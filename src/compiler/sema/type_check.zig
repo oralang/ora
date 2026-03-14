@@ -87,6 +87,49 @@ fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
         keyPathsEql(lhs.key_path, rhs.key_path);
 }
 
+fn effectSlotsEql(lhs: []const EffectSlot, rhs: []const EffectSlot) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |lhs_slot, rhs_slot| {
+        if (!effectSlotEql(lhs_slot, rhs_slot)) return false;
+    }
+    return true;
+}
+
+fn effectEql(lhs: Effect, rhs: Effect) bool {
+    return switch (lhs) {
+        .pure => rhs == .pure,
+        .external => rhs == .external,
+        .side_effects => |lhs_effects| rhs == .side_effects and
+            lhs_effects.has_external == rhs.side_effects.has_external and
+            lhs_effects.has_log == rhs.side_effects.has_log and
+            lhs_effects.has_havoc == rhs.side_effects.has_havoc and
+            lhs_effects.has_lock == rhs.side_effects.has_lock and
+            lhs_effects.has_unlock == rhs.side_effects.has_unlock,
+        .reads => |lhs_effects| rhs == .reads and
+            effectSlotsEql(lhs_effects.slots, rhs.reads.slots) and
+            lhs_effects.has_external == rhs.reads.has_external and
+            lhs_effects.has_log == rhs.reads.has_log and
+            lhs_effects.has_havoc == rhs.reads.has_havoc and
+            lhs_effects.has_lock == rhs.reads.has_lock and
+            lhs_effects.has_unlock == rhs.reads.has_unlock,
+        .writes => |lhs_effects| rhs == .writes and
+            effectSlotsEql(lhs_effects.slots, rhs.writes.slots) and
+            lhs_effects.has_external == rhs.writes.has_external and
+            lhs_effects.has_log == rhs.writes.has_log and
+            lhs_effects.has_havoc == rhs.writes.has_havoc and
+            lhs_effects.has_lock == rhs.writes.has_lock and
+            lhs_effects.has_unlock == rhs.writes.has_unlock,
+        .reads_writes => |lhs_effects| rhs == .reads_writes and
+            effectSlotsEql(lhs_effects.reads, rhs.reads_writes.reads) and
+            effectSlotsEql(lhs_effects.writes, rhs.reads_writes.writes) and
+            lhs_effects.has_external == rhs.reads_writes.has_external and
+            lhs_effects.has_log == rhs.reads_writes.has_log and
+            lhs_effects.has_havoc == rhs.reads_writes.has_havoc and
+            lhs_effects.has_lock == rhs.reads_writes.has_lock and
+            lhs_effects.has_unlock == rhs.reads_writes.has_unlock,
+    };
+}
+
 test "effect slot aliasing distinguishes parameters and constants" {
     const same_param = EffectSlot{
         .name = "balances",
@@ -823,12 +866,88 @@ const TypeChecker = struct {
             .visiting => return,
             .unvisited => {},
         }
+        _ = function;
 
+        const node_count = self.file.items.len;
+        const indexes = try self.arena.alloc(?u32, node_count);
+        const lowlinks = try self.arena.alloc(u32, node_count);
+        const on_stack = try self.arena.alloc(bool, node_count);
+        @memset(indexes, null);
+        @memset(lowlinks, 0);
+        @memset(on_stack, false);
+        var stack: std.ArrayList(ast.ItemId) = .{};
+        var next_index: u32 = 0;
+
+        try self.strongConnectEffectFunction(item_id, &next_index, indexes, lowlinks, on_stack, &stack);
+    }
+
+    fn strongConnectEffectFunction(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        next_index: *u32,
+        indexes: []?u32,
+        lowlinks: []u32,
+        on_stack: []bool,
+        stack: *std.ArrayList(ast.ItemId),
+    ) !void {
+        if (self.effect_states[item_id.index()] == .done) return;
+        if (indexes[item_id.index()] != null) return;
+
+        const function = switch (self.file.item(item_id).*) {
+            .Function => |function| function,
+            else => return,
+        };
+
+        indexes[item_id.index()] = next_index.*;
+        lowlinks[item_id.index()] = next_index.*;
+        next_index.* += 1;
         self.effect_states[item_id.index()] = .visiting;
-        errdefer self.effect_states[item_id.index()] = .unvisited;
+        self.item_effects[item_id.index()] = .pure;
+        try stack.append(self.arena, item_id);
+        on_stack[item_id.index()] = true;
 
-        self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(item_id, function);
-        self.effect_states[item_id.index()] = .done;
+        var callees: std.ArrayList(ast.ItemId) = .{};
+        try self.collectFunctionDirectCallees(item_id, function, &callees);
+        for (callees.items) |callee_id| {
+            if (self.file.item(callee_id).* != .Function) continue;
+            if (self.effect_states[callee_id.index()] == .done) continue;
+            if (indexes[callee_id.index()] == null) {
+                try self.strongConnectEffectFunction(callee_id, next_index, indexes, lowlinks, on_stack, stack);
+                lowlinks[item_id.index()] = @min(lowlinks[item_id.index()], lowlinks[callee_id.index()]);
+            } else if (on_stack[callee_id.index()]) {
+                lowlinks[item_id.index()] = @min(lowlinks[item_id.index()], indexes[callee_id.index()].?);
+            }
+        }
+
+        if (lowlinks[item_id.index()] != indexes[item_id.index()].?) return;
+
+        var component: std.ArrayList(ast.ItemId) = .{};
+        while (stack.items.len > 0) {
+            const member = stack.pop().?;
+            on_stack[member.index()] = false;
+            try component.append(self.arena, member);
+            if (member.index() == item_id.index()) break;
+        }
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (component.items) |member_id| {
+                const member_function = switch (self.file.item(member_id).*) {
+                    .Function => |member_function| member_function,
+                    else => continue,
+                };
+                const new_effect = try self.summarizeFunctionEffects(member_id, member_function);
+                if (!effectEql(new_effect, self.item_effects[member_id.index()])) {
+                    self.item_effects[member_id.index()] = new_effect;
+                    changed = true;
+                }
+            }
+        }
+
+        for (component.items) |member_id| {
+            self.effect_states[member_id.index()] = .done;
+        }
     }
 
     fn validateBodyLocks(self: *TypeChecker, body_id: ast.BodyId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
@@ -1532,6 +1651,132 @@ const TypeChecker = struct {
             .Group => |group| self.calleeFunctionItem(group.expr),
             else => null,
         };
+    }
+
+    fn collectFunctionDirectCallees(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        const previous_function_item = self.current_function_item;
+        self.current_function_item = item_id;
+        defer self.current_function_item = previous_function_item;
+        try self.collectBodyDirectCallees(function.body, callees);
+    }
+
+    fn collectBodyDirectCallees(self: *TypeChecker, body_id: ast.BodyId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| try self.collectStmtDirectCallees(statement_id, callees);
+    }
+
+    fn collectStmtDirectCallees(self: *TypeChecker, statement_id: ast.StmtId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+            .Return => |ret| if (ret.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+            .If => |if_stmt| {
+                try self.collectExprDirectCallees(if_stmt.condition, callees);
+                try self.collectBodyDirectCallees(if_stmt.then_body, callees);
+                if (if_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
+            },
+            .While => |while_stmt| {
+                try self.collectExprDirectCallees(while_stmt.condition, callees);
+                for (while_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
+                try self.collectBodyDirectCallees(while_stmt.body, callees);
+            },
+            .For => |for_stmt| {
+                try self.collectExprDirectCallees(for_stmt.iterable, callees);
+                for (for_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
+                try self.collectBodyDirectCallees(for_stmt.body, callees);
+            },
+            .Switch => |switch_stmt| {
+                try self.collectExprDirectCallees(switch_stmt.condition, callees);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+                        .Range => |range_pattern| {
+                            try self.collectExprDirectCallees(range_pattern.start, callees);
+                            try self.collectExprDirectCallees(range_pattern.end, callees);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectBodyDirectCallees(arm.body, callees);
+                }
+                if (switch_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
+            },
+            .Try => |try_stmt| {
+                try self.collectBodyDirectCallees(try_stmt.try_body, callees);
+                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyDirectCallees(catch_clause.body, callees);
+            },
+            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprDirectCallees(arg, callees),
+            .Lock => |lock_stmt| try self.collectExprDirectCallees(lock_stmt.path, callees),
+            .Unlock => |unlock_stmt| try self.collectExprDirectCallees(unlock_stmt.path, callees),
+            .Assert => |assert_stmt| try self.collectExprDirectCallees(assert_stmt.condition, callees),
+            .Assume => |assume_stmt| try self.collectExprDirectCallees(assume_stmt.condition, callees),
+            .Assign => |assign| {
+                try self.collectExprDirectCallees(assign.value, callees);
+                try self.collectPatternDirectCallees(assign.target, callees);
+            },
+            .Expr => |expr_stmt| try self.collectExprDirectCallees(expr_stmt.expr, callees),
+            .Block => |block| try self.collectBodyDirectCallees(block.body, callees),
+            .LabeledBlock => |block| try self.collectBodyDirectCallees(block.body, callees),
+            .Havoc, .Break, .Continue, .Error => {},
+        }
+    }
+
+    fn collectExprDirectCallees(self: *TypeChecker, expr_id: ast.ExprId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        switch (self.file.expression(expr_id).*) {
+            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprDirectCallees(element, callees),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprDirectCallees(element, callees),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprDirectCallees(field.value, callees),
+            .Switch => |switch_expr| {
+                try self.collectExprDirectCallees(switch_expr.condition, callees);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.collectExprDirectCallees(pattern_expr, callees),
+                        .Range => |range_pattern| {
+                            try self.collectExprDirectCallees(range_pattern.start, callees);
+                            try self.collectExprDirectCallees(range_pattern.end, callees);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectExprDirectCallees(arm.value, callees);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.collectExprDirectCallees(else_expr, callees);
+            },
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprDirectCallees(arg, callees),
+            .Unary => |unary| try self.collectExprDirectCallees(unary.operand, callees),
+            .Binary => |binary| {
+                try self.collectExprDirectCallees(binary.lhs, callees);
+                try self.collectExprDirectCallees(binary.rhs, callees);
+            },
+            .Call => |call| {
+                try self.collectExprDirectCallees(call.callee, callees);
+                for (call.args) |arg| try self.collectExprDirectCallees(arg, callees);
+                if (self.calleeFunctionItem(call.callee)) |callee_id| try self.appendUniqueItemId(callees, callee_id);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprDirectCallees(arg, callees),
+            .Field => |field| try self.collectExprDirectCallees(field.base, callees),
+            .Index => |index| {
+                try self.collectExprDirectCallees(index.base, callees);
+                try self.collectExprDirectCallees(index.index, callees);
+            },
+            .Group => |group| try self.collectExprDirectCallees(group.expr, callees),
+            .Comptime, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+        }
+    }
+
+    fn collectPatternDirectCallees(self: *TypeChecker, pattern_id: ast.PatternId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| try self.collectPatternDirectCallees(field.base, callees),
+            .Index => |index| {
+                try self.collectPatternDirectCallees(index.base, callees);
+                try self.collectExprDirectCallees(index.index, callees);
+            },
+            .Name, .StructDestructure, .Error => {},
+        }
+    }
+
+    fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
+        for (items.items) |existing| {
+            if (existing.index() == item_id.index()) return;
+        }
+        try items.append(self.arena, item_id);
     }
 
     fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {

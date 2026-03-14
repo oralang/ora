@@ -2223,6 +2223,64 @@ test "compiler tracks lock and unlock effect kinds" {
     }
 }
 
+test "compiler composes effects to a fixpoint across mutual recursion" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\
+        \\    fn ping(n: u256) {
+        \\        if (n == 0) {
+        \\            return;
+        \\        }
+        \\        log Ping(n);
+        \\        pong(n - 1);
+        \\    }
+        \\
+        \\    fn pong(n: u256) {
+        \\        if (n == 0) {
+        \\            return;
+        \\        }
+        \\        total = n;
+        \\        ping(n - 1);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const ping = item_index.lookup("ping").?;
+    const pong = item_index.lookup("pong").?;
+
+    switch (typecheck.itemEffect(ping)) {
+        .writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+        },
+        .reads_writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    switch (typecheck.itemEffect(pong)) {
+        .writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+        },
+        .reads_writes => |effect| {
+            try testing.expect(effect.has_log);
+            try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {
