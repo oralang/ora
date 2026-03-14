@@ -5,6 +5,7 @@ const diagnostics = @import("../diagnostics/mod.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 const descriptors = @import("type_descriptors.zig");
+const region_rules = @import("region.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -213,7 +214,7 @@ const TypeChecker = struct {
                         const expected_type = self.pattern_types[decl.pattern.index()].type;
                         if (try self.emitIntegerOverflowIfNeeded(decl.range, expr_id, expected_type)) {
                             // Keep lowering/recovery moving after reporting the overflow.
-                        } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
+                        } else if (!region_rules.isAssignable(LocatedType.unlocated(actual_type), self.pattern_types[decl.pattern.index()]) and actual_type.kind() != .unknown) {
                             try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
                                 typeDisplayName(expected_type),
                                 typeDisplayName(actual_type),
@@ -288,15 +289,26 @@ const TypeChecker = struct {
             .Havoc => {},
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
-                const expected_type = self.patternType(assign.target);
+                const expected = self.patternLocatedType(assign.target);
+                const expected_type = expected.type;
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
-                } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                    try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                        typeDisplayName(expected_type),
-                        typeDisplayName(actual_type),
-                    });
+                } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                    const actual = self.exprLocatedType(assign.value);
+                    if (!region_rules.isAssignable(actual, expected)) {
+                        if (typesAssignable(expected_type, actual_type)) {
+                            try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
+                                region_rules.regionDisplayName(expected.region),
+                                region_rules.regionDisplayName(actual.region),
+                            });
+                        } else {
+                            try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
+                                typeDisplayName(expected_type),
+                                typeDisplayName(actual_type),
+                            });
+                        }
+                    }
                 }
             },
             .Expr => |expr_stmt| try self.visitExpr(expr_stmt.expr),
@@ -521,6 +533,16 @@ const TypeChecker = struct {
             };
         }
         return .{ .unknown = {} };
+    }
+
+    fn locatedTypeForBinding(self: *const TypeChecker, binding: ?ResolvedBinding) LocatedType {
+        if (binding) |resolved| {
+            return switch (resolved) {
+                .item => |item_id| self.itemLocatedType(item_id),
+                .pattern => |pattern_id| self.pattern_types[pattern_id.index()],
+            };
+        }
+        return LocatedType.unlocated(.{ .unknown = {} });
     }
 
     fn callReturnType(self: *const TypeChecker, call: ast.CallExpr) Type {
@@ -790,10 +812,35 @@ const TypeChecker = struct {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()];
                 if (direct.kind() != .unknown) break :blk direct;
-                break :blk LocatedType.unlocated(self.lookupNamedPatternType(name.name));
+                break :blk self.lookupNamedPatternLocatedType(name.name);
             },
             .StructDestructure => self.pattern_types[pattern_id.index()],
-            .Field, .Index, .Error => LocatedType.unlocated(self.patternType(pattern_id)),
+            .Field => |field| blk: {
+                const base = self.patternLocatedType(field.base);
+                break :blk .{ .type = self.fieldPatternType(field), .region = base.region };
+            },
+            .Index => |index| blk: {
+                const base = self.patternLocatedType(index.base);
+                break :blk .{ .type = self.indexPatternType(index), .region = base.region };
+            },
+            .Error => LocatedType.unlocated(.{ .unknown = {} }),
+        };
+    }
+
+    fn exprLocatedType(self: *const TypeChecker, expr_id: ast.ExprId) LocatedType {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]),
+            .Group => |group| self.exprLocatedType(group.expr),
+            .Old => |old| self.exprLocatedType(old.expr),
+            .Field => |field| blk: {
+                const base = self.exprLocatedType(field.base);
+                break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
+            },
+            .Index => |index| blk: {
+                const base = self.exprLocatedType(index.base);
+                break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
+            },
+            else => LocatedType.unlocated(self.expr_types[expr_id.index()]),
         };
     }
 
@@ -817,16 +864,27 @@ const TypeChecker = struct {
     }
 
     fn lookupNamedPatternType(self: *const TypeChecker, name: []const u8) Type {
+        return self.lookupNamedPatternLocatedType(name).type;
+    }
+
+    fn lookupNamedPatternLocatedType(self: *const TypeChecker, name: []const u8) LocatedType {
         if (self.item_index.lookup(name)) |item_id| {
-            return self.item_types[item_id.index()];
+            return self.itemLocatedType(item_id);
         }
         for (self.file.patterns, 0..) |pattern, index| {
             if (pattern != .Name) continue;
             if (!std.mem.eql(u8, pattern.Name.name, name)) continue;
-            const ty = self.pattern_types[index].type;
+            const ty = self.pattern_types[index];
             if (ty.kind() != .unknown) return ty;
         }
-        return .{ .unknown = {} };
+        return LocatedType.unlocated(.{ .unknown = {} });
+    }
+
+    fn itemLocatedType(self: *const TypeChecker, item_id: ast.ItemId) LocatedType {
+        return .{
+            .type = self.item_types[item_id.index()],
+            .region = self.item_regions[item_id.index()],
+        };
     }
 };
 

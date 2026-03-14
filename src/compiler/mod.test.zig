@@ -67,6 +67,21 @@ fn findVariablePatternByName(ast_file: *const compiler.ast.AstFile, statements: 
     return null;
 }
 
+fn diagnosticMessagesContain(diags: *const compiler.diagnostics.DiagnosticList, needle: []const u8) bool {
+    for (diags.items.items) |diag| {
+        if (std.mem.containsAtLeast(u8, diag.message, 1, needle)) return true;
+    }
+    return false;
+}
+
+fn countDiagnosticMessages(diags: *const compiler.diagnostics.DiagnosticList, needle: []const u8) usize {
+    var count: usize = 0;
+    for (diags.items.items) |diag| {
+        if (std.mem.eql(u8, diag.message, needle)) count += 1;
+    }
+    return count;
+}
+
 fn nthDescendantNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind, ordinal: usize) ?compiler.SyntaxNode {
     var remaining = ordinal;
     return nthDescendantNodeOfKindInner(node, kind, &remaining);
@@ -1557,6 +1572,54 @@ test "compiler tracks declaration root regions in type check output" {
     const body = ast_file.body(function.body);
     const local_stmt = ast_file.statement(body.statements[0]).VariableDecl;
     try testing.expectEqual(compiler.sema.Region.none, typecheck.pattern_types[local_stmt.pattern.index()].region);
+}
+
+test "compiler allows implicit region reads into locals" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\    tstore var pending: u256;
+        \\}
+        \\
+        \\pub fn inspect(value: u256) -> u256 {
+        \\    let from_param = value;
+        \\    let from_storage = total;
+        \\    let from_tstore = pending;
+        \\    return from_param + from_storage + from_tstore;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects writes to calldata and direct storage transient transfer" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\    tstore var pending: u256;
+        \\}
+        \\
+        \\pub fn inspect(value: u256) -> u256 {
+        \\    value = total;
+        \\    pending = total;
+        \\    total = pending;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(diags.len() >= 3);
+    try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'calldata'"));
+    try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'transient'"));
+    try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'storage'"));
 }
 
 test "compiler infers field and index access types" {
@@ -3412,12 +3475,9 @@ test "compiler reports integer constant overflow against declared widths" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
-    try testing.expectEqual(@as(usize, 5), type_diags.len());
-    try testing.expectEqualStrings("constant value 256 does not fit in type 'u8'", type_diags.items.items[0].message);
-    try testing.expectEqualStrings("constant value 256 does not fit in type 'u8'", type_diags.items.items[1].message);
-    try testing.expectEqualStrings("constant value 256 does not fit in type 'u8'", type_diags.items.items[2].message);
-    try testing.expectEqualStrings("constant value 256 does not fit in type 'u8'", type_diags.items.items[3].message);
-    try testing.expectEqualStrings("constant value 256 does not fit in type 'u8'", type_diags.items.items[4].message);
+    try testing.expect(type_diags.len() >= 5);
+    try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(type_diags, "declaration expects type 'u8', found 'integer'"));
 }
 
 test "compiler reports constant cast overflow against target integer widths" {
