@@ -171,8 +171,10 @@ const ConstEvaluator = struct {
 
         if (try self.evalExprCtValue(expr_id)) |ct_value| {
             const const_value = try ctValueToConstValue(self.allocator, ct_value);
-            if (use_cache) self.values[expr_id.index()] = const_value;
-            return const_value;
+            if (const_value != null) {
+                if (use_cache) self.values[expr_id.index()] = const_value;
+                return const_value;
+            }
         }
 
         const value: ?ConstValue = switch (self.file.expression(expr_id).*) {
@@ -276,7 +278,16 @@ const ConstEvaluator = struct {
                 const value = (try parseIntegerLiteral(self.allocator, literal.text)) orelse break :blk null;
                 break :blk try constToCtValue(value);
             },
+            .StringLiteral => |literal| blk: {
+                const heap_id = try self.env.heap.allocString(literal.text);
+                break :blk CtValue{ .string_ref = heap_id };
+            },
             .BoolLiteral => |literal| CtValue{ .boolean = literal.value },
+            .BytesLiteral => |literal| blk: {
+                const bytes = try self.decodeHexBytesLiteral(literal.text);
+                const heap_id = try self.env.heap.allocBytes(bytes);
+                break :blk CtValue{ .bytes_ref = heap_id };
+            },
             .Name => |name| self.env.lookupValue(name.name),
             .Group => |group| try self.evalExprCtValue(group.expr),
             .ArrayLiteral => |array| blk: {
@@ -334,6 +345,16 @@ const ConstEvaluator = struct {
                         if (idx >= elems.len) break :blk_elem null;
                         break :blk_elem elems[idx];
                     },
+                    .string_ref => |heap_id| blk_elem: {
+                        const bytes = self.env.heap.getString(heap_id);
+                        if (idx >= bytes.len) break :blk_elem null;
+                        break :blk_elem CtValue{ .integer = bytes[idx] };
+                    },
+                    .bytes_ref => |heap_id| blk_elem: {
+                        const bytes = self.env.heap.getBytes(heap_id);
+                        if (idx >= bytes.len) break :blk_elem null;
+                        break :blk_elem CtValue{ .integer = bytes[idx] };
+                    },
                     else => null,
                 };
             },
@@ -347,6 +368,14 @@ const ConstEvaluator = struct {
                         if (field_index >= struct_data.fields.len) break :blk_field null;
                         break :blk_field struct_data.fields[field_index].value;
                     },
+                    .string_ref => |heap_id| blk_field: {
+                        if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
+                        break :blk_field CtValue{ .integer = @intCast(self.env.heap.getString(heap_id).len) };
+                    },
+                    .bytes_ref => |heap_id| blk_field: {
+                        if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
+                        break :blk_field CtValue{ .integer = @intCast(self.env.heap.getBytes(heap_id).len) };
+                    },
                     else => null,
                 };
             },
@@ -358,6 +387,19 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(type_name) orelse return null;
         if (self.file.item(item_id).* != .Struct) return null;
         return @intCast(item_id.index());
+    }
+
+    fn decodeHexBytesLiteral(self: *ConstEvaluator, text: []const u8) ![]u8 {
+        if (text.len % 2 != 0) return error.InvalidHexLiteral;
+
+        const out = try self.allocator.alloc(u8, text.len / 2);
+        var i: usize = 0;
+        while (i < out.len) : (i += 1) {
+            const hi = std.fmt.charToDigit(text[i * 2], 16) catch return error.InvalidHexLiteral;
+            const lo = std.fmt.charToDigit(text[i * 2 + 1], 16) catch return error.InvalidHexLiteral;
+            out[i] = @intCast((hi << 4) | lo);
+        }
+        return out;
     }
 
     fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) ?usize {
@@ -508,7 +550,7 @@ const ConstEvaluator = struct {
                     if (decl.value) |expr_id| {
                         if (try self.evalExprCtValue(expr_id)) |ct_value| {
                             try self.bindPatternCtValue(decl.pattern, ct_value);
-                            const persisted = try ctValueToConstValue(self.allocator, ct_value);
+                            const persisted = (try ctValueToConstValue(self.allocator, ct_value)) orelse try self.evalExprUncached(expr_id);
                             self.values[expr_id.index()] = persisted;
                         } else {
                             const persisted = try self.evalExprUncached(expr_id);

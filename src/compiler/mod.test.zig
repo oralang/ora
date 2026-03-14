@@ -3890,6 +3890,52 @@ test "compiler const eval applies compound assignment to struct fields" {
     try testing.expectEqual(@as(i128, 12), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval reads string length and indexing" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let text = "hello";
+        \\        text.length + text[1];
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 106), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval reads bytes length and indexing" {
+    const source_text =
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let payload = hex"deadbeef";
+        \\        payload.len + payload[0];
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 226), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval executes comptime break in while loops" {
     const source_text =
         \\pub fn count() -> u256 {
