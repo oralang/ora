@@ -3625,6 +3625,36 @@ test "compiler lowers builtin cast through real conversion ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.i160.to.addr"));
 }
 
+test "compiler lowers builtin bitCast through real bitcast op" {
+    const source_text =
+        \\pub fn recast(value: u160) -> address {
+        \\    let same = @bitCast(address, value);
+        \\    return same;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+    const builtin = ast_file.expression(decl.value.?).Builtin;
+    try testing.expectEqualStrings("bitCast", builtin.name);
+    try testing.expect(builtin.type_arg != null);
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(compiler.sema.TypeKind.address, typecheck.exprType(decl.value.?).kind());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.bitcast"));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {

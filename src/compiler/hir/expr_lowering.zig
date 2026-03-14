@@ -504,6 +504,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "cast") and builtin.args.len > 0) {
                 return try @This().lowerCastBuiltin(self, expr_id, builtin, locals, true);
             }
+            if (std.mem.eql(u8, builtin.name, "bitCast") and builtin.args.len > 0) {
+                return try @This().lowerBitcastBuiltin(self, expr_id, builtin, locals);
+            }
             if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
                 std.mem.eql(u8, builtin.name, "divFloor") or
                 std.mem.eql(u8, builtin.name, "divCeil") or
@@ -547,6 +550,56 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return value;
+        }
+
+        fn lowerBitcastBuiltin(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            builtin: ast.BuiltinExpr,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerExprType(expr_id);
+            const target_ref_base = mlir.oraRefinementTypeGetBaseType(target_type);
+            const concrete_target = if (!mlir.oraTypeIsNull(target_ref_base)) target_ref_base else target_type;
+
+            var value = try self.lowerExpr(builtin.args[0], locals);
+            value = try @This().unwrapRefinementForCast(self, value, builtin.range);
+
+            const value_type = mlir.oraValueGetType(value);
+            if (mlir.oraTypeEqual(value_type, concrete_target)) {
+                if (!mlir.oraTypeIsNull(target_ref_base)) {
+                    const wrap_op = mlir.oraBaseToRefinementOpCreate(
+                        self.parent.context,
+                        self.parent.location(builtin.range),
+                        value,
+                        target_type,
+                        self.block,
+                    );
+                    if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+                }
+                return value;
+            }
+
+            const bitcast = mlir.oraArithBitcastOpCreate(
+                self.parent.context,
+                self.parent.location(builtin.range),
+                value,
+                concrete_target,
+            );
+            if (mlir.oraOperationIsNull(bitcast)) return value;
+            const casted = appendValueOp(self.block, bitcast);
+
+            if (!mlir.oraTypeIsNull(target_ref_base)) {
+                const wrap_op = mlir.oraBaseToRefinementOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    casted,
+                    target_type,
+                    self.block,
+                );
+                if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+            }
+            return casted;
         }
 
         fn unwrapRefinementForCast(

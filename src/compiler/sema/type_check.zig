@@ -586,7 +586,7 @@ const TypeChecker = struct {
     }
 
     fn builtinReturnType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
-        if (std.mem.eql(u8, builtin.name, "cast")) {
+        if (std.mem.eql(u8, builtin.name, "cast") or std.mem.eql(u8, builtin.name, "bitCast")) {
             if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
             return .{ .unknown = {} };
         }
