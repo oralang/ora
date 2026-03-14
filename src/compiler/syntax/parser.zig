@@ -1789,7 +1789,9 @@ const Parser = struct {
         if (self.at(.LeftParen)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             if (builtin_name != null and
-                (std.mem.eql(u8, builtin_name.?, "cast") or std.mem.eql(u8, builtin_name.?, "bitCast")) and
+                (std.mem.eql(u8, builtin_name.?, "cast") or
+                    std.mem.eql(u8, builtin_name.?, "bitCast") or
+                    std.mem.eql(u8, builtin_name.?, "truncate")) and
                 !self.at(.RightParen))
             {
                 try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });

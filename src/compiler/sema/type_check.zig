@@ -586,16 +586,21 @@ const TypeChecker = struct {
     }
 
     fn builtinReturnType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
-        if (std.mem.eql(u8, builtin.name, "cast") or std.mem.eql(u8, builtin.name, "bitCast")) {
+        if (std.mem.eql(u8, builtin.name, "cast") or
+            std.mem.eql(u8, builtin.name, "bitCast") or
+            std.mem.eql(u8, builtin.name, "truncate"))
+        {
             if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
+            if (std.mem.eql(u8, builtin.name, "truncate") and builtin.args.len > 0) {
+                return self.expr_types[builtin.args[0].index()];
+            }
             return .{ .unknown = {} };
         }
 
         if (builtin.args.len > 0 and (std.mem.eql(u8, builtin.name, "divTrunc") or
             std.mem.eql(u8, builtin.name, "divFloor") or
             std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact") or
-            std.mem.eql(u8, builtin.name, "truncate")))
+            std.mem.eql(u8, builtin.name, "divExact")))
         {
             return self.expr_types[builtin.args[0].index()];
         }
