@@ -84,6 +84,11 @@ pub fn lowerQuantifiedExpression(self: *const DeclarationLowerer, quantified: *c
 
 /// Add verification-related attributes and metadata support
 pub fn addVerificationAttributes(self: *const DeclarationLowerer, operation: c.MlirOperation, verification_type: []const u8, metadata: ?[]const u8) void {
+    const verification_marker = h.boolAttr(self.ctx, 1);
+
+    c.oraOperationSetAttributeByName(operation, h.strRef("ora.verification"), verification_marker);
+    c.oraOperationSetAttributeByName(operation, h.strRef("ora.formal"), verification_marker);
+
     // add verification type attribute
     const verification_attr = h.stringAttr(self.ctx, verification_type);
     c.oraOperationSetAttributeByName(operation, h.strRef("ora.verification_type"), verification_attr);
@@ -93,10 +98,6 @@ pub fn addVerificationAttributes(self: *const DeclarationLowerer, operation: c.M
         const metadata_attr = h.stringAttr(self.ctx, meta);
         c.oraOperationSetAttributeByName(operation, h.strRef("ora.verification_metadata"), metadata_attr);
     }
-
-    // add verification marker
-    const verification_marker = h.boolAttr(self.ctx, 1);
-    c.oraOperationSetAttributeByName(operation, h.strRef("ora.formal_verification"), verification_marker);
 }
 
 /// Handle formal verification constructs in function contracts

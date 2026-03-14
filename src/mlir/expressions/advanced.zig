@@ -866,7 +866,7 @@ pub fn lowerQuantified(
         }
     }
 
-    addVerificationAttributes(self, &attributes, "quantified", "formal_verification");
+    addVerificationAttributes(self, &attributes, "quantified", "quantified");
 
     const domain_id = h.identifier(self.ctx, "ora.domain");
     const domain_str = switch (quantified.quantifier) {
@@ -1899,7 +1899,7 @@ pub fn createVerificationMetadata(
     const var_type_attr = h.stringAttr(self.ctx, var_type_str);
     metadata.append(std.heap.page_allocator, c.oraNamedAttributeGet(var_type_id, var_type_attr)) catch {};
 
-    addVerificationAttributes(self, &metadata, "quantified", "formal_verification");
+    addVerificationAttributes(self, &metadata, "quantified", "quantified");
 
     return metadata;
 }
