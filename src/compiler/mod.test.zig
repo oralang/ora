@@ -1212,6 +1212,11 @@ test "compiler lowers structured type expressions" {
     try testing.expectEqual(compiler.sema.TypeKind.integer, maybe_typecheck.payloadType().?.kind());
     try testing.expectEqual(@as(usize, 1), maybe_typecheck.errorTypes().len);
     try testing.expectEqual(compiler.sema.TypeKind.named, maybe_typecheck.errorTypes()[0].kind());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.min_value"));
 }
 
 test "compiler lowers struct and enum declarations through real decl ops" {

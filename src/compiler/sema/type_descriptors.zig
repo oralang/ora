@@ -7,7 +7,14 @@ const Type = model.Type;
 
 pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.AstFile, item_index: *const ItemIndexResult, type_expr_id: ast.TypeExprId) anyerror!Type {
     return switch (file.typeExpr(type_expr_id).*) {
-        .Path => |path| descriptorFromPathName(file, item_index, path.name),
+        .Path => |path| if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "NonZeroAddress"))
+            .{ .refinement = .{
+                .name = "NonZeroAddress",
+                .base_type = try storeType(allocator, .{ .address = {} }),
+                .args = &.{},
+            } }
+        else
+            descriptorFromPathName(file, item_index, path.name),
         .Generic => |generic| try descriptorFromGenericType(allocator, file, item_index, generic),
         .Tuple => |tuple| blk: {
             const elements = try allocator.alloc(Type, tuple.elements.len);
@@ -43,7 +50,6 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
     if (std.mem.eql(u8, trimmed, "bool")) return .{ .bool = {} };
     if (std.mem.eql(u8, trimmed, "string")) return .{ .string = {} };
     if (std.mem.eql(u8, trimmed, "address")) return .{ .address = {} };
-    if (std.mem.eql(u8, trimmed, "NonZeroAddress")) return .{ .address = {} };
     if (std.mem.eql(u8, trimmed, "bytes")) return .{ .bytes = {} };
     if (parseIntegerType(trimmed)) |integer| return .{ .integer = integer };
     if (item_index.lookup(trimmed)) |item_id| {
