@@ -71,7 +71,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
             if (map.key_type) |key| lowerTypeDescriptor(ctx, key.*) else defaultIntegerType(ctx),
             if (map.value_type) |value| lowerTypeDescriptor(ctx, value.*) else defaultIntegerType(ctx),
         ),
-        .refinement => |refinement| switchRefinementType(ctx, refinement),
+        .refinement => |refinement| lowerRefinementType(ctx, refinement),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.
@@ -83,36 +83,49 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
     };
 }
 
-fn switchRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType) mlir.MlirType {
+pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType) mlir.MlirType {
     const base_type = lowerTypeDescriptor(ctx, refinement.base_type.*);
-    if (std.mem.eql(u8, refinement.name, "MinValue")) {
-        const value = parseRefinementIntArg(refinement.args, 1) orelse return base_type;
+    return buildRefinementType(ctx, refinement.name, base_type, refinement.args) orelse base_type;
+}
+
+pub fn isRefinementTypeName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "MinValue") or
+        std.mem.eql(u8, name, "MaxValue") or
+        std.mem.eql(u8, name, "InRange") or
+        std.mem.eql(u8, name, "Scaled") or
+        std.mem.eql(u8, name, "Exact") or
+        std.mem.eql(u8, name, "NonZeroAddress");
+}
+
+pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg) ?mlir.MlirType {
+    if (std.mem.eql(u8, name, "MinValue")) {
+        const value = parseRefinementIntArg(args, 1) orelse return null;
         const words = splitU256IntoU64Words(value);
         return mlir.oraMinValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
     }
-    if (std.mem.eql(u8, refinement.name, "MaxValue")) {
-        const value = parseRefinementIntArg(refinement.args, 1) orelse return base_type;
+    if (std.mem.eql(u8, name, "MaxValue")) {
+        const value = parseRefinementIntArg(args, 1) orelse return null;
         const words = splitU256IntoU64Words(value);
         return mlir.oraMaxValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
     }
-    if (std.mem.eql(u8, refinement.name, "InRange")) {
-        const min_value = parseRefinementIntArg(refinement.args, 1) orelse return base_type;
-        const max_value = parseRefinementIntArg(refinement.args, 2) orelse return base_type;
+    if (std.mem.eql(u8, name, "InRange")) {
+        const min_value = parseRefinementIntArg(args, 1) orelse return null;
+        const max_value = parseRefinementIntArg(args, 2) orelse return null;
         const min_words = splitU256IntoU64Words(min_value);
         const max_words = splitU256IntoU64Words(max_value);
         return mlir.oraInRangeTypeGet(ctx, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
     }
-    if (std.mem.eql(u8, refinement.name, "Scaled")) {
-        const decimals = parseRefinementIntArg(refinement.args, 1) orelse return base_type;
+    if (std.mem.eql(u8, name, "Scaled")) {
+        const decimals = parseRefinementIntArg(args, 1) orelse return null;
         return mlir.oraScaledTypeGet(ctx, base_type, @intCast(decimals));
     }
-    if (std.mem.eql(u8, refinement.name, "Exact")) {
+    if (std.mem.eql(u8, name, "Exact")) {
         return mlir.oraExactTypeGet(ctx, base_type);
     }
-    if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) {
+    if (std.mem.eql(u8, name, "NonZeroAddress")) {
         return mlir.oraNonZeroAddressTypeGet(ctx);
     }
-    return base_type;
+    return null;
 }
 
 fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {

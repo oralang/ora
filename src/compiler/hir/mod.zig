@@ -216,7 +216,7 @@ const Lowerer = struct {
                 if (map.key_type) |key| self.lowerSemaType(key.*, range) else support.defaultIntegerType(self.context),
                 if (map.value_type) |value| self.lowerSemaType(value.*, range) else support.defaultIntegerType(self.context),
             ),
-            .refinement => |refinement| lowerRefinementType(self, refinement.name, self.lowerSemaType(refinement.base_type.*, range), refinement.args, range),
+            .refinement => |refinement| support.lowerRefinementType(self.context, refinement),
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
@@ -383,12 +383,13 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         };
         return mlir.oraMapTypeGet(lowerer.context, key_type, value_type);
     }
-    if (isRefinementTypeName(generic.name) and generic.args.len > 0) {
+    if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
         const base_type = switch (generic.args[0]) {
             .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
             else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
-        return lowerRefinementType(lowerer, generic.name, base_type, generic.args, generic.range);
+        return support.buildRefinementType(lowerer.context, generic.name, base_type, generic.args) orelse
+            lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range);
     }
     if (generic.args.len > 0) {
         return switch (generic.args[0]) {
@@ -400,72 +401,4 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         return mlir.oraNonZeroAddressTypeGet(lowerer.context);
     }
     return support.lowerPathType(lowerer.context, generic.name);
-}
-
-fn lowerRefinementType(lowerer: *Lowerer, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg, range: source.TextRange) mlir.MlirType {
-    if (std.mem.eql(u8, name, "MinValue")) {
-        const value = parseRefinementIntArg(args, 1) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, range);
-        const words = splitU256IntoU64Words(value);
-        return mlir.oraMinValueTypeGet(lowerer.context, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
-    }
-    if (std.mem.eql(u8, name, "MaxValue")) {
-        const value = parseRefinementIntArg(args, 1) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, range);
-        const words = splitU256IntoU64Words(value);
-        return mlir.oraMaxValueTypeGet(lowerer.context, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
-    }
-    if (std.mem.eql(u8, name, "InRange")) {
-        const min_value = parseRefinementIntArg(args, 1) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, range);
-        const max_value = parseRefinementIntArg(args, 2) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, range);
-        const min_words = splitU256IntoU64Words(min_value);
-        const max_words = splitU256IntoU64Words(max_value);
-        return mlir.oraInRangeTypeGet(lowerer.context, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
-    }
-    if (std.mem.eql(u8, name, "Scaled")) {
-        const decimals = parseRefinementIntArg(args, 1) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, range);
-        return mlir.oraScaledTypeGet(lowerer.context, base_type, @intCast(decimals));
-    }
-    if (std.mem.eql(u8, name, "Exact")) {
-        return mlir.oraExactTypeGet(lowerer.context, base_type);
-    }
-    if (std.mem.eql(u8, name, "NonZeroAddress")) {
-        return mlir.oraNonZeroAddressTypeGet(lowerer.context);
-    }
-    return base_type;
-}
-
-fn isRefinementTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "MinValue") or
-        std.mem.eql(u8, name, "MaxValue") or
-        std.mem.eql(u8, name, "InRange") or
-        std.mem.eql(u8, name, "Scaled") or
-        std.mem.eql(u8, name, "Exact") or
-        std.mem.eql(u8, name, "NonZeroAddress");
-}
-
-fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
-    if (index >= args.len) return null;
-    return switch (args[index]) {
-        .Integer => |literal| parseU256Literal(literal.text),
-        else => null,
-    };
-}
-
-fn parseU256Literal(text: []const u8) ?u256 {
-    const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
-    const digits = if (base == 10) text else text[2..];
-    return std.fmt.parseInt(u256, digits, base) catch null;
-}
-
-fn splitU256IntoU64Words(x: u256) struct {
-    high_high: u64,
-    high_low: u64,
-    low_high: u64,
-    low_low: u64,
-} {
-    return .{
-        .high_high = @truncate(x >> 192),
-        .high_low = @truncate(x >> 128),
-        .low_high = @truncate(x >> 64),
-        .low_low = @truncate(x),
-    };
 }
