@@ -60,6 +60,8 @@ const ConstEvaluator = struct {
     file: *const ast.AstFile,
     values: []?ConstValue,
     env: CtEnv,
+    call_depth: u32 = 0,
+    max_call_depth: u32 = 64,
 
     const BodyControl = union(enum) {
         value: ?ConstValue,
@@ -253,9 +255,7 @@ const ConstEvaluator = struct {
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
             .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExprImpl(binary.lhs, use_cache), try self.evalExprImpl(binary.rhs, use_cache)),
             .Call => |call| blk: {
-                _ = try self.evalExprImpl(call.callee, use_cache);
-                for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
-                break :blk null;
+                break :blk try self.evalCall(call, use_cache);
             },
             .Builtin => |builtin| try self.evalBuiltin(builtin),
             .Field => |field| blk: {
@@ -620,6 +620,18 @@ const ConstEvaluator = struct {
         return null;
     }
 
+    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?ast.FunctionItem {
+        const function_item_id = switch (self.file.expression(callee).*) {
+            .Name => |name| self.lookupNamedItem(name.name) orelse return null,
+            .Group => |group| return self.lookupCallableFunction(group.expr),
+            else => return null,
+        };
+
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function) return null;
+        return item.Function;
+    }
+
     fn itemName(self: *ConstEvaluator, item_id: ast.ItemId) ?[]const u8 {
         return switch (self.file.item(item_id).*) {
             .Contract => |contract| contract.name,
@@ -701,6 +713,45 @@ const ConstEvaluator = struct {
 
         for (builtin.args) |arg| _ = try self.evalExpr(arg);
         return null;
+    }
+
+    fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
+        const function = self.lookupCallableFunction(call.callee) orelse {
+            _ = try self.evalExprImpl(call.callee, use_cache);
+            for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
+            return null;
+        };
+
+        if (function.parameters.len != call.args.len) return null;
+        if (self.call_depth >= self.max_call_depth) return null;
+
+        var arg_values = try self.allocator.alloc(CtValue, call.args.len);
+        for (call.args, 0..) |arg, idx| {
+            _ = try self.evalExprImpl(arg, use_cache);
+            arg_values[idx] = (try self.evalExprCtValue(arg)) orelse blk: {
+                const const_value = (try self.evalExprImpl(arg, use_cache)) orelse return null;
+                break :blk (try constToCtValue(const_value)) orelse return null;
+            };
+        }
+
+        self.env.pushScope(false) catch return null;
+        defer self.env.popScope();
+
+        for (function.parameters, 0..) |parameter, idx| {
+            try self.bindPatternCtValue(parameter.pattern, arg_values[idx]);
+        }
+
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+
+        for (function.clauses) |clause| {
+            if (clause.kind != .requires) continue;
+            const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
+            const truthy = self.constConditionTruthy(condition) orelse return null;
+            if (!truthy) return null;
+        }
+
+        return try self.evalComptimeBody(function.body);
     }
 
     fn bindName(self: *ConstEvaluator, name: []const u8, value: ?ConstValue) !void {
