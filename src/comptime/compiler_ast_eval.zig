@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../compiler/ast/mod.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
+const stage_mod = @import("stage.zig");
 const model = @import("../compiler/sema/model.zig");
 const source = @import("../compiler/source/mod.zig");
 const error_mod = @import("error.zig");
@@ -14,6 +15,7 @@ const CtEnum = comptime_mod.CtEnum;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
 const SourceSpan = error_mod.SourceSpan;
+const Stage = stage_mod.Stage;
 const constEquals = bridge.constEquals;
 const ctValueToConstValue = bridge.ctValueToConstValue;
 const constToCtValue = bridge.constToCtValue;
@@ -266,7 +268,16 @@ const ConstEvaluator = struct {
             .Call => |call| blk: {
                 break :blk try self.evalCall(call, use_cache);
             },
-            .Builtin => |builtin| try self.evalBuiltin(builtin),
+            .Builtin => |builtin| blk: {
+                if (self.exprStage(expr_id) == .runtime_only) {
+                    self.last_error = error_mod.CtError.stageViolation(
+                        self.sourceSpan(builtin.range),
+                        builtin.name,
+                    );
+                    break :blk null;
+                }
+                break :blk try self.evalBuiltin(builtin);
+            },
             .Field => |field| blk: {
                 _ = try self.evalExprImpl(field.base, use_cache);
                 break :blk null;
@@ -731,6 +742,14 @@ const ConstEvaluator = struct {
             return null;
         };
 
+        if (self.functionStage(function) == .runtime_only) {
+            self.last_error = error_mod.CtError.stageViolation(
+                self.sourceSpan(call.range),
+                function.name,
+            );
+            return null;
+        }
+
         if (function.parameters.len != call.args.len) return null;
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = error_mod.CtError.init(
@@ -770,6 +789,152 @@ const ConstEvaluator = struct {
         return try self.evalComptimeBody(function.body);
     }
 
+    fn functionStage(self: *ConstEvaluator, function: ast.FunctionItem) Stage {
+        return self.bodyStage(function.body);
+    }
+
+    fn bodyStage(self: *ConstEvaluator, body_id: ast.BodyId) Stage {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| {
+            if (self.statementStage(statement_id) == .runtime_only) return .runtime_only;
+        }
+        return .comptime_ok;
+    }
+
+    fn statementStage(self: *ConstEvaluator, statement_id: ast.StmtId) Stage {
+        return switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| if (decl.value) |expr_id| self.exprStage(expr_id) else .comptime_ok,
+            .Return => |ret| if (ret.value) |expr_id| self.exprStage(expr_id) else .comptime_ok,
+            .If => |if_stmt| self.mergeStages(.{
+                self.exprStage(if_stmt.condition),
+                self.bodyStage(if_stmt.then_body),
+                if (if_stmt.else_body) |else_body| self.bodyStage(else_body) else .comptime_ok,
+            }),
+            .While => |while_stmt| self.mergeStages(.{
+                self.exprStage(while_stmt.condition),
+                self.bodyStage(while_stmt.body),
+            }),
+            .For => |for_stmt| self.mergeStages(.{
+                self.exprStage(for_stmt.iterable),
+                self.bodyStage(for_stmt.body),
+            }),
+            .Switch => |switch_stmt| blk: {
+                if (self.exprStage(switch_stmt.condition) == .runtime_only) break :blk .runtime_only;
+                for (switch_stmt.arms) |arm| {
+                    const pattern_stage = switch (arm.pattern) {
+                        .Expr => |expr_id| self.exprStage(expr_id),
+                        .Range => |range_pattern| self.mergeStages(.{
+                            self.exprStage(range_pattern.start),
+                            self.exprStage(range_pattern.end),
+                        }),
+                        .Else => .comptime_ok,
+                    };
+                    if (pattern_stage == .runtime_only or self.bodyStage(arm.body) == .runtime_only) break :blk .runtime_only;
+                }
+                if (switch_stmt.else_body) |else_body| {
+                    if (self.bodyStage(else_body) == .runtime_only) break :blk .runtime_only;
+                }
+                break :blk .comptime_ok;
+            },
+            .Try => |try_stmt| blk: {
+                if (self.bodyStage(try_stmt.try_body) == .runtime_only) break :blk .runtime_only;
+                if (try_stmt.catch_clause) |catch_clause| {
+                    if (self.bodyStage(catch_clause.body) == .runtime_only) break :blk .runtime_only;
+                }
+                break :blk .comptime_ok;
+            },
+            .Assign => |assign| self.exprStage(assign.value),
+            .Expr => |expr_stmt| self.exprStage(expr_stmt.expr),
+            .Block => |block_stmt| self.bodyStage(block_stmt.body),
+            .LabeledBlock => |block_stmt| self.bodyStage(block_stmt.body),
+            .Assert => |assert_stmt| self.exprStage(assert_stmt.condition),
+            .Assume => |assume_stmt| self.exprStage(assume_stmt.condition),
+            .Log, .Lock, .Unlock => .runtime_only,
+            .Havoc, .Break, .Continue, .Error => .comptime_ok,
+        };
+    }
+
+    fn exprStage(self: *ConstEvaluator, expr_id: ast.ExprId) Stage {
+        return switch (self.file.expression(expr_id).*) {
+            .Builtin => |builtin| blk: {
+                if (stage_mod.isRuntimeOnlyIntrinsic(builtin.name)) break :blk .runtime_only;
+                if (stage_mod.isComptimeOnlyIntrinsic(builtin.name)) break :blk .comptime_only;
+                break :blk .comptime_ok;
+            },
+            .Unary => |unary| self.exprStage(unary.operand),
+            .Binary => |binary| self.mergeStages(.{ self.exprStage(binary.lhs), self.exprStage(binary.rhs) }),
+            .Call => |call| self.mergeStages(.{
+                self.exprStage(call.callee),
+                self.argsStage(call.args),
+            }),
+            .Field => |field| self.exprStage(field.base),
+            .Index => |index| self.mergeStages(.{
+                self.exprStage(index.base),
+                self.exprStage(index.index),
+            }),
+            .Group => |group| self.exprStage(group.expr),
+            .Old => |old| self.exprStage(old.expr),
+            .Quantified => |quantified| self.mergeStages(.{
+                if (quantified.condition) |condition| self.exprStage(condition) else .comptime_ok,
+                self.exprStage(quantified.body),
+            }),
+            .Tuple => |tuple| self.argsStage(tuple.elements),
+            .ArrayLiteral => |array| self.argsStage(array.elements),
+            .StructLiteral => |struct_literal| blk: {
+                for (struct_literal.fields) |field| {
+                    if (self.exprStage(field.value) == .runtime_only) break :blk .runtime_only;
+                }
+                break :blk .comptime_ok;
+            },
+            .Switch => |switch_expr| blk: {
+                if (self.exprStage(switch_expr.condition) == .runtime_only) break :blk .runtime_only;
+                for (switch_expr.arms) |arm| {
+                    const pattern_stage = switch (arm.pattern) {
+                        .Expr => |pattern_expr| self.exprStage(pattern_expr),
+                        .Range => |range_pattern| self.mergeStages(.{
+                            self.exprStage(range_pattern.start),
+                            self.exprStage(range_pattern.end),
+                        }),
+                        .Else => .comptime_ok,
+                    };
+                    if (pattern_stage == .runtime_only or self.exprStage(arm.value) == .runtime_only) break :blk .runtime_only;
+                }
+                if (switch_expr.else_expr) |else_expr| {
+                    if (self.exprStage(else_expr) == .runtime_only) break :blk .runtime_only;
+                }
+                break :blk .comptime_ok;
+            },
+            .Comptime => |comptime_expr| self.bodyStage(comptime_expr.body),
+            .ErrorReturn => |error_return| self.argsStage(error_return.args),
+            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Name, .Result, .Error => .comptime_ok,
+        };
+    }
+
+    fn argsStage(self: *ConstEvaluator, args: []const ast.ExprId) Stage {
+        var saw_comptime_only = false;
+        for (args) |arg| {
+            switch (self.exprStage(arg)) {
+                .runtime_only => return .runtime_only,
+                .comptime_only => saw_comptime_only = true,
+                .comptime_ok => {},
+            }
+        }
+        return if (saw_comptime_only) .comptime_only else .comptime_ok;
+    }
+
+    fn mergeStages(self: *ConstEvaluator, stages: anytype) Stage {
+        _ = self;
+        var saw_comptime_only = false;
+        inline for (stages) |stage| {
+            switch (stage) {
+                .runtime_only => return .runtime_only,
+                .comptime_only => saw_comptime_only = true,
+                .comptime_ok => {},
+            }
+        }
+        return if (saw_comptime_only) .comptime_only else .comptime_ok;
+    }
+
     fn sourceSpan(self: *ConstEvaluator, range: source.TextRange) SourceSpan {
         _ = self;
         return .{
@@ -777,6 +942,31 @@ const ConstEvaluator = struct {
             .column = 0,
             .length = @intCast(range.end - range.start),
             .byte_offset = @intCast(range.start),
+        };
+    }
+
+    fn statementRange(self: *ConstEvaluator, statement_id: ast.StmtId) source.TextRange {
+        return switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |stmt| stmt.range,
+            .Return => |stmt| stmt.range,
+            .If => |stmt| stmt.range,
+            .While => |stmt| stmt.range,
+            .For => |stmt| stmt.range,
+            .Switch => |stmt| stmt.range,
+            .Try => |stmt| stmt.range,
+            .Log => |stmt| stmt.range,
+            .Lock => |stmt| stmt.range,
+            .Unlock => |stmt| stmt.range,
+            .Assert => |stmt| stmt.range,
+            .Assume => |stmt| stmt.range,
+            .Havoc => |stmt| stmt.range,
+            .Break => |stmt| stmt.range,
+            .Continue => |stmt| stmt.range,
+            .Assign => |stmt| stmt.range,
+            .Expr => |stmt| stmt.range,
+            .Block => |stmt| stmt.range,
+            .LabeledBlock => |stmt| stmt.range,
+            .Error => |stmt| stmt.range,
         };
     }
 
@@ -829,6 +1019,13 @@ const ConstEvaluator = struct {
         const body = self.file.body(body_id).*;
         var last_value: ?ConstValue = null;
         for (body.statements) |statement_id| {
+            if (self.statementStage(statement_id) == .runtime_only) {
+                self.last_error = error_mod.CtError.stageViolation(
+                    self.sourceSpan(self.statementRange(statement_id)),
+                    "runtime-only statement",
+                );
+                return .{ .value = null };
+            }
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {

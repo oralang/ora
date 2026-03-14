@@ -4272,6 +4272,35 @@ test "compiler const eval recursion limit leaves recursive calls unresolved" {
     try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[ret_stmt.value.?.index()]);
 }
 
+test "compiler const eval rejects runtime-only statements in called functions" {
+    const source_text =
+        \\log Ping(value: u256);
+        \\
+        \\fn noisy(next: u256) -> u256 {
+        \\    log Ping(next);
+        \\    return next;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        noisy(7);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[ret_stmt.value.?.index()]);
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {
