@@ -6,6 +6,7 @@ const model = @import("../compiler/sema/model.zig");
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const CtEnv = bridge.CtEnv;
+const CtValue = bridge.CtValue;
 const constEquals = bridge.constEquals;
 const ctValueToConstValue = bridge.ctValueToConstValue;
 const constToCtValue = bridge.constToCtValue;
@@ -329,12 +330,29 @@ const ConstEvaluator = struct {
         try self.env.set(name, ct_value);
     }
 
+    fn bindNameCtValue(self: *ConstEvaluator, name: []const u8, value: ?CtValue) !void {
+        const ct_value = value orelse return;
+        try self.env.set(name, ct_value);
+    }
+
     fn bindPattern(self: *ConstEvaluator, pattern_id: ast.PatternId, value: ?ConstValue) !void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => |name| try self.bindName(name.name, value),
             .StructDestructure => |destructure| {
                 for (destructure.fields) |field| {
                     try self.bindPattern(field.binding, null);
+                }
+            },
+            .Field, .Index, .Error => {},
+        }
+    }
+
+    fn bindPatternCtValue(self: *ConstEvaluator, pattern_id: ast.PatternId, value: ?CtValue) !void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| try self.bindNameCtValue(name.name, value),
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.bindPatternCtValue(field.binding, null);
                 }
             },
             .Field, .Index, .Error => {},
@@ -456,32 +474,103 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeFor(self: *ConstEvaluator, for_stmt: ast.ForStmt) anyerror!?ConstValue {
-        const iterable = (try self.evalExprUncached(for_stmt.iterable)) orelse return null;
-        const trip_count = switch (iterable) {
-            .integer => |integer| bridge.positiveShiftAmount(integer) orelse return null,
-            else => return null,
-        };
-
-        var iteration: usize = 0;
+        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return null;
         var last_value: ?ConstValue = null;
-        while (iteration < trip_count) : (iteration += 1) {
-            if (iteration >= self.env.config.max_loop_iterations) return null;
 
-            const item_value = ConstValue{ .integer = try std.math.big.int.Managed.initSet(self.allocator, iteration) };
-            try self.bindPattern(for_stmt.item_pattern, item_value);
+        switch (iterable) {
+            .integer => |integer| {
+                if (integer > std.math.maxInt(usize)) return null;
+                const trip_count: usize = @intCast(integer);
+                var iteration: usize = 0;
+                while (iteration < trip_count) : (iteration += 1) {
+                    if (iteration >= self.env.config.max_loop_iterations) return null;
 
-            if (for_stmt.index_pattern) |index_pattern| {
-                const index_value = ConstValue{ .integer = try std.math.big.int.Managed.initSet(self.allocator, iteration) };
-                try self.bindPattern(index_pattern, index_value);
-            }
+                    const item_value = CtValue{ .integer = @intCast(iteration) };
+                    try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
 
-            switch (try self.evalComptimeBodyControl(for_stmt.body)) {
-                .value => |value| last_value = value,
-                .break_loop => break,
-                .continue_loop => continue,
-            }
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        const index_value = CtValue{ .integer = @intCast(iteration) };
+                        try self.bindPatternCtValue(index_pattern, index_value);
+                    }
+
+                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => break,
+                        .continue_loop => continue,
+                    }
+                }
+            },
+            .array_ref => |heap_id| {
+                const elems = self.env.heap.getArray(heap_id).elems;
+                for (elems, 0..) |elem, iteration| {
+                    if (iteration >= self.env.config.max_loop_iterations) return null;
+
+                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        const index_value = CtValue{ .integer = @intCast(iteration) };
+                        try self.bindPatternCtValue(index_pattern, index_value);
+                    }
+
+                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => break,
+                        .continue_loop => continue,
+                    }
+                }
+            },
+            .tuple_ref => |heap_id| {
+                const elems = self.env.heap.getTuple(heap_id).elems;
+                for (elems, 0..) |elem, iteration| {
+                    if (iteration >= self.env.config.max_loop_iterations) return null;
+
+                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        const index_value = CtValue{ .integer = @intCast(iteration) };
+                        try self.bindPatternCtValue(index_pattern, index_value);
+                    }
+
+                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
+                        .value => |value| last_value = value,
+                        .break_loop => break,
+                        .continue_loop => continue,
+                    }
+                }
+            },
+            else => return null,
         }
         return last_value;
+    }
+
+    fn evalIterableCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| blk: {
+                const value = (try parseIntegerLiteral(self.allocator, literal.text)) orelse break :blk null;
+                break :blk try constToCtValue(value);
+            },
+            .BoolLiteral => |literal| CtValue{ .boolean = literal.value },
+            .Name => |name| self.env.lookupValue(name.name),
+            .Group => |group| try self.evalIterableCtValue(group.expr),
+            .ArrayLiteral => |array| blk: {
+                const elems = try self.allocator.alloc(CtValue, array.elements.len);
+                for (array.elements, 0..) |element_id, idx| {
+                    elems[idx] = (try self.evalIterableCtValue(element_id)) orelse break :blk null;
+                }
+                const heap_id = try self.env.heap.allocArray(elems);
+                break :blk CtValue{ .array_ref = heap_id };
+            },
+            .Tuple => |tuple| blk: {
+                const elems = try self.allocator.alloc(CtValue, tuple.elements.len);
+                for (tuple.elements, 0..) |element_id, idx| {
+                    elems[idx] = (try self.evalIterableCtValue(element_id)) orelse break :blk null;
+                }
+                const heap_id = try self.env.heap.allocTuple(elems);
+                break :blk CtValue{ .tuple_ref = heap_id };
+            },
+            else => blk: {
+                const value = (try self.evalExprUncached(expr_id)) orelse break :blk null;
+                break :blk try constToCtValue(value);
+            }
+        };
     }
 
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {

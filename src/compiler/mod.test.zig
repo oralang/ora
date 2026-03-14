@@ -3631,6 +3631,58 @@ test "compiler const eval executes comptime integer for loops" {
     try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval executes comptime array for loops" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    return comptime {
+        \\        let total = 0;
+        \\        for ([1, 2, 3]) |value| {
+        \\            total += value;
+        \\        }
+        \\        total;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval executes comptime tuple for loops with index" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    return comptime {
+        \\        let total = 0;
+        \\        for ((1, 2, 3)) |value, index| {
+        \\            total += value + index;
+        \\        }
+        \\        total;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 9), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval executes comptime break in while loops" {
     const source_text =
         \\pub fn count() -> u256 {
