@@ -1219,6 +1219,25 @@ test "compiler lowers structured type expressions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.min_value"));
 }
 
+test "compiler inserts parameter refinement guards in HIR" {
+    const source_text =
+        \\pub fn guarded(
+        \\    bounded: MinValue<u256, 100>,
+        \\    target: NonZeroAddress,
+        \\) -> u256 {
+        \\    return bounded;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "parameter_refinement"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MinValue"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZeroAddress"));
+}
+
 test "compiler lowers struct and enum declarations through real decl ops" {
     const source_text =
         \\struct Pair {

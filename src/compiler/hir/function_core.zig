@@ -17,6 +17,7 @@ const boolType = support.boolType;
 const clearKnownTerminator = support.clearKnownTerminator;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
+const cmpPredicate = support.cmpPredicate;
 const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
@@ -68,6 +69,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lower(self: *FunctionLowerer) anyerror!void {
             if (self.function) |function| {
+                try @This().insertParameterRefinementGuards(self, function);
                 for (function.clauses) |clause| {
                     if (clause.kind != .requires) continue;
                     const condition = try self.lowerExpr(clause.expr, &self.locals);
@@ -96,6 +98,179 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn cloneLocals(self: *FunctionLowerer, locals: *const LocalEnv) anyerror!LocalEnv {
             _ = self;
             return locals.clone();
+        }
+
+        fn insertParameterRefinementGuards(self: *FunctionLowerer, function: ast.FunctionItem) anyerror!void {
+            for (function.parameters) |parameter| {
+                const param_type = self.parent.typecheck.pattern_types[parameter.pattern.index()].type;
+                if (param_type.kind() != .refinement) continue;
+                const local_id = self.locals.resolvePatternTarget(self.parent.file, parameter.pattern) orelse continue;
+                const param_value = self.locals.getValue(local_id) orelse continue;
+                try @This().insertRefinementGuard(self, param_value, param_type.refinement, parameter.range, patternName(self.parent.file, parameter.pattern));
+            }
+        }
+
+        fn insertRefinementGuard(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType, range: source.TextRange, var_name: ?[]const u8) anyerror!void {
+            if (std.mem.eql(u8, refinement.name, "Exact") or std.mem.eql(u8, refinement.name, "Scaled")) return;
+
+            const loc = self.parent.location(range);
+            const base_value = try @This().unwrapRefinementValue(self, value, loc);
+            const condition = if (std.mem.eql(u8, refinement.name, "MinValue"))
+                try @This().buildMinValueCheck(self, base_value, refinement)
+            else if (std.mem.eql(u8, refinement.name, "MaxValue"))
+                try @This().buildMaxValueCheck(self, base_value, refinement)
+            else if (std.mem.eql(u8, refinement.name, "InRange"))
+                try @This().buildInRangeCheck(self, base_value, refinement)
+            else if (std.mem.eql(u8, refinement.name, "NonZeroAddress"))
+                try @This().buildNonZeroAddressCheck(self, base_value, range)
+            else
+                return;
+
+            const message = try @This().refinementMessage(self, refinement);
+            const op = mlir.oraRefinementGuardOpCreate(self.parent.context, loc, condition, strRef(message));
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            defer self.parent.allocator.free(message);
+
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "refinement_guard").attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "parameter_refinement").attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.refinement_kind"), namedStringAttr(self.parent.context, "ora.refinement_kind", refinement.name).attribute);
+            if (var_name) |name| {
+                const guard_id = try std.fmt.allocPrint(self.parent.allocator, "guard:{s}:{d}:{d}:{d}:{s}:{s}", .{
+                    self.parent.sources.file(self.parent.file.file_id).path,
+                    self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = range }).line,
+                    self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = range }).column,
+                    range.len(),
+                    refinement.name,
+                    name,
+                });
+                defer self.parent.allocator.free(guard_id);
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.guard_id"), namedStringAttr(self.parent.context, "ora.guard_id", guard_id).attribute);
+            }
+
+            appendOp(self.block, op);
+        }
+
+        fn unwrapRefinementValue(self: *FunctionLowerer, value: mlir.MlirValue, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            const base_type = mlir.oraRefinementTypeGetBaseType(value_type);
+            if (mlir.oraTypeIsNull(base_type)) return value;
+            const op = mlir.oraRefinementToBaseOpCreate(self.parent.context, loc, value, self.block);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return mlir.oraOperationGetResult(op, 0);
+        }
+
+        fn buildMinValueCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
+            const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+            const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), min_value, self.parent.location(.{ .start = 0, .end = 0 }));
+            const predicate = comparePredicateForBase(refinement.base_type.*, true);
+            const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn buildMaxValueCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
+            const max_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+            const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), max_value, self.parent.location(.{ .start = 0, .end = 0 }));
+            const predicate = comparePredicateForBase(refinement.base_type.*, false);
+            const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn buildInRangeCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
+            const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+            const max_value = refinementIntArg(refinement.args, 2) orelse return error.MlirOperationCreationFailed;
+            const ty = mlir.oraValueGetType(value);
+            const min_constant = try @This().createTypedIntegerConstant(self, ty, min_value, self.parent.location(.{ .start = 0, .end = 0 }));
+            const max_constant = try @This().createTypedIntegerConstant(self, ty, max_value, self.parent.location(.{ .start = 0, .end = 0 }));
+            const ge_predicate = comparePredicateForBase(refinement.base_type.*, true);
+            const le_predicate = comparePredicateForBase(refinement.base_type.*, false);
+            const ge_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), ge_predicate, value, min_constant);
+            if (mlir.oraOperationIsNull(ge_op)) return error.MlirOperationCreationFailed;
+            const le_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), le_predicate, value, max_constant);
+            if (mlir.oraOperationIsNull(le_op)) return error.MlirOperationCreationFailed;
+            const ge_value = appendValueOp(self.block, ge_op);
+            const le_value = appendValueOp(self.block, le_op);
+            const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), ge_value, le_value);
+            if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, and_op);
+        }
+
+        fn buildNonZeroAddressCheck(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(range);
+            const addr_to_i160 = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
+            if (mlir.oraOperationIsNull(addr_to_i160)) return error.MlirOperationCreationFailed;
+            const i160_value = appendValueOp(self.block, addr_to_i160);
+            const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, i160_type, 0));
+            const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, loc, cmpPredicate("ne"), i160_value, zero);
+            if (mlir.oraOperationIsNull(cmp_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, cmp_op);
+        }
+
+        fn createTypedIntegerConstant(self: *FunctionLowerer, ty: mlir.MlirType, value: u256, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
+            const attr = if (value <= std.math.maxInt(i64))
+                mlir.oraIntegerAttrCreateI64FromType(ty, @intCast(value))
+            else blk: {
+                var decimal_buf: [80]u8 = undefined;
+                const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{value}) catch return error.MlirOperationCreationFailed;
+                break :blk mlir.oraIntegerAttrGetFromString(ty, strRef(decimal_text));
+            };
+            const op = mlir.oraArithConstantOpCreate(self.parent.context, loc, ty, attr);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn refinementMessage(self: *FunctionLowerer, refinement: sema.RefinementType) anyerror![]const u8 {
+            if (std.mem.eql(u8, refinement.name, "MinValue")) {
+                const value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+                return std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected MinValue<u256, {d}>", .{value});
+            }
+            if (std.mem.eql(u8, refinement.name, "MaxValue")) {
+                const value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+                return std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{value});
+            }
+            if (std.mem.eql(u8, refinement.name, "InRange")) {
+                const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+                const max_value = refinementIntArg(refinement.args, 2) orelse return error.MlirOperationCreationFailed;
+                return std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ min_value, max_value });
+            }
+            if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) {
+                return self.parent.allocator.dupe(u8, "Refinement violation: expected NonZeroAddress");
+            }
+            return error.MlirOperationCreationFailed;
+        }
+
+        fn refinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
+            if (index >= args.len) return null;
+            return switch (args[index]) {
+                .Integer => |literal| parseU256Literal(literal.text),
+                else => null,
+            };
+        }
+
+        fn parseU256Literal(text: []const u8) ?u256 {
+            const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
+            const digits = if (base == 10) text else text[2..];
+            return std.fmt.parseInt(u256, digits, base) catch null;
+        }
+
+        fn comparePredicateForBase(base_type: sema.Type, lower_bound: bool) i64 {
+            const is_signed = switch (base_type) {
+                .integer => |integer| integer.signed orelse false,
+                else => false,
+            };
+            if (lower_bound) return if (is_signed) cmpPredicate("sge") else 9;
+            return if (is_signed) cmpPredicate("sle") else 7;
+        }
+
+        fn patternName(file: *const ast.AstFile, pattern_id: ast.PatternId) ?[]const u8 {
+            return switch (file.pattern(pattern_id).*) {
+                .Name => |name| name.name,
+                else => null,
+            };
         }
 
         fn wrapValueForReturn(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
