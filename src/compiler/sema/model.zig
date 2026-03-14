@@ -221,6 +221,50 @@ pub const LocatedType = struct {
             .region = region,
         };
     }
+
+    pub fn kind(self: LocatedType) TypeKind {
+        return self.type.kind();
+    }
+
+    pub fn name(self: *const LocatedType) ?[]const u8 {
+        return self.type.name();
+    }
+
+    pub fn elementType(self: *const LocatedType) ?*const Type {
+        return self.type.elementType();
+    }
+
+    pub fn keyType(self: *const LocatedType) ?*const Type {
+        return self.type.keyType();
+    }
+
+    pub fn valueType(self: *const LocatedType) ?*const Type {
+        return self.type.valueType();
+    }
+
+    pub fn payloadType(self: *const LocatedType) ?*const Type {
+        return self.type.payloadType();
+    }
+
+    pub fn arrayLen(self: *const LocatedType) ?u32 {
+        return self.type.arrayLen();
+    }
+
+    pub fn tupleTypes(self: *const LocatedType) []const Type {
+        return self.type.tupleTypes();
+    }
+
+    pub fn errorTypes(self: *const LocatedType) []const Type {
+        return self.type.errorTypes();
+    }
+
+    pub fn paramTypes(self: *const LocatedType) []const Type {
+        return self.type.paramTypes();
+    }
+
+    pub fn returnTypes(self: *const LocatedType) []const Type {
+        return self.type.returnTypes();
+    }
 };
 
 pub const ConstValue = union(enum) {
@@ -295,7 +339,8 @@ pub const TypeCheckResult = struct {
     arena: std.heap.ArenaAllocator,
     key: TypeCheckKey,
     item_types: []Type,
-    pattern_types: []Type,
+    item_regions: []Region,
+    pattern_types: []LocatedType,
     expr_types: []Type,
     body_types: []Type,
     diagnostics: diagnostics.DiagnosticList,
@@ -307,6 +352,13 @@ pub const TypeCheckResult = struct {
 
     pub fn exprType(self: *const TypeCheckResult, id: ast.ExprId) Type {
         return self.expr_types[id.index()];
+    }
+
+    pub fn itemLocatedType(self: *const TypeCheckResult, id: ast.ItemId) LocatedType {
+        return .{
+            .type = self.item_types[id.index()],
+            .region = self.item_regions[id.index()],
+        };
     }
 };
 

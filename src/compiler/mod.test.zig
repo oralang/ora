@@ -1525,6 +1525,40 @@ test "compiler resolves named path types to declaration kinds" {
     try testing.expectEqual(compiler.sema.TypeKind.struct_, return_type.kind());
 }
 
+test "compiler tracks declaration root regions in type check output" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\    memory var scratch: u256;
+        \\    tstore var pending: u256;
+        \\}
+        \\
+        \\pub fn inspect(value: u256) -> u256 {
+        \\    let local = value;
+        \\    return local;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    try testing.expectEqual(compiler.sema.Region.storage, typecheck.itemLocatedType(contract.members[0]).region);
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.itemLocatedType(contract.members[1]).region);
+    try testing.expectEqual(compiler.sema.Region.transient, typecheck.itemLocatedType(contract.members[2]).region);
+
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    try testing.expectEqual(compiler.sema.Region.calldata, typecheck.pattern_types[function.parameters[0].pattern.index()].region);
+
+    const body = ast_file.body(function.body);
+    const local_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.none, typecheck.pattern_types[local_stmt.pattern.index()].region);
+}
+
 test "compiler infers field and index access types" {
     const source_text =
         \\struct Pair {

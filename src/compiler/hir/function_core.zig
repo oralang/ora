@@ -360,7 +360,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             switch (self.parent.file.pattern(pattern_id).*) {
                 .StructDestructure => |destructure| {
                     for (destructure.fields) |field| {
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()], field.range);
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()].type, field.range);
                         const op = mlir.oraStructFieldExtractOpCreate(
                             self.parent.context,
                             self.parent.location(field.range),
@@ -558,7 +558,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .StructDestructure => |destructure| {
                     for (destructure.fields) |field| {
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()], field.range);
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()].type, field.range);
                         const op = mlir.oraStructFieldExtractOpCreate(
                             self.parent.context,
                             self.parent.location(field.range),
@@ -649,7 +649,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
                             const field = item.Field;
-                            const result_type = if (field.type_expr) |type_expr| self.parent.lowerTypeExpr(type_expr) else self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()], name.range);
+                            const result_type = if (field.type_expr) |type_expr| self.parent.lowerTypeExpr(type_expr) else self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
                             const op = switch (field.storage_class) {
                                 .storage => mlir.oraSLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),
                                 .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),
@@ -666,7 +666,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const key_value = try self.lowerExpr(index.index, locals);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()], index.range);
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
@@ -681,7 +681,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const result_type = blk2: {
                         const map_value_type = mlir.oraMapTypeGetValueType(mlir.oraValueGetType(base_value));
                         if (map_value_type.ptr != null) break :blk2 map_value_type;
-                        break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()], index.range);
+                        break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                     };
                     const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base_value, key_value, result_type);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -689,7 +689,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Field => |field| blk: {
                     const base_value = try @This().lowerPatternValue(self, field.base, locals);
-                    const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()], field.range);
+                    const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
                     const op = mlir.oraStructFieldExtractOpCreate(
                         self.parent.context,
                         self.parent.location(field.range),
@@ -836,7 +836,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(body_block, index_value_op);
             const index_value = mlir.oraOperationGetResult(index_value_op, 0);
 
-            const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()], for_stmt.range);
+            const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type, for_stmt.range);
             const item_load = mlir.oraMemrefLoadOpCreate(
                 self.parent.context,
                 loc,

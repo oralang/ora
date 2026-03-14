@@ -12,6 +12,8 @@ const ResolvedBinding = model.ResolvedBinding;
 const TypeCheckKey = model.TypeCheckKey;
 const TypeCheckResult = model.TypeCheckResult;
 const Type = model.Type;
+const LocatedType = model.LocatedType;
+const Region = model.Region;
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const BigInt = std.math.big.int.Managed;
@@ -19,6 +21,15 @@ const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
+
+fn declarationRegion(storage_class: ast.StorageClass) Region {
+    return switch (storage_class) {
+        .none => .none,
+        .storage => .storage,
+        .memory => .memory,
+        .tstore => .transient,
+    };
+}
 
 pub fn typeCheck(
     allocator: std.mem.Allocator,
@@ -33,6 +44,7 @@ pub fn typeCheck(
         .arena = std.heap.ArenaAllocator.init(allocator),
         .key = key,
         .item_types = &.{},
+        .item_regions = &.{},
         .pattern_types = &.{},
         .expr_types = &.{},
         .body_types = &.{},
@@ -42,11 +54,13 @@ pub fn typeCheck(
 
     const arena = result.arena.allocator();
     var item_types = try arena.alloc(Type, file.items.len);
-    var pattern_types = try arena.alloc(Type, file.patterns.len);
+    var item_regions = try arena.alloc(Region, file.items.len);
+    var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     var body_types = try arena.alloc(Type, file.bodies.len);
     @memset(item_types, .{ .unknown = {} });
-    @memset(pattern_types, .{ .unknown = {} });
+    @memset(item_regions, .none);
+    @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(body_types, .{ .void = {} });
 
@@ -55,11 +69,15 @@ pub fn typeCheck(
         switch (item) {
             .Function => |function| {
                 for (function.parameters) |parameter| {
-                    pattern_types[parameter.pattern.index()] = try descriptorFromTypeExpr(arena, file, item_index, parameter.type_expr);
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(
+                        try descriptorFromTypeExpr(arena, file, item_index, parameter.type_expr),
+                        .calldata,
+                    );
                 }
                 body_types[function.body.index()] = if (function.return_type) |type_expr| try descriptorFromTypeExpr(arena, file, item_index, type_expr) else .{ .void = {} };
             },
             .Field => |field| {
+                item_regions[index] = declarationRegion(field.storage_class);
                 if (field.type_expr) |type_expr| item_types[index] = try descriptorFromTypeExpr(arena, file, item_index, type_expr);
             },
             .Constant => |constant| {
@@ -73,7 +91,9 @@ pub fn typeCheck(
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
-                pattern_types[decl.pattern.index()] = try descriptorFromTypeExpr(arena, file, item_index, type_expr);
+                pattern_types[decl.pattern.index()] = LocatedType.unlocated(
+                    try descriptorFromTypeExpr(arena, file, item_index, type_expr),
+                );
             }
         }
     }
@@ -86,6 +106,7 @@ pub fn typeCheck(
         .resolution = resolution,
         .const_eval = const_eval,
         .item_types = item_types,
+        .item_regions = item_regions,
         .pattern_types = pattern_types,
         .expr_types = expr_types,
         .diagnostics = &result.diagnostics,
@@ -98,6 +119,7 @@ pub fn typeCheck(
     }
 
     result.item_types = item_types;
+    result.item_regions = item_regions;
     result.pattern_types = pattern_types;
     result.expr_types = expr_types;
     result.body_types = body_types;
@@ -112,7 +134,8 @@ const TypeChecker = struct {
     resolution: *const NameResolutionResult,
     const_eval: *const ConstEvalResult,
     item_types: []Type,
-    pattern_types: []Type,
+    item_regions: []Region,
+    pattern_types: []LocatedType,
     expr_types: []Type,
     current_return_type: ?Type = null,
     diagnostics: *diagnostics.DiagnosticList,
@@ -185,9 +208,9 @@ const TypeChecker = struct {
                     try self.visitExpr(expr_id);
                     const actual_type = self.expr_types[expr_id.index()];
                     if (decl.type_expr == null) {
-                        self.pattern_types[decl.pattern.index()] = actual_type;
+                        self.pattern_types[decl.pattern.index()] = LocatedType.unlocated(actual_type);
                     } else {
-                        const expected_type = self.pattern_types[decl.pattern.index()];
+                        const expected_type = self.pattern_types[decl.pattern.index()].type;
                         if (try self.emitIntegerOverflowIfNeeded(decl.range, expr_id, expected_type)) {
                             // Keep lowering/recovery moving after reporting the overflow.
                         } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
@@ -479,7 +502,9 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = self.expr_types[old.expr.index()];
             },
             .Quantified => |quantified| {
-                self.pattern_types[quantified.pattern.index()] = try descriptorFromTypeExpr(self.arena, self.file, self.item_index, quantified.type_expr);
+                self.pattern_types[quantified.pattern.index()] = LocatedType.unlocated(
+                    try descriptorFromTypeExpr(self.arena, self.file, self.item_index, quantified.type_expr),
+                );
                 if (quantified.condition) |condition| try self.visitExpr(condition);
                 try self.visitExpr(quantified.body);
                 self.expr_types[expr_id.index()] = .{ .bool = {} };
@@ -492,7 +517,7 @@ const TypeChecker = struct {
         if (binding) |resolved| {
             return switch (resolved) {
                 .item => |item_id| self.item_types[item_id.index()],
-                .pattern => |pattern_id| self.pattern_types[pattern_id.index()],
+                .pattern => |pattern_id| self.pattern_types[pattern_id.index()].type,
             };
         }
         return .{ .unknown = {} };
@@ -749,14 +774,26 @@ const TypeChecker = struct {
     fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) Type {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| blk: {
-                const direct = self.pattern_types[pattern_id.index()];
+                const direct = self.pattern_types[pattern_id.index()].type;
                 if (direct.kind() != .unknown) break :blk direct;
                 break :blk self.lookupNamedPatternType(name.name);
             },
             .Field => |field| self.fieldPatternType(field),
             .Index => |index| self.indexPatternType(index),
-            .StructDestructure => self.pattern_types[pattern_id.index()],
+            .StructDestructure => self.pattern_types[pattern_id.index()].type,
             .Error => .{ .unknown = {} },
+        };
+    }
+
+    fn patternLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) LocatedType {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| blk: {
+                const direct = self.pattern_types[pattern_id.index()];
+                if (direct.kind() != .unknown) break :blk direct;
+                break :blk LocatedType.unlocated(self.lookupNamedPatternType(name.name));
+            },
+            .StructDestructure => self.pattern_types[pattern_id.index()],
+            .Field, .Index, .Error => LocatedType.unlocated(self.patternType(pattern_id)),
         };
     }
 
@@ -786,7 +823,7 @@ const TypeChecker = struct {
         for (self.file.patterns, 0..) |pattern, index| {
             if (pattern != .Name) continue;
             if (!std.mem.eql(u8, pattern.Name.name, name)) continue;
-            const ty = self.pattern_types[index];
+            const ty = self.pattern_types[index].type;
             if (ty.kind() != .unknown) return ty;
         }
         return .{ .unknown = {} };
