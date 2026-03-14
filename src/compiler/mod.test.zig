@@ -1638,6 +1638,35 @@ test "compiler lowers bitfield field reads and writes through bit ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers bitfield construction through packed bit ops" {
+    const source_text =
+        \\contract Bits {
+        \\    bitfield Flags: u256 {
+        \\        enabled: u1,
+        \\        signed: i8,
+        \\    }
+        \\
+        \\    pub fn build() -> i8 {
+        \\        let packed = Flags { enabled: 1, signed: -2 };
+        \\        return packed.signed;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.ori"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_instantiate"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.struct.create\""));
+}
+
 test "compiler resolves named path types to declaration kinds" {
     const source_text =
         \\struct Pair {

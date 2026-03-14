@@ -139,8 +139,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk try @This().lowerArrayLiteral(self, expr_id, array, locals);
                 },
                 .StructLiteral => |struct_literal| blk: {
-                    const op = try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
-                    break :blk appendValueOp(self.block, op);
+                    break :blk try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
                 },
                 .Switch => |switch_expr| try self.lowerSwitchExpr(expr_id, switch_expr, locals),
                 .Comptime => |comptime_expr| blk: {
@@ -977,20 +976,34 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             expr_id: ast.ExprId,
             struct_literal: ast.StructLiteralExpr,
             locals: *LocalEnv,
-        ) anyerror!mlir.MlirOperation {
+        ) anyerror!mlir.MlirValue {
             const struct_item_id = self.parent.item_index.lookup(struct_literal.type_name) orelse {
-                return self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id));
+                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)));
             };
-            const struct_item = switch (self.parent.file.item(struct_item_id).*) {
-                .Struct => |item| item,
-                else => return self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)),
+            const item = self.parent.file.item(struct_item_id).*;
+            if (item == .Bitfield) {
+                const bitfield_type = self.parent.typecheck.exprType(expr_id);
+                const word_type = self.parent.lowerExprType(expr_id);
+                var packed_word = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
+                );
+                for (struct_literal.fields) |init| {
+                    const field_value = try self.lowerExpr(init.value, locals);
+                    packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
+                }
+                return packed_word;
+            }
+            const struct_item = switch (item) {
+                .Struct => |struct_item| struct_item,
+                else => return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id))),
             };
 
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
             for (struct_item.fields) |decl_field| {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
-                    return self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type);
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
                 };
                 try operands.append(self.parent.allocator, try self.lowerExpr(init.value, locals));
             }
@@ -1004,9 +1017,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 result_type,
             );
             if (mlir.oraOperationIsNull(op)) {
-                return self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type);
+                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
             }
-            return op;
+            return appendValueOp(self.block, op);
         }
 
         fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
