@@ -1,6 +1,7 @@
 const model = @import("model.zig");
 const comptime_eval = @import("../../comptime/mod.zig").compiler_ast_eval;
 const module_graph = @import("module_graph.zig");
+const region = @import("region.zig");
 const resolve = @import("resolve.zig");
 const type_check = @import("type_check.zig");
 const verification = @import("verification.zig");
@@ -32,4 +33,8 @@ pub const buildItemIndex = module_graph.buildItemIndex;
 pub const resolveNames = resolve.resolveNames;
 pub const typeCheck = type_check.typeCheck;
 pub const constEval = comptime_eval.constEval;
+pub const regionDisplayName = region.regionDisplayName;
+pub const regionAssignable = region.regionAssignable;
+pub const locatedTypeEql = region.locatedTypeEql;
+pub const locatedTypeAssignable = region.isAssignable;
 pub const verificationFacts = verification.verificationFacts;
