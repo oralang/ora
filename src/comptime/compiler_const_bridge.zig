@@ -6,8 +6,8 @@ const model = @import("../compiler/sema/model.zig");
 
 const BigInt = std.math.big.int.Managed;
 pub const ConstValue = model.ConstValue;
-const CtEnv = comptime_eval.CtEnv;
-const CtValue = comptime_eval.CtValue;
+pub const CtEnv = comptime_eval.CtEnv;
+pub const CtValue = comptime_eval.CtValue;
 const Evaluator = comptime_eval.Evaluator;
 const EvalResult = comptime_eval.EvalResult;
 const EvalMode = comptime_eval.EvalMode;
@@ -287,7 +287,7 @@ fn tryEvalBinaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.BinaryOp,
     return try evalResultToConstValue(allocator, result);
 }
 
-fn constToCtValue(value: ConstValue) !?CtValue {
+pub fn constToCtValue(value: ConstValue) !?CtValue {
     return switch (value) {
         .integer => |integer| blk: {
             if (!integer.isPositive() and !integer.eqlZero()) break :blk null;
@@ -313,4 +313,12 @@ fn evalResultToConstValue(allocator: std.mem.Allocator, result: EvalResult) !?Co
 
 fn zeroSpan() SourceSpan {
     return .{ .line = 0, .column = 0, .length = 0 };
+}
+
+pub fn ctValueToConstValue(allocator: std.mem.Allocator, value: CtValue) !?ConstValue {
+    return switch (value) {
+        .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
+        .boolean => |boolean| .{ .boolean = boolean },
+        else => null,
+    };
 }

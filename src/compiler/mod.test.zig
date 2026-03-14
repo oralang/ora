@@ -3442,6 +3442,32 @@ test "compiler const eval preserves integers wider than i128" {
     try testing.expectEqual(@as(usize, 0), type_diags.len());
 }
 
+test "compiler const eval resolves local name bindings in sequence" {
+    const source_text =
+        \\pub fn fold() -> u256 {
+        \\    let base = 2;
+        \\    let sum = base + 3;
+        \\    return sum;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const base_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+    const sum_stmt = ast_file.statement(body.statements[1]).VariableDecl;
+    const ret_stmt = ast_file.statement(body.statements[2]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 2), try consteval.values[base_stmt.value.?.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, 5), try consteval.values[sum_stmt.value.?.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval respects exclusive switch range patterns" {
     const source_text =
         \\pub fn choose() -> u256 {
@@ -3465,6 +3491,30 @@ test "compiler const eval respects exclusive switch range patterns" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[value_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 9), try consteval.values[value_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval sequences comptime block locals" {
+    const source_text =
+        \\pub fn choose() -> u256 {
+        \\    return comptime {
+        \\        let value = 1;
+        \\        let next = value + 4;
+        \\        next;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
 test "compiler lowers ghost items into ghost AST nodes" {

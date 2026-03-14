@@ -5,7 +5,10 @@ const model = @import("../compiler/sema/model.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
+const CtEnv = bridge.CtEnv;
 const constEquals = bridge.constEquals;
+const ctValueToConstValue = bridge.ctValueToConstValue;
+const constToCtValue = bridge.constToCtValue;
 const evalBinary = bridge.evalBinary;
 const evalUnary = bridge.evalUnary;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
@@ -36,7 +39,9 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstE
         .allocator = arena,
         .file = file,
         .values = values,
+        .env = CtEnv.init(arena, .{}),
     };
+    defer evaluator.env.deinit();
     for (file.root_items) |item_id| {
         evaluator.visitItem(item_id);
     }
@@ -49,6 +54,7 @@ const ConstEvaluator = struct {
     allocator: std.mem.Allocator,
     file: *const ast.AstFile,
     values: []?ConstValue,
+    env: CtEnv,
 
     fn visitItem(self: *ConstEvaluator, item_id: ast.ItemId) void {
         switch (self.file.item(item_id).*) {
@@ -61,20 +67,30 @@ const ConstEvaluator = struct {
                 self.visitBody(function.body);
             },
             .Field => |field| {
-                if (field.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                if (field.value) |expr_id| {
+                    const value = self.evalExpr(expr_id) catch null;
+                    self.bindName(field.name, value) catch {};
+                }
             },
-            .Constant => |constant| _ = self.evalExpr(constant.value) catch null,
+            .Constant => |constant| {
+                const value = self.evalExpr(constant.value) catch null;
+                self.bindName(constant.name, value) catch {};
+            },
             .GhostBlock => |ghost_block| self.visitBody(ghost_block.body),
             else => {},
         }
     }
 
     fn visitBody(self: *ConstEvaluator, body_id: ast.BodyId) void {
+        self.env.pushScope(false) catch return;
+        defer self.env.popScope();
+
         const body = self.file.body(body_id).*;
         for (body.statements) |statement_id| {
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
-                    if (decl.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                    const value = if (decl.value) |expr_id| self.evalExpr(expr_id) catch null else null;
+                    self.bindPattern(decl.pattern, value) catch {};
                 },
                 .Return => |ret| {
                     if (ret.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
@@ -185,20 +201,16 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Comptime => |comptime_expr| blk: {
-                const body = self.file.body(comptime_expr.body).*;
-                if (body.statements.len == 0) break :blk null;
-                const last_stmt = self.file.statement(body.statements[body.statements.len - 1]).*;
-                break :blk switch (last_stmt) {
-                    .Expr => |expr_stmt| try self.evalExpr(expr_stmt.expr),
-                    .Return => |ret| if (ret.value) |ret_value| try self.evalExpr(ret_value) else null,
-                    else => null,
-                };
+                break :blk try self.evalComptimeBody(comptime_expr.body);
             },
             .ErrorReturn => |error_return| blk: {
                 for (error_return.args) |arg| _ = try self.evalExpr(arg);
                 break :blk null;
             },
-            .Name => null,
+            .Name => |name| blk: {
+                const value = self.env.lookupValue(name.name) orelse break :blk null;
+                break :blk try ctValueToConstValue(self.allocator, value);
+            },
             .Result => null,
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExpr(unary.operand)),
             .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExpr(binary.lhs), try self.evalExpr(binary.rhs)),
@@ -290,5 +302,104 @@ const ConstEvaluator = struct {
 
         for (builtin.args) |arg| _ = try self.evalExpr(arg);
         return null;
+    }
+
+    fn bindName(self: *ConstEvaluator, name: []const u8, value: ?ConstValue) !void {
+        const const_value = value orelse return;
+        const ct_value = (try constToCtValue(const_value)) orelse return;
+        try self.env.set(name, ct_value);
+    }
+
+    fn bindPattern(self: *ConstEvaluator, pattern_id: ast.PatternId, value: ?ConstValue) !void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| try self.bindName(name.name, value),
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.bindPattern(field.binding, null);
+                }
+            },
+            .Field, .Index, .Error => {},
+        }
+    }
+
+    fn evalComptimeBody(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!?ConstValue {
+        self.env.pushScope(false) catch return null;
+        defer self.env.popScope();
+
+        const body = self.file.body(body_id).*;
+        var last_value: ?ConstValue = null;
+        for (body.statements) |statement_id| {
+            switch (self.file.statement(statement_id).*) {
+                .VariableDecl => |decl| {
+                    const value = if (decl.value) |expr_id| try self.evalExpr(expr_id) else null;
+                    try self.bindPattern(decl.pattern, value);
+                    last_value = null;
+                },
+                .Expr => |expr_stmt| {
+                    last_value = try self.evalExpr(expr_stmt.expr);
+                },
+                .Return => |ret| {
+                    return if (ret.value) |ret_value| try self.evalExpr(ret_value) else null;
+                },
+                .Block => |block_stmt| {
+                    last_value = try self.evalComptimeBody(block_stmt.body);
+                },
+                .LabeledBlock => |labeled| {
+                    last_value = try self.evalComptimeBody(labeled.body);
+                },
+                else => {
+                    self.visitBodyStatementForComptime(statement_id);
+                    last_value = null;
+                },
+            }
+        }
+        return last_value;
+    }
+
+    fn visitBodyStatementForComptime(self: *ConstEvaluator, statement_id: ast.StmtId) void {
+        switch (self.file.statement(statement_id).*) {
+            .If => |if_stmt| {
+                _ = self.evalExpr(if_stmt.condition) catch null;
+                self.visitBody(if_stmt.then_body);
+                if (if_stmt.else_body) |else_body| self.visitBody(else_body);
+            },
+            .While => |while_stmt| {
+                _ = self.evalExpr(while_stmt.condition) catch null;
+                for (while_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                self.visitBody(while_stmt.body);
+            },
+            .For => |for_stmt| {
+                _ = self.evalExpr(for_stmt.iterable) catch null;
+                for (for_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                self.visitBody(for_stmt.body);
+            },
+            .Switch => |switch_stmt| {
+                _ = self.evalExpr(switch_stmt.condition) catch null;
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| _ = self.evalExpr(expr_id) catch null,
+                        .Range => |range_pattern| {
+                            _ = self.evalExpr(range_pattern.start) catch null;
+                            _ = self.evalExpr(range_pattern.end) catch null;
+                        },
+                        .Else => {},
+                    }
+                    self.visitBody(arm.body);
+                }
+                if (switch_stmt.else_body) |else_body| self.visitBody(else_body);
+            },
+            .Try => |try_stmt| {
+                self.visitBody(try_stmt.try_body);
+                if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
+            },
+            .Assign => |assign| _ = self.evalExpr(assign.value) catch null,
+            .Log => |log_stmt| {
+                for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
+            },
+            .Assert => |assert_stmt| _ = self.evalExpr(assert_stmt.condition) catch null,
+            .Assume => |assume_stmt| _ = self.evalExpr(assume_stmt.condition) catch null,
+            .Lock, .Unlock, .Break, .Continue, .Havoc, .Error => {},
+            .VariableDecl, .Return, .Expr, .Block, .LabeledBlock => unreachable,
+        }
     }
 };
