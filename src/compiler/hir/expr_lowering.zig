@@ -442,14 +442,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
             var args: std.ArrayList(mlir.MlirValue) = .{};
-            for (call.args) |arg| {
-                try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
+            const callee_function = @This().calleeFunctionItem(self, call.callee);
+            for (call.args, 0..) |arg, index| {
+                var arg_value = try self.lowerExpr(arg, locals);
+                if (callee_function) |function| {
+                    if (index < function.parameters.len) {
+                        const parameter = function.parameters[index];
+                        const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
+                        arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                    }
+                }
+                try args.append(self.parent.allocator, arg_value);
             }
 
-            const callee_name = switch (self.parent.file.expression(call.callee).*) {
-                .Name => |name| name.name,
-                else => null,
-            } orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range);
+            const callee_name = @This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range);
 
             const result_type = self.parent.lowerExprType(expr_id);
             var result_types: [1]mlir.MlirType = .{result_type};
@@ -468,6 +474,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return self.defaultValue(defaultIntegerType(self.parent.context), call.range);
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn calleeName(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Name => |name| name.name,
+                .Group => |group| @This().calleeName(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn calleeFunctionItem(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.FunctionItem {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().calleeFunctionItem(self, group.expr),
+                else => blk: {
+                    const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                    break :blk switch (binding) {
+                        .item => |item_id| switch (self.parent.file.item(item_id).*) {
+                            .Function => |function| function,
+                            else => null,
+                        },
+                        else => null,
+                    };
+                },
+            };
         }
 
         pub fn lowerBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {

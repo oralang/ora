@@ -1236,6 +1236,47 @@ test "compiler inserts parameter refinement guards in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "parameter_refinement"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MinValue"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZeroAddress"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
+}
+
+test "compiler inserts refinement flow conversions in HIR" {
+    const source_text =
+        \\pub fn promote(value: u256) -> MinValue<u256, 100> {
+        \\    return @cast(MinValue<u256, 100>, value);
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
+}
+
+test "compiler inserts refinement call conversions in HIR" {
+    const source_text =
+        \\fn take_base(value: u256) -> u256 {
+        \\    return value;
+        \\}
+        \\
+        \\fn take_refined(value: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        \\    return value;
+        \\}
+        \\
+        \\pub fn bridge(
+        \\    raw: u256,
+        \\    bounded: MinValue<u256, 100>,
+        \\) -> u256 {
+        \\    let left = take_base(bounded);
+        \\    let right = take_refined(raw);
+        \\    return left;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.refinement_to_base"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
 }
 
 test "compiler lowers struct and enum declarations through real decl ops" {

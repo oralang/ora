@@ -340,6 +340,7 @@ const FunctionLowerer = struct {
     pub const lowerStmt = FunctionCore.lowerStmt;
     pub const bindPatternValue = FunctionCore.bindPatternValue;
     pub const storePattern = FunctionCore.storePattern;
+    pub const convertValueForFlow = FunctionCore.convertValueForFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const appendUnsupportedControlPlaceholder = FunctionCore.appendUnsupportedControlPlaceholder;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;

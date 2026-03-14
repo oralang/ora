@@ -273,14 +273,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
+        fn patternRange(file: *const ast.AstFile, pattern_id: ast.PatternId) source.TextRange {
+            return switch (file.pattern(pattern_id).*) {
+                .Name => |name| name.range,
+                .Field => |field| field.range,
+                .Index => |index| index.range,
+                .StructDestructure => |destructure| destructure.range,
+                .Error => |err| err.range,
+            };
+        }
+
         fn wrapValueForReturn(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
             const return_type = self.return_type orelse return value;
             const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
-            if (mlir.oraTypeIsNull(success_type)) return value;
+            if (mlir.oraTypeIsNull(success_type)) {
+                return @This().convertValueForFlow(self, value, return_type, range);
+            }
             if (mlir.oraTypeEqual(mlir.oraValueGetType(value), return_type)) return value;
 
-            const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), value, return_type);
-            if (mlir.oraOperationIsNull(op)) return value;
+            const payload = try @This().convertValueForFlow(self, value, success_type, range);
+            const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, return_type);
+            if (mlir.oraOperationIsNull(op)) return payload;
             return appendValueOp(self.block, op);
         }
 
@@ -558,8 +571,50 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.bindPatternValue(field.binding, field_value, locals);
                     }
                 },
-                else => try locals.bindPattern(self.parent.file, pattern_id, value),
+                else => {
+                    const range = patternRange(self.parent.file, pattern_id);
+                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const converted = try @This().convertValueForFlow(self, value, target_type, range);
+                    try locals.bindPattern(self.parent.file, pattern_id, converted);
+                },
             }
+        }
+
+        pub fn convertValueForFlow(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            if (mlir.oraTypeEqual(value_type, target_type)) return value;
+
+            const loc = self.parent.location(range);
+            const value_ref_base = mlir.oraRefinementTypeGetBaseType(value_type);
+            const target_ref_base = mlir.oraRefinementTypeGetBaseType(target_type);
+
+            if (!mlir.oraTypeIsNull(value_ref_base) and mlir.oraTypeEqual(value_ref_base, target_type)) {
+                const op = mlir.oraRefinementToBaseOpCreate(self.parent.context, loc, value, self.block);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return mlir.oraOperationGetResult(op, 0);
+            }
+
+            if (!mlir.oraTypeIsNull(target_ref_base) and mlir.oraTypeEqual(value_type, target_ref_base)) {
+                const op = mlir.oraBaseToRefinementOpCreate(self.parent.context, loc, value, target_type, self.block);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return mlir.oraOperationGetResult(op, 0);
+            }
+
+            if (!mlir.oraTypeIsNull(value_ref_base) and !mlir.oraTypeIsNull(target_ref_base) and mlir.oraTypeEqual(value_ref_base, target_ref_base)) {
+                const base_op = mlir.oraRefinementToBaseOpCreate(self.parent.context, loc, value, self.block);
+                if (mlir.oraOperationIsNull(base_op)) return error.MlirOperationCreationFailed;
+                const base_value = mlir.oraOperationGetResult(base_op, 0);
+                const refine_op = mlir.oraBaseToRefinementOpCreate(self.parent.context, loc, base_value, target_type, self.block);
+                if (mlir.oraOperationIsNull(refine_op)) return error.MlirOperationCreationFailed;
+                return mlir.oraOperationGetResult(refine_op, 0);
+            }
+
+            return value;
         }
 
         pub fn lowerCheckedPower(
@@ -717,8 +772,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn storePattern(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {
             switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| {
+                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
+                    const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                     if (locals.lookupName(name.name)) |local_id| {
-                        try locals.setValue(local_id, value);
+                        try locals.setValue(local_id, converted);
                         return;
                     }
                     if (self.parent.item_index.lookup(name.name)) |item_id| {
@@ -729,10 +786,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = switch (field.storage_class) {
                                 .storage => blk: {
                                     try @This().maybeEmitGuardedStorageWrite(self, field.name, name.range);
-                                    break :blk mlir.oraSStoreOpCreate(self.parent.context, loc, value, strRef(field.name));
+                                    break :blk mlir.oraSStoreOpCreate(self.parent.context, loc, converted, strRef(field.name));
                                 },
-                                .memory => mlir.oraMStoreOpCreate(self.parent.context, loc, value, strRef(field.name)),
-                                .tstore => mlir.oraTStoreOpCreate(self.parent.context, loc, value, strRef(field.name)),
+                                .memory => mlir.oraMStoreOpCreate(self.parent.context, loc, converted, strRef(field.name)),
+                                .tstore => mlir.oraTStoreOpCreate(self.parent.context, loc, converted, strRef(field.name)),
                                 .none => std.mem.zeroes(mlir.MlirOperation),
                             };
                             if (!mlir.oraOperationIsNull(op)) appendOp(self.block, op);
@@ -759,12 +816,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Field => |field| {
                     const base_value = try @This().lowerPatternValue(self, field.base, locals);
+                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
+                    const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
                     const op = mlir.oraStructFieldUpdateOpCreate(
                         self.parent.context,
                         self.parent.location(field.range),
                         base_value,
                         strRef(field.name),
-                        value,
+                        converted,
                     );
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     const updated_struct = appendValueOp(self.block, op);
@@ -774,13 +833,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Index => |index| {
                     const base_value = try @This().lowerPatternValue(self, index.base, locals);
                     const base_type = mlir.oraValueGetType(base_value);
+                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
+                    const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
                         const key_value = try self.lowerExpr(index.index, locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         const op = mlir.oraMemrefStoreOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
-                            value,
+                            converted,
                             base_value,
                             &[_]mlir.MlirValue{index_value},
                             1,
@@ -792,7 +853,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
                         const key_value = try self.lowerExpr(index.index, locals);
-                        try @This().appendMapStore(self, index.range, base_value, key_value, value);
+                        try @This().appendMapStore(self, index.range, base_value, key_value, converted);
                         if (self.parent.file.pattern(index.base).* == .Index) {
                             try self.storePattern(index.base, base_value, locals);
                         }
