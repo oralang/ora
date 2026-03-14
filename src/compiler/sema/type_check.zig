@@ -616,7 +616,14 @@ const TypeChecker = struct {
             std.mem.eql(u8, builtin.name, "shrWithOverflow") or
             std.mem.eql(u8, builtin.name, "powerWithOverflow"))
         {
-            return .{ .tuple = &.{} };
+            if (builtin.args.len > 0) {
+                const value_type = self.expr_types[builtin.args[0].index()];
+                const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
+                tuple_types[0] = value_type;
+                tuple_types[1] = .{ .bool = {} };
+                return .{ .tuple = tuple_types };
+            }
+            return .{ .unknown = {} };
         }
 
         return .{ .unknown = {} };

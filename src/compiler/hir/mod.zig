@@ -347,6 +347,7 @@ const FunctionLowerer = struct {
     pub const storePattern = FunctionCore.storePattern;
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
+    pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
     pub const appendUnsupportedControlPlaceholder = FunctionCore.appendUnsupportedControlPlaceholder;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;

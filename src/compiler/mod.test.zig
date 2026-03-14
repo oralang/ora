@@ -3687,6 +3687,45 @@ test "compiler lowers builtin truncate through unchecked truncation" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "safe cast narrowing overflow"));
 }
 
+test "compiler lowers overflow builtins through real tuple results" {
+    const source_text =
+        \\pub fn overflow_ops(a: u8, b: u8) -> bool {
+        \\    let added = @addWithOverflow(a, b);
+        \\    let negated = @negWithOverflow(a);
+        \\    let divided = @divWithOverflow(a, b);
+        \\    let powered = @powerWithOverflow(a, b);
+        \\    return added[1] || negated[1] || divided[1] || powered[1];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    const added_pattern = findVariablePatternByName(ast_file, body.statements, "added").?;
+    const added_type = typecheck.pattern_types[added_pattern.index()];
+    try testing.expectEqual(compiler.sema.TypeKind.tuple, added_type.kind());
+    try testing.expectEqual(@as(usize, 2), added_type.tupleTypes().len);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, added_type.tupleTypes()[0].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.bool, added_type.tupleTypes()[1].kind());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "ora.tuple_create"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.subi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.power"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.tuple.create\""));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {

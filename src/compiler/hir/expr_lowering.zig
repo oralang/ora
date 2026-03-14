@@ -507,6 +507,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "bitCast") and builtin.args.len > 0) {
                 return try @This().lowerBitcastBuiltin(self, expr_id, builtin, locals);
             }
+            if (std.mem.eql(u8, builtin.name, "addWithOverflow") or
+                std.mem.eql(u8, builtin.name, "subWithOverflow") or
+                std.mem.eql(u8, builtin.name, "mulWithOverflow") or
+                std.mem.eql(u8, builtin.name, "divWithOverflow") or
+                std.mem.eql(u8, builtin.name, "modWithOverflow") or
+                std.mem.eql(u8, builtin.name, "negWithOverflow") or
+                std.mem.eql(u8, builtin.name, "shlWithOverflow") or
+                std.mem.eql(u8, builtin.name, "shrWithOverflow") or
+                std.mem.eql(u8, builtin.name, "powerWithOverflow"))
+            {
+                return try @This().lowerOverflowBuiltin(self, expr_id, builtin, locals);
+            }
             if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
                 std.mem.eql(u8, builtin.name, "divFloor") or
                 std.mem.eql(u8, builtin.name, "divCeil") or
@@ -741,6 +753,224 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, no_overflow, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, assert_op);
+        }
+
+        fn lowerOverflowBuiltin(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            builtin: ast.BuiltinExpr,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(builtin.range);
+            const result_type = self.parent.lowerExprType(expr_id);
+            const is_unary = std.mem.eql(u8, builtin.name, "negWithOverflow");
+            const expected_args: usize = if (is_unary) 1 else 2;
+            if (builtin.args.len < expected_args) return self.defaultValue(result_type, builtin.range);
+
+            const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
+            const lhs_type = mlir.oraValueGetType(lhs);
+            const is_signed = mlir.oraTypeIsAInteger(lhs_type) and mlir.oraIntegerTypeIsSigned(lhs_type);
+
+            var value: mlir.MlirValue = lhs;
+            var overflow_flag: mlir.MlirValue = undefined;
+
+            if (std.mem.eql(u8, builtin.name, "negWithOverflow")) {
+                const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 0));
+                const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, lhs);
+                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, sub_op);
+                if (is_signed) {
+                    const bit_width: i64 = @intCast(mlir.oraIntegerTypeGetWidth(lhs_type) - 1);
+                    const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 1));
+                    const shift = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, bit_width));
+                    const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
+                    if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+                    const min_int = appendValueOp(self.block, min_op);
+                    overflow_flag = appendValueOp(self.block, self.createCompareOp(loc, "eq", lhs, min_int));
+                } else {
+                    const zero_cmp = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 0));
+                    overflow_flag = appendValueOp(self.block, self.createCompareOp(loc, "ne", lhs, zero_cmp));
+                }
+                return @This().packOverflowResult(self, value, overflow_flag, result_type, builtin.range);
+            }
+
+            const rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
+            if (std.mem.eql(u8, builtin.name, "addWithOverflow")) {
+                const add_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs);
+                if (mlir.oraOperationIsNull(add_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, add_op);
+                overflow_flag = if (is_signed)
+                    try @This().computeSignedAddOverflow(self, value, lhs, rhs, loc)
+                else
+                    appendValueOp(self.block, self.createCompareOp(loc, "ult", value, lhs));
+            } else if (std.mem.eql(u8, builtin.name, "subWithOverflow")) {
+                const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, lhs, rhs);
+                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, sub_op);
+                overflow_flag = if (is_signed)
+                    try @This().computeSignedSubOverflow(self, value, lhs, rhs, loc)
+                else
+                    appendValueOp(self.block, self.createCompareOp(loc, "ult", lhs, rhs));
+            } else if (std.mem.eql(u8, builtin.name, "mulWithOverflow")) {
+                const mul_op = mlir.oraArithMulIOpCreate(self.parent.context, loc, lhs, rhs);
+                if (mlir.oraOperationIsNull(mul_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, mul_op);
+                overflow_flag = if (is_signed)
+                    try @This().computeSignedMulOverflow(self, value, lhs, rhs, lhs_type, loc)
+                else
+                    try @This().computeUnsignedMulOverflow(self, value, lhs, rhs, lhs_type, loc);
+            } else if (std.mem.eql(u8, builtin.name, "powerWithOverflow")) {
+                const power = try self.lowerPowerWithOverflow(lhs, rhs, lhs_type, builtin.range);
+                value = power.value;
+                overflow_flag = power.overflow;
+            } else if (std.mem.eql(u8, builtin.name, "shlWithOverflow")) {
+                const shl_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, lhs, rhs);
+                if (mlir.oraOperationIsNull(shl_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, shl_op);
+                const shr_op = if (is_signed)
+                    mlir.oraArithShrSIOpCreate(self.parent.context, loc, value, rhs)
+                else
+                    mlir.oraArithShrUIOpCreate(self.parent.context, loc, value, rhs);
+                if (mlir.oraOperationIsNull(shr_op)) return error.MlirOperationCreationFailed;
+                const shifted_back = appendValueOp(self.block, shr_op);
+                overflow_flag = appendValueOp(self.block, self.createCompareOp(loc, "ne", shifted_back, lhs));
+            } else if (std.mem.eql(u8, builtin.name, "shrWithOverflow")) {
+                const shr_op = if (is_signed)
+                    mlir.oraArithShrSIOpCreate(self.parent.context, loc, lhs, rhs)
+                else
+                    mlir.oraArithShrUIOpCreate(self.parent.context, loc, lhs, rhs);
+                if (mlir.oraOperationIsNull(shr_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, shr_op);
+                overflow_flag = try @This().makeFalse(self, loc);
+            } else if (std.mem.eql(u8, builtin.name, "divWithOverflow") or std.mem.eql(u8, builtin.name, "modWithOverflow")) {
+                const arith_op = if (std.mem.eql(u8, builtin.name, "divWithOverflow"))
+                    (if (is_signed) mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs))
+                else
+                    (if (is_signed) mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs));
+                if (mlir.oraOperationIsNull(arith_op)) return self.defaultValue(result_type, builtin.range);
+                value = appendValueOp(self.block, arith_op);
+                overflow_flag = try @This().makeFalse(self, loc);
+            } else {
+                return self.defaultValue(result_type, builtin.range);
+            }
+
+            return @This().packOverflowResult(self, value, overflow_flag, result_type, builtin.range);
+        }
+
+        fn packOverflowResult(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            overflow_flag: mlir.MlirValue,
+            result_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const op = mlir.oraTupleCreateOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                &[_]mlir.MlirValue{ value, overflow_flag },
+                2,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, range);
+            return appendValueOp(self.block, op);
+        }
+
+        fn computeSignedAddOverflow(
+            self: *FunctionLowerer,
+            result: mlir.MlirValue,
+            a: mlir.MlirValue,
+            b: mlir.MlirValue,
+            loc: mlir.MlirLocation,
+        ) anyerror!mlir.MlirValue {
+            const xor_ra = mlir.oraArithXorIOpCreate(self.parent.context, loc, result, a);
+            if (mlir.oraOperationIsNull(xor_ra)) return error.MlirOperationCreationFailed;
+            const xor_rb = mlir.oraArithXorIOpCreate(self.parent.context, loc, result, b);
+            if (mlir.oraOperationIsNull(xor_rb)) return error.MlirOperationCreationFailed;
+            const left = appendValueOp(self.block, xor_ra);
+            const right = appendValueOp(self.block, xor_rb);
+            const and_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, left, right);
+            if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+            const and_value = appendValueOp(self.block, and_op);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, mlir.oraValueGetType(result), 0));
+            return appendValueOp(self.block, self.createCompareOp(loc, "slt", and_value, zero));
+        }
+
+        fn computeSignedSubOverflow(
+            self: *FunctionLowerer,
+            result: mlir.MlirValue,
+            a: mlir.MlirValue,
+            b: mlir.MlirValue,
+            loc: mlir.MlirLocation,
+        ) anyerror!mlir.MlirValue {
+            const xor_ab = mlir.oraArithXorIOpCreate(self.parent.context, loc, a, b);
+            if (mlir.oraOperationIsNull(xor_ab)) return error.MlirOperationCreationFailed;
+            const xor_ra = mlir.oraArithXorIOpCreate(self.parent.context, loc, result, a);
+            if (mlir.oraOperationIsNull(xor_ra)) return error.MlirOperationCreationFailed;
+            const left = appendValueOp(self.block, xor_ab);
+            const right = appendValueOp(self.block, xor_ra);
+            const and_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, left, right);
+            if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+            const and_value = appendValueOp(self.block, and_op);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, mlir.oraValueGetType(result), 0));
+            return appendValueOp(self.block, self.createCompareOp(loc, "slt", and_value, zero));
+        }
+
+        fn computeSignedMulOverflow(
+            self: *FunctionLowerer,
+            result: mlir.MlirValue,
+            a: mlir.MlirValue,
+            b: mlir.MlirValue,
+            val_ty: mlir.MlirType,
+            loc: mlir.MlirLocation,
+        ) anyerror!mlir.MlirValue {
+            const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, 1));
+            const shift = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, @intCast(mlir.oraIntegerTypeGetWidth(val_ty) - 1)));
+            const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
+            if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+            const min_int = appendValueOp(self.block, min_op);
+            const neg_one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, -1));
+            const a_min = appendValueOp(self.block, self.createCompareOp(loc, "eq", a, min_int));
+            const b_neg_one = appendValueOp(self.block, self.createCompareOp(loc, "eq", b, neg_one));
+            const special_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, a_min, b_neg_one);
+            if (mlir.oraOperationIsNull(special_op)) return error.MlirOperationCreationFailed;
+            const special = appendValueOp(self.block, special_op);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, 0));
+            const b_non_zero = appendValueOp(self.block, self.createCompareOp(loc, "ne", b, zero));
+            const quot_op = mlir.oraArithDivSIOpCreate(self.parent.context, loc, result, b);
+            if (mlir.oraOperationIsNull(quot_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(quot_op, strRef("ora.guard_internal"), mlir.oraStringAttrCreate(self.parent.context, strRef("true")));
+            const quotient = appendValueOp(self.block, quot_op);
+            const mismatch = appendValueOp(self.block, self.createCompareOp(loc, "ne", quotient, a));
+            const general_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, mismatch, b_non_zero);
+            if (mlir.oraOperationIsNull(general_op)) return error.MlirOperationCreationFailed;
+            const general = appendValueOp(self.block, general_op);
+            const overflow_op = mlir.oraArithOrIOpCreate(self.parent.context, loc, special, general);
+            if (mlir.oraOperationIsNull(overflow_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, overflow_op);
+        }
+
+        fn computeUnsignedMulOverflow(
+            self: *FunctionLowerer,
+            result: mlir.MlirValue,
+            a: mlir.MlirValue,
+            b: mlir.MlirValue,
+            value_ty: mlir.MlirType,
+            loc: mlir.MlirLocation,
+        ) anyerror!mlir.MlirValue {
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
+            const b_non_zero = appendValueOp(self.block, self.createCompareOp(loc, "ne", b, zero));
+            const quot_op = mlir.oraArithDivUIOpCreate(self.parent.context, loc, result, b);
+            if (mlir.oraOperationIsNull(quot_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(quot_op, strRef("ora.guard_internal"), mlir.oraStringAttrCreate(self.parent.context, strRef("true")));
+            const quotient = appendValueOp(self.block, quot_op);
+            const mismatch = appendValueOp(self.block, self.createCompareOp(loc, "ne", quotient, a));
+            const overflow_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, mismatch, b_non_zero);
+            if (mlir.oraOperationIsNull(overflow_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, overflow_op);
+        }
+
+        fn makeFalse(self: *FunctionLowerer, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
+            return appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
         }
 
         fn lowerStructLiteral(

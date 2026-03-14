@@ -617,13 +617,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return value;
         }
 
-        pub fn lowerCheckedPower(
+        pub fn lowerPowerWithOverflow(
             self: *FunctionLowerer,
             lhs: mlir.MlirValue,
             rhs: mlir.MlirValue,
             result_type: mlir.MlirType,
             range: source.TextRange,
-        ) anyerror!mlir.MlirValue {
+        ) anyerror!struct { value: mlir.MlirValue, overflow: mlir.MlirValue } {
             const loc = self.parent.location(range);
             const is_signed = mlir.oraTypeIsAInteger(result_type) and mlir.oraIntegerTypeIsSigned(result_type);
             const value_ty = result_type;
@@ -669,8 +669,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const power_op = mlir.oraPowerOpCreate(self.parent.context, loc, lhs, rhs, value_ty);
             if (mlir.oraOperationIsNull(power_op)) return error.MlirOperationCreationFailed;
             const power_value = appendValueOp(self.block, power_op);
-            try @This().emitOverflowAssert(self, overflow, "checked power overflow", range);
-            return power_value;
+            return .{ .value = power_value, .overflow = overflow };
+        }
+
+        pub fn lowerCheckedPower(
+            self: *FunctionLowerer,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            result_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const power = try @This().lowerPowerWithOverflow(self, lhs, rhs, result_type, range);
+            try @This().emitOverflowAssert(self, power.overflow, "checked power overflow", range);
+            return power.value;
         }
 
         fn createArithShiftRightUnsigned(self: *FunctionLowerer, lhs: mlir.MlirValue, rhs: mlir.MlirValue, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
