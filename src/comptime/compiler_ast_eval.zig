@@ -1,14 +1,14 @@
 const std = @import("std");
 const ast = @import("../compiler/ast/mod.zig");
-const const_values = @import("../compiler/sema/const_values.zig");
+const bridge = @import("compiler_const_bridge.zig");
 const model = @import("../compiler/sema/model.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
-const constEquals = const_values.constEquals;
-const evalBinary = const_values.evalBinary;
-const evalUnary = const_values.evalUnary;
-const parseIntegerLiteral = const_values.parseIntegerLiteral;
+const constEquals = bridge.constEquals;
+const evalBinary = bridge.evalBinary;
+const evalUnary = bridge.evalUnary;
+const parseIntegerLiteral = bridge.parseIntegerLiteral;
 
 /// Compiler-AST constant evaluator.
 ///
