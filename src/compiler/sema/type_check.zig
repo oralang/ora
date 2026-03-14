@@ -16,6 +16,8 @@ const Type = model.Type;
 const LocatedType = model.LocatedType;
 const Region = model.Region;
 const Effect = model.Effect;
+const EffectSlot = model.EffectSlot;
+const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const BigInt = std.math.big.int.Managed;
@@ -62,12 +64,14 @@ pub fn typeCheck(
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     var body_types = try arena.alloc(Type, file.bodies.len);
+    const effect_states = try arena.alloc(EffectSummaryState, file.items.len);
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(body_types, .{ .void = {} });
+    @memset(effect_states, .unvisited);
 
     for (file.items, 0..) |item, index| {
         item_types[index] = try inferItemType(arena, file, item_index, item);
@@ -115,6 +119,7 @@ pub fn typeCheck(
         .item_effects = item_effects,
         .pattern_types = pattern_types,
         .expr_types = expr_types,
+        .effect_states = effect_states,
         .diagnostics = &result.diagnostics,
     };
 
@@ -145,6 +150,7 @@ const TypeChecker = struct {
     item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
+    effect_states: []EffectSummaryState,
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
     diagnostics: *diagnostics.DiagnosticList,
@@ -164,7 +170,9 @@ const TypeChecker = struct {
                 defer self.current_return_type = previous_return_type;
                 for (function.clauses) |clause| try self.visitExpr(clause.expr);
                 try self.visitBody(function.body);
-                self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(function);
+                try self.ensureFunctionEffectSummary(item_id, function);
+                var locked_slots: std.ArrayList(EffectSlot) = .{};
+                try self.validateBodyLocks(function.body, &locked_slots);
             },
             .Field => |field| if (field.value) |expr_id| {
                 try self.visitExpr(expr_id);
@@ -642,27 +650,247 @@ const TypeChecker = struct {
     }
 
     fn summarizeFunctionEffects(self: *TypeChecker, function: ast.FunctionItem) !Effect {
-        var reads: std.ArrayList([]const u8) = .{};
-        var writes: std.ArrayList([]const u8) = .{};
+        var reads: std.ArrayList(EffectSlot) = .{};
+        var writes: std.ArrayList(EffectSlot) = .{};
         try self.collectBodyEffects(function.body, &reads, &writes);
         return buildEffect(reads.items, writes.items);
     }
 
-    fn buildEffect(reads: []const []const u8, writes: []const []const u8) Effect {
+    fn ensureFunctionEffectSummary(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) !void {
+        switch (self.effect_states[item_id.index()]) {
+            .done => return,
+            .visiting => return,
+            .unvisited => {},
+        }
+
+        self.effect_states[item_id.index()] = .visiting;
+        errdefer self.effect_states[item_id.index()] = .unvisited;
+
+        self.item_effects[item_id.index()] = try self.summarizeFunctionEffects(function);
+        self.effect_states[item_id.index()] = .done;
+    }
+
+    fn validateBodyLocks(self: *TypeChecker, body_id: ast.BodyId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| {
+            try self.validateStmtLocks(statement_id, locked_slots);
+        }
+    }
+
+    fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl, .Return, .Assert, .Assume, .Expr, .Havoc, .Break, .Continue, .Error => {
+                if (self.statementExpr(statement_id)) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+            },
+            .If => |if_stmt| {
+                try self.validateExprLocks(if_stmt.condition, locked_slots);
+                var then_locked = try self.cloneEffectSlots(locked_slots.items);
+                var else_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer then_locked.deinit(self.arena);
+                defer else_locked.deinit(self.arena);
+                try self.validateBodyLocks(if_stmt.then_body, &then_locked);
+                if (if_stmt.else_body) |else_body| try self.validateBodyLocks(else_body, &else_locked);
+            },
+            .While => |while_stmt| {
+                try self.validateExprLocks(while_stmt.condition, locked_slots);
+                for (while_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                var loop_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer loop_locked.deinit(self.arena);
+                try self.validateBodyLocks(while_stmt.body, &loop_locked);
+            },
+            .For => |for_stmt| {
+                try self.validateExprLocks(for_stmt.iterable, locked_slots);
+                for (for_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                var loop_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer loop_locked.deinit(self.arena);
+                try self.validateBodyLocks(for_stmt.body, &loop_locked);
+            },
+            .Switch => |switch_stmt| {
+                try self.validateExprLocks(switch_stmt.condition, locked_slots);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.validateExprLocks(expr_id, locked_slots),
+                        .Range => |range_pattern| {
+                            try self.validateExprLocks(range_pattern.start, locked_slots);
+                            try self.validateExprLocks(range_pattern.end, locked_slots);
+                        },
+                        .Else => {},
+                    }
+                    var case_locked = try self.cloneEffectSlots(locked_slots.items);
+                    defer case_locked.deinit(self.arena);
+                    try self.validateBodyLocks(arm.body, &case_locked);
+                }
+                if (switch_stmt.else_body) |else_body| {
+                    var else_locked = try self.cloneEffectSlots(locked_slots.items);
+                    defer else_locked.deinit(self.arena);
+                    try self.validateBodyLocks(else_body, &else_locked);
+                }
+            },
+            .Try => |try_stmt| {
+                var try_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer try_locked.deinit(self.arena);
+                try self.validateBodyLocks(try_stmt.try_body, &try_locked);
+                if (try_stmt.catch_clause) |catch_clause| {
+                    var catch_locked = try self.cloneEffectSlots(locked_slots.items);
+                    defer catch_locked.deinit(self.arena);
+                    try self.validateBodyLocks(catch_clause.body, &catch_locked);
+                }
+            },
+            .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateExprLocks(arg, locked_slots),
+            .Block => |block| {
+                var nested_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer nested_locked.deinit(self.arena);
+                try self.validateBodyLocks(block.body, &nested_locked);
+            },
+            .LabeledBlock => |block| {
+                var nested_locked = try self.cloneEffectSlots(locked_slots.items);
+                defer nested_locked.deinit(self.arena);
+                try self.validateBodyLocks(block.body, &nested_locked);
+            },
+            .Lock => |lock_stmt| {
+                try self.validateExprLocks(lock_stmt.path, locked_slots);
+                if (self.lockSlotForExpr(lock_stmt.path)) |slot| try self.appendUniqueSlot(locked_slots, slot);
+            },
+            .Unlock => |unlock_stmt| {
+                try self.validateExprLocks(unlock_stmt.path, locked_slots);
+                if (self.lockSlotForExpr(unlock_stmt.path)) |slot| self.removeLockedSlot(locked_slots, slot);
+            },
+            .Assign => |assign| {
+                try self.validateExprLocks(assign.value, locked_slots);
+                var reads: std.ArrayList(EffectSlot) = .{};
+                var writes: std.ArrayList(EffectSlot) = .{};
+                try self.collectPatternTargetEffects(assign.target, assign.op, &reads, &writes);
+                try self.emitLockedWriteDiagnostics(assign.range, writes.items, locked_slots.items);
+            },
+        }
+    }
+
+    fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+        switch (self.file.expression(expr_id).*) {
+            .Call => |call| {
+                try self.validateExprLocks(call.callee, locked_slots);
+                for (call.args) |arg| try self.validateExprLocks(arg, locked_slots);
+                if (self.calleeFunctionItem(call.callee)) |callee_id| {
+                    switch (self.file.item(callee_id).*) {
+                        .Function => |function| {
+                            try self.ensureFunctionEffectSummary(callee_id, function);
+                            try self.emitLockedWriteDiagnostics(call.range, self.effectWrites(self.item_effects[callee_id.index()]), locked_slots.items);
+                        },
+                        else => {},
+                    }
+                }
+            },
+            .Unary => |unary| try self.validateExprLocks(unary.operand, locked_slots),
+            .Binary => |binary| {
+                try self.validateExprLocks(binary.lhs, locked_slots);
+                try self.validateExprLocks(binary.rhs, locked_slots);
+            },
+            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprLocks(element, locked_slots),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprLocks(element, locked_slots),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprLocks(field.value, locked_slots),
+            .Switch => |switch_expr| {
+                try self.validateExprLocks(switch_expr.condition, locked_slots);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.validateExprLocks(pattern_expr, locked_slots),
+                        .Range => |range_pattern| {
+                            try self.validateExprLocks(range_pattern.start, locked_slots);
+                            try self.validateExprLocks(range_pattern.end, locked_slots);
+                        },
+                        .Else => {},
+                    }
+                    try self.validateExprLocks(arm.value, locked_slots);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.validateExprLocks(else_expr, locked_slots);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprLocks(arg, locked_slots),
+            .Field => |field| try self.validateExprLocks(field.base, locked_slots),
+            .Index => |index| {
+                try self.validateExprLocks(index.base, locked_slots);
+                try self.validateExprLocks(index.index, locked_slots);
+            },
+            .Group => |group| try self.validateExprLocks(group.expr, locked_slots),
+            .Comptime, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+        }
+    }
+
+    fn statementExpr(self: *TypeChecker, statement_id: ast.StmtId) ?ast.ExprId {
+        return switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| decl.value,
+            .Return => |ret| ret.value,
+            .Assert => |assert_stmt| assert_stmt.condition,
+            .Assume => |assume_stmt| assume_stmt.condition,
+            .Expr => |expr_stmt| expr_stmt.expr,
+            else => null,
+        };
+    }
+
+    fn lockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| self.lookupNamedFieldSlot(name.name),
+            .Group => |group| self.lockSlotForExpr(group.expr),
+            .Field => |field| self.lockSlotForExpr(field.base),
+            .Index => |index| self.lockSlotForExpr(index.base),
+            else => null,
+        };
+    }
+
+    fn emitLockedWriteDiagnostics(self: *TypeChecker, range: source.TextRange, writes: []const EffectSlot, locked_slots: []const EffectSlot) !void {
+        for (writes) |write_slot| {
+            for (locked_slots) |locked_slot| {
+                if (write_slot.region != locked_slot.region) continue;
+                if (!std.mem.eql(u8, write_slot.name, locked_slot.name)) continue;
+                try self.emitRangeError(range, "cannot write locked {s} slot '{s}'", .{
+                    region_rules.regionDisplayName(write_slot.region),
+                    write_slot.name,
+                });
+                break;
+            }
+        }
+    }
+
+    fn effectWrites(self: *TypeChecker, effect: Effect) []const EffectSlot {
+        _ = self;
+        return switch (effect) {
+            .pure, .reads => &.{},
+            .writes => |write_effect| write_effect.slots,
+            .reads_writes => |read_write| read_write.writes,
+        };
+    }
+
+    fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !std.ArrayList(EffectSlot) {
+        var clone: std.ArrayList(EffectSlot) = .{};
+        for (items) |item| try clone.append(self.arena, item);
+        return clone;
+    }
+
+    fn removeLockedSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) void {
+        _ = self;
+        var index: usize = 0;
+        while (index < slots.items.len) : (index += 1) {
+            const existing = slots.items[index];
+            if (existing.region != slot.region) continue;
+            if (!std.mem.eql(u8, existing.name, slot.name)) continue;
+            _ = slots.swapRemove(index);
+            return;
+        }
+    }
+
+    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot) Effect {
         if (reads.len == 0 and writes.len == 0) return .pure;
         if (reads.len == 0) return .{ .writes = .{ .slots = writes } };
         if (writes.len == 0) return .{ .reads = .{ .slots = reads } };
         return .{ .reads_writes = .{ .reads = reads, .writes = writes } };
     }
 
-    fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+    fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot)) anyerror!void {
         const body = self.file.body(body_id).*;
         for (body.statements) |statement_id| {
             try self.collectStmtEffects(statement_id, reads, writes);
         }
     }
 
-    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| if (decl.value) |expr_id| {
                 try self.collectExprEffects(expr_id, reads, writes);
@@ -721,7 +949,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+    fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.expression(expr_id).*) {
             .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
             .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, reads, writes),
@@ -757,6 +985,15 @@ const TypeChecker = struct {
             .Call => |call| {
                 try self.collectExprEffects(call.callee, reads, writes);
                 for (call.args) |arg| try self.collectExprEffects(arg, reads, writes);
+                if (self.calleeFunctionItem(call.callee)) |callee_id| {
+                    switch (self.file.item(callee_id).*) {
+                        .Function => |function| {
+                            try self.ensureFunctionEffectSummary(callee_id, function);
+                            try self.mergeEffect(reads, writes, self.item_effects[callee_id.index()]);
+                        },
+                        else => {},
+                    }
+                }
             },
             .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, reads, writes),
             .Field => |field| try self.collectExprEffects(field.base, reads, writes),
@@ -769,7 +1006,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+    fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternRootFieldSlot(pattern_id)) |slot_name| {
@@ -793,7 +1030,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, reads: *std.ArrayList([]const u8), writes: *std.ArrayList([]const u8)) anyerror!void {
+    fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternRootFieldSlot(pattern_id)) |slot| {
@@ -810,7 +1047,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn patternRootFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?[]const u8 {
+    fn patternRootFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
             .Field => |field| self.patternRootFieldSlot(field.base),
@@ -820,11 +1057,14 @@ const TypeChecker = struct {
         };
     }
 
-    fn fieldSlotForBinding(self: *TypeChecker, binding: ?ResolvedBinding) ?[]const u8 {
+    fn fieldSlotForBinding(self: *TypeChecker, binding: ?ResolvedBinding) ?EffectSlot {
         if (binding) |resolved| {
             return switch (resolved) {
                 .item => |item_id| switch (self.file.item(item_id).*) {
-                    .Field => |field| if (field.storage_class != .none) field.name else null,
+                    .Field => |field| if (field.storage_class != .none) .{
+                        .name = field.name,
+                        .region = declarationRegion(field.storage_class),
+                    } else null,
                     else => null,
                 },
                 .pattern => null,
@@ -833,14 +1073,17 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn lookupNamedFieldSlot(self: *TypeChecker, name: []const u8) ?[]const u8 {
+    fn lookupNamedFieldSlot(self: *TypeChecker, name: []const u8) ?EffectSlot {
         if (self.current_contract) |contract_id| {
             const contract = self.file.item(contract_id).Contract;
             for (contract.members) |member_id| {
                 switch (self.file.item(member_id).*) {
                     .Field => |field| {
                         if (field.storage_class == .none) continue;
-                        if (std.mem.eql(u8, field.name, name)) return field.name;
+                        if (std.mem.eql(u8, field.name, name)) return .{
+                            .name = field.name,
+                            .region = declarationRegion(field.storage_class),
+                        };
                     },
                     else => {},
                 }
@@ -849,11 +1092,37 @@ const TypeChecker = struct {
         return self.fieldSlotForBinding(if (self.item_index.lookup(name)) |item_id| .{ .item = item_id } else null);
     }
 
-    fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList([]const u8), slot: []const u8) !void {
+    fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) !void {
         for (slots.items) |existing| {
-            if (std.mem.eql(u8, existing, slot)) return;
+            if (existing.region == slot.region and std.mem.eql(u8, existing.name, slot.name)) return;
         }
         try slots.append(self.arena, slot);
+    }
+
+    fn mergeEffect(self: *TypeChecker, reads: *std.ArrayList(EffectSlot), writes: *std.ArrayList(EffectSlot), effect: Effect) !void {
+        switch (effect) {
+            .pure => {},
+            .reads => |read_effect| for (read_effect.slots) |slot| try self.appendUniqueSlot(reads, slot),
+            .writes => |write_effect| for (write_effect.slots) |slot| try self.appendUniqueSlot(writes, slot),
+            .reads_writes => |read_write| {
+                for (read_write.reads) |slot| try self.appendUniqueSlot(reads, slot);
+                for (read_write.writes) |slot| try self.appendUniqueSlot(writes, slot);
+            },
+        }
+    }
+
+    fn calleeFunctionItem(self: *TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+                .item => |item_id| switch (self.file.item(item_id).*) {
+                    .Function => item_id,
+                    else => null,
+                },
+                .pattern => null,
+            } else null,
+            .Group => |group| self.calleeFunctionItem(group.expr),
+            else => null,
+        };
     }
 
     fn storeType(self: *TypeChecker, ty: Type) !*const Type {

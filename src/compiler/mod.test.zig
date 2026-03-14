@@ -82,9 +82,9 @@ fn countDiagnosticMessages(diags: *const compiler.diagnostics.DiagnosticList, ne
     return count;
 }
 
-fn containsString(items: []const []const u8, needle: []const u8) bool {
+fn containsEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region) bool {
     for (items) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
+        if (item.region == region and std.mem.eql(u8, item.name, needle)) return true;
     }
     return false;
 }
@@ -1645,23 +1645,155 @@ test "compiler tracks per-function read and write effects" {
     const mixed = item_index.lookup("mixed").?;
 
     switch (typecheck.itemEffect(read_only)) {
-        .reads => |effect| try testing.expect(containsString(effect.slots, "total")),
+        .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "total", .storage)),
         else => return error.TestUnexpectedResult,
     }
 
     switch (typecheck.itemEffect(write_only)) {
-        .writes => |effect| try testing.expect(containsString(effect.slots, "total")),
+        .writes => |effect| try testing.expect(containsEffectSlot(effect.slots, "total", .storage)),
         else => return error.TestUnexpectedResult,
     }
 
     switch (typecheck.itemEffect(mixed)) {
         .reads_writes => |effect| {
-            try testing.expect(containsString(effect.reads, "pending"));
-            try testing.expect(containsString(effect.reads, "total"));
-            try testing.expect(containsString(effect.writes, "pending"));
+            try testing.expect(containsEffectSlot(effect.reads, "pending", .transient));
+            try testing.expect(containsEffectSlot(effect.reads, "total", .storage));
+            try testing.expect(containsEffectSlot(effect.writes, "pending", .transient));
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "compiler composes callee effects into caller summaries" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\    tstore var pending: u256;
+        \\
+        \\    fn read_total() -> u256 {
+        \\        return total;
+        \\    }
+        \\
+        \\    fn write_pending(value: u256) {
+        \\        pending = value;
+        \\    }
+        \\
+        \\    pub fn wrapper(value: u256) -> u256 {
+        \\        write_pending(value);
+        \\        return (read_total());
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const wrapper = item_index.lookup("wrapper").?;
+
+    switch (typecheck.itemEffect(wrapper)) {
+        .reads_writes => |effect| {
+            try testing.expect(containsEffectSlot(effect.reads, "total", .storage));
+            try testing.expect(containsEffectSlot(effect.writes, "pending", .transient));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler rejects direct writes to locked slots" {
+    const source_text =
+        \\contract Locked {
+        \\    storage total: u256;
+        \\
+        \\    pub fn write_while_locked(value: u256) {
+        \\        @lock(total);
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
+test "compiler rejects callee writes to locked slots" {
+    const source_text =
+        \\contract Locked {
+        \\    storage total: u256;
+        \\
+        \\    fn write_total(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn write_while_locked(value: u256) {
+        \\        @lock(total);
+        \\        write_total(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
+test "compiler allows writes after unlock" {
+    const source_text =
+        \\contract Locked {
+        \\    storage total: u256;
+        \\
+        \\    pub fn write_after_unlock(value: u256) {
+        \\        @lock(total);
+        \\        @unlock(total);
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
+test "compiler rejects writes to locked transient slots" {
+    const source_text =
+        \\contract Locked {
+        \\    tstore var pending: u256;
+        \\
+        \\    pub fn write_while_locked(value: u256) {
+        \\        @lock(pending);
+        \\        pending = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked transient slot 'pending'"));
 }
 
 test "compiler lowers bitfield field reads and writes through bit ops" {

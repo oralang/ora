@@ -295,13 +295,18 @@ pub const VerificationFact = struct {
     range: source.TextRange,
 };
 
+pub const EffectSlot = struct {
+    name: []const u8,
+    region: Region,
+};
+
 pub const Effect = union(enum) {
     pure,
-    writes: struct { slots: []const []const u8 },
-    reads: struct { slots: []const []const u8 },
+    writes: struct { slots: []const EffectSlot },
+    reads: struct { slots: []const EffectSlot },
     reads_writes: struct {
-        reads: []const []const u8,
-        writes: []const []const u8,
+        reads: []const EffectSlot,
+        writes: []const EffectSlot,
     },
 };
 
@@ -459,13 +464,18 @@ test "refinement type preserves base type" {
 }
 
 test "Effect stub supports read and write slot sets" {
-    const slots = [_][]const u8{ "balances", "pending" };
+    const slots = [_]EffectSlot{
+        .{ .name = "balances", .region = .storage },
+        .{ .name = "pending", .region = .transient },
+    };
     const read_effect: Effect = .{ .reads = .{ .slots = &slots } };
     const write_effect: Effect = .{ .writes = .{ .slots = &slots } };
     const both_effect: Effect = .{ .reads_writes = .{ .reads = &slots, .writes = &slots } };
 
-    try std.testing.expectEqualStrings("balances", read_effect.reads.slots[0]);
-    try std.testing.expectEqualStrings("pending", write_effect.writes.slots[1]);
-    try std.testing.expectEqualStrings("balances", both_effect.reads_writes.reads[0]);
-    try std.testing.expectEqualStrings("pending", both_effect.reads_writes.writes[1]);
+    try std.testing.expectEqualStrings("balances", read_effect.reads.slots[0].name);
+    try std.testing.expectEqual(.storage, read_effect.reads.slots[0].region);
+    try std.testing.expectEqualStrings("pending", write_effect.writes.slots[1].name);
+    try std.testing.expectEqual(.transient, write_effect.writes.slots[1].region);
+    try std.testing.expectEqualStrings("balances", both_effect.reads_writes.reads[0].name);
+    try std.testing.expectEqualStrings("pending", both_effect.reads_writes.writes[1].name);
 }

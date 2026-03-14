@@ -18,6 +18,7 @@ pub const Type = model.Type;
 pub const LocatedType = model.LocatedType;
 pub const RefinementType = model.RefinementType;
 pub const ConstValue = model.ConstValue;
+pub const EffectSlot = model.EffectSlot;
 pub const Effect = model.Effect;
 pub const VerificationFact = model.VerificationFact;
 pub const TypeCheckKey = model.TypeCheckKey;
