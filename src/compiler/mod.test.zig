@@ -3545,6 +3545,40 @@ test "compiler const eval executes comptime if and assignment statements" {
     try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval executes comptime switch statements" {
+    const source_text =
+        \\pub fn choose() -> u256 {
+        \\    return comptime {
+        \\        let value = 0;
+        \\        switch (2) {
+        \\            0 => {
+        \\                value = 10;
+        \\            }
+        \\            1..2 => {
+        \\                value = 20;
+        \\            }
+        \\            else => {
+        \\                value = 30;
+        \\            }
+        \\        }
+        \\        value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 30), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {

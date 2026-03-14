@@ -350,6 +350,9 @@ const ConstEvaluator = struct {
                 .If => |if_stmt| {
                     last_value = try self.evalComptimeIf(if_stmt);
                 },
+                .Switch => |switch_stmt| {
+                    last_value = try self.evalComptimeSwitchStmt(switch_stmt);
+                },
                 .Assign => |assign| {
                     last_value = try self.evalComptimeAssign(assign);
                 },
@@ -367,6 +370,17 @@ const ConstEvaluator = struct {
         const take_then = self.constConditionTruthy(condition) orelse return null;
         if (take_then) return try self.evalComptimeBody(if_stmt.then_body);
         if (if_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
+        return null;
+    }
+
+    fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!?ConstValue {
+        const condition = (try self.evalExpr(switch_stmt.condition)) orelse return null;
+        for (switch_stmt.arms) |arm| {
+            if (self.patternMatches(condition, arm.pattern)) {
+                return try self.evalComptimeBody(arm.body);
+            }
+        }
+        if (switch_stmt.else_body) |else_body| return try self.evalComptimeBody(else_body);
         return null;
     }
 
