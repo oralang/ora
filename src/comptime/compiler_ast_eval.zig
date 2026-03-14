@@ -671,7 +671,6 @@ const ConstEvaluator = struct {
                 return value;
             },
             .Index => |index| {
-                if (assign.op != .assign) return null;
                 const base_name = switch (self.file.pattern(index.base).*) {
                     .Name => |name| name.name,
                     else => return null,
@@ -688,11 +687,42 @@ const ConstEvaluator = struct {
                 } orelse return null;
 
                 const updated = switch (base_value) {
-                    .array_ref => |heap_id| CtValue{ .array_ref = try self.env.heap.setArrayElem(heap_id, idx, rhs_ct) },
+                    .array_ref => |heap_id| blk: {
+                        const elems = self.env.heap.getArray(heap_id).elems;
+                        if (idx >= elems.len) break :blk null;
+                        const next_value = switch (assign.op) {
+                            .assign => rhs_ct,
+                            else => blk_op: {
+                                const current = (try ctValueToConstValue(self.allocator, elems[idx])) orelse break :blk_op null;
+                                const computed = switch (assign.op) {
+                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
+                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
+                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
+                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
+                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
+                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
+                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
+                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
+                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
+                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
+                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
+                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
+                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
+                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
+                                    .assign => unreachable,
+                                } orelse break :blk_op null;
+                                break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
+                            },
+                        } orelse return null;
+                        break :blk CtValue{ .array_ref = try self.env.heap.setArrayElem(heap_id, idx, next_value) };
+                    },
                     else => return null,
-                };
+                } orelse return null;
                 self.env.update(base_slot, updated);
-                return rhs;
+                return try ctValueToConstValue(self.allocator, switch (updated) {
+                    .array_ref => |heap_id| self.env.heap.getArray(heap_id).elems[idx],
+                    else => unreachable,
+                });
             },
             else => return null,
         }
