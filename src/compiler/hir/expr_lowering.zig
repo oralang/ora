@@ -502,7 +502,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lowerBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
             if (std.mem.eql(u8, builtin.name, "cast") and builtin.args.len > 0) {
-                return self.lowerExpr(builtin.args[0], locals);
+                return try @This().lowerCastBuiltin(self, expr_id, builtin, locals, true);
             }
             if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
                 std.mem.eql(u8, builtin.name, "divFloor") or
@@ -515,9 +515,179 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
             if (builtin.args.len > 0 and std.mem.eql(u8, builtin.name, "truncate")) {
-                return self.lowerExpr(builtin.args[0], locals);
+                return try @This().lowerCastBuiltin(self, expr_id, builtin, locals, false);
             }
             return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
+        }
+
+        fn lowerCastBuiltin(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            builtin: ast.BuiltinExpr,
+            locals: *LocalEnv,
+            checked: bool,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerExprType(expr_id);
+            const target_ref_base = mlir.oraRefinementTypeGetBaseType(target_type);
+            const concrete_target = if (!mlir.oraTypeIsNull(target_ref_base)) target_ref_base else target_type;
+
+            var value = try self.lowerExpr(builtin.args[0], locals);
+            value = try @This().unwrapRefinementForCast(self, value, builtin.range);
+            value = try @This().convertBuiltinCastValue(self, value, concrete_target, builtin.range, checked);
+
+            if (!mlir.oraTypeIsNull(target_ref_base) and !mlir.oraTypeEqual(mlir.oraValueGetType(value), target_type)) {
+                const wrap_op = mlir.oraBaseToRefinementOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    value,
+                    target_type,
+                    self.block,
+                );
+                if (mlir.oraOperationIsNull(wrap_op)) return value;
+                return mlir.oraOperationGetResult(wrap_op, 0);
+            }
+            return value;
+        }
+
+        fn unwrapRefinementForCast(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            const base_type = mlir.oraRefinementTypeGetBaseType(value_type);
+            if (mlir.oraTypeIsNull(base_type)) return value;
+            const op = mlir.oraRefinementToBaseOpCreate(self.parent.context, self.parent.location(range), value, self.block);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return mlir.oraOperationGetResult(op, 0);
+        }
+
+        fn convertBuiltinCastValue(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+            checked: bool,
+        ) anyerror!mlir.MlirValue {
+            const value_type = mlir.oraValueGetType(value);
+            if (mlir.oraTypeEqual(value_type, target_type)) return value;
+
+            const loc = self.parent.location(range);
+            const value_is_int = mlir.oraTypeIsAInteger(value_type);
+            const target_is_int = mlir.oraTypeIsAInteger(target_type);
+
+            if (mlir.oraTypeIsAddressType(value_type) and target_is_int and mlir.oraIntegerTypeGetWidth(target_type) == 160) {
+                const op = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
+                if (mlir.oraOperationIsNull(op)) return value;
+                return appendValueOp(self.block, op);
+            }
+
+            if (value_is_int and mlir.oraTypeIsAddressType(target_type) and mlir.oraIntegerTypeGetWidth(value_type) == 160) {
+                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, value);
+                if (mlir.oraOperationIsNull(op)) return value;
+                return appendValueOp(self.block, op);
+            }
+
+            if (!(value_is_int and target_is_int)) return value;
+
+            const value_width = mlir.oraIntegerTypeGetWidth(value_type);
+            const target_width = mlir.oraIntegerTypeGetWidth(target_type);
+            if (value_width == target_width) {
+                const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return value;
+                return appendValueOp(self.block, op);
+            }
+
+            if (value_width < target_width) {
+                const op = if (mlir.oraIntegerTypeIsSigned(value_type))
+                    mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
+                else
+                    mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return value;
+                return appendValueOp(self.block, op);
+            }
+
+            if (checked) {
+                try @This().emitCastOverflowCheck(self, value, target_type, range);
+            }
+
+            const trunc = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
+            if (mlir.oraOperationIsNull(trunc)) return value;
+            return appendValueOp(self.block, trunc);
+        }
+
+        fn emitCastOverflowCheck(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_type = mlir.oraValueGetType(value);
+            const value_width = mlir.oraIntegerTypeGetWidth(value_type);
+            const target_width = mlir.oraIntegerTypeGetWidth(target_type);
+            if (target_width >= value_width) return;
+
+            const loc = self.parent.location(range);
+            if (!mlir.oraIntegerTypeIsSigned(target_type)) {
+                const trunc_op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(trunc_op)) return error.MlirOperationCreationFailed;
+                const truncated = appendValueOp(self.block, trunc_op);
+                const ext_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, truncated, value_type);
+                if (mlir.oraOperationIsNull(ext_op)) return error.MlirOperationCreationFailed;
+                const widened = appendValueOp(self.block, ext_op);
+                const mismatch = appendValueOp(self.block, self.createCompareOp(loc, "ne", value, widened));
+                try @This().emitCastOverflowAssert(self, mismatch, "safe cast narrowing overflow", range);
+                return;
+            }
+
+            const max_u256 = (@as(u256, 1) << @intCast(target_width - 1)) - 1;
+            const min_u256_abs = @as(u256, 1) << @intCast(target_width - 1);
+            const max_constant = try @This().createWideIntegerConstant(self, value_type, max_u256, false, range);
+            const min_constant = try @This().createWideIntegerConstant(self, value_type, min_u256_abs, true, range);
+            const above_max = appendValueOp(self.block, self.createCompareOp(loc, "sgt", value, max_constant));
+            const below_min = appendValueOp(self.block, self.createCompareOp(loc, "slt", value, min_constant));
+            const overflow_op = mlir.oraArithOrIOpCreate(self.parent.context, loc, above_max, below_min);
+            if (mlir.oraOperationIsNull(overflow_op)) return error.MlirOperationCreationFailed;
+            const overflow = appendValueOp(self.block, overflow_op);
+            try @This().emitCastOverflowAssert(self, overflow, "safe cast narrowing overflow", range);
+        }
+
+        fn createWideIntegerConstant(
+            self: *FunctionLowerer,
+            ty: mlir.MlirType,
+            value: u256,
+            negative: bool,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const attr = if (!negative and value <= std.math.maxInt(i64))
+                mlir.oraIntegerAttrCreateI64FromType(ty, @intCast(value))
+            else blk: {
+                var buf: [80]u8 = undefined;
+                const text = if (negative)
+                    std.fmt.bufPrint(&buf, "-{}", .{value}) catch return error.MlirOperationCreationFailed
+                else
+                    std.fmt.bufPrint(&buf, "{}", .{value}) catch return error.MlirOperationCreationFailed;
+                break :blk mlir.oraIntegerAttrGetFromString(ty, strRef(text));
+            };
+            const op = mlir.oraArithConstantOpCreate(self.parent.context, self.parent.location(range), ty, attr);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn emitCastOverflowAssert(
+            self: *FunctionLowerer,
+            overflow_flag: mlir.MlirValue,
+            message: []const u8,
+            range: source.TextRange,
+        ) anyerror!void {
+            const loc = self.parent.location(range);
+            const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+            const not_op = mlir.oraArithXorIOpCreate(self.parent.context, loc, overflow_flag, true_value);
+            if (mlir.oraOperationIsNull(not_op)) return error.MlirOperationCreationFailed;
+            const no_overflow = appendValueOp(self.block, not_op);
+            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, no_overflow, strRef(message));
+            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, assert_op);
         }
 
         fn lowerStructLiteral(

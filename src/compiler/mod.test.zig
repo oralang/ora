@@ -3606,6 +3606,25 @@ test "compiler reports constant cast overflow against target integer widths" {
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bad_pattern.index()].kind());
 }
 
+test "compiler lowers builtin cast through real conversion ops" {
+    const source_text =
+        \\pub fn casts(value: u256, raw: u160) -> address {
+        \\    let narrowed = @cast(u8, value);
+        \\    let widened = @cast(u256, narrowed);
+        \\    let addr = @cast(address, raw);
+        \\    return addr;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.trunci"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.extui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.i160.to.addr"));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {
