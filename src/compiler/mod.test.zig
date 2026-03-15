@@ -732,6 +732,63 @@ test "compiler rejects bounded generic calls for types without impl" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'Plain' does not implement trait 'Marker'"));
 }
 
+test "compiler resolves trait-bound methods in generic bodies" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return self.value > 0;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn choose(comptime T: type, a: T) -> bool where T: Marker {
+        \\        return a.marked();
+        \\    }
+        \\
+        \\    pub fn run(a: Box) -> bool {
+        \\        return choose(Box, a);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("Test").?;
+    const contract = ast_file.item(contract_id).Contract;
+    var choose_id: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+        if (std.mem.eql(u8, item.Function.name, "choose")) {
+            choose_id = member_id;
+            break;
+        }
+    }
+    try testing.expect(choose_id != null);
+    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.itemLocatedType(choose_id.?).type.function.return_types[0].kind());
+
+    const choose_fn = ast_file.item(choose_id.?).Function;
+    const body = ast_file.body(choose_fn.body).*;
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const call_expr = ret_stmt.value.?;
+    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(call_expr).kind());
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {

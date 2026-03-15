@@ -3013,6 +3013,7 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
+        if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
             if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
                 for (instantiated.fields) |field| {
@@ -3080,6 +3081,48 @@ const TypeChecker = struct {
             },
             else => .{ .unknown = {} },
         };
+    }
+
+    fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+        const type_name = base_type.name() orelse return null;
+        const function_item_id = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+
+        var matched: ?TraitMethodSignature = null;
+        for (function.trait_bounds) |bound| {
+            if (!std.mem.eql(u8, bound.parameter_name, type_name)) continue;
+            const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
+            const method = self.findTraitMethodSignature(trait_interface, field_name) orelse continue;
+            if (matched != null) return null;
+            matched = method;
+        }
+
+        const method_signature = matched orelse return null;
+        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        returns[0] = method_signature.return_type;
+        return .{ .function = .{
+            .name = method_signature.name,
+            .param_types = method_signature.param_types,
+            .return_types = returns,
+        } };
+    }
+
+    fn traitInterfaceByName(self: *const TypeChecker, name: []const u8) ?TraitInterface {
+        for (self.trait_interfaces.items) |trait_interface| {
+            if (std.mem.eql(u8, trait_interface.name, name)) return trait_interface;
+        }
+        return null;
+    }
+
+    fn findTraitMethodSignature(self: *const TypeChecker, trait_interface: TraitInterface, name: []const u8) ?TraitMethodSignature {
+        _ = self;
+        for (trait_interface.methods) |method| {
+            if (std.mem.eql(u8, method.name, name)) return method;
+        }
+        return null;
     }
 
     fn indexAccessType(self: *const TypeChecker, base_type: Type, index_expr_id: ast.ExprId) Type {
