@@ -20,7 +20,7 @@ pub fn locatedTypeEql(lhs: LocatedType, rhs: LocatedType) bool {
 }
 
 pub fn isAssignable(from: LocatedType, to: LocatedType) bool {
-    return type_descriptors.typeEql(from.type, to.type) and regionAssignable(from.region, to.region);
+    return type_descriptors.typesAssignable(to.type, from.type) and regionAssignable(from.region, to.region);
 }
 
 pub fn regionAssignable(from: Region, to: Region) bool {
@@ -85,14 +85,17 @@ test "regionAssignable follows implicit coercion rules" {
     try std.testing.expect(!regionAssignable(.transient, .calldata));
 }
 
-test "isAssignable combines type equality and region coercion" {
+test "isAssignable combines lenient type assignability and region coercion" {
     const storage_bool = LocatedType.withRegion(.{ .bool = {} }, .storage);
     const memory_bool = LocatedType.withRegion(.{ .bool = {} }, .memory);
     const calldata_bool = LocatedType.withRegion(.{ .bool = {} }, .calldata);
     const memory_address = LocatedType.withRegion(.{ .address = {} }, .memory);
+    const memory_u8 = LocatedType.withRegion(.{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } }, .memory);
+    const storage_u256 = LocatedType.withRegion(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, .storage);
 
     try std.testing.expect(isAssignable(storage_bool, memory_bool));
     try std.testing.expect(isAssignable(calldata_bool, memory_bool));
     try std.testing.expect(!isAssignable(memory_bool, calldata_bool));
     try std.testing.expect(!isAssignable(storage_bool, memory_address));
+    try std.testing.expect(isAssignable(memory_u8, storage_u256));
 }

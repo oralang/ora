@@ -180,9 +180,19 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
     };
 }
 
+pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
+    if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
+    if (isIntegerType(expected_type) and isIntegerType(actual_type)) return true;
+    return typeEql(expected_type, actual_type);
+}
+
 fn optionalTypeEql(lhs: ?*const Type, rhs: ?*const Type) bool {
     if (lhs == null or rhs == null) return lhs == null and rhs == null;
     return typeEql(lhs.?.*, rhs.?.*);
+}
+
+fn isIntegerType(ty: Type) bool {
+    return ty.kind() == .integer;
 }
 
 fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {

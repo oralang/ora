@@ -34,6 +34,7 @@ const descriptorFromPathName = descriptors.descriptorFromPathName;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
+const typesAssignable = descriptors.typesAssignable;
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
@@ -42,6 +43,10 @@ fn declarationRegion(storage_class: ast.StorageClass) Region {
         .memory => .memory,
         .tstore => .transient,
     };
+}
+
+fn locatedValue(expr_type: Type, expr_region: Region) LocatedType {
+    return LocatedType.withRegion(expr_type, expr_region);
 }
 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
@@ -452,20 +457,20 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(field.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                        if (!typesAssignable(expected_type, actual_type)) {
-                            try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
-                                field.name,
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
-                            });
-                        } else {
-                            const expected_region = self.item_regions[item_id.index()];
-                            const actual_region = self.exprLocatedType(expr_id).region;
-                            if (!region_rules.regionAssignable(actual_region, expected_region)) {
+                        const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
+                        const actual = locatedValue(actual_type, self.exprLocatedType(expr_id).region);
+                        if (!region_rules.isAssignable(actual, expected)) {
+                            if (!typesAssignable(expected_type, actual_type)) {
+                                try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
+                                    field.name,
+                                    typeDisplayName(expected_type),
+                                    typeDisplayName(actual_type),
+                                });
+                            } else {
                                 try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
                                     field.name,
-                                    region_rules.regionDisplayName(expected_region),
-                                    region_rules.regionDisplayName(actual_region),
+                                    region_rules.regionDisplayName(expected.region),
+                                    region_rules.regionDisplayName(actual.region),
                                 });
                             }
                         }
@@ -512,22 +517,22 @@ const TypeChecker = struct {
                     if (decl.type_expr == null) {
                         self.pattern_types[decl.pattern.index()] = LocatedType.withRegion(actual_type, declarationRegion(decl.storage_class));
                     } else {
-                        const expected_type = self.pattern_types[decl.pattern.index()].type;
+                        const expected = self.pattern_types[decl.pattern.index()];
+                        const expected_type = expected.type;
                         if (try self.emitIntegerOverflowIfNeeded(decl.range, expr_id, expected_type)) {
                             // Keep lowering/recovery moving after reporting the overflow.
                         } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                            if (!typesAssignable(expected_type, actual_type)) {
-                                try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                    typeDisplayName(expected_type),
-                                    typeDisplayName(actual_type),
-                                });
-                            } else {
-                                const expected_region = self.pattern_types[decl.pattern.index()].region;
-                                const actual_region = self.exprLocatedType(expr_id).region;
-                                if (!region_rules.regionAssignable(actual_region, expected_region)) {
+                            const actual = locatedValue(actual_type, self.exprLocatedType(expr_id).region);
+                            if (!region_rules.isAssignable(actual, expected)) {
+                                if (!typesAssignable(expected_type, actual_type)) {
+                                    try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
+                                        typeDisplayName(expected_type),
+                                        typeDisplayName(actual_type),
+                                    });
+                                } else {
                                     try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
-                                        region_rules.regionDisplayName(expected_region),
-                                        region_rules.regionDisplayName(actual_region),
+                                        region_rules.regionDisplayName(expected.region),
+                                        region_rules.regionDisplayName(actual.region),
                                     });
                                 }
                             }
@@ -611,17 +616,17 @@ const TypeChecker = struct {
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
                 } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                    if (!typesAssignable(expected_type, actual_type)) {
-                        try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                            typeDisplayName(expected_type),
-                            typeDisplayName(actual_type),
-                        });
-                    } else {
-                        const actual_region = self.exprLocatedType(assign.value).region;
-                        if (!region_rules.regionAssignable(actual_region, expected.region)) {
+                    const actual = locatedValue(actual_type, self.exprLocatedType(assign.value).region);
+                    if (!region_rules.isAssignable(actual, expected)) {
+                        if (!typesAssignable(expected_type, actual_type)) {
+                            try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
+                                typeDisplayName(expected_type),
+                                typeDisplayName(actual_type),
+                            });
+                        } else {
                             try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
                                 region_rules.regionDisplayName(expected.region),
-                                region_rules.regionDisplayName(actual_region),
+                                region_rules.regionDisplayName(actual.region),
                             });
                         }
                     }
@@ -3055,12 +3060,6 @@ fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
     const signed = integer.signed orelse return true;
     if (bits == 0) return value.eqlZero();
     return value.fitsInTwosComp(if (signed) .signed else .unsigned, bits);
-}
-
-fn typesAssignable(expected_type: Type, actual_type: Type) bool {
-    if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
-    if (isIntegerType(expected_type) and isIntegerType(actual_type)) return true;
-    return typeEql(expected_type, actual_type);
 }
 
 fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
