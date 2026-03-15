@@ -13,6 +13,7 @@ const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
 
 const descriptorFromPathName = sema.descriptorFromPathName;
+const appendSemaTypeMangleName = sema.appendTypeMangleName;
 
 pub const HirSymbolKind = enum {
     contract,
@@ -581,65 +582,8 @@ const Lowerer = struct {
 
     fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
         var name = std.ArrayList(u8){};
-        try self.appendTypeMangleName(&name, ty);
+        try appendSemaTypeMangleName(self.allocator, &name, ty);
         return name.toOwnedSlice(self.allocator);
-    }
-
-    fn appendTypeMangleName(self: *Lowerer, buffer: *std.ArrayList(u8), ty: sema.Type) !void {
-        const allocator = self.allocator;
-        switch (ty) {
-            .unknown => try buffer.appendSlice(allocator, "unknown"),
-            .void => try buffer.appendSlice(allocator, "void"),
-            .bool => try buffer.appendSlice(allocator, "bool"),
-            .string => try buffer.appendSlice(allocator, "string"),
-            .address => try buffer.appendSlice(allocator, "address"),
-            .bytes => try buffer.appendSlice(allocator, "bytes"),
-            .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),
-            .named => |named| try buffer.appendSlice(allocator, named.name),
-            .contract => |named| try buffer.appendSlice(allocator, named.name),
-            .struct_ => |named| try buffer.appendSlice(allocator, named.name),
-            .bitfield => |named| try buffer.appendSlice(allocator, named.name),
-            .enum_ => |named| try buffer.appendSlice(allocator, named.name),
-            .refinement => |refinement| try buffer.appendSlice(allocator, refinement.name),
-            .slice => |slice| {
-                try buffer.appendSlice(allocator, "slice_");
-                try self.appendTypeMangleName(buffer, slice.element_type.*);
-            },
-            .array => |array| {
-                try buffer.appendSlice(allocator, "array_");
-                try self.appendTypeMangleName(buffer, array.element_type.*);
-                if (array.len) |len| {
-                    var len_buf: [32]u8 = undefined;
-                    const len_text = try std.fmt.bufPrint(&len_buf, "_{d}", .{len});
-                    try buffer.appendSlice(allocator, len_text);
-                }
-            },
-            .tuple => |elements| {
-                try buffer.appendSlice(allocator, "tuple");
-                for (elements) |element| {
-                    try buffer.appendSlice(allocator, "_");
-                    try self.appendTypeMangleName(buffer, element);
-                }
-            },
-            .map => |map| {
-                try buffer.appendSlice(allocator, "map");
-                if (map.key_type) |key| {
-                    try buffer.appendSlice(allocator, "_");
-                    try self.appendTypeMangleName(buffer, key.*);
-                }
-                if (map.value_type) |value| {
-                    try buffer.appendSlice(allocator, "_");
-                    try self.appendTypeMangleName(buffer, value.*);
-                }
-            },
-            .error_union => |error_union| {
-                try buffer.appendSlice(allocator, "error_union_");
-                try self.appendTypeMangleName(buffer, error_union.payload_type.*);
-            },
-            .function => |function| {
-                try buffer.appendSlice(allocator, function.name orelse "fn");
-            },
-        }
     }
 
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {

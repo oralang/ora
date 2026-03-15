@@ -2346,11 +2346,7 @@ const Parser = struct {
     fn tokenCouldStartTypeValuedCallArg(self: *const Parser) bool {
         const kind = self.current().kind;
         if (kind == .Map) return true;
-        if (kind != .Identifier) return tokenIsIdentifierLike(kind);
-
-        const text = self.source_text[self.current().range.start..self.current().range.end];
-        if (text.len == 0) return false;
-        return std.ascii.isUpper(text[0]);
+        return kind == .Identifier or tokenIsIdentifierLike(kind);
     }
 
     fn typeAtGreaterToken(self: *const Parser) bool {

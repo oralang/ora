@@ -18,6 +18,7 @@ const Region = model.Region;
 const Effect = model.Effect;
 const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
+const appendModelTypeMangleName = model.appendTypeMangleName;
 const InstantiatedStruct = model.InstantiatedStruct;
 const InstantiatedStructField = model.InstantiatedStructField;
 const InstantiatedEnum = model.InstantiatedEnum;
@@ -1336,51 +1337,11 @@ const TypeChecker = struct {
         for (bindings) |binding| {
             try name.appendSlice(self.arena, "__");
             switch (binding.value) {
-                .ty => |ty| try self.appendTypeMangleName(&name, ty),
+                .ty => |ty| try appendModelTypeMangleName(self.arena, &name, ty),
                 .integer => |integer| try name.appendSlice(self.arena, try self.sanitizeGenericMangleSegment(integer)),
             }
         }
         return name.toOwnedSlice(self.arena);
-    }
-
-    fn appendTypeMangleName(self: *TypeChecker, buffer: *std.ArrayList(u8), ty: Type) anyerror!void {
-        switch (ty) {
-            .bool => try buffer.appendSlice(self.arena, "bool"),
-            .address => try buffer.appendSlice(self.arena, "address"),
-            .string => try buffer.appendSlice(self.arena, "string"),
-            .bytes => try buffer.appendSlice(self.arena, "bytes"),
-            .void => try buffer.appendSlice(self.arena, "void"),
-            .integer => |integer| try buffer.appendSlice(self.arena, integer.spelling orelse "int"),
-            .named => |named| try buffer.appendSlice(self.arena, named.name),
-            .struct_ => |named| try buffer.appendSlice(self.arena, named.name),
-            .contract => |named| try buffer.appendSlice(self.arena, named.name),
-            .bitfield => |named| try buffer.appendSlice(self.arena, named.name),
-            .enum_ => |named| try buffer.appendSlice(self.arena, named.name),
-            .slice => |slice| {
-                try buffer.appendSlice(self.arena, "slice_");
-                try self.appendTypeMangleName(buffer, slice.element_type.*);
-            },
-            .array => |array| {
-                try buffer.appendSlice(self.arena, "array_");
-                try self.appendTypeMangleName(buffer, array.element_type.*);
-                if (array.len) |len| {
-                    try buffer.append(self.arena, '_');
-                    try buffer.writer(self.arena).print("{d}", .{len});
-                }
-            },
-            .map => |map| {
-                try buffer.appendSlice(self.arena, "map");
-                if (map.key_type) |key| {
-                    try buffer.append(self.arena, '_');
-                    try self.appendTypeMangleName(buffer, key.*);
-                }
-                if (map.value_type) |value| {
-                    try buffer.append(self.arena, '_');
-                    try self.appendTypeMangleName(buffer, value.*);
-                }
-            },
-            else => try buffer.appendSlice(self.arena, "type"),
-        }
     }
 
     fn instantiatedStructByName(self: *const TypeChecker, name: []const u8) ?InstantiatedStruct {

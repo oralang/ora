@@ -250,6 +250,59 @@ pub const Type = union(TypeKind) {
     }
 };
 
+pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
+    switch (ty) {
+        .bool => try buffer.appendSlice(allocator, "bool"),
+        .address => try buffer.appendSlice(allocator, "address"),
+        .string => try buffer.appendSlice(allocator, "string"),
+        .bytes => try buffer.appendSlice(allocator, "bytes"),
+        .void => try buffer.appendSlice(allocator, "void"),
+        .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),
+        .named => |named| try buffer.appendSlice(allocator, named.name),
+        .struct_ => |named| try buffer.appendSlice(allocator, named.name),
+        .contract => |named| try buffer.appendSlice(allocator, named.name),
+        .bitfield => |named| try buffer.appendSlice(allocator, named.name),
+        .enum_ => |named| try buffer.appendSlice(allocator, named.name),
+        .refinement => |refinement| try buffer.appendSlice(allocator, refinement.name),
+        .slice => |slice| {
+            try buffer.appendSlice(allocator, "slice_");
+            try appendTypeMangleName(allocator, buffer, slice.element_type.*);
+        },
+        .array => |array| {
+            try buffer.appendSlice(allocator, "array_");
+            try appendTypeMangleName(allocator, buffer, array.element_type.*);
+            if (array.len) |len| {
+                try buffer.append(allocator, '_');
+                try buffer.writer(allocator).print("{d}", .{len});
+            }
+        },
+        .map => |map| {
+            try buffer.appendSlice(allocator, "map");
+            if (map.key_type) |key| {
+                try buffer.append(allocator, '_');
+                try appendTypeMangleName(allocator, buffer, key.*);
+            }
+            if (map.value_type) |value| {
+                try buffer.append(allocator, '_');
+                try appendTypeMangleName(allocator, buffer, value.*);
+            }
+        },
+        .tuple => |elements| {
+            try buffer.appendSlice(allocator, "tuple");
+            for (elements) |element| {
+                try buffer.append(allocator, '_');
+                try appendTypeMangleName(allocator, buffer, element);
+            }
+        },
+        .error_union => |error_union| {
+            try buffer.appendSlice(allocator, "error_union_");
+            try appendTypeMangleName(allocator, buffer, error_union.payload_type.*);
+        },
+        .function => |function| try buffer.appendSlice(allocator, function.name orelse "fn"),
+        .unknown => try buffer.appendSlice(allocator, "type"),
+    }
+}
+
 pub const LocatedType = struct {
     type: Type,
     region: Region = .none,
