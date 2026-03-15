@@ -31,6 +31,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const expr = self.parent.file.expression(expr_id).*;
             const loc = self.parent.location(exprRange(self.parent.file, expr_id));
             return switch (expr) {
+                .TypeValue => |type_value| blk: {
+                    const placeholder = try self.createValuePlaceholder("ora.type_value", "type", type_value.range, self.parent.lowerExprType(expr_id));
+                    break :blk appendValueOp(self.block, placeholder);
+                },
                 .IntegerLiteral => |literal| blk: {
                     const ty = self.parent.lowerExprType(expr_id);
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), ty, parseIntLiteral(literal.text) orelse 0));

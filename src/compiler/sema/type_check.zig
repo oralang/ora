@@ -613,6 +613,9 @@ const TypeChecker = struct {
             .BoolLiteral => self.expr_types[expr_id.index()] = .{ .bool = {} },
             .AddressLiteral => self.expr_types[expr_id.index()] = .{ .address = {} },
             .BytesLiteral => self.expr_types[expr_id.index()] = .{ .bytes = {} },
+            .TypeValue => |type_value| {
+                self.expr_types[expr_id.index()] = try self.resolveTypeExpr(type_value.type_expr);
+            },
             .Tuple => |tuple| {
                 for (tuple.elements) |element| try self.visitExpr(element);
                 const elements = try self.arena.alloc(Type, tuple.elements.len);
@@ -947,6 +950,14 @@ const TypeChecker = struct {
         };
     }
 
+    fn typeArgTypeFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => self.expr_types[expr_id.index()],
+            .Group => |group| self.typeArgTypeFromExpr(group.expr),
+            else => null,
+        };
+    }
+
     fn exprIntegerText(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
@@ -957,6 +968,9 @@ const TypeChecker = struct {
 
     fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
         if (self.isGenericTypeParameter(parameter)) {
+            if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
+                if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
+            }
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
             return .{ .ty = descriptorFromPathName(self.file, self.item_index, arg_name) };
         }
@@ -1808,6 +1822,7 @@ const TypeChecker = struct {
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.expression(expr_id).*) {
+            .TypeValue => {},
             .Call => |call| {
                 try self.validateExprLocks(call.callee, locked_slots);
                 for (call.args) |arg| try self.validateExprLocks(arg, locked_slots);
@@ -2132,7 +2147,7 @@ const TypeChecker = struct {
     fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) anyerror!void {
         var expr_state = EffectCollectorState.init();
         switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .TypeValue, .Result, .Error => {},
             .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, &expr_state),
             .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, &expr_state),
             .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, &expr_state),
@@ -2499,6 +2514,7 @@ const TypeChecker = struct {
 
     fn collectExprDirectCallees(self: *TypeChecker, expr_id: ast.ExprId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
         switch (self.file.expression(expr_id).*) {
+            .TypeValue => {},
             .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprDirectCallees(element, callees),
             .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprDirectCallees(element, callees),
             .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprDirectCallees(field.value, callees),

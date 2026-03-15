@@ -2968,6 +2968,60 @@ test "compiler monomorphizes generic contract function calls in HIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
 }
 
+test "compiler monomorphizes generic contract calls with generic struct type arguments" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(a: Pair<u256>, b: Pair<u256>) -> Pair<u256> {
+        \\        return first(Pair<u256>, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract_item_id = item_index.lookup("Math").?;
+    const contract_item = ast_file.item(contract_item_id).Contract;
+    var choose_id: ?compiler.ast.ItemId = null;
+    for (contract_item.members) |member_id| {
+        const member = ast_file.item(member_id).*;
+        if (member != .Function) continue;
+        if (std.mem.eql(u8, member.Function.name, "choose")) {
+            choose_id = member_id;
+            break;
+        }
+    }
+    try testing.expect(choose_id != null);
+    const choose_item = ast_file.item(choose_id.?).Function;
+    const function_type = typecheck.itemLocatedType(choose_id.?).type;
+    try testing.expect(function_type == .function);
+    try testing.expectEqualStrings("Pair__u256", function_type.function.return_types[0].name().?);
+    try testing.expectEqualStrings("Pair__u256", typecheck.body_types[choose_item.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first__Pair__u256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @first__Pair__u256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
+}
+
 test "compiler monomorphizes integer generic contract function calls in HIR" {
     const source_text =
         \\contract Math {

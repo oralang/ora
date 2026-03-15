@@ -2000,7 +2000,7 @@ const Parser = struct {
         try children.append(self.allocator, .{ .node = callee });
         try children.append(self.allocator, .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+            try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
             if (!self.at(.Comma)) break;
             try children.append(self.allocator, .{ .token = self.bump() });
         }
@@ -2011,6 +2011,13 @@ const Parser = struct {
         }
         _ = terminators;
         return self.finishNode(SyntaxKind.CallExpr, children.items);
+    }
+
+    fn parseCallArgumentNode(self: *Parser) anyerror!green.GreenNodeId {
+        if (self.looksLikeGenericTypeCallArg()) {
+            return self.parseTypeExprNode(&.{ .Comma, .RightParen });
+        }
+        return self.parseExpressionNode(&.{ .Comma, .RightParen });
     }
 
     fn parseFieldExprNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
@@ -2281,6 +2288,7 @@ const Parser = struct {
     fn nodeCouldStartStructLiteral(self: *const Parser, node_id: green.GreenNodeId) bool {
         return switch (self.nodes.items[node_id.index()].kind) {
             .NameExpr => true,
+            .GenericType => true,
             .GroupExpr => blk: {
                 const node = self.nodes.items[node_id.index()];
                 var i: usize = 0;
@@ -2297,9 +2305,62 @@ const Parser = struct {
         };
     }
 
+    fn looksLikeGenericTypeCallArg(self: *const Parser) bool {
+        if (!self.tokenCouldStartTypeValuedCallArg()) return false;
+        if (self.peekKind(1) != .Less) return false;
+
+        var depth: usize = 0;
+        var cursor = self.index + 1;
+        while (cursor < self.tokens.items.len) : (cursor += 1) {
+            switch (self.tokens.items[cursor].kind) {
+                .Less => depth += 1,
+                .Greater => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                    if (depth == 0) {
+                        const next_kind = self.peekTokenKindAt(cursor + 1);
+                        return switch (next_kind) {
+                            .Comma, .RightParen => true,
+                            else => false,
+                        };
+                    }
+                },
+                .GreaterGreater => {
+                    if (depth < 2) return false;
+                    depth -= 2;
+                    if (depth == 0) {
+                        const next_kind = self.peekTokenKindAt(cursor + 1);
+                        return switch (next_kind) {
+                            .Comma, .RightParen => true,
+                            else => false,
+                        };
+                    }
+                },
+                .Eof => return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn tokenCouldStartTypeValuedCallArg(self: *const Parser) bool {
+        const kind = self.current().kind;
+        if (kind == .Map) return true;
+        if (kind != .Identifier) return tokenIsIdentifierLike(kind);
+
+        const text = self.source_text[self.current().range.start..self.current().range.end];
+        if (text.len == 0) return false;
+        return std.ascii.isUpper(text[0]);
+    }
+
     fn typeAtGreaterToken(self: *const Parser) bool {
         if (self.pending_type_gt > 0) return true;
         return self.at(.Greater) or self.at(.GreaterGreater);
+    }
+
+    fn peekTokenKindAt(self: *const Parser, index: usize) green.TokenKind {
+        const bounded = @min(index, self.tokens.items.len - 1);
+        return self.tokens.items[bounded].kind;
     }
 
     fn bumpTypeGreater(self: *Parser) green.GreenTokenId {

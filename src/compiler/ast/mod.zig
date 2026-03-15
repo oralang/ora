@@ -41,6 +41,7 @@ pub const StringLiteralExpr = nodes.StringLiteralExpr;
 pub const BoolLiteralExpr = nodes.BoolLiteralExpr;
 pub const AddressLiteralExpr = nodes.AddressLiteralExpr;
 pub const BytesLiteralExpr = nodes.BytesLiteralExpr;
+pub const TypeValueExpr = nodes.TypeValueExpr;
 pub const TupleExpr = nodes.TupleExpr;
 pub const ArrayLiteralExpr = nodes.ArrayLiteralExpr;
 pub const StructFieldInit = nodes.StructFieldInit;

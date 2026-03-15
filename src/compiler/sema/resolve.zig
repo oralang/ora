@@ -221,6 +221,7 @@ const Resolver = struct {
                     });
                 }
             },
+            .TypeValue => {},
             .Unary => |unary| try self.resolveExpr(unary.operand, env),
             .Binary => |binary| {
                 try self.resolveExpr(binary.lhs, env);

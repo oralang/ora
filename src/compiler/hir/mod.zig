@@ -534,6 +534,14 @@ const Lowerer = struct {
         };
     }
 
+    fn typeArgTypeFromExpr(self: *const Lowerer, expr_id: ast.ExprId) ?sema.Type {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => self.typecheck.exprType(expr_id),
+            .Group => |group| self.typeArgTypeFromExpr(group.expr),
+            else => null,
+        };
+    }
+
     fn integerArgText(self: *const Lowerer, expr_id: ast.ExprId) ?[]const u8 {
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
@@ -544,6 +552,15 @@ const Lowerer = struct {
 
     fn genericBindingForCallArg(self: *Lowerer, parameter: ast.Parameter, name: []const u8, arg_expr: ast.ExprId) !?GenericTypeBinding {
         if (self.isGenericTypeParameter(parameter)) {
+            if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
+                if (arg_type.kind() != .unknown) {
+                    return .{
+                        .name = name,
+                        .value = .{ .ty = arg_type },
+                        .mangle_name = try self.typeMangleName(arg_type),
+                    };
+                }
+            }
             const concrete_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
             return .{
                 .name = name,
@@ -560,6 +577,69 @@ const Lowerer = struct {
             };
         }
         return null;
+    }
+
+    fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
+        var name = std.ArrayList(u8){};
+        try self.appendTypeMangleName(&name, ty);
+        return name.toOwnedSlice(self.allocator);
+    }
+
+    fn appendTypeMangleName(self: *Lowerer, buffer: *std.ArrayList(u8), ty: sema.Type) !void {
+        const allocator = self.allocator;
+        switch (ty) {
+            .unknown => try buffer.appendSlice(allocator, "unknown"),
+            .void => try buffer.appendSlice(allocator, "void"),
+            .bool => try buffer.appendSlice(allocator, "bool"),
+            .string => try buffer.appendSlice(allocator, "string"),
+            .address => try buffer.appendSlice(allocator, "address"),
+            .bytes => try buffer.appendSlice(allocator, "bytes"),
+            .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),
+            .named => |named| try buffer.appendSlice(allocator, named.name),
+            .contract => |named| try buffer.appendSlice(allocator, named.name),
+            .struct_ => |named| try buffer.appendSlice(allocator, named.name),
+            .bitfield => |named| try buffer.appendSlice(allocator, named.name),
+            .enum_ => |named| try buffer.appendSlice(allocator, named.name),
+            .refinement => |refinement| try buffer.appendSlice(allocator, refinement.name),
+            .slice => |slice| {
+                try buffer.appendSlice(allocator, "slice_");
+                try self.appendTypeMangleName(buffer, slice.element_type.*);
+            },
+            .array => |array| {
+                try buffer.appendSlice(allocator, "array_");
+                try self.appendTypeMangleName(buffer, array.element_type.*);
+                if (array.len) |len| {
+                    var len_buf: [32]u8 = undefined;
+                    const len_text = try std.fmt.bufPrint(&len_buf, "_{d}", .{len});
+                    try buffer.appendSlice(allocator, len_text);
+                }
+            },
+            .tuple => |elements| {
+                try buffer.appendSlice(allocator, "tuple");
+                for (elements) |element| {
+                    try buffer.appendSlice(allocator, "_");
+                    try self.appendTypeMangleName(buffer, element);
+                }
+            },
+            .map => |map| {
+                try buffer.appendSlice(allocator, "map");
+                if (map.key_type) |key| {
+                    try buffer.appendSlice(allocator, "_");
+                    try self.appendTypeMangleName(buffer, key.*);
+                }
+                if (map.value_type) |value| {
+                    try buffer.appendSlice(allocator, "_");
+                    try self.appendTypeMangleName(buffer, value.*);
+                }
+            },
+            .error_union => |error_union| {
+                try buffer.appendSlice(allocator, "error_union_");
+                try self.appendTypeMangleName(buffer, error_union.payload_type.*);
+            },
+            .function => |function| {
+                try buffer.appendSlice(allocator, function.name orelse "fn");
+            },
+        }
     }
 
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {

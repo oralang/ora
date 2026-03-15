@@ -225,6 +225,7 @@ const ConstEvaluator = struct {
             .StringLiteral => |literal| ConstValue{ .string = literal.text },
             .BoolLiteral => |literal| ConstValue{ .boolean = literal.value },
             .AddressLiteral, .BytesLiteral => null,
+            .TypeValue => null,
             .Tuple => |tuple| blk: {
                 for (tuple.elements) |element| _ = try self.evalExprImpl(element, use_cache);
                 break :blk null;
@@ -878,6 +879,7 @@ const ConstEvaluator = struct {
 
     fn exprStage(self: *ConstEvaluator, expr_id: ast.ExprId) Stage {
         return switch (self.file.expression(expr_id).*) {
+            .TypeValue => .comptime_only,
             .Builtin => |builtin| blk: {
                 if (stage_mod.isRuntimeOnlyIntrinsic(builtin.name)) break :blk .runtime_only;
                 if (stage_mod.isComptimeOnlyIntrinsic(builtin.name)) break :blk .comptime_only;

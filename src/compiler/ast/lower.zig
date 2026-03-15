@@ -238,6 +238,7 @@ const Validator = struct {
     fn validateExpr(self: *Validator, _: ExprId, expr: Expr) !void {
         const expr_range = source.rangeOf(expr);
         switch (expr) {
+            .TypeValue => {},
             .Tuple => |tuple| {
                 for (tuple.elements) |expr_id| _ = try self.expectExpr(expr_id, expr_range, "tuple expression references invalid element id");
             },

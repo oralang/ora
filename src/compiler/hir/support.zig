@@ -290,6 +290,7 @@ pub fn exprRange(file: *const ast.AstFile, expr_id: ast.ExprId) source.TextRange
         .BoolLiteral => |node| node.range,
         .AddressLiteral => |node| node.range,
         .BytesLiteral => |node| node.range,
+        .TypeValue => |node| node.range,
         .Tuple => |node| node.range,
         .ArrayLiteral => |node| node.range,
         .StructLiteral => |node| node.range,

@@ -854,6 +854,7 @@ pub fn mixin(Builder: type) type {
             return switch (node.kind()) {
                 .Literal => Lowering.lowerLiteralExprNode(self, node),
                 .NameExpr => Lowering.lowerNameExprNode(self, node),
+                .PathType, .GenericType, .TupleType, .ArrayType, .SliceType, .ErrorUnionType => Lowering.lowerTypeValueExprNode(self, node),
                 .UnaryExpr => Lowering.lowerUnaryExprNode(self, node),
                 .BinaryExpr => Lowering.lowerBinaryExprNode(self, node),
                 .CallExpr => Lowering.lowerCallExprNode(self, node),
@@ -898,6 +899,13 @@ pub fn mixin(Builder: type) type {
                 } }),
                 else => Lowering.malformedExpr(self, node, "unsupported literal token"),
             };
+        }
+
+        fn lowerTypeValueExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            return Support.pushExpr(self, .{ .TypeValue = .{
+                .range = node.range(),
+                .type_expr = try Lowering.lowerTypeNode(self, node),
+            } });
         }
 
         fn lowerNameExprNode(self: *Builder, node: SyntaxNode) !ExprId {

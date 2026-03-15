@@ -147,6 +147,7 @@ pub const Expr = union(enum) {
     BoolLiteral: BoolLiteralExpr,
     AddressLiteral: AddressLiteralExpr,
     BytesLiteral: BytesLiteralExpr,
+    TypeValue: TypeValueExpr,
     Tuple: TupleExpr,
     ArrayLiteral: ArrayLiteralExpr,
     StructLiteral: StructLiteralExpr,
@@ -190,6 +191,11 @@ pub const AddressLiteralExpr = struct {
 pub const BytesLiteralExpr = struct {
     range: source.TextRange,
     text: []const u8,
+};
+
+pub const TypeValueExpr = struct {
+    range: source.TextRange,
+    type_expr: TypeExprId,
 };
 
 pub const TupleExpr = struct {
