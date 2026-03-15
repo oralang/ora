@@ -20,6 +20,9 @@ const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
 const InstantiatedStruct = model.InstantiatedStruct;
 const InstantiatedStructField = model.InstantiatedStructField;
+const InstantiatedEnum = model.InstantiatedEnum;
+const InstantiatedBitfield = model.InstantiatedBitfield;
+const InstantiatedBitfieldField = model.InstantiatedBitfieldField;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -251,6 +254,8 @@ pub fn typeCheck(
         .expr_effects = &.{},
         .body_types = &.{},
         .instantiated_structs = &.{},
+        .instantiated_enums = &.{},
+        .instantiated_bitfields = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -318,6 +323,8 @@ pub fn typeCheck(
         .expr_effects = expr_effects,
         .effect_states = effect_states,
         .instantiated_structs = .{},
+        .instantiated_enums = .{},
+        .instantiated_bitfields = .{},
         .diagnostics = &result.diagnostics,
     };
 
@@ -368,6 +375,8 @@ pub fn typeCheck(
     result.expr_effects = expr_effects;
     result.body_types = body_types;
     result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
+    result.instantiated_enums = try typechecker.instantiated_enums.toOwnedSlice(arena);
+    result.instantiated_bitfields = try typechecker.instantiated_bitfields.toOwnedSlice(arena);
     return result;
 }
 
@@ -386,6 +395,8 @@ const TypeChecker = struct {
     expr_effects: []Effect,
     effect_states: []EffectSummaryState,
     instantiated_structs: std.ArrayList(InstantiatedStruct),
+    instantiated_enums: std.ArrayList(InstantiatedEnum),
+    instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
@@ -1042,6 +1053,12 @@ const TypeChecker = struct {
                 .Struct => |struct_item| if (struct_item.is_generic) {
                     return try self.instantiateGenericStruct(item_id, struct_item, generic, bindings);
                 },
+                .Enum => |enum_item| if (enum_item.is_generic) {
+                    return try self.instantiateGenericEnum(item_id, enum_item, generic, bindings);
+                },
+                .Bitfield => |bitfield_item| if (bitfield_item.is_generic) {
+                    return try self.instantiateGenericBitfield(item_id, bitfield_item, generic, bindings);
+                },
                 else => {},
             }
         }
@@ -1089,6 +1106,12 @@ const TypeChecker = struct {
         }
         if (self.instantiatedStructByName(name) != null) {
             return .{ .struct_ = .{ .name = name } };
+        }
+        if (self.instantiatedEnumByName(name) != null) {
+            return .{ .enum_ = .{ .name = name } };
+        }
+        if (self.instantiatedBitfieldByName(name) != null) {
+            return .{ .bitfield = .{ .name = name } };
         }
         return .{ .named = .{ .name = name } };
     }
@@ -1196,6 +1219,120 @@ const TypeChecker = struct {
 
     fn instantiatedStructByName(self: *const TypeChecker, name: []const u8) ?InstantiatedStruct {
         for (self.instantiated_structs.items) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
+    }
+
+    fn instantiateGenericEnum(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        enum_item: ast.EnumItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror!Type {
+        const bindings = try self.genericTypeBindingsForEnum(enum_item, generic, outer_bindings);
+        const mangled_name = try self.mangleGenericStructName(enum_item.name, bindings);
+
+        if (self.instantiatedEnumByName(mangled_name) == null) {
+            try self.instantiated_enums.append(self.arena, .{
+                .template_item_id = item_id,
+                .mangled_name = mangled_name,
+            });
+        }
+
+        return .{ .enum_ = .{ .name = mangled_name } };
+    }
+
+    fn genericTypeBindingsForEnum(
+        self: *TypeChecker,
+        enum_item: ast.EnumItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror![]const GenericTypeBinding {
+        if (enum_item.template_parameters.len != generic.args.len) return error.InvalidGenericEnumInstantiation;
+
+        const bindings = try self.arena.alloc(GenericTypeBinding, enum_item.template_parameters.len);
+        for (enum_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
+            const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericEnumInstantiation;
+            const ty = switch (arg) {
+                .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
+                else => return error.InvalidGenericEnumInstantiation,
+            };
+            bindings[index] = .{
+                .name = name,
+                .ty = ty,
+            };
+        }
+        return bindings;
+    }
+
+    fn instantiatedEnumByName(self: *const TypeChecker, name: []const u8) ?InstantiatedEnum {
+        for (self.instantiated_enums.items) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
+    }
+
+    fn instantiateGenericBitfield(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        bitfield_item: ast.BitfieldItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror!Type {
+        const bindings = try self.genericTypeBindingsForBitfield(bitfield_item, generic, outer_bindings);
+        const mangled_name = try self.mangleGenericStructName(bitfield_item.name, bindings);
+
+        if (self.instantiatedBitfieldByName(mangled_name) == null) {
+            const fields = try self.arena.alloc(InstantiatedBitfieldField, bitfield_item.fields.len);
+            for (bitfield_item.fields, 0..) |field, index| {
+                fields[index] = .{
+                    .name = field.name,
+                    .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
+                    .offset = field.offset,
+                    .width = field.width,
+                };
+            }
+            try self.instantiated_bitfields.append(self.arena, .{
+                .template_item_id = item_id,
+                .mangled_name = mangled_name,
+                .base_type = if (bitfield_item.base_type) |type_expr|
+                    try self.resolveTypeExprWithBindings(type_expr, bindings)
+                else
+                    null,
+                .fields = fields,
+            });
+        }
+
+        return .{ .bitfield = .{ .name = mangled_name } };
+    }
+
+    fn genericTypeBindingsForBitfield(
+        self: *TypeChecker,
+        bitfield_item: ast.BitfieldItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror![]const GenericTypeBinding {
+        if (bitfield_item.template_parameters.len != generic.args.len) return error.InvalidGenericBitfieldInstantiation;
+
+        const bindings = try self.arena.alloc(GenericTypeBinding, bitfield_item.template_parameters.len);
+        for (bitfield_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
+            const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericBitfieldInstantiation;
+            const ty = switch (arg) {
+                .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
+                else => return error.InvalidGenericBitfieldInstantiation,
+            };
+            bindings[index] = .{
+                .name = name,
+                .ty = ty,
+            };
+        }
+        return bindings;
+    }
+
+    fn instantiatedBitfieldByName(self: *const TypeChecker, name: []const u8) ?InstantiatedBitfield {
+        for (self.instantiated_bitfields.items) |instantiated| {
             if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
         }
         return null;
@@ -2254,6 +2391,23 @@ const TypeChecker = struct {
                 return .{ .unknown = {} };
             }
         }
+        if (base_type.kind() == .enum_) {
+            if (self.instantiatedEnumByName(base_type.enum_.name)) |instantiated| {
+                const enum_item = self.file.item(instantiated.template_item_id).Enum;
+                for (enum_item.variants) |variant| {
+                    if (std.mem.eql(u8, variant.name, field_name)) return base_type;
+                }
+                return .{ .unknown = {} };
+            }
+        }
+        if (base_type.kind() == .bitfield) {
+            if (self.instantiatedBitfieldByName(base_type.bitfield.name)) |instantiated| {
+                for (instantiated.fields) |field| {
+                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
+                }
+                return .{ .unknown = {} };
+            }
+        }
         const item_id = self.itemIdForType(base_type) orelse return .{ .unknown = {} };
         return switch (self.file.item(item_id).*) {
             .Struct => |struct_item| blk: {
@@ -2288,6 +2442,7 @@ const TypeChecker = struct {
                 break :blk .{ .unknown = {} };
             },
             .Enum => |enum_item| blk: {
+                if (self.instantiatedEnumByName(enum_item.name)) |_| break :blk base_type;
                 for (enum_item.variants) |variant| {
                     if (std.mem.eql(u8, variant.name, field_name)) break :blk base_type;
                 }
@@ -2320,6 +2475,9 @@ const TypeChecker = struct {
 
     fn itemIdForType(self: *const TypeChecker, ty: Type) ?ast.ItemId {
         const name = ty.name() orelse return null;
+        if (self.instantiatedStructByName(name) != null) return null;
+        if (self.instantiatedEnumByName(name) != null) return null;
+        if (self.instantiatedBitfieldByName(name) != null) return null;
         return self.item_index.lookup(name);
     }
 

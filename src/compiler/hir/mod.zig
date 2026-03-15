@@ -139,6 +139,12 @@ pub fn lowerModule(
     for (typecheck.instantiated_structs) |instantiated| {
         try lowerer.lowerInstantiatedStructDecl(instantiated, lowerer.module_body);
     }
+    for (typecheck.instantiated_enums) |instantiated| {
+        try lowerer.lowerInstantiatedEnumDecl(instantiated, lowerer.module_body);
+    }
+    for (typecheck.instantiated_bitfields) |instantiated| {
+        try lowerer.lowerInstantiatedBitfieldDecl(instantiated, lowerer.module_body);
+    }
 
     for (file.root_items) |item_id| {
         try lowerer.lowerItem(item_id, lowerer.module_body);
@@ -159,6 +165,7 @@ const Lowerer = struct {
 
     pub const ResolvedBitfieldField = struct {
         field: ast.BitfieldField,
+        field_type: ?sema.Type = null,
         offset: u32,
         width: u32,
         sign: u8,
@@ -185,6 +192,8 @@ const Lowerer = struct {
     pub const lowerContract = ModuleLowering.lowerContract;
     pub const lowerFunction = ModuleLowering.lowerFunction;
     pub const lowerInstantiatedStructDecl = ModuleLowering.lowerInstantiatedStructDecl;
+    pub const lowerInstantiatedEnumDecl = ModuleLowering.lowerInstantiatedEnumDecl;
+    pub const lowerInstantiatedBitfieldDecl = ModuleLowering.lowerInstantiatedBitfieldDecl;
     pub const lowerStructDecl = ModuleLowering.lowerStructDecl;
     pub const lowerEnumDecl = ModuleLowering.lowerEnumDecl;
     pub const lowerField = ModuleLowering.lowerField;
@@ -197,9 +206,13 @@ const Lowerer = struct {
     pub const appendItemHandle = ModuleLowering.appendItemHandle;
     pub const ensureMonomorphizedFunction = ModuleLowering.ensureMonomorphizedFunction;
     pub const attachBitfieldParamMetadata = ModuleLowering.attachBitfieldParamMetadata;
+    pub const attachBitfieldParamMetadataForType = ModuleLowering.attachBitfieldParamMetadataForType;
     pub const attachBitfieldOpMetadata = ModuleLowering.attachBitfieldOpMetadata;
+    pub const attachBitfieldOpMetadataForType = ModuleLowering.attachBitfieldOpMetadataForType;
     pub const bitfieldMetadataForTypeExpr = ModuleLowering.bitfieldMetadataForTypeExpr;
+    pub const bitfieldMetadataForType = ModuleLowering.bitfieldMetadataForType;
     pub const buildBitfieldLayout = ModuleLowering.buildBitfieldLayout;
+    pub const buildInstantiatedBitfieldLayout = ModuleLowering.buildInstantiatedBitfieldLayout;
     pub const bitfieldFieldSign = ModuleLowering.bitfieldFieldSign;
 
     pub fn location(self: *const Lowerer, range: source.TextRange) mlir.MlirLocation {
@@ -338,6 +351,10 @@ const Lowerer = struct {
         };
     }
 
+    pub fn instantiatedBitfieldByName(self: *const Lowerer, name: []const u8) ?sema.InstantiatedBitfield {
+        return self.typecheck.instantiatedBitfieldByName(name);
+    }
+
     pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) u32 {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
@@ -351,7 +368,45 @@ const Lowerer = struct {
         };
     }
 
+    pub fn bitfieldFieldWidthFromType(self: *const Lowerer, ty: sema.Type) u32 {
+        _ = self;
+        return switch (ty) {
+            .bool => 1,
+            .address => 160,
+            .integer => |integer| integer.bits orelse 256,
+            else => 256,
+        };
+    }
+
+    pub fn bitfieldFieldSignFromType(self: *const Lowerer, ty: sema.Type) u8 {
+        _ = self;
+        return switch (ty) {
+            .integer => |integer| if (integer.signed == true) 's' else 'u',
+            else => 'u',
+        };
+    }
+
     pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) ?ResolvedBitfieldField {
+        if (self.instantiatedBitfieldByName(bitfield_name)) |bitfield| {
+            const template = self.file.item(bitfield.template_item_id).Bitfield;
+            var next_offset: u32 = 0;
+            for (bitfield.fields, 0..) |field, index| {
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+                const offset = field.offset orelse next_offset;
+                const sign = self.bitfieldFieldSignFromType(field.ty);
+                if (std.mem.eql(u8, field.name, field_name)) {
+                    return .{
+                        .field = template.fields[index],
+                        .field_type = field.ty,
+                        .offset = offset,
+                        .width = width,
+                        .sign = sign,
+                    };
+                }
+                next_offset = offset + width;
+            }
+            return null;
+        }
         const bitfield = self.bitfieldItemByName(bitfield_name) orelse return null;
         var next_offset: u32 = 0;
         for (bitfield.fields) |field| {
@@ -361,6 +416,7 @@ const Lowerer = struct {
             if (std.mem.eql(u8, field.name, field_name)) {
                 return .{
                     .field = field,
+                    .field_type = null,
                     .offset = offset,
                     .width = width,
                     .sign = sign,

@@ -105,6 +105,41 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             appendOp(parent_block, op);
         }
 
+        pub fn lowerInstantiatedEnumDecl(self: *Lowerer, instantiated: sema.InstantiatedEnum, parent_block: mlir.MlirBlock) anyerror!void {
+            const template_item = self.file.item(instantiated.template_item_id).Enum;
+            const loc = self.location(template_item.range);
+            const repr_type = defaultIntegerType(self.context);
+            const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(instantiated.mangled_name), repr_type);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+
+            if (template_item.variants.len > 0) {
+                const variant_names = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
+                const variant_values = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
+                for (template_item.variants, 0..) |variant, index| {
+                    variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
+                    variant_values[index] = mlir.oraIntegerAttrCreateI64FromType(repr_type, @intCast(index));
+                }
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_names"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_names.len), variant_names.ptr));
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_values"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_values.len), variant_values.ptr));
+            }
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.enum_decl"), mlir.oraBoolAttrCreate(self.context, true));
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, false));
+
+            appendOp(parent_block, op);
+        }
+
+        pub fn lowerInstantiatedBitfieldDecl(self: *Lowerer, instantiated: sema.InstantiatedBitfield, parent_block: mlir.MlirBlock) anyerror!void {
+            const template_item = self.file.item(instantiated.template_item_id).Bitfield;
+            const op = try self.createNamedPlaceholderOp("ora.bitfield_decl", instantiated.mangled_name, template_item.range, mlir.oraNoneTypeCreate(self.context));
+            if (try self.bitfieldMetadataForType(.{ .bitfield = .{ .name = instantiated.mangled_name } })) |metadata| {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
+                if (metadata.layout.len > 0) {
+                    mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield_layout"), mlir.oraStringAttrCreate(self.context, strRef(metadata.layout)));
+                }
+            }
+            appendOp(parent_block, op);
+        }
+
         pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr, parameters: []const ast.Parameter) anyerror!?[]const u8 {
             if (!function.is_generic) return function.name;
             const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
@@ -188,7 +223,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
 
             for (parameters, 0..) |parameter, index| {
-                try self.attachBitfieldParamMetadata(op, parameter.type_expr, @intCast(index));
+                try self.attachBitfieldParamMetadataForType(op, self.typecheck.pattern_types[parameter.pattern.index()].type, @intCast(index));
             }
 
             appendOp(parent_block, op);
@@ -221,8 +256,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 } else try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
                 if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
 
-                if (field.type_expr) |type_expr| {
-                    try self.attachBitfieldOpMetadata(op, type_expr);
+                if (field.type_expr) |_| {
+                    try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
                 }
 
                 appendOp(parent_block, op);
@@ -257,8 +292,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
             if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
 
-            if (field.type_expr) |type_expr| {
-                try self.attachBitfieldOpMetadata(op, type_expr);
+            if (field.type_expr) |_| {
+                try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
             }
 
             appendOp(parent_block, op);
@@ -480,8 +515,21 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             _ = mlir.oraFuncSetArgAttr(func_op, index, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
         }
 
+        pub fn attachBitfieldParamMetadataForType(self: *Lowerer, func_op: mlir.MlirOperation, ty: sema.Type, index: c_uint) !void {
+            const metadata = (try self.bitfieldMetadataForType(ty)) orelse return;
+            _ = mlir.oraFuncSetArgAttr(func_op, index, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
+        }
+
         pub fn attachBitfieldOpMetadata(self: *Lowerer, op: mlir.MlirOperation, type_expr_id: ast.TypeExprId) !void {
             const metadata = self.bitfieldMetadataForTypeExpr(type_expr_id) orelse return;
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
+            if (metadata.layout.len > 0) {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield_layout"), mlir.oraStringAttrCreate(self.context, strRef(metadata.layout)));
+            }
+        }
+
+        pub fn attachBitfieldOpMetadataForType(self: *Lowerer, op: mlir.MlirOperation, ty: sema.Type) !void {
+            const metadata = (try self.bitfieldMetadataForType(ty)) orelse return;
             mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
             if (metadata.layout.len > 0) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield_layout"), mlir.oraStringAttrCreate(self.context, strRef(metadata.layout)));
@@ -507,11 +555,42 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
         }
 
+        pub fn bitfieldMetadataForType(self: *Lowerer, ty: sema.Type) !?BitfieldMetadata {
+            if (ty.kind() != .bitfield) return null;
+            const name = ty.name() orelse return null;
+            if (self.instantiatedBitfieldByName(name)) |bitfield| {
+                const layout = try self.buildInstantiatedBitfieldLayout(bitfield);
+                return .{
+                    .name = bitfield.mangled_name,
+                    .layout = layout,
+                };
+            }
+            const template = self.bitfieldItemByName(name) orelse return null;
+            const layout = try self.buildBitfieldLayout(template);
+            return .{
+                .name = template.name,
+                .layout = layout,
+            };
+        }
+
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
             var buffer: std.ArrayList(u8) = .{};
             for (bitfield.fields) |field| {
                 const resolved = self.resolveBitfieldField(bitfield.name, field.name) orelse continue;
                 try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
+            }
+            return buffer.toOwnedSlice(self.allocator);
+        }
+
+        pub fn buildInstantiatedBitfieldLayout(self: *Lowerer, bitfield: sema.InstantiatedBitfield) ![]const u8 {
+            var buffer: std.ArrayList(u8) = .{};
+            var next_offset: u32 = 0;
+            for (bitfield.fields) |field| {
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+                const offset = field.offset orelse next_offset;
+                const sign = self.bitfieldFieldSignFromType(field.ty);
+                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                next_offset = offset + width;
             }
             return buffer.toOwnedSlice(self.allocator);
         }

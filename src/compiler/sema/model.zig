@@ -42,6 +42,25 @@ pub const InstantiatedStruct = struct {
     fields: []const InstantiatedStructField,
 };
 
+pub const InstantiatedEnum = struct {
+    template_item_id: ast.ItemId,
+    mangled_name: []const u8,
+};
+
+pub const InstantiatedBitfieldField = struct {
+    name: []const u8,
+    ty: Type,
+    offset: ?u32,
+    width: ?u32,
+};
+
+pub const InstantiatedBitfield = struct {
+    template_item_id: ast.ItemId,
+    mangled_name: []const u8,
+    base_type: ?Type,
+    fields: []const InstantiatedBitfieldField,
+};
+
 pub const Binding = union(enum) {
     item: ast.ItemId,
     pattern: ast.PatternId,
@@ -423,6 +442,8 @@ pub const TypeCheckResult = struct {
     expr_effects: []Effect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
+    instantiated_enums: []const InstantiatedEnum,
+    instantiated_bitfields: []const InstantiatedBitfield,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *TypeCheckResult) void {
@@ -451,6 +472,20 @@ pub const TypeCheckResult = struct {
 
     pub fn instantiatedStructByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedStruct {
         for (self.instantiated_structs) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
+    }
+
+    pub fn instantiatedEnumByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedEnum {
+        for (self.instantiated_enums) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
+    }
+
+    pub fn instantiatedBitfieldByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedBitfield {
+        for (self.instantiated_bitfields) |instantiated| {
             if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
         }
         return null;

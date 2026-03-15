@@ -2988,6 +2988,98 @@ test "compiler lowers instantiated generic struct declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
 }
 
+test "compiler monomorphizes generic enum types on type use" {
+    const source_text =
+        \\enum Choice(comptime T: type) {
+        \\    left,
+        \\    right,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256>) -> Choice<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.enum_, param_type.kind());
+    try testing.expectEqualStrings("Choice__u256", param_type.name().?);
+    try testing.expectEqualStrings("Choice__u256", typecheck.body_types[function.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedEnumByName("Choice__u256") != null);
+}
+
+test "compiler lowers instantiated generic enum declarations in HIR" {
+    const source_text =
+        \\enum Choice(comptime T: type) {
+        \\    left,
+        \\    right,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256>) -> Choice<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Choice__u256\">"));
+}
+
+test "compiler monomorphizes generic bitfield types on type use" {
+    const source_text =
+        \\bitfield Flags(comptime T: type): u256 {
+        \\    enabled: T;
+        \\}
+        \\
+        \\pub fn read_flag(value: Flags<u8>) -> u8 {
+        \\    return value.enabled;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.bitfield, param_type.kind());
+    try testing.expectEqualStrings("Flags__u8", param_type.name().?);
+    try testing.expect(typecheck.instantiatedBitfieldByName("Flags__u8") != null);
+}
+
+test "compiler lowers instantiated generic bitfield metadata in HIR" {
+    const source_text =
+        \\bitfield Flags(comptime T: type): u256 {
+        \\    enabled: T;
+        \\}
+        \\
+        \\pub fn read_flag(value: Flags<u8>) -> u8 {
+        \\    return value.enabled;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Flags__u8\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_layout"));
+}
+
 test "compiler lowers builtin, quantified, and verification expressions" {
     const source_text =
         \\pub fn verify(values: slice[u256], next: address) -> u256
