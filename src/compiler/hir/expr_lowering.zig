@@ -516,7 +516,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.impl_item_id,
                 resolved.method_item_id,
                 resolved.function,
-                resolved.trait_name,
                 resolved.target_name,
             );
 

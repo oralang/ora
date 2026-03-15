@@ -819,8 +819,11 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box__Marker__marked"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box__Marker__marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @run"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
 test "compiler syntax parses expression precedence and postfix chains" {

@@ -40,7 +40,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
                 .Trait => {},
-                .Impl => {},
+                .Impl => |impl_item| try @This().lowerImpl(self, item_id, impl_item, parent_block),
                 .TypeAlias => {},
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
@@ -85,6 +85,30 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (function.is_generic) return;
             const parameters = try self.runtimeFunctionParameters(function);
             try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{});
+        }
+
+        pub fn lowerImpl(self: *Lowerer, impl_item_id: ast.ItemId, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
+            _ = parent_block;
+            const impl_parent_block = if (self.item_index.lookup(impl_item.target_name)) |target_item_id| blk: {
+                if (self.file.item(target_item_id).* == .Contract) {
+                    const block = self.contract_body_blocks[target_item_id.index()];
+                    if (!mlir.oraBlockIsNull(block)) break :blk block;
+                }
+                break :blk self.module_body;
+            } else self.module_body;
+
+            for (impl_item.methods) |method_item_id| {
+                const function = switch (self.file.item(method_item_id).*) {
+                    .Function => |function| function,
+                    else => continue,
+                };
+                if (function.is_generic) continue;
+                const symbol_name = try @This().implMethodSymbolName(self, impl_item.target_name, function.name);
+                if (self.monomorphized_function_names.contains(symbol_name)) continue;
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{});
+                try self.monomorphized_function_names.put(symbol_name, {});
+                _ = impl_item_id;
+            }
         }
 
         pub fn lowerInstantiatedStructDecl(self: *Lowerer, instantiated: sema.InstantiatedStruct, parent_block: mlir.MlirBlock) anyerror!void {
@@ -163,10 +187,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             impl_item_id: ast.ItemId,
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
-            trait_name: []const u8,
             target_name: []const u8,
         ) anyerror![]const u8 {
-            const symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
+            const symbol_name = try @This().implMethodSymbolName(self, target_name, function.name);
             if (!self.monomorphized_function_names.contains(symbol_name)) {
                 const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
                     if (self.file.item(target_item_id).* == .Contract) {
@@ -182,12 +205,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return symbol_name;
         }
 
-        fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
+        fn implMethodSymbolName(self: *Lowerer, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
             var name = std.ArrayList(u8){};
             try name.appendSlice(self.allocator, target_name);
-            try name.appendSlice(self.allocator, "__");
-            try name.appendSlice(self.allocator, trait_name);
-            try name.appendSlice(self.allocator, "__");
+            try name.appendSlice(self.allocator, ".");
             try name.appendSlice(self.allocator, method_name);
             return name.toOwnedSlice(self.allocator);
         }
