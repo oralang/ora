@@ -497,6 +497,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveTraitBoundMethodCall(self, call.callee) orelse return null;
+            const runtime_args = if (resolved.function.is_generic)
+                self.parent.stripGenericCallArgs(resolved.function, call)
+            else
+                call.args;
+            const runtime_parameters = try self.parent.runtimeFunctionParameters(resolved.function);
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             var receiver_value = try self.lowerExpr(resolved.receiver_expr, locals);
@@ -504,9 +509,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             receiver_value = try self.convertValueForFlow(receiver_value, receiver_type, exprRange(self.parent.file, resolved.receiver_expr));
             try args.append(self.parent.allocator, receiver_value);
 
-            for (call.args, 0..) |arg, index| {
+            for (runtime_args, 0..) |arg, index| {
                 var arg_value = try self.lowerExpr(arg, locals);
-                const parameter = resolved.function.parameters[index + 1];
+                const parameter = runtime_parameters[index + 1];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
                 arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
                 try args.append(self.parent.allocator, arg_value);
@@ -517,6 +522,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.method_item_id,
                 resolved.function,
                 resolved.target_name,
+                call,
             );
 
             const result_type = self.parent.lowerExprType(expr_id);

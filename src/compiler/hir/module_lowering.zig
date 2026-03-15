@@ -188,8 +188,30 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
             target_name: []const u8,
+            call: ?ast.CallExpr,
         ) anyerror![]const u8 {
-            const symbol_name = try @This().implMethodSymbolName(self, target_name, function.name);
+            const base_symbol_name = try @This().implMethodSymbolName(self, target_name, function.name);
+            if (function.is_generic) {
+                const method_call = call orelse return base_symbol_name;
+                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return base_symbol_name;
+                const runtime_parameters = try self.runtimeFunctionParameters(function);
+                const symbol_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+                if (!self.monomorphized_function_names.contains(symbol_name)) {
+                    const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
+                        if (self.file.item(target_item_id).* == .Contract) {
+                            const block = self.contract_body_blocks[target_item_id.index()];
+                            if (!mlir.oraBlockIsNull(block)) break :blk block;
+                        }
+                        break :blk self.module_body;
+                    } else self.module_body;
+                    try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings);
+                    try self.monomorphized_function_names.put(symbol_name, {});
+                    _ = impl_item_id;
+                }
+                return symbol_name;
+            }
+
+            const symbol_name = base_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
                 const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
                     if (self.file.item(target_item_id).* == .Contract) {

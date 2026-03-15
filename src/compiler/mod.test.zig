@@ -826,6 +826,41 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
+test "compiler lowers generic impl methods for trait-bound calls" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(comptime N: u256, self) -> u256;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(comptime N: u256, self) -> u256 {
+        \\        return N;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn choose(comptime T: type, a: T) -> u256 where T: Marker {
+        \\        return a.marked(7);
+        \\    }
+        \\
+        \\    pub fn run(a: Box) -> u256 {
+        \\        return choose(Box, a);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked__7"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked__7"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {
