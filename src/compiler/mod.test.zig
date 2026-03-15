@@ -3022,6 +3022,32 @@ test "compiler monomorphizes generic contract calls with generic struct type arg
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
 }
 
+test "compiler does not type-check generic call type args as runtime arguments" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(a: Pair<u256>, b: Pair<u256>) -> Pair<u256> {
+        \\        return first(Pair<u256>, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const type_diags = &module_typecheck.diagnostics;
+    try testing.expect(type_diags.isEmpty());
+}
+
 test "compiler emits user diagnostics for generic arity mismatches" {
     const source_text =
         \\struct Pair(comptime T: type) {
@@ -5416,6 +5442,26 @@ test "compiler reports integer constant overflow against declared widths" {
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
     try testing.expectEqual(@as(usize, 5), type_diags.len());
     try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
+}
+
+test "compiler reports integer constant overflow at call sites" {
+    const source_text =
+        \\fn take(value: u8) -> u8 {
+        \\    return value;
+        \\}
+        \\
+        \\pub fn narrow() -> u8 {
+        \\    return take(256);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expect(countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'") >= 1);
 }
 
 test "compiler reports constant cast overflow against target integer widths" {

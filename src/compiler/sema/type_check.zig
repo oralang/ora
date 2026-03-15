@@ -796,20 +796,7 @@ const TypeChecker = struct {
                         try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
                     }
                 } else {
-                    // Type-check individual arguments (no region check — argument passing copies through the stack).
-                    const param_types = callee_type.paramTypes();
-                    if (param_types.len == call.args.len) {
-                        for (call.args, param_types) |arg, param_type| {
-                            const arg_type = self.expr_types[arg.index()];
-                            if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
-                                !typesAssignable(param_type, arg_type))
-                            {
-                                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                                    typeDisplayName(param_type), typeDisplayName(arg_type),
-                                });
-                            }
-                        }
-                    }
+                    try self.checkCallArguments(call, callee_type);
                 }
             },
             .Builtin => |builtin| {
@@ -968,6 +955,53 @@ const TypeChecker = struct {
             try parameters.append(self.arena, parameter);
         }
         return parameters.toOwnedSlice(self.arena);
+    }
+
+    fn exprRange(self: *const TypeChecker, expr_id: ast.ExprId) source.TextRange {
+        return switch (self.file.expression(expr_id).*) {
+            inline else => |expr| expr.range,
+        };
+    }
+
+    fn checkCallArguments(self: *TypeChecker, call: ast.CallExpr, callee_type: Type) !void {
+        const callee_id = self.calleeFunctionItem(call.callee);
+        if (callee_id) |item_id| {
+            const function = switch (self.file.item(item_id).*) {
+                .Function => |function| function,
+                else => return,
+            };
+            const runtime_parameters = try self.runtimeFunctionParameters(function);
+            if (runtime_parameters.len != call.args.len) return;
+            for (call.args, runtime_parameters) |arg, parameter| {
+                const param_type = self.pattern_types[parameter.pattern.index()].type;
+                if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
+                const arg_type = self.expr_types[arg.index()];
+                if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
+                    !typesAssignable(param_type, arg_type))
+                {
+                    try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
+                        typeDisplayName(param_type), typeDisplayName(arg_type),
+                    });
+                }
+            }
+            return;
+        }
+
+        // Fall back to the callee type when the call target is not a directly-resolved function item.
+        // This cannot recover comptime-vs-runtime parameter metadata, so only use it for non-item callables.
+        const param_types = callee_type.paramTypes();
+        if (param_types.len != call.args.len) return;
+        for (call.args, param_types) |arg, param_type| {
+            if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
+            const arg_type = self.expr_types[arg.index()];
+            if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
+                !typesAssignable(param_type, arg_type))
+            {
+                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
+                    typeDisplayName(param_type), typeDisplayName(arg_type),
+                });
+            }
+        }
     }
 
     fn isGenericTypeParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {
