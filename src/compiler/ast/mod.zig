@@ -84,6 +84,7 @@ pub const BlockStmt = nodes.BlockStmt;
 pub const Body = nodes.Body;
 pub const Parameter = nodes.Parameter;
 pub const SpecClause = nodes.SpecClause;
+pub const TraitBound = nodes.TraitBound;
 pub const StructField = nodes.StructField;
 pub const BitfieldField = nodes.BitfieldField;
 pub const LogField = nodes.LogField;

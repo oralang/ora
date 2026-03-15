@@ -162,6 +162,7 @@ pub fn mixin(Builder: type) type {
             const parameters = try Lowering.lowerParameterListNode(self, params_node);
             const return_type = firstDirectTypeChild(node) orelse null;
 
+            var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
             var body: ?BodyId = null;
 
@@ -170,6 +171,7 @@ pub fn mixin(Builder: type) type {
                 switch (child) {
                     .token => {},
                     .node => |child_node| switch (child_node.kind()) {
+                        .TraitBoundClause => try trait_bounds.append(self.allocator, try Lowering.lowerTraitBoundClauseNode(self, child_node)),
                         .SpecClause => try clauses.append(self.allocator, try Lowering.lowerSpecClauseNode(self, child_node)),
                         .Body => body = try Lowering.lowerBodyNode(self, child_node),
                         else => {},
@@ -196,6 +198,7 @@ pub fn mixin(Builder: type) type {
                 .visibility = visibility,
                 .parameters = parameters,
                 .return_type = if (return_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
+                .trait_bounds = try trait_bounds.toOwnedSlice(self.allocator),
                 .clauses = try clauses.toOwnedSlice(self.allocator),
                 .body = body_id,
                 .parent_contract = parent_contract,
@@ -398,12 +401,14 @@ pub fn mixin(Builder: type) type {
                 }
             }
 
+            var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
                     .node => |child_node| switch (child_node.kind()) {
+                        .TraitBoundClause => try trait_bounds.append(self.allocator, try Lowering.lowerTraitBoundClauseNode(self, child_node)),
                         .SpecClause => try clauses.append(self.allocator, try Lowering.lowerSpecClauseNode(self, child_node)),
                         else => {},
                     },
@@ -416,8 +421,38 @@ pub fn mixin(Builder: type) type {
                 .has_self = has_self,
                 .parameters = try parameters.toOwnedSlice(self.allocator),
                 .return_type = if (firstDirectTypeChild(node)) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
+                .trait_bounds = try trait_bounds.toOwnedSlice(self.allocator),
                 .clauses = try clauses.toOwnedSlice(self.allocator),
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
+            };
+        }
+
+        fn lowerTraitBoundClauseNode(self: *Builder, node: SyntaxNode) !nodes.TraitBound {
+            const parameter_name = if (firstDirectTokenOfKind(node, .Identifier)) |token|
+                tokenText(token)
+            else blk: {
+                _ = try Lowering.malformedItem(self, node, "missing trait bound parameter");
+                break :blk "";
+            };
+
+            const trait_type_expr = if (firstDirectTypeChild(node)) |type_node|
+                try Lowering.lowerTypeNode(self, type_node)
+            else
+                try Lowering.malformedType(self, node, "missing trait bound type");
+
+            const trait_name = switch (self.type_exprs.items[trait_type_expr.index()]) {
+                .Path => |path| path.name,
+                .Generic => |generic| generic.name,
+                else => blk: {
+                    _ = try Lowering.malformedItem(self, node, "trait bounds require a named trait");
+                    break :blk "";
+                },
+            };
+
+            return .{
+                .range = node.range(),
+                .parameter_name = parameter_name,
+                .trait_name = trait_name,
             };
         }
 

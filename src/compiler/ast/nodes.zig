@@ -485,6 +485,12 @@ pub const SpecClause = struct {
     expr: ExprId,
 };
 
+pub const TraitBound = struct {
+    range: source.TextRange,
+    parameter_name: []const u8,
+    trait_name: []const u8,
+};
+
 pub const StructField = struct {
     range: source.TextRange,
     name: []const u8,
@@ -517,6 +523,7 @@ pub const TraitMethod = struct {
     has_self: bool,
     parameters: []Parameter,
     return_type: ?TypeExprId,
+    trait_bounds: []TraitBound,
     clauses: []SpecClause,
     is_comptime: bool,
 };
@@ -563,6 +570,7 @@ pub const FunctionItem = struct {
     visibility: Visibility,
     parameters: []Parameter,
     return_type: ?TypeExprId,
+    trait_bounds: []TraitBound,
     clauses: []SpecClause,
     body: BodyId,
     parent_contract: ?ItemId,

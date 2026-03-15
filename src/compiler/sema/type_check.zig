@@ -1219,7 +1219,7 @@ const TypeChecker = struct {
         return function.parameters.len;
     }
 
-    fn genericTypeBindingsForCall(self: *const TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
+    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
         const generic_count = self.leadingComptimeParameterCount(function);
         if (generic_count == 0) return &.{};
         if (call.args.len < generic_count) return null;
@@ -1230,6 +1230,7 @@ const TypeChecker = struct {
             const value = self.genericBindingValueForCallArg(parameter, call.args[index]) orelse return null;
             bindings[index] = .{ .name = name, .value = value };
         }
+        self.validateGenericTraitBounds(function, call.range, bindings) catch return null;
         return bindings;
     }
 
@@ -1385,6 +1386,46 @@ const TypeChecker = struct {
             .integer => |text| text,
             .ty => null,
         };
+    }
+
+    fn validateGenericTraitBounds(
+        self: *TypeChecker,
+        function: ast.FunctionItem,
+        call_range: source.TextRange,
+        bindings: []const GenericTypeBinding,
+    ) anyerror!void {
+        for (function.trait_bounds) |bound| {
+            const binding = self.genericBindingByName(bindings, bound.parameter_name) orelse continue;
+            const bound_type = genericBindingType(binding) orelse {
+                try self.emitRangeError(call_range, "trait bound '{s}: {s}' requires a type argument", .{
+                    bound.parameter_name,
+                    bound.trait_name,
+                });
+                continue;
+            };
+
+            const target_name = bound_type.name() orelse {
+                try self.emitRangeError(call_range, "type '{s}' does not implement trait '{s}'", .{
+                    typeDisplayName(bound_type),
+                    bound.trait_name,
+                });
+                continue;
+            };
+            if (self.item_index.lookupImpl(bound.trait_name, target_name) == null) {
+                try self.emitRangeError(call_range, "type '{s}' does not implement trait '{s}'", .{
+                    typeDisplayName(bound_type),
+                    bound.trait_name,
+                });
+            }
+        }
+    }
+
+    fn genericBindingByName(self: *TypeChecker, bindings: []const GenericTypeBinding, name: []const u8) ?GenericTypeBinding {
+        _ = self;
+        for (bindings) |binding| {
+            if (std.mem.eql(u8, binding.name, name)) return binding;
+        }
+        return null;
     }
 
     fn comptimeIntegerParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {

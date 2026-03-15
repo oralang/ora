@@ -379,7 +379,7 @@ const Parser = struct {
             try self.reportHere("expected parameter list in " ++ context);
         }
 
-        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
+        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Requires) and !self.at(.Ensures)) {
             if (self.at(.Semicolon)) break;
             if (self.at(.Arrow)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
@@ -389,9 +389,38 @@ const Parser = struct {
             try children.append(self.allocator, try self.parseElement(null));
         }
 
+        if (self.at(.Where)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures) and !self.at(.Semicolon)) {
+                try children.append(self.allocator, .{ .node = try self.parseTraitBoundClauseNode() });
+                if (!self.at(.Comma)) break;
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+        }
+
         while (self.at(.Requires) or self.at(.Ensures)) {
             try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
         }
+    }
+
+    fn parseTraitBoundClauseNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Identifier)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected type parameter name in trait bound");
+        }
+
+        if (self.at(.Colon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ':' in trait bound");
+        }
+
+        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Requires, .Ensures, .LeftBrace, .Semicolon }) });
+        return self.finishNode(SyntaxKind.TraitBoundClause, children.items);
     }
 
     fn parseParameterListNode(self: *Parser) anyerror!green.GreenNodeId {

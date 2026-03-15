@@ -634,6 +634,104 @@ test "compiler exposes trait and impl interfaces in sema" {
     try testing.expectEqualStrings("decimals", impl_interface.?.methods[1].name);
 }
 
+test "compiler parses and lowers trait bounds on generic functions" {
+    const source_text =
+        \\trait Comparable {
+        \\    fn compare(self, other: u256) -> bool;
+        \\}
+        \\
+        \\fn keep(comptime T: type, value: T) -> T where T: Comparable, T: Comparable {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(syntax_tree);
+    try testing.expect(containsNodeOfKind(root, .TraitBoundClause));
+
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    try testing.expectEqual(@as(usize, 2), function.trait_bounds.len);
+    try testing.expectEqualStrings("T", function.trait_bounds[0].parameter_name);
+    try testing.expectEqualStrings("Comparable", function.trait_bounds[0].trait_name);
+}
+
+test "compiler accepts bounded generic calls for implemented trait types" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn keep(comptime T: type, value: T) -> T where T: Marker {
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn run(value: Box) -> Box {
+        \\        return keep(Box, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects bounded generic calls for types without impl" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\struct Plain {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn keep(comptime T: type, value: T) -> T where T: Marker {
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn run(value: Plain) -> Plain {
+        \\        return keep(Plain, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'Plain' does not implement trait 'Marker'"));
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {
