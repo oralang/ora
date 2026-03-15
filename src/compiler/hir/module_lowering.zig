@@ -84,6 +84,27 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{});
         }
 
+        pub fn lowerInstantiatedStructDecl(self: *Lowerer, instantiated: sema.InstantiatedStruct, parent_block: mlir.MlirBlock) anyerror!void {
+            const template_item = self.file.item(instantiated.template_item_id).Struct;
+            const loc = self.location(template_item.range);
+            const op = mlir.oraStructDeclOpCreate(self.context, loc, strRef(instantiated.mangled_name));
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+
+            if (instantiated.fields.len > 0) {
+                const field_names = try self.allocator.alloc(mlir.MlirAttribute, instantiated.fields.len);
+                const field_types = try self.allocator.alloc(mlir.MlirAttribute, instantiated.fields.len);
+                for (instantiated.fields, 0..) |field, index| {
+                    field_names[index] = mlir.oraStringAttrCreate(self.context, strRef(field.name));
+                    field_types[index] = mlir.oraTypeAttrCreateFromType(self.lowerSemaType(field.ty, template_item.range));
+                }
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.field_names"), mlir.oraArrayAttrCreate(self.context, @intCast(field_names.len), field_names.ptr));
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.field_types"), mlir.oraArrayAttrCreate(self.context, @intCast(field_types.len), field_types.ptr));
+            }
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.struct_decl"), mlir.oraBoolAttrCreate(self.context, true));
+
+            appendOp(parent_block, op);
+        }
+
         pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr, parameters: []const ast.Parameter) anyerror!?[]const u8 {
             if (!function.is_generic) return function.name;
             const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
@@ -113,7 +134,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             defer self.active_type_bindings = previous_type_bindings;
 
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
-            const return_type = if (function.return_type) |type_id| self.lowerTypeExpr(type_id) else null;
+            const return_type = if (function.return_type) |_| blk: {
+                if (type_bindings.len == 0) {
+                    break :blk self.lowerSemaType(self.typecheck.body_types[function.body.index()], function.range);
+                }
+                break :blk self.lowerSemaType(self.typecheck.body_types[function.body.index()], function.range);
+            } else null;
 
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", symbol_name));
             try attrs.append(self.allocator, namedStringAttr(
@@ -128,7 +154,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
             for (parameters) |parameter| {
-                try param_types.append(self.allocator, self.lowerTypeExpr(parameter.type_expr));
+                const param_type = if (type_bindings.len == 0)
+                    self.lowerSemaType(self.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
+                else
+                    self.lowerTypeExpr(parameter.type_expr);
+                try param_types.append(self.allocator, param_type);
                 try param_locs.append(self.allocator, self.location(parameter.range));
             }
 
@@ -174,7 +204,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerField(self: *Lowerer, item_id: ast.ItemId, field: ast.FieldItem, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(field.range);
-            const ty = if (field.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else defaultIntegerType(self.context);
+            const ty = if (field.type_expr) |_|
+                self.lowerSemaType(self.typecheck.item_types[item_id.index()], field.range)
+            else
+                defaultIntegerType(self.context);
 
             if (field.binding_kind == .immutable) {
                 const op = if (field.value) |expr_id| blk: {
@@ -234,7 +267,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerConstant(self: *Lowerer, item_id: ast.ItemId, constant: ast.ConstantItem, parent_block: mlir.MlirBlock) anyerror!void {
             const expr = self.file.expression(constant.value).*;
-            const declared_type = if (constant.type_expr) |type_expr| self.lowerTypeExpr(type_expr) else self.lowerExprType(constant.value);
+            const declared_type = if (constant.type_expr) |_|
+                self.lowerSemaType(self.typecheck.item_types[item_id.index()], constant.range)
+            else
+                self.lowerExprType(constant.value);
             const result_type = if (mlir.oraTypeIsAddressType(declared_type))
                 mlir.oraIntegerTypeCreate(self.context, 160)
             else

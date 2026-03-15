@@ -136,6 +136,10 @@ pub fn lowerModule(
     };
     @memset(lowerer.contract_body_blocks, std.mem.zeroes(mlir.MlirBlock));
 
+    for (typecheck.instantiated_structs) |instantiated| {
+        try lowerer.lowerInstantiatedStructDecl(instantiated, lowerer.module_body);
+    }
+
     for (file.root_items) |item_id| {
         try lowerer.lowerItem(item_id, lowerer.module_body);
     }
@@ -180,6 +184,7 @@ const Lowerer = struct {
     pub const lowerItem = ModuleLowering.lowerItem;
     pub const lowerContract = ModuleLowering.lowerContract;
     pub const lowerFunction = ModuleLowering.lowerFunction;
+    pub const lowerInstantiatedStructDecl = ModuleLowering.lowerInstantiatedStructDecl;
     pub const lowerStructDecl = ModuleLowering.lowerStructDecl;
     pub const lowerEnumDecl = ModuleLowering.lowerEnumDecl;
     pub const lowerField = ModuleLowering.lowerField;

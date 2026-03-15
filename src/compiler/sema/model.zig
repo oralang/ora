@@ -31,6 +31,17 @@ pub const NamedItem = struct {
     item_id: ast.ItemId,
 };
 
+pub const InstantiatedStructField = struct {
+    name: []const u8,
+    ty: Type,
+};
+
+pub const InstantiatedStruct = struct {
+    template_item_id: ast.ItemId,
+    mangled_name: []const u8,
+    fields: []const InstantiatedStructField,
+};
+
 pub const Binding = union(enum) {
     item: ast.ItemId,
     pattern: ast.PatternId,
@@ -411,6 +422,7 @@ pub const TypeCheckResult = struct {
     expr_types: []Type,
     expr_effects: []Effect,
     body_types: []Type,
+    instantiated_structs: []const InstantiatedStruct,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *TypeCheckResult) void {
@@ -435,6 +447,13 @@ pub const TypeCheckResult = struct {
 
     pub fn itemEffect(self: *const TypeCheckResult, id: ast.ItemId) Effect {
         return self.item_effects[id.index()];
+    }
+
+    pub fn instantiatedStructByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedStruct {
+        for (self.instantiated_structs) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
     }
 };
 

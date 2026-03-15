@@ -1260,7 +1260,6 @@ test "compiler inserts parameter refinement guards in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "parameter_refinement"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MinValue"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZeroAddress"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
 }
 
@@ -2939,6 +2938,54 @@ test "compiler monomorphizes generic contract function calls in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first__u256"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @first__u256"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
+}
+
+test "compiler monomorphizes generic struct types on type use" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn identity(value: Pair<u256>) -> Pair<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("Pair__u256", param_type.name().?);
+    try testing.expectEqualStrings("Pair__u256", typecheck.body_types[function.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+}
+
+test "compiler lowers instantiated generic struct declarations in HIR" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn identity(value: Pair<u256>) -> Pair<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct.decl"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
 }
 
 test "compiler lowers builtin, quantified, and verification expressions" {

@@ -18,11 +18,14 @@ const Region = model.Region;
 const Effect = model.Effect;
 const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
+const InstantiatedStruct = model.InstantiatedStruct;
+const InstantiatedStructField = model.InstantiatedStructField;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
+const descriptorFromGenericType = descriptors.descriptorFromGenericType;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
@@ -247,6 +250,7 @@ pub fn typeCheck(
         .expr_types = &.{},
         .expr_effects = &.{},
         .body_types = &.{},
+        .instantiated_structs = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -274,19 +278,16 @@ pub fn typeCheck(
         switch (item) {
             .Function => |function| {
                 for (function.parameters) |parameter| {
-                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(
-                        try descriptorFromTypeExpr(arena, file, item_index, parameter.type_expr),
-                        .calldata,
-                    );
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(.{ .unknown = {} }, .calldata);
                 }
-                body_types[function.body.index()] = if (function.return_type) |type_expr| try descriptorFromTypeExpr(arena, file, item_index, type_expr) else .{ .void = {} };
+                body_types[function.body.index()] = if (function.return_type) |_| .{ .unknown = {} } else .{ .void = {} };
             },
             .Field => |field| {
                 item_regions[index] = declarationRegion(field.storage_class);
-                if (field.type_expr) |type_expr| item_types[index] = try descriptorFromTypeExpr(arena, file, item_index, type_expr);
+                if (field.type_expr) |_| item_types[index] = .{ .unknown = {} };
             },
             .Constant => |constant| {
-                if (constant.type_expr) |type_expr| item_types[index] = try descriptorFromTypeExpr(arena, file, item_index, type_expr);
+                if (constant.type_expr) |_| item_types[index] = .{ .unknown = {} };
             },
             else => {},
         }
@@ -296,9 +297,8 @@ pub fn typeCheck(
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
-                pattern_types[decl.pattern.index()] = LocatedType.unlocated(
-                    try descriptorFromTypeExpr(arena, file, item_index, type_expr),
-                );
+                _ = type_expr;
+                pattern_types[decl.pattern.index()] = LocatedType.unlocated(.{ .unknown = {} });
             }
         }
     }
@@ -317,10 +317,44 @@ pub fn typeCheck(
         .expr_types = expr_types,
         .expr_effects = expr_effects,
         .effect_states = effect_states,
+        .instantiated_structs = .{},
         .diagnostics = &result.diagnostics,
     };
 
     try result.diagnostics.appendList(&const_eval.diagnostics);
+
+    for (file.items, 0..) |item, index| {
+        switch (item) {
+            .Function => |function| {
+                for (function.parameters) |parameter| {
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(
+                        try typechecker.resolveTypeExpr(parameter.type_expr),
+                        .calldata,
+                    );
+                }
+                body_types[function.body.index()] = if (function.return_type) |type_expr|
+                    try typechecker.resolveTypeExpr(type_expr)
+                else
+                    .{ .void = {} };
+            },
+            .Field => |field| {
+                if (field.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
+            },
+            .Constant => |constant| {
+                if (constant.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
+            },
+            else => {},
+        }
+    }
+
+    for (file.statements) |statement| {
+        if (statement == .VariableDecl) {
+            const decl = statement.VariableDecl;
+            if (decl.type_expr) |type_expr| {
+                pattern_types[decl.pattern.index()] = LocatedType.unlocated(try typechecker.resolveTypeExpr(type_expr));
+            }
+        }
+    }
 
     for (file.root_items) |item_id| {
         try typechecker.visitItem(item_id);
@@ -333,6 +367,7 @@ pub fn typeCheck(
     result.expr_types = expr_types;
     result.expr_effects = expr_effects;
     result.body_types = body_types;
+    result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
     return result;
 }
 
@@ -350,6 +385,7 @@ const TypeChecker = struct {
     expr_types: []Type,
     expr_effects: []Effect,
     effect_states: []EffectSummaryState,
+    instantiated_structs: std.ArrayList(InstantiatedStruct),
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
@@ -367,7 +403,7 @@ const TypeChecker = struct {
             .Function => |function| {
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
-                self.current_return_type = if (function.return_type) |type_expr| try descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) else .{ .void = {} };
+                self.current_return_type = if (function.return_type) |type_expr| try self.resolveTypeExpr(type_expr) else .{ .void = {} };
                 self.current_function_item = item_id;
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
@@ -954,11 +990,215 @@ const TypeChecker = struct {
         };
     }
 
+    fn resolveTypeExpr(self: *TypeChecker, type_expr: ast.TypeExprId) anyerror!Type {
+        return self.resolveTypeExprWithBindings(type_expr, &.{});
+    }
+
+    fn resolveTypeExprWithBindings(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) anyerror!Type {
+        return switch (self.file.typeExpr(type_expr).*) {
+            .Path => |path| blk: {
+                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                for (bindings) |binding| {
+                    if (std.mem.eql(u8, trimmed, binding.name)) break :blk binding.ty;
+                }
+                break :blk descriptorFromPathName(self.file, self.item_index, trimmed);
+            },
+            .Generic => |generic| self.resolveGenericTypeWithBindings(generic, bindings),
+            .Tuple => |tuple| blk: {
+                const elements = try self.arena.alloc(Type, tuple.elements.len);
+                for (tuple.elements, 0..) |element, index| {
+                    elements[index] = try self.resolveTypeExprWithBindings(element, bindings);
+                }
+                break :blk .{ .tuple = elements };
+            },
+            .Array => |array| .{ .array = .{
+                .element_type = try self.storeType(try self.resolveTypeExprWithBindings(array.element, bindings)),
+                .len = std.fmt.parseInt(u32, array.size.text, 10) catch null,
+            } },
+            .Slice => |slice| .{ .slice = .{
+                .element_type = try self.storeType(try self.resolveTypeExprWithBindings(slice.element, bindings)),
+            } },
+            .ErrorUnion => |error_union| blk: {
+                const errors = try self.arena.alloc(Type, error_union.errors.len);
+                for (error_union.errors, 0..) |error_type, index| {
+                    errors[index] = try self.resolveTypeExprWithBindings(error_type, bindings);
+                }
+                break :blk .{ .error_union = .{
+                    .payload_type = try self.storeType(try self.resolveTypeExprWithBindings(error_union.payload, bindings)),
+                    .error_types = errors,
+                } };
+            },
+            .Error => .{ .unknown = {} },
+        };
+    }
+
+    fn resolveGenericType(self: *TypeChecker, generic: ast.GenericTypeExpr) anyerror!Type {
+        return self.resolveGenericTypeWithBindings(generic, &.{});
+    }
+
+    fn resolveGenericTypeWithBindings(self: *TypeChecker, generic: ast.GenericTypeExpr, bindings: []const GenericTypeBinding) anyerror!Type {
+        if (self.item_index.lookup(generic.name)) |item_id| {
+            switch (self.file.item(item_id).*) {
+                .Struct => |struct_item| if (struct_item.is_generic) {
+                    return try self.instantiateGenericStruct(item_id, struct_item, generic, bindings);
+                },
+                else => {},
+            }
+        }
+        if (bindings.len == 0) {
+            return descriptorFromGenericType(self.arena, self.file, self.item_index, generic);
+        }
+
+        if (std.mem.eql(u8, generic.name, "map")) {
+            return .{ .map = .{
+                .key_type = if (generic.args.len > 0 and generic.args[0] == .Type)
+                    try self.storeType(try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings))
+                else
+                    null,
+                .value_type = if (generic.args.len > 1 and generic.args[1] == .Type)
+                    try self.storeType(try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings))
+                else
+                    null,
+            } };
+        }
+
+        if (std.mem.eql(u8, generic.name, "MinValue") or
+            std.mem.eql(u8, generic.name, "MaxValue") or
+            std.mem.eql(u8, generic.name, "InRange") or
+            std.mem.eql(u8, generic.name, "Scaled") or
+            std.mem.eql(u8, generic.name, "Exact") or
+            std.mem.eql(u8, generic.name, "NonZero") or
+            std.mem.eql(u8, generic.name, "NonZeroAddress") or
+            std.mem.eql(u8, generic.name, "BasisPoints"))
+        {
+            if (generic.args.len > 0 and generic.args[0] == .Type) {
+                return .{ .refinement = .{
+                    .name = generic.name,
+                    .base_type = try self.storeType(try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings)),
+                    .args = generic.args,
+                } };
+            }
+        }
+
+        return descriptorFromPathName(self.file, self.item_index, generic.name);
+    }
+
     fn structLiteralType(self: *const TypeChecker, name: []const u8) Type {
         if (self.item_index.lookup(name)) |item_id| {
             return self.item_types[item_id.index()];
         }
+        if (self.instantiatedStructByName(name) != null) {
+            return .{ .struct_ = .{ .name = name } };
+        }
         return .{ .named = .{ .name = name } };
+    }
+
+    fn instantiateGenericStruct(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        struct_item: ast.StructItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror!Type {
+        const bindings = try self.genericTypeBindingsForStruct(struct_item, generic, outer_bindings);
+        const mangled_name = try self.mangleGenericStructName(struct_item.name, bindings);
+
+        if (self.instantiatedStructByName(mangled_name) == null) {
+            const fields = try self.arena.alloc(InstantiatedStructField, struct_item.fields.len);
+            for (struct_item.fields, 0..) |field, index| {
+                fields[index] = .{
+                    .name = field.name,
+                    .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
+                };
+            }
+            try self.instantiated_structs.append(self.arena, .{
+                .template_item_id = item_id,
+                .mangled_name = mangled_name,
+                .fields = fields,
+            });
+        }
+
+        return .{ .struct_ = .{ .name = mangled_name } };
+    }
+
+    fn genericTypeBindingsForStruct(
+        self: *TypeChecker,
+        struct_item: ast.StructItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror![]const GenericTypeBinding {
+        if (struct_item.template_parameters.len != generic.args.len) return error.InvalidGenericStructInstantiation;
+
+        const bindings = try self.arena.alloc(GenericTypeBinding, struct_item.template_parameters.len);
+        for (struct_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
+            const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericStructInstantiation;
+            const ty = switch (arg) {
+                .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
+                else => return error.InvalidGenericStructInstantiation,
+            };
+            bindings[index] = .{
+                .name = name,
+                .ty = ty,
+            };
+        }
+        return bindings;
+    }
+
+    fn mangleGenericStructName(self: *TypeChecker, base_name: []const u8, bindings: []const GenericTypeBinding) anyerror![]const u8 {
+        var name = std.ArrayList(u8){};
+        try name.appendSlice(self.arena, base_name);
+        for (bindings) |binding| {
+            try name.appendSlice(self.arena, "__");
+            try self.appendTypeMangleName(&name, binding.ty);
+        }
+        return name.toOwnedSlice(self.arena);
+    }
+
+    fn appendTypeMangleName(self: *TypeChecker, buffer: *std.ArrayList(u8), ty: Type) anyerror!void {
+        switch (ty) {
+            .bool => try buffer.appendSlice(self.arena, "bool"),
+            .address => try buffer.appendSlice(self.arena, "address"),
+            .string => try buffer.appendSlice(self.arena, "string"),
+            .bytes => try buffer.appendSlice(self.arena, "bytes"),
+            .void => try buffer.appendSlice(self.arena, "void"),
+            .integer => |integer| try buffer.appendSlice(self.arena, integer.spelling orelse "int"),
+            .named => |named| try buffer.appendSlice(self.arena, named.name),
+            .struct_ => |named| try buffer.appendSlice(self.arena, named.name),
+            .contract => |named| try buffer.appendSlice(self.arena, named.name),
+            .bitfield => |named| try buffer.appendSlice(self.arena, named.name),
+            .enum_ => |named| try buffer.appendSlice(self.arena, named.name),
+            .slice => |slice| {
+                try buffer.appendSlice(self.arena, "slice_");
+                try self.appendTypeMangleName(buffer, slice.element_type.*);
+            },
+            .array => |array| {
+                try buffer.appendSlice(self.arena, "array_");
+                try self.appendTypeMangleName(buffer, array.element_type.*);
+                if (array.len) |len| {
+                    try buffer.append(self.arena, '_');
+                    try buffer.writer(self.arena).print("{d}", .{len});
+                }
+            },
+            .map => |map| {
+                try buffer.appendSlice(self.arena, "map");
+                if (map.key_type) |key| {
+                    try buffer.append(self.arena, '_');
+                    try self.appendTypeMangleName(buffer, key.*);
+                }
+                if (map.value_type) |value| {
+                    try buffer.append(self.arena, '_');
+                    try self.appendTypeMangleName(buffer, value.*);
+                }
+            },
+            else => try buffer.appendSlice(self.arena, "type"),
+        }
+    }
+
+    fn instantiatedStructByName(self: *const TypeChecker, name: []const u8) ?InstantiatedStruct {
+        for (self.instantiated_structs.items) |instantiated| {
+            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
     }
 
     fn builtinReturnType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
@@ -2006,6 +2246,14 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
+        if (base_type.kind() == .struct_) {
+            if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
+                for (instantiated.fields) |field| {
+                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
+                }
+                return .{ .unknown = {} };
+            }
+        }
         const item_id = self.itemIdForType(base_type) orelse return .{ .unknown = {} };
         return switch (self.file.item(item_id).*) {
             .Struct => |struct_item| blk: {
