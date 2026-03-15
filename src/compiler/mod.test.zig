@@ -2817,6 +2817,35 @@ test "compiler preserves generic function template parameters in AST" {
     try testing.expect(!function.parameters[1].is_comptime);
 }
 
+test "compiler preserves generic struct and contract template metadata in AST" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\contract Box(comptime T: type) {
+        \\    let value: T;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+
+    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
+    try testing.expect(struct_item.is_generic);
+    try testing.expectEqual(@as(usize, 1), struct_item.template_parameters.len);
+    try testing.expect(struct_item.template_parameters[0].is_comptime);
+
+    const contract_item = ast_file.item(ast_file.root_items[1]).Contract;
+    try testing.expect(contract_item.is_generic);
+    try testing.expectEqual(@as(usize, 1), contract_item.template_parameters.len);
+    try testing.expect(contract_item.template_parameters[0].is_comptime);
+}
+
 test "compiler skips generic function templates in HIR" {
     const source_text =
         \\contract Math {
@@ -2835,6 +2864,28 @@ test "compiler skips generic function templates in HIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @concrete"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @max"));
+}
+
+test "compiler monomorphizes generic contract function calls in HIR" {
+    const source_text =
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(a: u256, b: u256) -> u256 {
+        \\        return first(u256, a, b);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first__u256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @first__u256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
 }
 
 test "compiler lowers builtin, quantified, and verification expressions" {

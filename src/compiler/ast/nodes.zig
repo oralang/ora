@@ -525,6 +525,8 @@ pub const ImportItem = struct {
 pub const ContractItem = struct {
     range: source.TextRange,
     name: []const u8,
+    is_generic: bool = false,
+    template_parameters: []const Parameter,
     members: []ItemId,
     invariants: []ExprId,
 };
@@ -545,6 +547,8 @@ pub const FunctionItem = struct {
 pub const StructItem = struct {
     range: source.TextRange,
     name: []const u8,
+    is_generic: bool = false,
+    template_parameters: []const Parameter,
     fields: []StructField,
 };
 

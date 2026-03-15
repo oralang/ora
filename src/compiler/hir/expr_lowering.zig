@@ -440,12 +440,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
             var args: std.ArrayList(mlir.MlirValue) = .{};
-            const callee_function = @This().calleeFunctionItem(self, call.callee);
-            for (call.args, 0..) |arg, index| {
+            const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
+            const callee_function = if (callee_item_id) |item_id| switch (self.parent.file.item(item_id).*) {
+                .Function => |function| function,
+                else => null,
+            } else null;
+            const runtime_args = if (callee_function) |function|
+                self.parent.stripGenericCallArgs(function, call)
+            else
+                call.args;
+            const runtime_parameters = if (callee_function) |function|
+                try self.parent.runtimeFunctionParameters(function)
+            else
+                &.{};
+            for (runtime_args, 0..) |arg, index| {
                 var arg_value = try self.lowerExpr(arg, locals);
-                if (callee_function) |function| {
-                    if (index < function.parameters.len) {
-                        const parameter = function.parameters[index];
+                if (index < runtime_parameters.len) {
+                    const parameter = runtime_parameters[index];
+                    if (callee_function != null) {
                         const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
                         arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
                     }
@@ -453,7 +465,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try args.append(self.parent.allocator, arg_value);
             }
 
-            const callee_name = @This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range);
+            const callee_name = if (callee_function != null and callee_item_id != null)
+                (try self.parent.ensureMonomorphizedFunction(callee_item_id.?, callee_function.?, call)) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+            else
+                (@This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range));
 
             const result_type = self.parent.lowerExprType(expr_id);
             var result_types: [1]mlir.MlirType = .{result_type};
@@ -483,13 +498,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn calleeFunctionItem(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.FunctionItem {
+            const item_id = @This().calleeFunctionItemId(self, expr_id) orelse return null;
+            return switch (self.parent.file.item(item_id).*) {
+                .Function => |function| function,
+                else => null,
+            };
+        }
+
+        fn calleeFunctionItemId(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.ItemId {
             return switch (self.parent.file.expression(expr_id).*) {
-                .Group => |group| @This().calleeFunctionItem(self, group.expr),
+                .Group => |group| @This().calleeFunctionItemId(self, group.expr),
                 else => blk: {
                     const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
                     break :blk switch (binding) {
                         .item => |item_id| switch (self.parent.file.item(item_id).*) {
-                            .Function => |function| function,
+                            .Function => item_id,
                             else => null,
                         },
                         else => null,

@@ -23,6 +23,7 @@ const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
+const descriptorFromPathName = descriptors.descriptorFromPathName;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
@@ -693,8 +694,11 @@ const TypeChecker = struct {
                     if (bad_type.kind() != .unknown) {
                         try self.emitExprError(expr_id, "type '{s}' is not callable", .{typeDisplayName(bad_type)});
                     }
-                } else if (result_type.kind() == .unknown and callee_type.paramTypes().len != call.args.len) {
-                    try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ callee_type.paramTypes().len, call.args.len });
+                } else if (result_type.kind() == .unknown) {
+                    const expected_args = self.expectedCallArgCount(call) orelse callee_type.paramTypes().len;
+                    if (expected_args != call.args.len) {
+                        try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
+                    }
                 }
             },
             .Builtin => |builtin| {
@@ -767,7 +771,8 @@ const TypeChecker = struct {
         return LocatedType.unlocated(.{ .unknown = {} });
     }
 
-    fn callReturnType(self: *const TypeChecker, call: ast.CallExpr) Type {
+    fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
+        if (self.genericCallReturnType(call)) |result| return result;
         const callee_type = self.callableType(call.callee);
         if (callee_type.kind() != .function) return .{ .unknown = {} };
 
@@ -798,6 +803,155 @@ const TypeChecker = struct {
             else => {},
         }
         return .{ .unknown = {} };
+    }
+
+    fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        if (!function.is_generic) return null;
+
+        const bindings = self.genericTypeBindingsForCall(function, call) orelse return .{ .unknown = {} };
+        const runtime_parameters = self.runtimeFunctionParameters(function) catch return .{ .unknown = {} };
+        if (runtime_parameters.len != call.args.len - bindings.len) return .{ .unknown = {} };
+        if (function.return_type) |type_expr| {
+            const raw_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch return .{ .unknown = {} };
+            return self.substituteGenericType(raw_type, bindings) catch .{ .unknown = {} };
+        }
+        return .{ .void = {} };
+    }
+
+    fn expectedCallArgCount(self: *const TypeChecker, call: ast.CallExpr) ?usize {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        if (!function.is_generic) return function.parameters.len;
+        return function.parameters.len;
+    }
+
+    fn genericTypeBindingsForCall(self: *const TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
+        var generic_count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!self.isGenericTypeParameter(parameter)) break;
+            generic_count += 1;
+        }
+        if (generic_count == 0) return &.{};
+        if (call.args.len < generic_count) return null;
+
+        const bindings = self.arena.alloc(GenericTypeBinding, generic_count) catch return null;
+        for (function.parameters[0..generic_count], 0..) |parameter, index| {
+            const name = self.patternName(parameter.pattern) orelse return null;
+            const arg_name = self.typeArgNameFromExpr(call.args[index]) orelse return null;
+            bindings[index] = .{
+                .name = name,
+                .ty = descriptorFromPathName(self.file, self.item_index, arg_name),
+            };
+        }
+        return bindings;
+    }
+
+    fn runtimeFunctionParameters(self: *const TypeChecker, function: ast.FunctionItem) ![]ast.Parameter {
+        var parameters: std.ArrayList(ast.Parameter) = .{};
+        for (function.parameters) |parameter| {
+            if (self.isGenericTypeParameter(parameter)) continue;
+            try parameters.append(self.arena, parameter);
+        }
+        return parameters.toOwnedSlice(self.arena);
+    }
+
+    fn isGenericTypeParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {
+        if (!parameter.is_comptime) return false;
+        return switch (self.file.typeExpr(parameter.type_expr).*) {
+            .Path => |path| std.mem.eql(u8, path.name, "type"),
+            else => false,
+        };
+    }
+
+    fn patternName(self: *const TypeChecker, pattern_id: ast.PatternId) ?[]const u8 {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| name.name,
+            else => null,
+        };
+    }
+
+    fn typeArgNameFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| name.name,
+            .Group => |group| self.typeArgNameFromExpr(group.expr),
+            else => null,
+        };
+    }
+
+    const GenericTypeBinding = struct {
+        name: []const u8,
+        ty: Type,
+    };
+
+    fn substituteGenericType(self: *TypeChecker, ty: Type, bindings: []const GenericTypeBinding) !Type {
+        return switch (ty) {
+            .named => |named| blk: {
+                for (bindings) |binding| {
+                    if (std.mem.eql(u8, named.name, binding.name)) break :blk binding.ty;
+                }
+                break :blk ty;
+            },
+            .refinement => |refinement| blk: {
+                const base_copy = try self.substituteGenericType(refinement.base_type.*, bindings);
+                var refinement_copy = refinement;
+                refinement_copy.base_type = try self.storeType(base_copy);
+                break :blk .{ .refinement = refinement_copy };
+            },
+            .array => |array| blk: {
+                const element = try self.substituteGenericType(array.element_type.*, bindings);
+                break :blk .{ .array = .{
+                    .element_type = try self.storeType(element),
+                    .len = array.len,
+                } };
+            },
+            .slice => |slice| blk: {
+                const element = try self.substituteGenericType(slice.element_type.*, bindings);
+                break :blk .{ .slice = .{
+                    .element_type = try self.storeType(element),
+                } };
+            },
+            .map => |map| blk: {
+                const key_ptr = if (map.key_type) |key_type| blk_key: {
+                    const key_copy = try self.substituteGenericType(key_type.*, bindings);
+                    break :blk_key try self.storeType(key_copy);
+                } else null;
+                const value_ptr = if (map.value_type) |value_type| blk_value: {
+                    const value_copy = try self.substituteGenericType(value_type.*, bindings);
+                    break :blk_value try self.storeType(value_copy);
+                } else null;
+                break :blk .{ .map = .{
+                    .key_type = key_ptr,
+                    .value_type = value_ptr,
+                } };
+            },
+            .tuple => |elements| blk: {
+                const substituted = try self.arena.alloc(Type, elements.len);
+                for (elements, 0..) |element, index| {
+                    substituted[index] = try self.substituteGenericType(element, bindings);
+                }
+                break :blk .{ .tuple = substituted };
+            },
+            .error_union => |error_union| blk: {
+                const payload = try self.substituteGenericType(error_union.payload_type.*, bindings);
+                const errors = try self.arena.alloc(Type, error_union.error_types.len);
+                for (error_union.error_types, 0..) |error_type, index| {
+                    errors[index] = try self.substituteGenericType(error_type, bindings);
+                }
+                break :blk .{ .error_union = .{
+                    .payload_type = try self.storeType(payload),
+                    .error_types = errors,
+                } };
+            },
+            else => ty,
+        };
     }
 
     fn structLiteralType(self: *const TypeChecker, name: []const u8) Type {
@@ -1652,7 +1806,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn calleeFunctionItem(self: *TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+    fn calleeFunctionItem(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
         return switch (self.file.expression(expr_id).*) {
             .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
                 .item => |item_id| switch (self.file.item(item_id).*) {

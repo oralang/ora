@@ -173,6 +173,14 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
         }
@@ -593,6 +601,14 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
         }
@@ -1468,7 +1484,7 @@ const Parser = struct {
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
         _ = terminators;
         return switch (self.current().kind) {
-            .Identifier, .Result, .From, .To, .Error => self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
+            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
             .IntegerLiteral, .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
             .LeftParen => self.parseParenLikeExprNode(),
             .LeftBracket => self.parseArrayLiteralExprNode(),
@@ -2102,7 +2118,7 @@ const Parser = struct {
 
     fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result => true,
+            .Identifier, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
             else => false,
         };
     }

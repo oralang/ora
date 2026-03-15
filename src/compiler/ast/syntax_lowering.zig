@@ -76,6 +76,11 @@ pub fn mixin(Builder: type) type {
 
         fn lowerContractItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing contract name"));
+            const template_params_node = firstDirectChildOfKind(node, .ParameterList);
+            const template_parameters = if (template_params_node) |params_node|
+                try Lowering.lowerParameterListNode(self, params_node)
+            else
+                &.{};
             var members: std.ArrayList(ItemId) = .{};
             var invariants: std.ArrayList(ExprId) = .{};
 
@@ -104,6 +109,8 @@ pub fn mixin(Builder: type) type {
             const item_id = try Support.pushItem(self, .{ .Contract = .{
                 .range = node.range(),
                 .name = name,
+                .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
+                .template_parameters = template_parameters,
                 .members = try members.toOwnedSlice(self.allocator),
                 .invariants = try invariants.toOwnedSlice(self.allocator),
             } });
@@ -186,6 +193,11 @@ pub fn mixin(Builder: type) type {
 
         fn lowerStructItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing struct name"));
+            const template_params_node = firstDirectChildOfKind(node, .ParameterList);
+            const template_parameters = if (template_params_node) |params_node|
+                try Lowering.lowerParameterListNode(self, params_node)
+            else
+                &.{};
             var fields: std.ArrayList(StructField) = .{};
 
             var it = node.children();
@@ -202,6 +214,8 @@ pub fn mixin(Builder: type) type {
             return Support.pushItem(self, .{ .Struct = .{
                 .range = node.range(),
                 .name = name,
+                .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
+                .template_parameters = template_parameters,
                 .fields = try fields.toOwnedSlice(self.allocator),
             } });
         }
@@ -337,6 +351,13 @@ pub fn mixin(Builder: type) type {
                 .Path => |path| std.mem.eql(u8, path.name, "type"),
                 else => false,
             };
+        }
+
+        fn hasGenericTemplateParameters(self: *Builder, parameters: []const Parameter) bool {
+            for (parameters) |parameter| {
+                if (Lowering.isGenericTypeParameter(self, parameter)) return true;
+            }
+            return false;
         }
 
         fn lowerBodyNode(self: *Builder, node: SyntaxNode) !BodyId {
@@ -1690,7 +1711,10 @@ fn tokenText(token: SyntaxToken) []const u8 {
 }
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
-    return kind == .Identifier or kind == .From or kind == .To or kind == .Error or kind == .Result;
+    return switch (kind) {
+        .Identifier, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        else => false,
+    };
 }
 
 fn parseBindingKind(node: SyntaxNode) BindingKind {

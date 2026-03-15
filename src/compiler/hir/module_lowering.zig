@@ -46,6 +46,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerContract(self: *Lowerer, item_id: ast.ItemId, contract: ast.ContractItem, parent_block: mlir.MlirBlock) anyerror!void {
+            if (contract.is_generic) return;
             const op = mlir.oraContractOpCreate(self.context, self.location(contract.range), strRef(contract.name));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(parent_block, op);
@@ -53,6 +54,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             const body = mlir.oraContractOpGetBodyBlock(op);
             if (mlir.oraBlockIsNull(body)) return error.MlirOperationCreationFailed;
+            self.contract_body_blocks[item_id.index()] = body;
 
             var contract_lowerer = ContractLowerer{
                 .parent = self,
@@ -75,11 +77,43 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, parent_block: mlir.MlirBlock) anyerror!void {
             if (function.is_generic) return;
+            const parameters = try self.runtimeFunctionParameters(function);
+            try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{});
+        }
+
+        pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr) anyerror!?[]const u8 {
+            if (!function.is_generic) return function.name;
+            const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
+            const mangled_name = try self.mangleGenericFunctionName(function.name, bindings);
+            if (!self.monomorphized_function_names.contains(mangled_name)) {
+                const parameters = try self.runtimeFunctionParameters(function);
+                const parent_block = if (function.parent_contract) |contract_id|
+                    self.contract_body_blocks[contract_id.index()]
+                else
+                    self.module_body;
+                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings);
+                try self.monomorphized_function_names.put(mangled_name, {});
+            }
+            return mangled_name;
+        }
+
+        fn lowerConcreteFunction(
+            self: *Lowerer,
+            item_id: ast.ItemId,
+            function: ast.FunctionItem,
+            symbol_name: []const u8,
+            parameters: []ast.Parameter,
+            parent_block: mlir.MlirBlock,
+            type_bindings: []const Lowerer.GenericTypeBinding,
+        ) anyerror!void {
+            const previous_type_bindings = self.active_type_bindings;
+            self.active_type_bindings = type_bindings;
+            defer self.active_type_bindings = previous_type_bindings;
 
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
             const return_type = if (function.return_type) |type_id| self.lowerTypeExpr(type_id) else null;
 
-            try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", function.name));
+            try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", symbol_name));
             try attrs.append(self.allocator, namedStringAttr(
                 self.context,
                 "ora.visibility",
@@ -91,7 +125,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
-            for (function.parameters) |parameter| {
+            for (parameters) |parameter| {
                 try param_types.append(self.allocator, self.lowerTypeExpr(parameter.type_expr));
                 try param_locs.append(self.allocator, self.location(parameter.range));
             }
@@ -121,14 +155,18 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
 
-            for (function.parameters, 0..) |parameter, index| {
+            for (parameters, 0..) |parameter, index| {
                 try self.attachBitfieldParamMetadata(op, parameter.type_expr, @intCast(index));
             }
 
             appendOp(parent_block, op);
-            try self.appendItemHandle(item_id, .function, function.name, function.range, op);
+            try self.appendItemHandle(item_id, .function, symbol_name, function.range, op);
 
-            var function_lowerer = FunctionLowerer.init(self, item_id, function, op, return_type);
+            var specialized_function = function;
+            specialized_function.name = symbol_name;
+            specialized_function.is_generic = false;
+            specialized_function.parameters = parameters;
+            var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
             try function_lowerer.lower();
         }
 
@@ -293,6 +331,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerStructDecl(self: *Lowerer, item_id: ast.ItemId, struct_item: ast.StructItem, parent_block: mlir.MlirBlock) anyerror!void {
+            if (struct_item.is_generic) return;
             const loc = self.location(struct_item.range);
             const op = mlir.oraStructDeclOpCreate(self.context, loc, strRef(struct_item.name));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
