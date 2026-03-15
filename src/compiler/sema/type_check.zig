@@ -24,6 +24,9 @@ const InstantiatedStructField = model.InstantiatedStructField;
 const InstantiatedEnum = model.InstantiatedEnum;
 const InstantiatedBitfield = model.InstantiatedBitfield;
 const InstantiatedBitfieldField = model.InstantiatedBitfieldField;
+const TraitMethodSignature = model.TraitMethodSignature;
+const TraitInterface = model.TraitInterface;
+const ImplInterface = model.ImplInterface;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -262,6 +265,8 @@ pub fn typeCheck(
         .instantiated_structs = &.{},
         .instantiated_enums = &.{},
         .instantiated_bitfields = &.{},
+        .trait_interfaces = &.{},
+        .impl_interfaces = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -331,6 +336,8 @@ pub fn typeCheck(
         .instantiated_structs = .{},
         .instantiated_enums = .{},
         .instantiated_bitfields = .{},
+        .trait_interfaces = .{},
+        .impl_interfaces = .{},
         .diagnostics = &result.diagnostics,
     };
 
@@ -399,6 +406,8 @@ pub fn typeCheck(
     result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
     result.instantiated_enums = try typechecker.instantiated_enums.toOwnedSlice(arena);
     result.instantiated_bitfields = try typechecker.instantiated_bitfields.toOwnedSlice(arena);
+    result.trait_interfaces = try typechecker.trait_interfaces.toOwnedSlice(arena);
+    result.impl_interfaces = try typechecker.impl_interfaces.toOwnedSlice(arena);
     return result;
 }
 
@@ -419,6 +428,8 @@ const TypeChecker = struct {
     instantiated_structs: std.ArrayList(InstantiatedStruct),
     instantiated_enums: std.ArrayList(InstantiatedEnum),
     instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
+    trait_interfaces: std.ArrayList(TraitInterface),
+    impl_interfaces: std.ArrayList(ImplInterface),
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
@@ -446,6 +457,34 @@ const TypeChecker = struct {
                 try self.ensureFunctionEffectSummary(item_id, function);
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
                 try self.validateBodyLocks(function.body, &locked_slots);
+            },
+            .Trait => |trait_item| {
+                for (trait_item.methods) |method| {
+                    for (method.parameters) |parameter| {
+                        _ = try self.resolveTypeExpr(parameter.type_expr);
+                    }
+                    if (method.return_type) |type_expr| {
+                        _ = try self.resolveTypeExpr(type_expr);
+                    }
+                    for (method.clauses) |clause| try self.visitExpr(clause.expr);
+                }
+                try self.recordTraitInterface(item_id, trait_item);
+            },
+            .Impl => |impl_item| {
+                try self.checkImplConformance(impl_item);
+
+                const previous_contract = self.current_contract;
+                if (self.item_index.lookup(impl_item.target_name)) |target_item_id| {
+                    if (self.file.item(target_item_id).* == .Contract) {
+                        self.current_contract = target_item_id;
+                    }
+                }
+                defer self.current_contract = previous_contract;
+
+                for (impl_item.methods) |method_id| {
+                    try self.visitItem(method_id);
+                }
+                try self.recordImplInterface(item_id, impl_item);
             },
             .Field => |field| if (field.value) |expr_id| {
                 try self.visitExpr(expr_id);
@@ -499,6 +538,251 @@ const TypeChecker = struct {
             .TypeAlias => {},
             else => {},
         }
+    }
+
+    fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
+        const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse {
+            try self.emitRangeError(impl_item.range, "impl references unknown trait '{s}'", .{
+                impl_item.trait_name,
+            });
+            return;
+        };
+        const trait_item = switch (self.file.item(trait_item_id).*) {
+            .Trait => |trait_item| trait_item,
+            else => {
+                try self.emitRangeError(impl_item.range, "'{s}' is not a trait", .{
+                    impl_item.trait_name,
+                });
+                return;
+            },
+        };
+
+        const target_item_id = self.item_index.lookup(impl_item.target_name) orelse {
+            try self.emitRangeError(impl_item.range, "impl references unknown target '{s}'", .{
+                impl_item.target_name,
+            });
+            return;
+        };
+        switch (self.file.item(target_item_id).*) {
+            .Contract, .Struct, .Bitfield, .Enum => {},
+            else => {
+                try self.emitRangeError(impl_item.range, "impl target '{s}' must name a contract, struct, bitfield, or enum", .{
+                    impl_item.target_name,
+                });
+                return;
+            },
+        }
+
+        var impl_count: usize = 0;
+        for (self.item_index.impl_entries) |entry| {
+            if (std.mem.eql(u8, entry.trait_name, impl_item.trait_name) and
+                std.mem.eql(u8, entry.target_name, impl_item.target_name))
+            {
+                impl_count += 1;
+            }
+        }
+        if (impl_count > 1) {
+            try self.emitRangeError(impl_item.range, "duplicate impl for trait '{s}' and type '{s}'", .{
+                impl_item.trait_name,
+                impl_item.target_name,
+            });
+        }
+
+        for (trait_item.methods) |trait_method| {
+            const impl_method = self.findImplMethodByName(impl_item, trait_method.name);
+            if (impl_method == null) {
+                try self.emitRangeError(impl_item.range, "impl missing method '{s}' required by trait '{s}'", .{
+                    trait_method.name,
+                    trait_item.name,
+                });
+                continue;
+            }
+            try self.checkImplMethodSignature(trait_item.name, trait_method, impl_method.?);
+        }
+
+        for (impl_item.methods) |method_id| {
+            const method = self.file.item(method_id).Function;
+            if (!self.traitHasMethodNamed(trait_item, method.name)) {
+                try self.emitRangeError(method.range, "impl contains method '{s}' which is not part of trait '{s}'", .{
+                    method.name,
+                    trait_item.name,
+                });
+            }
+        }
+    }
+
+    fn traitHasMethodNamed(self: *TypeChecker, trait_item: anytype, name: []const u8) bool {
+        _ = self;
+        for (trait_item.methods) |method| {
+            if (std.mem.eql(u8, method.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn findImplMethodByName(self: *TypeChecker, impl_item: anytype, name: []const u8) ?ast.FunctionItem {
+        for (impl_item.methods) |method_id| {
+            const item = self.file.item(method_id).*;
+            if (item != .Function) continue;
+            if (std.mem.eql(u8, item.Function.name, name)) return item.Function;
+        }
+        return null;
+    }
+
+    fn checkImplMethodSignature(self: *TypeChecker, trait_name: []const u8, trait_method: anytype, impl_method: ast.FunctionItem) anyerror!void {
+        const impl_has_self = self.functionHasBareSelf(impl_method);
+        if (impl_has_self != trait_method.has_self) {
+            try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature: expected {s}self parameter", .{
+                impl_method.name,
+                if (trait_method.has_self) "" else "no ",
+            });
+            return;
+        }
+
+        const impl_offset: usize = if (impl_has_self) 1 else 0;
+        const impl_runtime_params = impl_method.parameters.len -| impl_offset;
+        if (impl_runtime_params != trait_method.parameters.len) {
+            try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature for trait '{s}': expected {d} parameters, found {d}", .{
+                impl_method.name,
+                trait_name,
+                trait_method.parameters.len,
+                impl_runtime_params,
+            });
+            return;
+        }
+
+        for (trait_method.parameters, 0..) |trait_param, index| {
+            const impl_param = impl_method.parameters[index + impl_offset];
+            const trait_type = try self.resolveTypeExpr(trait_param.type_expr);
+            const impl_type = try self.resolveTypeExpr(impl_param.type_expr);
+            if (trait_type.kind() == .unknown or impl_type.kind() == .unknown) continue;
+            if (!typesAssignable(trait_type, impl_type) or !typesAssignable(impl_type, trait_type)) {
+                try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature for trait '{s}': parameter {d} expects '{s}', found '{s}'", .{
+                    impl_method.name,
+                    trait_name,
+                    index,
+                    typeDisplayName(trait_type),
+                    typeDisplayName(impl_type),
+                });
+                return;
+            }
+        }
+
+        const trait_return = if (trait_method.return_type) |type_expr|
+            try self.resolveTypeExpr(type_expr)
+        else
+            Type{ .void = {} };
+        const impl_return = if (impl_method.return_type) |type_expr|
+            try self.resolveTypeExpr(type_expr)
+        else
+            Type{ .void = {} };
+        if (trait_return.kind() != .unknown and impl_return.kind() != .unknown and
+            (!typesAssignable(trait_return, impl_return) or !typesAssignable(impl_return, trait_return)))
+        {
+            try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature for trait '{s}': expected return '{s}', found '{s}'", .{
+                impl_method.name,
+                trait_name,
+                typeDisplayName(trait_return),
+                typeDisplayName(impl_return),
+            });
+        }
+    }
+
+    fn functionHasBareSelf(self: *TypeChecker, function: ast.FunctionItem) bool {
+        if (function.parameters.len == 0) return false;
+        const first = function.parameters[0];
+        const pattern = self.file.pattern(first.pattern).*;
+        if (pattern != .Name) return false;
+        return std.mem.eql(u8, pattern.Name.name, "self");
+    }
+
+    fn buildTraitMethodSignature(self: *TypeChecker, trait_method: anytype) anyerror!TraitMethodSignature {
+        const param_types = try self.arena.alloc(Type, trait_method.parameters.len);
+        for (trait_method.parameters, 0..) |parameter, index| {
+            param_types[index] = try self.resolveTypeExpr(parameter.type_expr);
+        }
+        const return_type = if (trait_method.return_type) |type_expr|
+            try self.resolveTypeExpr(type_expr)
+        else
+            Type{ .void = {} };
+        return .{
+            .name = trait_method.name,
+            .has_self = trait_method.has_self,
+            .is_comptime = trait_method.is_comptime,
+            .param_types = param_types,
+            .return_type = return_type,
+        };
+    }
+
+    fn buildFunctionMethodSignature(self: *TypeChecker, function: ast.FunctionItem) anyerror!TraitMethodSignature {
+        const has_self = self.functionHasBareSelf(function);
+        const offset: usize = if (has_self) 1 else 0;
+        const runtime_param_count = function.parameters.len -| offset;
+        const param_types = try self.arena.alloc(Type, runtime_param_count);
+        for (function.parameters[offset..], 0..) |parameter, index| {
+            param_types[index] = try self.resolveTypeExpr(parameter.type_expr);
+        }
+        const return_type = if (function.return_type) |type_expr|
+            try self.resolveTypeExpr(type_expr)
+        else
+            Type{ .void = {} };
+        return .{
+            .name = function.name,
+            .has_self = has_self,
+            .param_types = param_types,
+            .return_type = return_type,
+        };
+    }
+
+    fn recordTraitInterface(self: *TypeChecker, trait_item_id: ast.ItemId, trait_item: anytype) anyerror!void {
+        if (self.findRecordedTraitInterfaceIndex(trait_item.name) != null) return;
+
+        const methods = try self.arena.alloc(TraitMethodSignature, trait_item.methods.len);
+        for (trait_item.methods, 0..) |method, index| {
+            methods[index] = try self.buildTraitMethodSignature(method);
+        }
+        try self.trait_interfaces.append(self.arena, .{
+            .trait_item_id = trait_item_id,
+            .name = trait_item.name,
+            .methods = methods,
+        });
+    }
+
+    fn recordImplInterface(self: *TypeChecker, impl_item_id: ast.ItemId, impl_item: anytype) anyerror!void {
+        if (self.findRecordedImplInterfaceIndex(impl_item.trait_name, impl_item.target_name) != null) return;
+
+        const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return;
+        const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return;
+        const methods = try self.arena.alloc(TraitMethodSignature, impl_item.methods.len);
+        for (impl_item.methods, 0..) |method_id, index| {
+            const method = self.file.item(method_id).Function;
+            methods[index] = try self.buildFunctionMethodSignature(method);
+        }
+        try self.impl_interfaces.append(self.arena, .{
+            .impl_item_id = impl_item_id,
+            .trait_item_id = trait_item_id,
+            .target_item_id = target_item_id,
+            .trait_name = impl_item.trait_name,
+            .target_name = impl_item.target_name,
+            .methods = methods,
+        });
+    }
+
+    fn findRecordedTraitInterfaceIndex(self: *TypeChecker, name: []const u8) ?usize {
+        for (self.trait_interfaces.items, 0..) |trait_interface, index| {
+            if (std.mem.eql(u8, trait_interface.name, name)) return index;
+        }
+        return null;
+    }
+
+    fn findRecordedImplInterfaceIndex(self: *TypeChecker, trait_name: []const u8, target_name: []const u8) ?usize {
+        for (self.impl_interfaces.items, 0..) |impl_interface, index| {
+            if (std.mem.eql(u8, impl_interface.trait_name, trait_name) and
+                std.mem.eql(u8, impl_interface.target_name, target_name))
+            {
+                return index;
+            }
+        }
+        return null;
     }
 
     fn visitBody(self: *TypeChecker, body_id: ast.BodyId) anyerror!void {

@@ -37,6 +37,29 @@ pub const ImplEntry = struct {
     item_id: ast.ItemId,
 };
 
+pub const TraitMethodSignature = struct {
+    name: []const u8,
+    has_self: bool,
+    is_comptime: bool = false,
+    param_types: []const Type = &.{},
+    return_type: Type = .{ .void = {} },
+};
+
+pub const TraitInterface = struct {
+    trait_item_id: ast.ItemId,
+    name: []const u8,
+    methods: []const TraitMethodSignature,
+};
+
+pub const ImplInterface = struct {
+    impl_item_id: ast.ItemId,
+    trait_item_id: ast.ItemId,
+    target_item_id: ast.ItemId,
+    trait_name: []const u8,
+    target_name: []const u8,
+    methods: []const TraitMethodSignature,
+};
+
 pub const InstantiatedStructField = struct {
     name: []const u8,
     ty: Type,
@@ -513,6 +536,8 @@ pub const TypeCheckResult = struct {
     instantiated_structs: []const InstantiatedStruct,
     instantiated_enums: []const InstantiatedEnum,
     instantiated_bitfields: []const InstantiatedBitfield,
+    trait_interfaces: []const TraitInterface,
+    impl_interfaces: []const ImplInterface,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *TypeCheckResult) void {
@@ -556,6 +581,24 @@ pub const TypeCheckResult = struct {
     pub fn instantiatedBitfieldByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedBitfield {
         for (self.instantiated_bitfields) |instantiated| {
             if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
+        }
+        return null;
+    }
+
+    pub fn traitInterfaceByName(self: *const TypeCheckResult, name: []const u8) ?TraitInterface {
+        for (self.trait_interfaces) |trait_interface| {
+            if (std.mem.eql(u8, trait_interface.name, name)) return trait_interface;
+        }
+        return null;
+    }
+
+    pub fn implInterfaceByNames(self: *const TypeCheckResult, trait_name: []const u8, target_name: []const u8) ?ImplInterface {
+        for (self.impl_interfaces) |impl_interface| {
+            if (std.mem.eql(u8, impl_interface.trait_name, trait_name) and
+                std.mem.eql(u8, impl_interface.target_name, target_name))
+            {
+                return impl_interface;
+            }
         }
         return null;
     }

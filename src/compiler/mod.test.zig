@@ -479,6 +479,161 @@ test "compiler rejects bare self in ordinary functions" {
     try testing.expect(diagnosticMessagesContain(ast_diags, "bare 'self' parameter is only allowed in trait and impl methods"));
 }
 
+test "compiler type checks valid trait impl conformance" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\    fn transfer(self, to: address, amount: u256) -> bool;
+        \\    fn decimals() -> u8;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\    fn transfer(self, to: address, amount: u256) -> bool {
+        \\        _ = to;
+        \\        _ = amount;
+        \\        return true;
+        \\    }
+        \\    fn decimals() -> u8 { return 18; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
+test "compiler reports missing and extra trait impl methods" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\    fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\    fn extra(self) -> u256 { return 1; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "impl missing method 'transfer' required by trait 'ERC20'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "impl contains method 'extra' which is not part of trait 'ERC20'"));
+}
+
+test "compiler reports wrong trait impl parameter and return signatures" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn transfer(self, to: bool, amount: u256) -> u256 {
+        \\        _ = to;
+        \\        _ = amount;
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "method 'transfer' has wrong signature for trait 'ERC20': parameter 0 expects 'address', found 'bool'"));
+}
+
+test "compiler reports trait impl return signature mismatch" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> bool { return true; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "method 'totalSupply' has wrong signature for trait 'ERC20': expected return 'u256', found 'bool'"));
+}
+
+test "compiler reports duplicate impl for same trait and target" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 1; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "duplicate impl for trait 'ERC20' and type 'Token'"));
+}
+
+test "compiler exposes trait and impl interfaces in sema" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\    fn decimals() -> u8;
+        \\}
+        \\
+        \\contract Token {}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\    fn decimals() -> u8 { return 18; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const trait_interface = typecheck.traitInterfaceByName("ERC20");
+    try testing.expect(trait_interface != null);
+    try testing.expectEqual(@as(usize, 2), trait_interface.?.methods.len);
+    try testing.expectEqualStrings("totalSupply", trait_interface.?.methods[0].name);
+    try testing.expect(trait_interface.?.methods[0].has_self);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, trait_interface.?.methods[0].return_type.kind());
+    try testing.expectEqualStrings("decimals", trait_interface.?.methods[1].name);
+    try testing.expect(!trait_interface.?.methods[1].has_self);
+
+    const impl_interface = typecheck.implInterfaceByNames("ERC20", "Token");
+    try testing.expect(impl_interface != null);
+    try testing.expectEqual(@as(usize, 2), impl_interface.?.methods.len);
+    try testing.expectEqualStrings("totalSupply", impl_interface.?.methods[0].name);
+    try testing.expect(impl_interface.?.methods[0].has_self);
+    try testing.expectEqualStrings("decimals", impl_interface.?.methods[1].name);
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {
