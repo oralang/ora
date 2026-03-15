@@ -9,6 +9,7 @@ const ModuleImport = model.ModuleImport;
 const ModuleSummary = model.ModuleSummary;
 const ItemIndexResult = model.ItemIndexResult;
 const NamedItem = model.NamedItem;
+const ImplEntry = model.ImplEntry;
 const VisitState = enum(u2) { unvisited, visiting, done };
 
 pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.PackageId, inputs: []const ModuleGraphInput) !ModuleGraphResult {
@@ -65,13 +66,15 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     var result = ItemIndexResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .entries = &[_]NamedItem{},
+        .impl_entries = &[_]ImplEntry{},
     };
     errdefer result.deinit();
 
     const arena = result.arena.allocator();
     var entries: std.ArrayList(NamedItem) = .{};
+    var impl_entries: std.ArrayList(ImplEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
@@ -79,10 +82,18 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         }
     }.lessThan);
     result.entries = try entries.toOwnedSlice(arena);
+    result.impl_entries = try impl_entries.toOwnedSlice(arena);
     return result;
 }
 
-fn collectItemEntry(allocator: std.mem.Allocator, file: *const ast.AstFile, item_id: ast.ItemId, prefix: ?[]const u8, entries: *std.ArrayList(NamedItem)) !void {
+fn collectItemEntry(
+    allocator: std.mem.Allocator,
+    file: *const ast.AstFile,
+    item_id: ast.ItemId,
+    prefix: ?[]const u8,
+    entries: *std.ArrayList(NamedItem),
+    impl_entries: *std.ArrayList(ImplEntry),
+) !void {
     const item = file.item(item_id).*;
     const name = switch (item) {
         .Contract => item.Contract.name,
@@ -90,11 +101,20 @@ fn collectItemEntry(allocator: std.mem.Allocator, file: *const ast.AstFile, item
         .Struct => item.Struct.name,
         .Bitfield => item.Bitfield.name,
         .Enum => item.Enum.name,
+        .Trait => item.Trait.name,
         .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
         .ErrorDecl => item.ErrorDecl.name,
         .Field => item.Field.name,
         .Constant => item.Constant.name,
+        .Impl => {
+            try impl_entries.append(allocator, .{
+                .trait_name = item.Impl.trait_name,
+                .target_name = item.Impl.target_name,
+                .item_id = item_id,
+            });
+            return;
+        },
         .GhostBlock => return,
         else => return,
     };
@@ -107,7 +127,7 @@ fn collectItemEntry(allocator: std.mem.Allocator, file: *const ast.AstFile, item
 
     if (item == .Contract) {
         for (item.Contract.members) |member_id| {
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries);
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries);
         }
     }
 }

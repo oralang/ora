@@ -31,6 +31,12 @@ pub const NamedItem = struct {
     item_id: ast.ItemId,
 };
 
+pub const ImplEntry = struct {
+    trait_name: []const u8,
+    target_name: []const u8,
+    item_id: ast.ItemId,
+};
+
 pub const InstantiatedStructField = struct {
     name: []const u8,
     ty: Type,
@@ -453,6 +459,7 @@ pub const ModuleGraphResult = struct {
 pub const ItemIndexResult = struct {
     arena: std.heap.ArenaAllocator,
     entries: []NamedItem,
+    impl_entries: []ImplEntry,
 
     pub fn deinit(self: *ItemIndexResult) void {
         self.arena.deinit();
@@ -467,6 +474,15 @@ pub const ItemIndexResult = struct {
                 .lt => right = mid,
                 .gt => left = mid + 1,
                 .eq => return self.entries[mid].item_id,
+            }
+        }
+        return null;
+    }
+
+    pub fn lookupImpl(self: *const ItemIndexResult, trait_name: []const u8, target_name: []const u8) ?ast.ItemId {
+        for (self.impl_entries) |entry| {
+            if (std.mem.eql(u8, entry.trait_name, trait_name) and std.mem.eql(u8, entry.target_name, target_name)) {
+                return entry.item_id;
             }
         }
         return null;

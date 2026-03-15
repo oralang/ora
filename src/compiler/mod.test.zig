@@ -401,6 +401,33 @@ test "compiler reports impl syntax errors for missing body and missing for" {
     try testing.expect(diagnosticMessagesContain(diags, "impl methods must have a body"));
 }
 
+test "compiler indexes traits and impls by trait target pair" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+
+    const trait_item_id = item_index.lookup("ERC20");
+    try testing.expect(trait_item_id != null);
+    try testing.expect(ast_file.item(trait_item_id.?).* == .Trait);
+
+    const impl_item_id = item_index.lookupImpl("ERC20", "Token");
+    try testing.expect(impl_item_id != null);
+    try testing.expect(ast_file.item(impl_item_id.?).* == .Impl);
+}
+
 test "compiler allows bare self in trait and impl methods" {
     const source_text =
         \\trait ERC20 {
