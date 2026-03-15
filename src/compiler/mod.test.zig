@@ -818,7 +818,6 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
 
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
-
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @run"));
@@ -893,6 +892,92 @@ test "compiler lowers generic impl methods for trait-bound calls" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked__7"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked__7"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
+}
+
+test "compiler type checks associated trait calls in generic bodies" {
+    const source_text =
+        \\trait Factory {
+        \\    fn make() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Factory for Box {
+        \\    fn make() -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn choose(comptime T: type) -> bool where T: Factory {
+        \\        return T.make();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("Test").?;
+    const contract = ast_file.item(contract_id).Contract;
+    var choose_id: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+        if (std.mem.eql(u8, item.Function.name, "choose")) {
+            choose_id = member_id;
+            break;
+        }
+    }
+    try testing.expect(choose_id != null);
+    const choose_fn = ast_file.item(choose_id.?).Function;
+    const body = ast_file.body(choose_fn.body).*;
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const call_expr = ret_stmt.value.?;
+    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(call_expr).kind());
+}
+
+test "compiler lowers associated trait impl calls to concrete symbols" {
+    const source_text =
+        \\trait Factory {
+        \\    fn make() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Factory for Box {
+        \\    fn make() -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn choose(comptime T: type) -> bool where T: Factory {
+        \\        return T.make();
+        \\    }
+        \\
+        \\    pub fn run() -> bool {
+        \\        return choose(Box);
+        \\    }
+        \\
+        \\    pub fn direct() -> bool {
+        \\        return Box.make();
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Box.make"));
 }
 
 test "compiler syntax parses expression precedence and postfix chains" {

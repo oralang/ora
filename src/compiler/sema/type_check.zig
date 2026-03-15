@@ -706,11 +706,13 @@ const TypeChecker = struct {
     }
 
     fn functionHasBareSelf(self: *TypeChecker, function: ast.FunctionItem) bool {
-        if (function.parameters.len == 0) return false;
-        const first = function.parameters[0];
-        const pattern = self.file.pattern(first.pattern).*;
-        if (pattern != .Name) return false;
-        return std.mem.eql(u8, pattern.Name.name, "self");
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            const pattern = self.file.pattern(parameter.pattern).*;
+            if (pattern != .Name) return false;
+            return std.mem.eql(u8, pattern.Name.name, "self");
+        }
+        return false;
     }
 
     fn parameterTypeForFunctionItem(self: *TypeChecker, function_item_id: ast.ItemId, parameter: ast.Parameter) ?Type {
@@ -1142,7 +1144,7 @@ const TypeChecker = struct {
             .Field => |field| {
                 try self.visitExpr(field.base);
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = try self.fieldAccessType(base_type, field.name);
+                const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
                 self.expr_types[expr_id.index()] = result_type;
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
@@ -3124,6 +3126,119 @@ const TypeChecker = struct {
             },
             else => .{ .unknown = {} },
         };
+    }
+
+    fn fieldAccessTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !Type {
+        if (self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
+        const base_type = self.expr_types[base_expr_id.index()];
+        return self.fieldAccessType(base_type, field_name);
+    }
+
+    fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+        if (!self.exprRepresentsType(base_expr_id)) return null;
+        if (self.traitBoundAssociatedMethodType(base_expr_id, field_name)) |method_type| return method_type;
+        return self.concreteAssociatedMethodType(base_expr_id, field_name);
+    }
+
+    fn exprRepresentsType(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => true,
+            .Group => |group| self.exprRepresentsType(group.expr),
+            .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+                .item => |item_id| switch (self.file.item(item_id).*) {
+                    .Struct, .Enum, .Bitfield, .Contract => true,
+                    else => false,
+                },
+                .pattern => |pattern_id| blk: {
+                    const ty = self.pattern_types[pattern_id.index()].type;
+                    break :blk if (ty.name()) |name| std.mem.eql(u8, name, "type") else false;
+                },
+            } else false,
+            else => false,
+        };
+    }
+
+    fn traitBoundAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+        const parameter_name = self.genericTypeParameterNameForExpr(base_expr_id) orelse return null;
+        const function_item_id = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+
+        var matched: ?TraitMethodSignature = null;
+        for (function.trait_bounds) |bound| {
+            if (!std.mem.eql(u8, bound.parameter_name, parameter_name)) continue;
+            const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
+            const method = self.findTraitMethodSignature(trait_interface, field_name) orelse continue;
+            if (method.has_self) continue;
+            if (matched != null) return null;
+            matched = method;
+        }
+        return self.functionTypeFromTraitSignature(matched orelse return null);
+    }
+
+    fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+        const target_name = self.concreteTypeNameForExpr(base_expr_id) orelse return null;
+        var matched: ?TraitMethodSignature = null;
+        for (self.impl_interfaces.items) |impl_interface| {
+            if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
+            for (impl_interface.methods) |method| {
+                if (!std.mem.eql(u8, method.name, field_name) or method.has_self) continue;
+                if (matched != null) return null;
+                matched = method;
+            }
+        }
+        return self.functionTypeFromTraitSignature(matched orelse return null);
+    }
+
+    fn genericTypeParameterNameForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.genericTypeParameterNameForExpr(group.expr),
+            .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+                .pattern => |pattern_id| blk: {
+                    const ty = self.pattern_types[pattern_id.index()].type;
+                    const name = if (ty.name()) |n| n else break :blk null;
+                    if (!std.mem.eql(u8, name, "type")) break :blk null;
+                    const pattern = self.file.pattern(pattern_id).*;
+                    if (pattern != .Name) break :blk null;
+                    break :blk pattern.Name.name;
+                },
+                else => null,
+            } else null,
+            else => null,
+        };
+    }
+
+    fn concreteTypeNameForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => |type_value| switch (self.file.typeExpr(type_value.type_expr).*) {
+                .Path => |path| std.mem.trim(u8, path.name, " \t\n\r"),
+                else => null,
+            },
+            .Group => |group| self.concreteTypeNameForExpr(group.expr),
+            .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+                .item => |item_id| switch (self.file.item(item_id).*) {
+                    .Struct => |item| item.name,
+                    .Enum => |item| item.name,
+                    .Bitfield => |item| item.name,
+                    .Contract => |item| item.name,
+                    else => null,
+                },
+                else => null,
+            } else null,
+            else => null,
+        };
+    }
+
+    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) Type {
+        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        returns[0] = method_signature.return_type;
+        return .{ .function = .{
+            .name = method_signature.name,
+            .param_types = method_signature.param_types,
+            .return_types = returns,
+        } };
     }
 
     fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
