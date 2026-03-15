@@ -39,6 +39,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     try self.lowerDeclPlaceholder(item_id, .bitfield, bitfield.name, bitfield.range, "ora.bitfield_decl", parent_block);
                 },
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
+                .Trait => {},
+                .Impl => {},
                 .TypeAlias => {},
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),

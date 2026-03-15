@@ -140,6 +140,33 @@ const Validator = struct {
                 try self.validateBitfieldFields(bitfield.fields);
             },
             .Enum => |enum_item| try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'"),
+            .Trait => |trait_item| {
+                var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+                defer seen.deinit();
+                for (trait_item.methods) |method| {
+                    if (seen.get(method.name)) |first_range| {
+                        try self.emitError(method.range, "duplicate trait method '{s}'", .{
+                            method.name,
+                        });
+                        _ = first_range;
+                    } else {
+                        try seen.put(method.name, method.range);
+                    }
+                    if (method.return_type) |type_id| {
+                        _ = try self.expectType(type_id, method.range, "trait method references invalid return type id");
+                    }
+                    try self.validateParameters(method.parameters, "trait method parameter");
+                    for (method.clauses) |clause| {
+                        _ = try self.expectExpr(clause.expr, clause.range, "trait method clause references invalid expression id");
+                    }
+                }
+            },
+            .Impl => |impl_item| {
+                for (impl_item.methods) |method_id| {
+                    _ = try self.expectItem(method_id, item_range, "impl references invalid method item id");
+                }
+                try self.validateItemScope(impl_item.methods, "impl scope");
+            },
             .TypeAlias => |type_alias| {
                 _ = try self.expectType(type_alias.target_type, item_range, "type alias references invalid target type id");
                 try self.validateParameters(type_alias.template_parameters, "type alias parameter");

@@ -511,6 +511,16 @@ pub const EnumVariant = struct {
     name: []const u8,
 };
 
+pub const TraitMethod = struct {
+    range: source.TextRange,
+    name: []const u8,
+    has_self: bool,
+    parameters: []Parameter,
+    return_type: ?TypeExprId,
+    clauses: []SpecClause,
+    is_comptime: bool,
+};
+
 pub const Item = union(enum) {
     Import: ImportItem,
     Contract: ContractItem,
@@ -518,6 +528,8 @@ pub const Item = union(enum) {
     Struct: StructItem,
     Bitfield: BitfieldItem,
     Enum: EnumItem,
+    Trait: TraitItem,
+    Impl: ImplItem,
     TypeAlias: TypeAliasItem,
     LogDecl: LogDeclItem,
     ErrorDecl: ErrorDeclItem,
@@ -579,6 +591,19 @@ pub const EnumItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     variants: []EnumVariant,
+};
+
+pub const TraitItem = struct {
+    range: source.TextRange,
+    name: []const u8,
+    methods: []TraitMethod,
+};
+
+pub const ImplItem = struct {
+    range: source.TextRange,
+    trait_name: []const u8,
+    target_name: []const u8,
+    methods: []ItemId,
 };
 
 pub const TypeAliasItem = struct {
