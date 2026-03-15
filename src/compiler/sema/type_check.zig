@@ -37,7 +37,7 @@ const typeEql = descriptors.typeEql;
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
-        .none => .none,
+        .none => .memory,
         .storage => .storage,
         .memory => .memory,
         .tstore => .transient,
@@ -304,7 +304,7 @@ pub fn typeCheck(
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
                 _ = type_expr;
-                pattern_types[decl.pattern.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                pattern_types[decl.pattern.index()] = LocatedType.withRegion(.{ .unknown = {} }, declarationRegion(decl.storage_class));
             }
         }
     }
@@ -375,7 +375,7 @@ pub fn typeCheck(
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
-                pattern_types[decl.pattern.index()] = LocatedType.unlocated(try typechecker.resolveTypeExpr(type_expr));
+                pattern_types[decl.pattern.index()] = LocatedType.withRegion(try typechecker.resolveTypeExpr(type_expr), declarationRegion(decl.storage_class));
             }
         }
     }
@@ -451,12 +451,24 @@ const TypeChecker = struct {
                     const actual_type = self.expr_types[expr_id.index()];
                     if (try self.emitIntegerOverflowIfNeeded(field.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
-                    } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
-                        try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
-                            field.name,
-                            typeDisplayName(expected_type),
-                            typeDisplayName(actual_type),
-                        });
+                    } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                        if (!typesAssignable(expected_type, actual_type)) {
+                            try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
+                                field.name,
+                                typeDisplayName(expected_type),
+                                typeDisplayName(actual_type),
+                            });
+                        } else {
+                            const expected_region = self.item_regions[item_id.index()];
+                            const actual_region = self.exprLocatedType(expr_id).region;
+                            if (!region_rules.regionAssignable(actual_region, expected_region)) {
+                                try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
+                                    field.name,
+                                    region_rules.regionDisplayName(expected_region),
+                                    region_rules.regionDisplayName(actual_region),
+                                });
+                            }
+                        }
                     }
                 }
             },
@@ -498,16 +510,27 @@ const TypeChecker = struct {
                     try self.visitExpr(expr_id);
                     const actual_type = self.expr_types[expr_id.index()];
                     if (decl.type_expr == null) {
-                        self.pattern_types[decl.pattern.index()] = LocatedType.unlocated(actual_type);
+                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegion(actual_type, declarationRegion(decl.storage_class));
                     } else {
                         const expected_type = self.pattern_types[decl.pattern.index()].type;
                         if (try self.emitIntegerOverflowIfNeeded(decl.range, expr_id, expected_type)) {
                             // Keep lowering/recovery moving after reporting the overflow.
-                        } else if (!region_rules.isAssignable(LocatedType.unlocated(actual_type), self.pattern_types[decl.pattern.index()]) and actual_type.kind() != .unknown) {
-                            try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
-                            });
+                        } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                            if (!typesAssignable(expected_type, actual_type)) {
+                                try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
+                                    typeDisplayName(expected_type),
+                                    typeDisplayName(actual_type),
+                                });
+                            } else {
+                                const expected_region = self.pattern_types[decl.pattern.index()].region;
+                                const actual_region = self.exprLocatedType(expr_id).region;
+                                if (!region_rules.regionAssignable(actual_region, expected_region)) {
+                                    try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
+                                        region_rules.regionDisplayName(expected_region),
+                                        region_rules.regionDisplayName(actual_region),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -518,11 +541,15 @@ const TypeChecker = struct {
                 if (self.current_return_type) |expected_type| {
                     if (try self.emitIntegerOverflowIfNeeded(ret.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
-                    } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
-                        try self.emitRangeError(ret.range, "return expects type '{s}', found '{s}'", .{
-                            typeDisplayName(expected_type),
-                            typeDisplayName(actual_type),
-                        });
+                    } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                        if (!typesAssignable(expected_type, actual_type)) {
+                            try self.emitRangeError(ret.range, "return expects type '{s}', found '{s}'", .{
+                                typeDisplayName(expected_type),
+                                typeDisplayName(actual_type),
+                            });
+                        }
+                        // No region check — return values are loaded to stack,
+                        // so all source regions are valid regardless of return type region.
                     }
                 }
             },
@@ -584,17 +611,17 @@ const TypeChecker = struct {
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
                 } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                    const actual = self.exprLocatedType(assign.value);
-                    if (!region_rules.isAssignable(actual, expected)) {
-                        if (typesAssignable(expected_type, actual_type)) {
+                    if (!typesAssignable(expected_type, actual_type)) {
+                        try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
+                            typeDisplayName(expected_type),
+                            typeDisplayName(actual_type),
+                        });
+                    } else {
+                        const actual_region = self.exprLocatedType(assign.value).region;
+                        if (!region_rules.regionAssignable(actual_region, expected.region)) {
                             try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
                                 region_rules.regionDisplayName(expected.region),
-                                region_rules.regionDisplayName(actual.region),
-                            });
-                        } else {
-                            try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
+                                region_rules.regionDisplayName(actual_region),
                             });
                         }
                     }
@@ -767,6 +794,21 @@ const TypeChecker = struct {
                     const expected_args = self.expectedCallArgCount(call) orelse callee_type.paramTypes().len;
                     if (expected_args != call.args.len) {
                         try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
+                    }
+                } else {
+                    // Type-check individual arguments (no region check — argument passing copies through the stack).
+                    const param_types = callee_type.paramTypes();
+                    if (param_types.len == call.args.len) {
+                        for (call.args, param_types) |arg, param_type| {
+                            const arg_type = self.expr_types[arg.index()];
+                            if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
+                                !typesAssignable(param_type, arg_type))
+                            {
+                                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
+                                    typeDisplayName(param_type), typeDisplayName(arg_type),
+                                });
+                            }
+                        }
                     }
                 }
             },
@@ -2820,9 +2862,8 @@ const TypeChecker = struct {
 
     fn exprLocatedType(self: *const TypeChecker, expr_id: ast.ExprId) LocatedType {
         return switch (self.file.expression(expr_id).*) {
+            // Located: region inherited from binding or base expression.
             .Name => self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]),
-            .Group => |group| self.exprLocatedType(group.expr),
-            .Old => |old| self.exprLocatedType(old.expr),
             .Field => |field| blk: {
                 const base = self.exprLocatedType(field.base);
                 break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
@@ -2831,7 +2872,31 @@ const TypeChecker = struct {
                 const base = self.exprLocatedType(index.base);
                 break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
             },
-            else => LocatedType.unlocated(self.expr_types[expr_id.index()]),
+            // Transparent: region passes through wrapper.
+            .Group => |group| self.exprLocatedType(group.expr),
+            .Old => |old| self.exprLocatedType(old.expr),
+            // Unlocated: stack-computed values, comptime constants, or verification constructs.
+            // These have no storage region — the value exists on the EVM stack or in bytecode.
+            .IntegerLiteral,
+            .StringLiteral,
+            .BoolLiteral,
+            .AddressLiteral,
+            .BytesLiteral,
+            .TypeValue,
+            .Comptime,
+            .Unary,
+            .Binary,
+            .Call,
+            .Builtin,
+            .Tuple,
+            .ArrayLiteral,
+            .StructLiteral,
+            .Switch,
+            .ErrorReturn,
+            .Result,
+            .Quantified,
+            .Error,
+            => LocatedType.unlocated(self.expr_types[expr_id.index()]),
         };
     }
 

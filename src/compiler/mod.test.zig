@@ -2482,7 +2482,7 @@ test "compiler tracks declaration root regions in type check output" {
 
     const body = ast_file.body(function.body);
     const local_stmt = ast_file.statement(body.statements[0]).VariableDecl;
-    try testing.expectEqual(compiler.sema.Region.none, typecheck.pattern_types[local_stmt.pattern.index()].region);
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[local_stmt.pattern.index()].region);
 }
 
 test "compiler allows implicit region reads into locals" {
@@ -5414,9 +5414,8 @@ test "compiler reports integer constant overflow against declared widths" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
-    try testing.expect(type_diags.len() >= 5);
+    try testing.expectEqual(@as(usize, 5), type_diags.len());
     try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
-    try testing.expect(diagnosticMessagesContain(type_diags, "declaration expects type 'u8', found 'integer'"));
 }
 
 test "compiler reports constant cast overflow against target integer widths" {
@@ -7001,4 +7000,230 @@ test "compiler lowers real HIR while loops with nested switch expressions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
+test "compiler tracks storage_class on variable declarations" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\}
+        \\
+        \\pub fn example() {
+        \\    storage var x: u256 = 0;
+        \\    memory var y: u256 = 0;
+        \\    let z: u256 = 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+
+    const decl_x = ast_file.statement(body.statements[0]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.storage, typecheck.pattern_types[decl_x.pattern.index()].region);
+
+    const decl_y = ast_file.statement(body.statements[1]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[decl_y.pattern.index()].region);
+
+    const decl_z = ast_file.statement(body.statements[2]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[decl_z.pattern.index()].region);
+}
+
+test "compiler rejects region-incompatible variable initialization" {
+    const source_text =
+        \\contract Vault {
+        \\    tstore var pending: u256;
+        \\}
+        \\
+        \\pub fn example() {
+        \\    storage var x: u256 = pending;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "declaration expects region 'storage', found 'transient'"));
+}
+
+test "compiler rejects region-incompatible field initializer" {
+    const source_text =
+        \\contract Vault {
+        \\    tstore var pending: u256;
+        \\    storage var committed: u256 = pending;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "field 'committed' expects region"));
+}
+
+test "compiler allows passing storage values to function parameters" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\}
+        \\
+        \\pub fn helper(x: u256) -> u256 {
+        \\    return x;
+        \\}
+        \\
+        \\pub fn example() -> u256 {
+        \\    return helper(total);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects type mismatch in function arguments" {
+    const source_text =
+        \\pub fn helper(x: u256) -> u256 {
+        \\    return x;
+        \\}
+        \\
+        \\pub fn example() -> u256 {
+        \\    return helper(true);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "expected argument type"));
+}
+
+test "compiler allows returning storage values from functions" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\}
+        \\
+        \\pub fn example() -> u256 {
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects return type mismatch" {
+    const source_text =
+        \\pub fn example() -> u256 {
+        \\    return true;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "return expects type"));
+}
+
+test "compiler tracks storage_class on inferred-type variable declarations" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\}
+        \\
+        \\pub fn example() {
+        \\    storage var x = 0;
+        \\    memory var y = 0;
+        \\    tstore var z = 0;
+        \\    let w = 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+
+    const decl_x = ast_file.statement(body.statements[0]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.storage, typecheck.pattern_types[decl_x.pattern.index()].region);
+
+    const decl_y = ast_file.statement(body.statements[1]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[decl_y.pattern.index()].region);
+
+    const decl_z = ast_file.statement(body.statements[2]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.transient, typecheck.pattern_types[decl_z.pattern.index()].region);
+
+    const decl_w = ast_file.statement(body.statements[3]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[decl_w.pattern.index()].region);
+}
+
+test "compiler tracks tstore var inside function body" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256;
+        \\}
+        \\
+        \\pub fn example() {
+        \\    tstore var temp: u256 = 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+    try testing.expectEqual(compiler.sema.Region.transient, typecheck.pattern_types[decl.pattern.index()].region);
+}
+
+test "compiler allows passing calldata values to function parameters" {
+    const source_text =
+        \\pub fn helper(x: u256) -> u256 {
+        \\    return x;
+        \\}
+        \\
+        \\pub fn example(value: u256) -> u256 {
+        \\    return helper(value);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
 }
