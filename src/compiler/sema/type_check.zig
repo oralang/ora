@@ -970,8 +970,7 @@ const TypeChecker = struct {
                 defer else_locked.deinit(self.arena);
                 try self.validateBodyLocks(if_stmt.then_body, &then_locked);
                 if (if_stmt.else_body) |else_body| try self.validateBodyLocks(else_body, &else_locked);
-                try self.mergeLockedSlots(locked_slots, then_locked.items);
-                try self.mergeLockedSlots(locked_slots, else_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(then_locked.items, else_locked.items);
             },
             .While => |while_stmt| {
                 try self.validateExprLocks(while_stmt.condition, locked_slots);
@@ -979,7 +978,7 @@ const TypeChecker = struct {
                 var loop_locked = try self.cloneEffectSlots(locked_slots.items);
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(while_stmt.body, &loop_locked);
-                try self.mergeLockedSlots(locked_slots, loop_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(locked_slots.items, loop_locked.items);
             },
             .For => |for_stmt| {
                 try self.validateExprLocks(for_stmt.iterable, locked_slots);
@@ -987,7 +986,7 @@ const TypeChecker = struct {
                 var loop_locked = try self.cloneEffectSlots(locked_slots.items);
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(for_stmt.body, &loop_locked);
-                try self.mergeLockedSlots(locked_slots, loop_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(locked_slots.items, loop_locked.items);
             },
             .Switch => |switch_stmt| {
                 try self.validateExprLocks(switch_stmt.condition, locked_slots);
@@ -1004,13 +1003,17 @@ const TypeChecker = struct {
                     var case_locked = try self.cloneEffectSlots(locked_slots.items);
                     defer case_locked.deinit(self.arena);
                     try self.validateBodyLocks(arm.body, &case_locked);
-                    try self.mergeLockedSlots(&merged_locked, case_locked.items);
+                    const next = try self.intersectLockedSlots(merged_locked.items, case_locked.items);
+                    merged_locked.deinit(self.arena);
+                    merged_locked = next;
                 }
                 if (switch_stmt.else_body) |else_body| {
                     var else_locked = try self.cloneEffectSlots(locked_slots.items);
                     defer else_locked.deinit(self.arena);
                     try self.validateBodyLocks(else_body, &else_locked);
-                    try self.mergeLockedSlots(&merged_locked, else_locked.items);
+                    const next = try self.intersectLockedSlots(merged_locked.items, else_locked.items);
+                    merged_locked.deinit(self.arena);
+                    merged_locked = next;
                 }
                 locked_slots.* = merged_locked;
             },
@@ -1022,22 +1025,23 @@ const TypeChecker = struct {
                     var catch_locked = try self.cloneEffectSlots(locked_slots.items);
                     defer catch_locked.deinit(self.arena);
                     try self.validateBodyLocks(catch_clause.body, &catch_locked);
-                    try self.mergeLockedSlots(locked_slots, catch_locked.items);
+                    locked_slots.* = try self.intersectLockedSlots(try_locked.items, catch_locked.items);
+                } else {
+                    locked_slots.* = try self.cloneEffectSlots(try_locked.items);
                 }
-                try self.mergeLockedSlots(locked_slots, try_locked.items);
             },
             .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateExprLocks(arg, locked_slots),
             .Block => |block| {
                 var nested_locked = try self.cloneEffectSlots(locked_slots.items);
                 defer nested_locked.deinit(self.arena);
                 try self.validateBodyLocks(block.body, &nested_locked);
-                try self.mergeLockedSlots(locked_slots, nested_locked.items);
+                locked_slots.* = try self.cloneEffectSlots(nested_locked.items);
             },
             .LabeledBlock => |block| {
                 var nested_locked = try self.cloneEffectSlots(locked_slots.items);
                 defer nested_locked.deinit(self.arena);
                 try self.validateBodyLocks(block.body, &nested_locked);
-                try self.mergeLockedSlots(locked_slots, nested_locked.items);
+                locked_slots.* = try self.cloneEffectSlots(nested_locked.items);
             },
             .Lock => |lock_stmt| {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
@@ -1240,6 +1244,18 @@ const TypeChecker = struct {
 
     fn mergeLockedSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
         for (src) |slot| try self.appendUniqueSlot(dst, slot);
+    }
+
+    fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
+        var result: std.ArrayList(EffectSlot) = .{};
+        for (lhs) |lhs_slot| {
+            for (rhs) |rhs_slot| {
+                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
+                try result.append(self.arena, lhs_slot);
+                break;
+            }
+        }
+        return result;
     }
 
     fn removeLockedSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) void {

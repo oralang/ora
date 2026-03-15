@@ -1926,7 +1926,7 @@ test "compiler allows writes after unlock" {
     try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
-test "compiler rejects writes after a conditional lock" {
+test "compiler allows writes after a conditional lock on only one path" {
     const source_text =
         \\contract Locked {
         \\    storage total: u256;
@@ -1947,10 +1947,10 @@ test "compiler rejects writes after a conditional lock" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
-test "compiler rejects writes after a conditional map-entry lock" {
+test "compiler allows writes after a conditional map-entry lock on only one path" {
     const source_text =
         \\contract Locked {
         \\    storage balances: map<address, u256>;
@@ -1971,7 +1971,33 @@ test "compiler rejects writes after a conditional map-entry lock" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'balances'"));
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'balances'"));
+}
+
+test "compiler rejects writes when all branches keep a slot locked" {
+    const source_text =
+        \\contract Locked {
+        \\    storage total: u256;
+        \\
+        \\    pub fn guarded(flag: bool, value: u256) {
+        \\        if (flag) {
+        \\            @lock(total);
+        \\        } else {
+        \\            @lock(total);
+        \\        }
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
 test "compiler rejects writes to locked transient slots" {
