@@ -356,6 +356,7 @@ test "compiler lowers trait and impl items into AST" {
     const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
     try testing.expectEqualStrings("ERC20", trait_item.name);
     try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
+    try testing.expectEqual(@as(?compiler.ast.ItemId, null), trait_item.ghost_block);
     try testing.expect(trait_item.methods[0].has_self);
     try testing.expectEqualStrings("totalSupply", trait_item.methods[0].name);
     try testing.expectEqual(@as(usize, 0), trait_item.methods[0].parameters.len);
@@ -368,6 +369,30 @@ test "compiler lowers trait and impl items into AST" {
     try testing.expectEqualStrings("Token", impl_item.target_name);
     try testing.expectEqual(@as(usize, 1), impl_item.methods.len);
     try testing.expect(ast_file.item(impl_item.methods[0]).* == .Function);
+}
+
+test "compiler preserves trait ghost blocks in AST" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\
+        \\    ghost {
+        \\        assert(true, "ok");
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
+
+    try testing.expect(trait_item.ghost_block != null);
+    const ghost_item = ast_file.item(trait_item.ghost_block.?).GhostBlock;
+    const body = ast_file.body(ghost_item.body).*;
+    try testing.expectEqual(@as(usize, 1), body.statements.len);
 }
 
 test "compiler reports trait method body parse error" {

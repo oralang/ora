@@ -605,6 +605,7 @@ pub const TraitItem = struct {
     range: source.TextRange,
     name: []const u8,
     methods: []TraitMethod,
+    ghost_block: ?ItemId = null,
 };
 
 pub const ImplItem = struct {

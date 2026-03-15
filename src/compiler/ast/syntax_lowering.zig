@@ -304,14 +304,18 @@ pub fn mixin(Builder: type) type {
         fn lowerTraitItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing trait name"));
             var methods: std.ArrayList(TraitMethod) = .{};
+            var ghost_block: ?ItemId = null;
 
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
                     .node => |method_node| {
-                        if (method_node.kind() != .TraitMethodSignature) continue;
-                        try methods.append(self.allocator, try Lowering.lowerTraitMethodSignatureNode(self, method_node));
+                        switch (method_node.kind()) {
+                            .TraitMethodSignature => try methods.append(self.allocator, try Lowering.lowerTraitMethodSignatureNode(self, method_node)),
+                            .GhostItem => ghost_block = try Lowering.lowerGhostItemNode(self, method_node, null),
+                            else => {},
+                        }
                     },
                 }
             }
@@ -320,6 +324,7 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .name = name,
                 .methods = try methods.toOwnedSlice(self.allocator),
+                .ghost_block = ghost_block,
             } });
         }
 

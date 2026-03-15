@@ -282,6 +282,10 @@ const Parser = struct {
                 try children.append(self.allocator, .{ .token = self.bump() });
                 continue;
             }
+            if (self.at(.Ghost)) {
+                try children.append(self.allocator, .{ .node = try self.parseGhostItem() });
+                continue;
+            }
             if (!self.at(.Comptime) and !self.at(.Fn)) {
                 try self.reportHere("expected method signature in trait body");
                 try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
