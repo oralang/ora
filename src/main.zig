@@ -15,6 +15,7 @@ const std = @import("std");
 const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
+const compiler = @import("compiler/mod.zig");
 const project_config = @import("config/mod.zig");
 const import_program = @import("imports/program_loader.zig");
 const log = @import("log");
@@ -261,6 +262,7 @@ pub fn main() !void {
     }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
+    const use_v2: bool = parsed.use_v2;
     const input_file: ?[]const u8 = parsed.input_file;
     const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
@@ -344,6 +346,11 @@ pub fn main() !void {
 
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (use_v2 and command_kind == .Build) {
+        std.debug.print("error: --v2 currently supports only 'ora emit --emit-ast' and 'ora emit --emit-typed-ast'.\n", .{});
         std.process.exit(2);
     }
 
@@ -542,6 +549,30 @@ pub fn main() !void {
     }
 
     const file_path = input_file.?;
+
+    if (use_v2) {
+        if (emit_cfg or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
+            std.debug.print("error: --v2 currently supports only AST and typed-AST emission.\n", .{});
+            std.process.exit(2);
+        }
+        if (!emit_ast and !emit_typed_ast) {
+            std.debug.print("error: --v2 currently requires --emit-ast or --emit-typed-ast.\n", .{});
+            std.process.exit(2);
+        }
+
+        const format = if (emit_typed_ast)
+            (emit_typed_ast_format orelse "tree")
+        else
+            (emit_ast_format orelse "tree");
+        try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, &metrics);
+
+        var stderr_buffer_v2: [1024]u8 = undefined;
+        var stderr_writer_v2 = std.fs.File.stderr().writer(&stderr_buffer_v2);
+        const stderr_v2 = &stderr_writer_v2.interface;
+        try metrics.report(stderr_v2);
+        try stderr_v2.flush();
+        return;
+    }
 
     // handle CFG generation (uses MLIR's built-in view-op-graph pass)
     if (emit_cfg) {
@@ -1011,6 +1042,7 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
+    try stdout.print("  --v2                   - Use the new compiler for supported emit modes\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -1056,6 +1088,261 @@ fn printUsage() !void {
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
+    try stdout.flush();
+}
+
+fn compilerDiagnosticSeverityName(severity: compiler.diagnostics.Severity) []const u8 {
+    return switch (severity) {
+        .Error => "error",
+        .Warning => "warning",
+        .Note => "note",
+        .Help => "help",
+    };
+}
+
+fn writeJsonString(writer: anytype, text: []const u8) !void {
+    try std.json.stringify(text, .{}, writer);
+}
+
+fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
+    switch (ty) {
+        .unknown => try writer.writeAll("unknown"),
+        .void => try writer.writeAll("void"),
+        .bool => try writer.writeAll("bool"),
+        .string => try writer.writeAll("string"),
+        .address => try writer.writeAll("address"),
+        .bytes => try writer.writeAll("bytes"),
+        .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
+        .named => |named| try writer.writeAll(named.name),
+        .contract => |named| try writer.writeAll(named.name),
+        .struct_ => |named| try writer.writeAll(named.name),
+        .bitfield => |named| try writer.writeAll(named.name),
+        .enum_ => |named| try writer.writeAll(named.name),
+        .function => |function| {
+            try writer.writeAll("fn(");
+            for (function.param_types, 0..) |param_type, index| {
+                if (index != 0) try writer.writeAll(", ");
+                try writeCompilerType(writer, param_type);
+            }
+            try writer.writeAll(")");
+            if (function.return_types.len == 1) {
+                try writer.writeAll(" -> ");
+                try writeCompilerType(writer, function.return_types[0]);
+            } else if (function.return_types.len > 1) {
+                try writer.writeAll(" -> (");
+                for (function.return_types, 0..) |return_type, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    try writeCompilerType(writer, return_type);
+                }
+                try writer.writeAll(")");
+            }
+        },
+        .tuple => |elements| {
+            try writer.writeAll("(");
+            for (elements, 0..) |element, index| {
+                if (index != 0) try writer.writeAll(", ");
+                try writeCompilerType(writer, element);
+            }
+            try writer.writeAll(")");
+        },
+        .array => |array| {
+            try writer.writeByte('[');
+            try writeCompilerType(writer, array.element_type.*);
+            try writer.writeAll("; ");
+            if (array.len) |len| {
+                try writer.print("{d}", .{len});
+            } else {
+                try writer.writeAll("?");
+            }
+            try writer.writeByte(']');
+        },
+        .slice => |slice| {
+            try writer.writeAll("[]");
+            try writeCompilerType(writer, slice.element_type.*);
+        },
+        .map => |map| {
+            try writer.writeAll("map<");
+            if (map.key_type) |key_type| {
+                try writeCompilerType(writer, key_type.*);
+            } else {
+                try writer.writeAll("?");
+            }
+            try writer.writeAll(", ");
+            if (map.value_type) |value_type| {
+                try writeCompilerType(writer, value_type.*);
+            } else {
+                try writer.writeAll("?");
+            }
+            try writer.writeByte('>');
+        },
+        .error_union => |error_union| {
+            try writer.writeByte('!');
+            try writeCompilerType(writer, error_union.payload_type.*);
+            if (error_union.error_types.len != 0) {
+                try writer.writeAll(" | ");
+                for (error_union.error_types, 0..) |error_type, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    try writeCompilerType(writer, error_type);
+                }
+            }
+        },
+        .refinement => |refinement| {
+            try writer.writeAll(refinement.name);
+            if (refinement.args.len != 0) {
+                try writer.writeByte('<');
+                for (refinement.args, 0..) |arg, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    switch (arg) {
+                        .Type => try writer.writeAll("type"),
+                        .Integer => |integer| try writer.writeAll(integer.text),
+                    }
+                }
+                try writer.writeByte('>');
+            }
+        },
+    }
+}
+
+fn compilerItemKindName(item: compiler.ast.Item) []const u8 {
+    return switch (item) {
+        .Import => "Import",
+        .Contract => "Contract",
+        .Function => "Function",
+        .Struct => "Struct",
+        .Bitfield => "Bitfield",
+        .Enum => "Enum",
+        .Trait => "Trait",
+        .Impl => "Impl",
+        .TypeAlias => "TypeAlias",
+        .LogDecl => "LogDecl",
+        .ErrorDecl => "ErrorDecl",
+        .GhostBlock => "GhostBlock",
+        .Field => "Field",
+        .Constant => "Constant",
+        .Error => "Error",
+    };
+}
+
+fn compilerItemName(item: compiler.ast.Item) ?[]const u8 {
+    return switch (item) {
+        .Contract => |contract_item| contract_item.name,
+        .Function => |function| function.name,
+        .Struct => |struct_item| struct_item.name,
+        .Bitfield => |bitfield_item| bitfield_item.name,
+        .Enum => |enum_item| enum_item.name,
+        .Trait => |trait_item| trait_item.name,
+        .Impl => |impl_item| impl_item.target_name,
+        .TypeAlias => |type_alias| type_alias.name,
+        .LogDecl => |log_decl| log_decl.name,
+        .ErrorDecl => |error_decl| error_decl.name,
+        .Field => |field| field.name,
+        .Constant => |constant| constant.name,
+        else => null,
+    };
+}
+
+fn writeCompilerV2Ast(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    ast_file: *const compiler.ast.AstFile,
+    typecheck: ?*const compiler.sema.TypeCheckResult,
+    diagnostics_list: *const compiler.diagnostics.DiagnosticList,
+    format: []const u8,
+) !void {
+    if (!std.mem.eql(u8, format, "tree") and !std.mem.eql(u8, format, "json")) {
+        return error.InvalidArgument;
+    }
+
+    if (std.mem.eql(u8, format, "json")) {
+        try writer.writeAll("{\n  \"root_items\": [\n");
+        for (ast_file.root_items, 0..) |item_id, index| {
+            const item = ast_file.item(item_id).*;
+            if (index != 0) try writer.writeAll(",\n");
+            try writer.writeAll("    {\"kind\": ");
+            try writeJsonString(writer, compilerItemKindName(item));
+            if (compilerItemName(item)) |name| {
+                try writer.writeAll(", \"name\": ");
+                try writeJsonString(writer, name);
+            }
+            if (typecheck) |typed| {
+                try writer.writeAll(", \"type\": ");
+                var type_buffer: std.ArrayList(u8) = .{};
+                defer type_buffer.deinit(allocator);
+                try writeCompilerType(type_buffer.writer(allocator), typed.item_types[item_id.index()]);
+                try writeJsonString(writer, type_buffer.items);
+            }
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("\n  ],\n  \"diagnostics\": [\n");
+        for (diagnostics_list.items.items, 0..) |diag, index| {
+            if (index != 0) try writer.writeAll(",\n");
+            try writer.writeAll("    {\"severity\": ");
+            try writeJsonString(writer, compilerDiagnosticSeverityName(diag.severity));
+            try writer.writeAll(", \"message\": ");
+            try writeJsonString(writer, diag.message);
+            try writer.writeAll("}");
+        }
+        try writer.writeAll("\n  ]\n}\n");
+        return;
+    }
+
+    try writer.print("Compiler V2 {s}AST\n", .{if (typecheck != null) "typed " else ""});
+    try writer.print("Root items: {d}\n", .{ast_file.root_items.len});
+    if (diagnostics_list.items.items.len != 0) {
+        try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
+        for (diagnostics_list.items.items) |diag| {
+            try writer.print("  [{s}] {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
+        }
+    }
+    for (ast_file.root_items, 0..) |item_id, index| {
+        const item = ast_file.item(item_id).*;
+        try writer.print("[{d}] {s}", .{ index, compilerItemKindName(item) });
+        if (compilerItemName(item)) |name| {
+            try writer.print(" {s}", .{name});
+        }
+        if (typecheck) |typed| {
+            try writer.writeAll(" : ");
+            try writeCompilerType(writer, typed.item_types[item_id.index()]);
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn runCompilerV2AstEmit(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    format: []const u8,
+    include_types: bool,
+    m: *Metrics,
+) !void {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    m.begin("compiler v2");
+    var compilation = compiler.driver.compilePackage(allocator, file_path) catch |err| {
+        m.end();
+        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    m.end();
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const typecheck = if (include_types) module_typecheck else null;
+    const diagnostics_list = &module_typecheck.diagnostics;
+
+    writeCompilerV2Ast(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
+        error.InvalidArgument => {
+            try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        else => return err,
+    };
     try stdout.flush();
 }
 
@@ -2895,6 +3182,52 @@ test "init command: rejects non-empty target directory" {
     defer allocator.free(target_path);
 
     try std.testing.expectError(error.InitTargetNotEmpty, initProjectLayout(target_path));
+}
+
+test "compiler v2 typed AST writer prints root item types" {
+    const allocator = std.testing.allocator;
+    const source_text =
+        \\fn id(x: u256) -> u256 {
+        \\    return x;
+        \\}
+    ;
+
+    var compilation = try compiler.driver.compileSource(allocator, "test.ora", source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(allocator);
+    try writeCompilerV2Ast(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree");
+
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler V2 typed AST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Function id : fn(u256) -> u256") != null);
+}
+
+test "compiler v2 JSON AST writer includes diagnostics array" {
+    const allocator = std.testing.allocator;
+    const source_text =
+        \\fn bad() -> u256 {
+        \\    return true;
+        \\}
+    ;
+
+    var compilation = try compiler.driver.compileSource(allocator, "bad.ora", source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(allocator);
+    try writeCompilerV2Ast(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json");
+
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);
 }
 
 test "simple test" {

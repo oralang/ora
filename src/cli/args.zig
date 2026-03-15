@@ -5,6 +5,7 @@
 const std = @import("std");
 
 pub const CliOptions = struct {
+    use_v2: bool = false,
     output_dir: ?[]const u8 = null,
     input_file: ?[]const u8 = null,
     emit_tokens: bool = false,
@@ -65,6 +66,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.output_dir = args[i + 1];
             i += 2;
+        } else if (std.mem.eql(u8, arg, "--v2")) {
+            opts.use_v2 = true;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-tokens")) {
             opts.emit_tokens = true;
             i += 1;

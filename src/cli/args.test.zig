@@ -14,6 +14,15 @@ test "emit-cfg consumes one arg and preserves following input file" {
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 
+test "v2 flag parses without consuming input file" {
+    const args = [_][]const u8{ "--v2", "--emit-typed-ast", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.use_v2);
+    try testing.expect(parsed.emit_typed_ast);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
 test "emit-cfg does not skip subsequent flags" {
     const args = [_][]const u8{ "--emit-cfg", "--emit-ast", "contract.ora" };
     const parsed = try cli.parseArgs(&args);
