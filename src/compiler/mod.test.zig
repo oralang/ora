@@ -3146,6 +3146,72 @@ test "compiler forwards nested aliases into generic struct instantiation" {
     try testing.expect(typecheck.instantiatedStructByName("Pair__Pair__u256") != null);
 }
 
+test "compiler monomorphizes generic structs for top-level constants" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\const ZERO: Pair<u256> = Pair { left: 0, right: 0 };
+        \\
+        \\pub fn get() -> Pair<u256> {
+        \\    return ZERO;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+
+    const constant_type = typecheck.item_types[ast_file.root_items[1].index()];
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, constant_type.kind());
+    try testing.expectEqualStrings("Pair__u256", constant_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.const"));
+}
+
+test "compiler monomorphizes generic structs for top-level fields" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\memory current: Pair<u256>;
+        \\
+        \\pub fn read() -> Pair<u256> {
+        \\    return current;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+
+    const field_type = typecheck.item_types[ast_file.root_items[1].index()];
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, field_type.kind());
+    try testing.expectEqualStrings("Pair__u256", field_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.memory.global"));
+}
+
 test "compiler monomorphizes generic enum types on type use" {
     const source_text =
         \\enum Choice(comptime T: type) {
