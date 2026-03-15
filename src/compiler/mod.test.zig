@@ -401,6 +401,42 @@ test "compiler reports impl syntax errors for missing body and missing for" {
     try testing.expect(diagnosticMessagesContain(diags, "impl methods must have a body"));
 }
 
+test "compiler allows bare self in trait and impl methods" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(!diagnosticMessagesContain(syntax_diags, "bare 'self'"));
+    try testing.expect(!diagnosticMessagesContain(ast_diags, "bare 'self'"));
+}
+
+test "compiler rejects bare self in ordinary functions" {
+    const source_text =
+        \\pub fn bad(self) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "bare 'self' parameter is only allowed in trait and impl methods"));
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {

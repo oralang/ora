@@ -60,7 +60,7 @@ pub fn mixin(Builder: type) type {
         fn lowerTopLevelItemNodeInner(self: *Builder, node: SyntaxNode, parent_contract: ?ItemId) anyerror!ItemId {
             return switch (node.kind()) {
                 .ContractItem => Lowering.lowerContractItemNode(self, node),
-                .FunctionItem => Lowering.lowerFunctionItemNode(self, node, parent_contract),
+                .FunctionItem => Lowering.lowerFunctionItemNode(self, node, parent_contract, false),
                 .StructItem => Lowering.lowerStructItemNode(self, node),
                 .BitfieldItem => Lowering.lowerBitfieldItemNode(self, node),
                 .EnumItem => Lowering.lowerEnumItemNode(self, node),
@@ -155,7 +155,7 @@ pub fn mixin(Builder: type) type {
             }
         }
 
-        fn lowerFunctionItemNode(self: *Builder, node: SyntaxNode, parent_contract: ?ItemId) !ItemId {
+        fn lowerFunctionItemNode(self: *Builder, node: SyntaxNode, parent_contract: ?ItemId, allow_bare_self: bool) !ItemId {
             const name = tokenText(nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing function name"));
             const visibility: Visibility = if (firstDirectTokenOfKind(node, .Pub) != null) .public else .private;
             const params_node = firstDirectChildOfKind(node, .ParameterList) orelse return Lowering.malformedItem(self, node, "missing function parameter list");
@@ -180,6 +180,10 @@ pub fn mixin(Builder: type) type {
             const body_id = body orelse return Lowering.malformedItem(self, node, "missing function body");
             var is_generic = false;
             for (parameters) |parameter| {
+                const pattern = self.patterns.items[parameter.pattern.index()];
+                if (!allow_bare_self and pattern == .Name and std.mem.eql(u8, pattern.Name.name, "self")) {
+                    _ = try Lowering.malformedItem(self, node, "bare 'self' parameter is only allowed in trait and impl methods");
+                }
                 if (parameter.is_comptime) {
                     is_generic = true;
                     break;
@@ -327,7 +331,7 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |method_node| {
                         if (method_node.kind() != .FunctionItem) continue;
-                        try methods.append(self.allocator, try Lowering.lowerFunctionItemNode(self, method_node, null));
+                        try methods.append(self.allocator, try Lowering.lowerFunctionItemNode(self, method_node, null, true));
                     },
                 }
             }
