@@ -63,6 +63,7 @@ pub fn mixin(Builder: type) type {
                 .StructItem => Lowering.lowerStructItemNode(self, node),
                 .BitfieldItem => Lowering.lowerBitfieldItemNode(self, node),
                 .EnumItem => Lowering.lowerEnumItemNode(self, node),
+                .TypeAliasItem => Lowering.lowerTypeAliasItemNode(self, node),
                 .ImportItem => Lowering.lowerImportItemNode(self, node),
                 .GhostItem => Lowering.lowerGhostItemNode(self, node, parent_contract),
                 .FieldItem => Lowering.lowerFieldItemNode(self, node),
@@ -94,6 +95,7 @@ pub fn mixin(Builder: type) type {
                         .StructItem,
                         .BitfieldItem,
                         .EnumItem,
+                        .TypeAliasItem,
                         .ImportItem,
                         .GhostItem,
                         .FieldItem,
@@ -284,6 +286,24 @@ pub fn mixin(Builder: type) type {
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
                 .variants = try variants.toOwnedSlice(self.allocator),
+            } });
+        }
+
+        fn lowerTypeAliasItemNode(self: *Builder, node: SyntaxNode) !ItemId {
+            const name = tokenText(nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedItem(self, node, "missing type alias name"));
+            const template_params_node = firstDirectChildOfKind(node, .ParameterList);
+            const template_parameters = if (template_params_node) |params_node|
+                try Lowering.lowerParameterListNode(self, params_node)
+            else
+                &.{};
+            const target_node = firstDirectTypeChild(node) orelse return Lowering.malformedItem(self, node, "missing type alias target");
+
+            return Support.pushItem(self, .{ .TypeAlias = .{
+                .range = node.range(),
+                .name = name,
+                .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
+                .template_parameters = template_parameters,
+                .target_type = try Lowering.lowerTypeNode(self, target_node),
             } });
         }
 

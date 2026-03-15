@@ -350,6 +350,9 @@ pub fn typeCheck(
             .Constant => |constant| {
                 if (constant.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
             },
+            .TypeAlias => |type_alias| {
+                item_types[index] = try typechecker.resolveTypeExpr(type_alias.target_type);
+            },
             else => {},
         }
     }
@@ -397,6 +400,7 @@ const TypeChecker = struct {
     instantiated_structs: std.ArrayList(InstantiatedStruct),
     instantiated_enums: std.ArrayList(InstantiatedEnum),
     instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
+    active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
@@ -461,6 +465,7 @@ const TypeChecker = struct {
                 }
             },
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
+            .TypeAlias => {},
             else => {},
         }
     }
@@ -864,8 +869,7 @@ const TypeChecker = struct {
         const runtime_parameters = self.runtimeFunctionParameters(function) catch return .{ .unknown = {} };
         if (runtime_parameters.len != call.args.len - bindings.len) return .{ .unknown = {} };
         if (function.return_type) |type_expr| {
-            const raw_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch return .{ .unknown = {} };
-            return self.substituteGenericType(raw_type, bindings) catch .{ .unknown = {} };
+            return self.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
         }
         return .{ .void = {} };
     }
@@ -1012,6 +1016,12 @@ const TypeChecker = struct {
                 for (bindings) |binding| {
                     if (std.mem.eql(u8, trimmed, binding.name)) break :blk binding.ty;
                 }
+                if (self.item_index.lookup(trimmed)) |item_id| {
+                    switch (self.file.item(item_id).*) {
+                        .TypeAlias => |type_alias| break :blk try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
+                        else => {},
+                    }
+                }
                 break :blk descriptorFromPathName(self.file, self.item_index, trimmed);
             },
             .Generic => |generic| self.resolveGenericTypeWithBindings(generic, bindings),
@@ -1058,6 +1068,9 @@ const TypeChecker = struct {
                 },
                 .Bitfield => |bitfield_item| if (bitfield_item.is_generic) {
                     return try self.instantiateGenericBitfield(item_id, bitfield_item, generic, bindings);
+                },
+                .TypeAlias => |type_alias| if (type_alias.is_generic) {
+                    return try self.instantiateGenericTypeAlias(item_id, type_alias, generic, bindings);
                 },
                 else => {},
             }
@@ -1306,6 +1319,57 @@ const TypeChecker = struct {
         }
 
         return .{ .bitfield = .{ .name = mangled_name } };
+    }
+
+    fn instantiateGenericTypeAlias(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        type_alias: ast.TypeAliasItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror!Type {
+        const bindings = try self.genericTypeBindingsForAlias(type_alias, generic, outer_bindings);
+        return self.resolveTypeAliasTarget(item_id, type_alias, bindings);
+    }
+
+    fn genericTypeBindingsForAlias(
+        self: *TypeChecker,
+        type_alias: ast.TypeAliasItem,
+        generic: ast.GenericTypeExpr,
+        outer_bindings: []const GenericTypeBinding,
+    ) anyerror![]const GenericTypeBinding {
+        if (type_alias.template_parameters.len != generic.args.len) return error.InvalidGenericTypeAliasInstantiation;
+
+        const bindings = try self.arena.alloc(GenericTypeBinding, type_alias.template_parameters.len);
+        for (type_alias.template_parameters, generic.args, 0..) |parameter, arg, index| {
+            const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericTypeAliasInstantiation;
+            const ty = switch (arg) {
+                .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
+                else => return error.InvalidGenericTypeAliasInstantiation,
+            };
+            bindings[index] = .{
+                .name = name,
+                .ty = ty,
+            };
+        }
+        return bindings;
+    }
+
+    fn resolveTypeAliasTarget(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        type_alias: ast.TypeAliasItem,
+        bindings: []const GenericTypeBinding,
+    ) anyerror!Type {
+        for (self.active_aliases.items) |active_id| {
+            if (active_id == item_id) {
+                try self.emitRangeError(type_alias.range, "recursive type alias '{s}' is not supported", .{type_alias.name});
+                return .{ .unknown = {} };
+            }
+        }
+        try self.active_aliases.append(self.arena, item_id);
+        defer _ = self.active_aliases.pop();
+        return self.resolveTypeExprWithBindings(type_alias.target_type, bindings);
     }
 
     fn genericTypeBindingsForBitfield(

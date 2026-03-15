@@ -140,6 +140,10 @@ const Validator = struct {
                 try self.validateBitfieldFields(bitfield.fields);
             },
             .Enum => |enum_item| try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'"),
+            .TypeAlias => |type_alias| {
+                _ = try self.expectType(type_alias.target_type, item_range, "type alias references invalid target type id");
+                try self.validateParameters(type_alias.template_parameters, "type alias parameter");
+            },
             .LogDecl => |log_decl| try self.validateLogFields(log_decl.fields),
             .ErrorDecl => |error_decl| try self.validateParameters(error_decl.parameters, "error parameter"),
             .GhostBlock => |ghost_block| {
@@ -495,6 +499,7 @@ fn itemName(item: Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield| bitfield.name,
         .Enum => |enum_item| enum_item.name,
+        .TypeAlias => |type_alias| type_alias.name,
         .LogDecl => |log_decl| log_decl.name,
         .ErrorDecl => |error_decl| error_decl.name,
         .Field => |field| field.name,

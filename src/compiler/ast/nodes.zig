@@ -507,6 +507,7 @@ pub const Item = union(enum) {
     Struct: StructItem,
     Bitfield: BitfieldItem,
     Enum: EnumItem,
+    TypeAlias: TypeAliasItem,
     LogDecl: LogDeclItem,
     ErrorDecl: ErrorDeclItem,
     GhostBlock: GhostBlockItem,
@@ -567,6 +568,14 @@ pub const EnumItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     variants: []EnumVariant,
+};
+
+pub const TypeAliasItem = struct {
+    range: source.TextRange,
+    name: []const u8,
+    is_generic: bool = false,
+    template_parameters: []const Parameter,
+    target_type: TypeExprId,
 };
 
 pub const LogDeclItem = struct {

@@ -90,6 +90,7 @@ fn collectItemEntry(allocator: std.mem.Allocator, file: *const ast.AstFile, item
         .Struct => item.Struct.name,
         .Bitfield => item.Bitfield.name,
         .Enum => item.Enum.name,
+        .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
         .ErrorDecl => item.ErrorDecl.name,
         .Field => item.Field.name,

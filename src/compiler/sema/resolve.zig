@@ -85,6 +85,7 @@ const Resolver = struct {
                         .Struct => member.Struct.name,
                         .Bitfield => member.Bitfield.name,
                         .Enum => member.Enum.name,
+                        .TypeAlias => member.TypeAlias.name,
                         .LogDecl => member.LogDecl.name,
                         .ErrorDecl => member.ErrorDecl.name,
                         .GhostBlock => continue,

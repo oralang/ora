@@ -2967,6 +2967,87 @@ test "compiler monomorphizes generic struct types on type use" {
     try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
 }
 
+test "compiler preserves generic type alias metadata in AST" {
+    const source_text =
+        \\type Balances(comptime K: type) = map<K, u256>;
+        \\type U256 = u256;
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+
+    const generic_alias = ast_file.item(ast_file.root_items[0]).TypeAlias;
+    try testing.expectEqualStrings("Balances", generic_alias.name);
+    try testing.expect(generic_alias.is_generic);
+    try testing.expectEqual(@as(usize, 1), generic_alias.template_parameters.len);
+
+    const plain_alias = ast_file.item(ast_file.root_items[1]).TypeAlias;
+    try testing.expectEqualStrings("U256", plain_alias.name);
+    try testing.expect(!plain_alias.is_generic);
+}
+
+test "compiler resolves generic type aliases through substitution" {
+    const source_text =
+        \\type Balances(comptime K: type) = map<K, u256>;
+        \\
+        \\pub fn lookup(values: Balances<address>) -> Balances<address> {
+        \\    return values;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.map, param_type.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.address, param_type.keyType().?.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.integer, param_type.valueType().?.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.map, typecheck.body_types[function.body.index()].kind());
+}
+
+test "compiler forwards type aliases into generic struct instantiation" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\type U256Pair = Pair<u256>;
+        \\
+        \\pub fn identity(value: U256Pair) -> U256Pair {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("Pair__u256", param_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "type_alias"));
+}
+
 test "compiler lowers instantiated generic struct declarations in HIR" {
     const source_text =
         \\struct Pair(comptime T: type) {

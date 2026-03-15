@@ -137,6 +137,9 @@ const Parser = struct {
         if (self.at(.Comptime) and self.peekKind(1) == .Const) {
             return self.parseConstOrImportItem();
         }
+        if (self.startsTypeAliasItem()) {
+            return self.parseTypeAliasItem();
+        }
         return switch (self.current().kind) {
             .Contract => self.parseContractItem(),
             .Pub, .Fn => self.parseFunctionItem(),
@@ -688,6 +691,45 @@ const Parser = struct {
 
     fn parseEnumItem(self: *Parser) anyerror!green.GreenNodeId {
         return self.parseMemberItem(SyntaxKind.EnumItem, SyntaxKind.EnumVariant, "expected enum variant");
+    }
+
+    fn parseTypeAliasItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Identifier)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'type' in type alias declaration");
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected alias name");
+            return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
+        if (self.at(.Equal)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '=' in type alias declaration");
+            return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
+        }
+
+        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.Semicolon}) });
+
+        if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ';' after type alias");
+        }
+
+        return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
     }
 
     fn parseMemberItem(self: *Parser, item_kind: SyntaxKind, member_kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
@@ -2085,8 +2127,13 @@ const Parser = struct {
         return switch (kind) {
             .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
             .Comptime => self.peekKind(1) == .Const,
+            .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
+    }
+
+    fn startsTypeAliasItem(self: *const Parser) bool {
+        return self.at(.Identifier) and self.currentTokenTextEql("type");
     }
 
     fn peekKind(self: *const Parser, lookahead: usize) green.TokenKind {
@@ -2135,6 +2182,11 @@ const Parser = struct {
         if (!self.at(.At) or self.peekKind(1) != .Identifier) return false;
         const token = self.tokens.items[self.index + 1];
         return std.mem.eql(u8, self.source_text[token.range.start..token.range.end], name);
+    }
+
+    fn currentTokenTextEql(self: *const Parser, comptime text: []const u8) bool {
+        const token = self.current();
+        return std.mem.eql(u8, self.source_text[token.range.start..token.range.end], text);
     }
 
     fn tokenIsIdentifierLike(kind: green.TokenKind) bool {

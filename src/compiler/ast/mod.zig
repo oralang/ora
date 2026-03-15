@@ -93,6 +93,7 @@ pub const FunctionItem = nodes.FunctionItem;
 pub const StructItem = nodes.StructItem;
 pub const BitfieldItem = nodes.BitfieldItem;
 pub const EnumItem = nodes.EnumItem;
+pub const TypeAliasItem = nodes.TypeAliasItem;
 pub const LogDeclItem = nodes.LogDeclItem;
 pub const ErrorDeclItem = nodes.ErrorDeclItem;
 pub const GhostBlockItem = nodes.GhostBlockItem;
