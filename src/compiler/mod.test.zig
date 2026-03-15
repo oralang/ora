@@ -3022,6 +3022,41 @@ test "compiler monomorphizes generic contract calls with generic struct type arg
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
 }
 
+test "compiler emits user diagnostics for generic arity mismatches" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\enum Choice(comptime T: type) {
+        \\    ok,
+        \\}
+        \\
+        \\bitfield Flags(comptime T: type): u256 {
+        \\    raw: T;
+        \\}
+        \\
+        \\type Wrapper(comptime T: type) = Pair<T>;
+        \\
+        \\pub fn broken(
+        \\    a: Pair<u256, u8>,
+        \\    b: Choice<u256, u8>,
+        \\    c: Flags<u256, u8>,
+        \\    d: Wrapper<u256, u8>,
+        \\) -> void {}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "generic struct 'Pair' expects 1 arguments, found 2"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "generic enum 'Choice' expects 1 arguments, found 2"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "generic bitfield 'Flags' expects 1 arguments, found 2"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "generic type alias 'Wrapper' expects 1 arguments, found 2"));
+}
+
 test "compiler monomorphizes integer generic contract function calls in HIR" {
     const source_text =
         \\contract Math {

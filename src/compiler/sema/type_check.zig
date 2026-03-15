@@ -1214,15 +1214,31 @@ const TypeChecker = struct {
         if (self.item_index.lookup(generic.name)) |item_id| {
             switch (self.file.item(item_id).*) {
                 .Struct => |struct_item| if (struct_item.is_generic) {
+                    if (struct_item.template_parameters.len != generic.args.len) {
+                        try self.emitGenericArityError(generic.range, "struct", struct_item.name, struct_item.template_parameters.len, generic.args.len);
+                        return .{ .unknown = {} };
+                    }
                     return try self.instantiateGenericStruct(item_id, struct_item, generic, bindings);
                 },
                 .Enum => |enum_item| if (enum_item.is_generic) {
+                    if (enum_item.template_parameters.len != generic.args.len) {
+                        try self.emitGenericArityError(generic.range, "enum", enum_item.name, enum_item.template_parameters.len, generic.args.len);
+                        return .{ .unknown = {} };
+                    }
                     return try self.instantiateGenericEnum(item_id, enum_item, generic, bindings);
                 },
                 .Bitfield => |bitfield_item| if (bitfield_item.is_generic) {
+                    if (bitfield_item.template_parameters.len != generic.args.len) {
+                        try self.emitGenericArityError(generic.range, "bitfield", bitfield_item.name, bitfield_item.template_parameters.len, generic.args.len);
+                        return .{ .unknown = {} };
+                    }
                     return try self.instantiateGenericBitfield(item_id, bitfield_item, generic, bindings);
                 },
                 .TypeAlias => |type_alias| if (type_alias.is_generic) {
+                    if (type_alias.template_parameters.len != generic.args.len) {
+                        try self.emitGenericArityError(generic.range, "type alias", type_alias.name, type_alias.template_parameters.len, generic.args.len);
+                        return .{ .unknown = {} };
+                    }
                     return try self.instantiateGenericTypeAlias(item_id, type_alias, generic, bindings);
                 },
                 else => {},
@@ -2732,6 +2748,22 @@ const TypeChecker = struct {
 
     fn integerValueText(self: *TypeChecker, value: BigInt) ![]const u8 {
         return try value.toString(self.arena, 10, .lower);
+    }
+
+    fn emitGenericArityError(
+        self: *TypeChecker,
+        range: source.TextRange,
+        kind: []const u8,
+        name: []const u8,
+        expected: usize,
+        found: usize,
+    ) !void {
+        try self.emitRangeError(range, "generic {s} '{s}' expects {d} arguments, found {d}", .{
+            kind,
+            name,
+            expected,
+            found,
+        });
     }
 
     fn emitExprError(self: *TypeChecker, expr_id: ast.ExprId, comptime fmt: []const u8, args: anytype) !void {
