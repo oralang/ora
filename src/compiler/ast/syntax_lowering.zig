@@ -27,6 +27,7 @@ const Parameter = nodes.Parameter;
 const StructField = nodes.StructField;
 const BitfieldField = nodes.BitfieldField;
 const EnumVariant = nodes.EnumVariant;
+const TraitMethod = nodes.TraitMethod;
 const SwitchPattern = nodes.SwitchPattern;
 const CatchClause = nodes.CatchClause;
 const TypeIntegerLiteral = nodes.TypeIntegerLiteral;
@@ -63,6 +64,8 @@ pub fn mixin(Builder: type) type {
                 .StructItem => Lowering.lowerStructItemNode(self, node),
                 .BitfieldItem => Lowering.lowerBitfieldItemNode(self, node),
                 .EnumItem => Lowering.lowerEnumItemNode(self, node),
+                .TraitItem => Lowering.lowerTraitItemNode(self, node),
+                .ImplItem => Lowering.lowerImplItemNode(self, node),
                 .TypeAliasItem => Lowering.lowerTypeAliasItemNode(self, node),
                 .ImportItem => Lowering.lowerImportItemNode(self, node),
                 .GhostItem => Lowering.lowerGhostItemNode(self, node, parent_contract),
@@ -95,6 +98,8 @@ pub fn mixin(Builder: type) type {
                         .StructItem,
                         .BitfieldItem,
                         .EnumItem,
+                        .TraitItem,
+                        .ImplItem,
                         .TypeAliasItem,
                         .ImportItem,
                         .GhostItem,
@@ -289,6 +294,52 @@ pub fn mixin(Builder: type) type {
             } });
         }
 
+        fn lowerTraitItemNode(self: *Builder, node: SyntaxNode) !ItemId {
+            const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing trait name"));
+            var methods: std.ArrayList(TraitMethod) = .{};
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |method_node| {
+                        if (method_node.kind() != .TraitMethodSignature) continue;
+                        try methods.append(self.allocator, try Lowering.lowerTraitMethodSignatureNode(self, method_node));
+                    },
+                }
+            }
+
+            return Support.pushItem(self, .{ .Trait = .{
+                .range = node.range(),
+                .name = name,
+                .methods = try methods.toOwnedSlice(self.allocator),
+            } });
+        }
+
+        fn lowerImplItemNode(self: *Builder, node: SyntaxNode) !ItemId {
+            const trait_name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing impl trait name"));
+            const target_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedItem(self, node, "missing impl target name");
+            var methods: std.ArrayList(ItemId) = .{};
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |method_node| {
+                        if (method_node.kind() != .FunctionItem) continue;
+                        try methods.append(self.allocator, try Lowering.lowerFunctionItemNode(self, method_node, null));
+                    },
+                }
+            }
+
+            return Support.pushItem(self, .{ .Impl = .{
+                .range = node.range(),
+                .trait_name = trait_name,
+                .target_name = tokenText(target_token),
+                .methods = try methods.toOwnedSlice(self.allocator),
+            } });
+        }
+
         fn lowerTypeAliasItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedItem(self, node, "missing type alias name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
@@ -305,6 +356,65 @@ pub fn mixin(Builder: type) type {
                 .template_parameters = template_parameters,
                 .target_type = try Lowering.lowerTypeNode(self, target_node),
             } });
+        }
+
+        fn lowerTraitMethodSignatureNode(self: *Builder, node: SyntaxNode) !TraitMethod {
+            const name = if (nthDirectIdentifierLikeToken(node, 0)) |token|
+                tokenText(token)
+            else blk: {
+                _ = try Lowering.malformedItem(self, node, "missing trait method name");
+                break :blk "";
+            };
+            const params_node = if (firstDirectChildOfKind(node, .ParameterList)) |params_node|
+                params_node
+            else blk: {
+                _ = try Lowering.malformedItem(self, node, "missing trait method parameter list");
+                break :blk node;
+            };
+            var parameters: std.ArrayList(Parameter) = .{};
+            var has_self = false;
+
+            var params_it = params_node.children();
+            while (params_it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |param_node| {
+                        if (param_node.kind() != .Parameter) continue;
+                        const name_token = nthDirectIdentifierLikeToken(param_node, 0);
+                        const is_self = if (name_token) |token|
+                            std.mem.eql(u8, tokenText(token), "self") and firstDirectTypeChild(param_node) == null
+                        else
+                            false;
+                        if (is_self) {
+                            has_self = true;
+                            continue;
+                        }
+                        try parameters.append(self.allocator, try Lowering.lowerParameterNode(self, param_node));
+                    },
+                }
+            }
+
+            var clauses: std.ArrayList(nodes.SpecClause) = .{};
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |child_node| switch (child_node.kind()) {
+                        .SpecClause => try clauses.append(self.allocator, try Lowering.lowerSpecClauseNode(self, child_node)),
+                        else => {},
+                    },
+                }
+            }
+
+            return .{
+                .range = node.range(),
+                .name = name,
+                .has_self = has_self,
+                .parameters = try parameters.toOwnedSlice(self.allocator),
+                .return_type = if (firstDirectTypeChild(node)) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
+                .clauses = try clauses.toOwnedSlice(self.allocator),
+                .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
+            };
         }
 
         fn lowerStructFieldNode(self: *Builder, node: SyntaxNode) !StructField {

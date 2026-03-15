@@ -306,6 +306,101 @@ test "compiler syntax bounds spec clauses loop invariants and item members" {
     try testing.expect(nthChildNodeOfKind(for_stmt.?, .InvariantClause, 0) != null);
 }
 
+test "compiler syntax parses trait and impl blocks" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\    fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+
+    const trait_item = nthChildNodeOfKind(root, .TraitItem, 0);
+    const impl_item = nthChildNodeOfKind(root, .ImplItem, 0);
+    try testing.expect(trait_item != null);
+    try testing.expect(impl_item != null);
+    try testing.expect(nthChildNodeOfKind(trait_item.?, .TraitMethodSignature, 0) != null);
+    try testing.expect(nthChildNodeOfKind(trait_item.?, .TraitMethodSignature, 1) != null);
+    try testing.expect(nthChildNodeOfKind(impl_item.?, .FunctionItem, 0) != null);
+}
+
+test "compiler lowers trait and impl items into AST" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256;
+        \\    comptime fn decimals() -> u8;
+        \\}
+        \\
+        \\impl ERC20 for Token {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+
+    try testing.expect(ast_file.item(ast_file.root_items[0]).* == .Trait);
+    const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
+    try testing.expectEqualStrings("ERC20", trait_item.name);
+    try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
+    try testing.expect(trait_item.methods[0].has_self);
+    try testing.expectEqualStrings("totalSupply", trait_item.methods[0].name);
+    try testing.expectEqual(@as(usize, 0), trait_item.methods[0].parameters.len);
+    try testing.expect(trait_item.methods[1].is_comptime);
+    try testing.expectEqualStrings("decimals", trait_item.methods[1].name);
+
+    try testing.expect(ast_file.item(ast_file.root_items[1]).* == .Impl);
+    const impl_item = ast_file.item(ast_file.root_items[1]).Impl;
+    try testing.expectEqualStrings("ERC20", impl_item.trait_name);
+    try testing.expectEqualStrings("Token", impl_item.target_name);
+    try testing.expectEqual(@as(usize, 1), impl_item.methods.len);
+    try testing.expect(ast_file.item(impl_item.methods[0]).* == .Function);
+}
+
+test "compiler reports trait method body parse error" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn totalSupply(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(diags, "trait methods cannot have a body"));
+}
+
+test "compiler reports impl syntax errors for missing body and missing for" {
+    const source_text =
+        \\impl ERC20 Token {
+        \\    fn totalSupply(self) -> u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(diags, "expected 'for' in impl declaration"));
+    try testing.expect(diagnosticMessagesContain(diags, "impl methods must have a body"));
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {

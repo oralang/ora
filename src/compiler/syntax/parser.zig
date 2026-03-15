@@ -146,6 +146,8 @@ const Parser = struct {
             .Struct => self.parseStructItem(),
             .Bitfield => self.parseBitfieldItem(),
             .Enum => self.parseEnumItem(),
+            .Trait => self.parseTraitItem(),
+            .Impl => self.parseImplItem(),
             .Log => self.parseLogDeclItem(),
             .Error => self.parseErrorDeclItem(),
             .Const => self.parseConstantItem(false),
@@ -249,6 +251,180 @@ const Parser = struct {
             try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
         } else if (self.at(.Semicolon)) {
             try children.append(self.allocator, .{ .token = self.bump() });
+        } else if (!self.at(.Eof)) {
+            try self.reportHere("expected function body");
+        }
+
+        return self.finishNode(SyntaxKind.FunctionItem, children.items);
+    }
+
+    fn parseTraitMethodSignature(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Comptime)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.Fn)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'fn' in trait method declaration");
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        } else {
+            try self.reportHere("expected parameter list in trait method declaration");
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
+            if (self.at(.Semicolon)) break;
+            if (self.at(.Arrow)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Requires, .Ensures, .Semicolon }) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        while (self.at(.Requires) or self.at(.Ensures)) {
+            try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
+        }
+
+        if (self.at(.LeftBrace)) {
+            _ = try self.parseBodyNode();
+            try self.reportHere("trait methods cannot have a body");
+        } else if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else if (!self.at(.Eof)) {
+            try self.reportHere("expected ';' after trait method declaration");
+        }
+
+        return self.finishNode(SyntaxKind.TraitMethodSignature, children.items);
+    }
+
+    fn parseTraitItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (!self.at(.LeftBrace)) {
+            try self.reportHere("expected '{' after trait declaration");
+            return self.finishNode(SyntaxKind.TraitItem, children.items);
+        }
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma) or self.at(.Semicolon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseTraitMethodSignature() });
+        }
+
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated trait body", children.items);
+        }
+
+        return self.finishNode(SyntaxKind.TraitItem, children.items);
+    }
+
+    fn parseImplItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        var saw_for = false;
+        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
+            if (self.at(.For)) saw_for = true;
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (!saw_for) {
+            try self.reportHere("expected 'for' in impl declaration");
+        }
+
+        if (!self.at(.LeftBrace)) {
+            try self.reportHere("expected '{' after impl declaration");
+            return self.finishNode(SyntaxKind.ImplItem, children.items);
+        }
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma) or self.at(.Semicolon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            if (self.at(.Fn)) {
+                try children.append(self.allocator, .{ .node = try self.parseImplMethodItem() });
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+        }
+
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated impl body", children.items);
+        }
+
+        return self.finishNode(SyntaxKind.ImplItem, children.items);
+    }
+
+    fn parseImplMethodItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.Fn)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'fn' in impl method declaration");
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        } else {
+            try self.reportHere("expected parameter list in impl method declaration");
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
+            if (self.at(.Semicolon)) break;
+            if (self.at(.Arrow)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Requires, .Ensures, .Semicolon }) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        while (self.at(.Requires) or self.at(.Ensures)) {
+            try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
+        }
+
+        if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        } else if (self.at(.Semicolon)) {
+            _ = self.bump();
+            try self.reportHere("impl methods must have a body");
         } else if (!self.at(.Eof)) {
             try self.reportHere("expected function body");
         }
@@ -2132,7 +2308,7 @@ const Parser = struct {
     fn startsTopLevelItem(self: *const Parser) bool {
         const kind = self.current().kind;
         return switch (kind) {
-            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
+            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
             .Comptime => self.peekKind(1) == .Const,
             .Identifier => self.startsTypeAliasItem(),
             else => false,
