@@ -486,21 +486,11 @@ const Lowerer = struct {
         var bindings: std.ArrayList(GenericTypeBinding) = .{};
         for (function.parameters[0..generic_count], 0..) |parameter, index| {
             const type_name = self.patternName(parameter.pattern) orelse return null;
-            var value: GenericBindingValue = undefined;
-            var mangle_name: []const u8 = undefined;
-            if (self.isGenericTypeParameter(parameter)) {
-                const concrete_name = self.typeArgNameFromExpr(call.args[index]) orelse return null;
-                value = .{ .ty = descriptorFromPathName(self.file, self.item_index, concrete_name) };
-                mangle_name = try self.allocator.dupe(u8, std.mem.trim(u8, concrete_name, " \t\n\r"));
-            } else if (parameter.is_comptime) {
-                const integer_text = self.integerArgText(call.args[index]) orelse return null;
-                value = .{ .integer = integer_text };
-                mangle_name = try self.allocator.dupe(u8, integer_text);
-            } else return null;
+            const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
             try bindings.append(self.allocator, .{
-                .name = type_name,
-                .value = value,
-                .mangle_name = mangle_name,
+                .name = binding.name,
+                .value = binding.value,
+                .mangle_name = binding.mangle_name,
             });
         }
         return @constCast(try bindings.toOwnedSlice(self.allocator));
@@ -550,6 +540,26 @@ const Lowerer = struct {
             .Group => |group| self.integerArgText(group.expr),
             else => null,
         };
+    }
+
+    fn genericBindingForCallArg(self: *Lowerer, parameter: ast.Parameter, name: []const u8, arg_expr: ast.ExprId) !?GenericTypeBinding {
+        if (self.isGenericTypeParameter(parameter)) {
+            const concrete_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
+            return .{
+                .name = name,
+                .value = .{ .ty = descriptorFromPathName(self.file, self.item_index, concrete_name) },
+                .mangle_name = try self.allocator.dupe(u8, std.mem.trim(u8, concrete_name, " \t\n\r")),
+            };
+        }
+        if (parameter.is_comptime) {
+            const integer_text = self.integerArgText(arg_expr) orelse return null;
+            return .{
+                .name = name,
+                .value = .{ .integer = integer_text },
+                .mangle_name = try self.allocator.dupe(u8, integer_text),
+            };
+        }
+        return null;
     }
 
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {

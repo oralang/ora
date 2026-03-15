@@ -909,18 +909,7 @@ const TypeChecker = struct {
         const bindings = self.arena.alloc(GenericTypeBinding, generic_count) catch return null;
         for (function.parameters[0..generic_count], 0..) |parameter, index| {
             const name = self.patternName(parameter.pattern) orelse return null;
-            const value = if (self.isGenericTypeParameter(parameter))
-                blk: {
-                    const arg_name = self.typeArgNameFromExpr(call.args[index]) orelse return null;
-                    break :blk GenericBindingValue{ .ty = descriptorFromPathName(self.file, self.item_index, arg_name) };
-                }
-            else if (self.comptimeIntegerParameter(parameter))
-                blk: {
-                    const integer = self.exprIntegerText(call.args[index]) orelse return null;
-                    break :blk GenericBindingValue{ .integer = integer };
-                }
-            else
-                return null;
+            const value = self.genericBindingValueForCallArg(parameter, call.args[index]) orelse return null;
             bindings[index] = .{ .name = name, .value = value };
         }
         return bindings;
@@ -964,6 +953,18 @@ const TypeChecker = struct {
             .Group => |group| self.exprIntegerText(group.expr),
             else => null,
         };
+    }
+
+    fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
+        if (self.isGenericTypeParameter(parameter)) {
+            const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
+            return .{ .ty = descriptorFromPathName(self.file, self.item_index, arg_name) };
+        }
+        if (self.comptimeIntegerParameter(parameter)) {
+            const integer = self.exprIntegerText(arg_expr) orelse return null;
+            return .{ .integer = integer };
+        }
+        return null;
     }
 
     const GenericBindingValue = union(enum) {
@@ -1306,21 +1307,7 @@ const TypeChecker = struct {
         const bindings = try self.arena.alloc(GenericTypeBinding, struct_item.template_parameters.len);
         for (struct_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericStructInstantiation;
-            const value = if (self.isGenericTypeParameter(parameter))
-                blk: {
-                    const ty = switch (arg) {
-                        .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
-                        else => return error.InvalidGenericStructInstantiation,
-                    };
-                    break :blk GenericBindingValue{ .ty = ty };
-                }
-            else if (self.comptimeIntegerParameter(parameter))
-                blk: {
-                    const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return error.InvalidGenericStructInstantiation;
-                    break :blk GenericBindingValue{ .integer = integer };
-                }
-            else
-                return error.InvalidGenericStructInstantiation;
+            const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericStructInstantiation);
             bindings[index] = .{
                 .name = name,
                 .value = value,
@@ -1420,21 +1407,7 @@ const TypeChecker = struct {
         const bindings = try self.arena.alloc(GenericTypeBinding, enum_item.template_parameters.len);
         for (enum_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericEnumInstantiation;
-            const value = if (self.isGenericTypeParameter(parameter))
-                blk: {
-                    const ty = switch (arg) {
-                        .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
-                        else => return error.InvalidGenericEnumInstantiation,
-                    };
-                    break :blk GenericBindingValue{ .ty = ty };
-                }
-            else if (self.comptimeIntegerParameter(parameter))
-                blk: {
-                    const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return error.InvalidGenericEnumInstantiation;
-                    break :blk GenericBindingValue{ .integer = integer };
-                }
-            else
-                return error.InvalidGenericEnumInstantiation;
+            const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericEnumInstantiation);
             bindings[index] = .{
                 .name = name,
                 .value = value,
@@ -1506,21 +1479,7 @@ const TypeChecker = struct {
         const bindings = try self.arena.alloc(GenericTypeBinding, type_alias.template_parameters.len);
         for (type_alias.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericTypeAliasInstantiation;
-            const value = if (self.isGenericTypeParameter(parameter))
-                blk: {
-                    const ty = switch (arg) {
-                        .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
-                        else => return error.InvalidGenericTypeAliasInstantiation,
-                    };
-                    break :blk GenericBindingValue{ .ty = ty };
-                }
-            else if (self.comptimeIntegerParameter(parameter))
-                blk: {
-                    const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return error.InvalidGenericTypeAliasInstantiation;
-                    break :blk GenericBindingValue{ .integer = integer };
-                }
-            else
-                return error.InvalidGenericTypeAliasInstantiation;
+            const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericTypeAliasInstantiation);
             bindings[index] = .{
                 .name = name,
                 .value = value,
@@ -1557,27 +1516,34 @@ const TypeChecker = struct {
         const bindings = try self.arena.alloc(GenericTypeBinding, bitfield_item.template_parameters.len);
         for (bitfield_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericBitfieldInstantiation;
-            const value = if (self.isGenericTypeParameter(parameter))
-                blk: {
-                    const ty = switch (arg) {
-                        .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
-                        else => return error.InvalidGenericBitfieldInstantiation,
-                    };
-                    break :blk GenericBindingValue{ .ty = ty };
-                }
-            else if (self.comptimeIntegerParameter(parameter))
-                blk: {
-                    const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return error.InvalidGenericBitfieldInstantiation;
-                    break :blk GenericBindingValue{ .integer = integer };
-                }
-            else
-                return error.InvalidGenericBitfieldInstantiation;
+            const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericBitfieldInstantiation);
             bindings[index] = .{
                 .name = name,
                 .value = value,
             };
         }
         return bindings;
+    }
+
+    fn genericBindingValueForTypeArg(
+        self: *TypeChecker,
+        parameter: ast.Parameter,
+        arg: ast.TypeArg,
+        outer_bindings: []const GenericTypeBinding,
+        comptime invalid_instantiation: anytype,
+    ) anyerror!GenericBindingValue {
+        if (self.isGenericTypeParameter(parameter)) {
+            const ty = switch (arg) {
+                .Type => |type_expr| try self.resolveTypeExprWithBindings(type_expr, outer_bindings),
+                else => return invalid_instantiation,
+            };
+            return .{ .ty = ty };
+        }
+        if (self.comptimeIntegerParameter(parameter)) {
+            const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return invalid_instantiation;
+            return .{ .integer = integer };
+        }
+        return invalid_instantiation;
     }
 
     fn instantiatedBitfieldByName(self: *const TypeChecker, name: []const u8) ?InstantiatedBitfield {
