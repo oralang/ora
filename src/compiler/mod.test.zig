@@ -2967,6 +2967,120 @@ test "compiler monomorphizes generic struct types on type use" {
     try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
 }
 
+test "compiler monomorphizes generic struct return types in non-generic functions" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn make() -> Pair<u256> {
+        \\    return Pair { left: 1, right: 2 };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, typecheck.body_types[function.body.index()].kind());
+    try testing.expectEqualStrings("Pair__u256", typecheck.body_types[function.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
+}
+
+test "compiler monomorphizes generic struct types nested in storage field declarations" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage balances: map<address, Pair<u256>>;
+        \\
+        \\    pub fn read(user: address) -> Pair<u256> {
+        \\        return balances[user];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const contract = ast_file.item(ast_file.root_items[1]).Contract;
+    const field_id = contract.members[0];
+    const function_id = contract.members[1];
+
+    const field_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = field_id });
+    const field_type = field_typecheck.item_types[field_id.index()];
+    try testing.expectEqual(compiler.sema.TypeKind.map, field_type.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, field_type.valueType().?.kind());
+    try testing.expectEqualStrings("Pair__u256", field_type.valueType().?.name().?);
+    try testing.expect(field_typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const function_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = function_id });
+    const function = ast_file.item(function_id).Function;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, function_typecheck.body_types[function.body.index()].kind());
+    try testing.expectEqualStrings("Pair__u256", function_typecheck.body_types[function.body.index()].name().?);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.global"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.map_get"));
+}
+
+test "compiler monomorphizes generic struct payloads in error unions" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\error NotFound;
+        \\
+        \\pub fn get() -> !Pair<u256> | NotFound {
+        \\    return ok(Pair { left: 1, right: 2 });
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const function_type = typecheck.item_types[ast_file.root_items[2].index()];
+    try testing.expectEqual(compiler.sema.TypeKind.function, function_type.kind());
+    try testing.expectEqual(@as(usize, 1), function_type.returnTypes().len);
+    const return_type = function_type.returnTypes()[0];
+    try testing.expectEqual(compiler.sema.TypeKind.error_union, return_type.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, return_type.payloadType().?.kind());
+    try testing.expectEqualStrings("Pair__u256", return_type.payloadType().?.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.error_union<!ora.struct<\"Pair__u256\">"));
+}
+
 test "compiler preserves generic type alias metadata in AST" {
     const source_text =
         \\type Balances(comptime K: type) = map<K, u256>;

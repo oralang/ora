@@ -339,6 +339,20 @@ pub fn typeCheck(
                         .calldata,
                     );
                 }
+                const resolved_params = try arena.alloc(Type, function.parameters.len);
+                for (function.parameters, 0..) |parameter, param_index| {
+                    resolved_params[param_index] = try typechecker.resolveTypeExpr(parameter.type_expr);
+                }
+                const resolved_returns = if (function.return_type) |type_expr| blk_returns: {
+                    const slice = try arena.alloc(Type, 1);
+                    slice[0] = try typechecker.resolveTypeExpr(type_expr);
+                    break :blk_returns slice;
+                } else &.{};
+                item_types[index] = .{ .function = .{
+                    .name = function.name,
+                    .param_types = resolved_params,
+                    .return_types = resolved_returns,
+                } };
                 body_types[function.body.index()] = if (function.return_type) |type_expr|
                     try typechecker.resolveTypeExpr(type_expr)
                 else
@@ -1075,10 +1089,6 @@ const TypeChecker = struct {
                 else => {},
             }
         }
-        if (bindings.len == 0) {
-            return descriptorFromGenericType(self.arena, self.file, self.item_index, generic);
-        }
-
         if (std.mem.eql(u8, generic.name, "map")) {
             return .{ .map = .{
                 .key_type = if (generic.args.len > 0 and generic.args[0] == .Type)
@@ -1108,6 +1118,10 @@ const TypeChecker = struct {
                     .args = generic.args,
                 } };
             }
+        }
+
+        if (bindings.len == 0) {
+            return descriptorFromGenericType(self.arena, self.file, self.item_index, generic);
         }
 
         return descriptorFromPathName(self.file, self.item_index, generic.name);
