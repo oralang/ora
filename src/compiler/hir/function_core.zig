@@ -47,8 +47,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .in_ghost_context = function.is_ghost,
             };
 
-            for (function.parameters, 0..) |parameter, index| {
-                self.locals.bindPattern(parent.file, parameter.pattern, mlir.oraBlockGetArgument(block, index)) catch {};
+            var runtime_index: usize = 0;
+            for (function.parameters) |parameter| {
+                if (parameter.is_comptime) {
+                    if (parent.patternName(parameter.pattern)) |name| {
+                        if (parent.substitutedInteger(name)) |integer_text| {
+                            const param_type = parent.lowerSemaType(parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
+                            const parsed = support.parseIntLiteral(integer_text) orelse 0;
+                            const value = appendValueOp(block, createIntegerConstant(parent.context, parent.location(parameter.range), param_type, parsed));
+                            self.locals.bindPattern(parent.file, parameter.pattern, value) catch {};
+                        }
+                    }
+                    continue;
+                }
+                self.locals.bindPattern(parent.file, parameter.pattern, mlir.oraBlockGetArgument(block, runtime_index)) catch {};
+                runtime_index += 1;
             }
             return self;
         }

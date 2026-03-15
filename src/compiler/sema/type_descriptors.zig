@@ -25,7 +25,7 @@ pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.Ast
         },
         .Array => |array| .{ .array = .{
             .element_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, array.element)),
-            .len = parseArrayLen(array.size.text),
+            .len = parseArrayLen(array.size),
         } },
         .Slice => |slice| .{ .slice = .{
             .element_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, slice.element)),
@@ -234,8 +234,11 @@ fn commonIntegerType(lhs: Type, rhs: Type) ?Type {
     return lhs;
 }
 
-fn parseArrayLen(text: []const u8) ?u32 {
-    return std.fmt.parseInt(u32, text, 10) catch null;
+fn parseArrayLen(size: ast.TypeArraySize) ?u32 {
+    return switch (size) {
+        .Integer => |literal| std.fmt.parseInt(u32, literal.text, 10) catch null,
+        .Name => null,
+    };
 }
 
 fn parseIntegerType(name: []const u8) ?model.IntegerType {

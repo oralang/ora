@@ -72,6 +72,11 @@ pub const TypeIntegerLiteral = struct {
     text: []const u8,
 };
 
+pub const TypeArraySize = union(enum) {
+    Integer: TypeIntegerLiteral,
+    Name: PathTypeExpr,
+};
+
 pub const GenericTypeExpr = struct {
     range: source.TextRange,
     name: []const u8,
@@ -86,7 +91,7 @@ pub const TupleTypeExpr = struct {
 pub const ArrayTypeExpr = struct {
     range: source.TextRange,
     element: TypeExprId,
-    size: TypeIntegerLiteral,
+    size: TypeArraySize,
 };
 
 pub const SliceTypeExpr = struct {

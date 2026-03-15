@@ -1180,7 +1180,8 @@ test "compiler lowers structured type expressions" {
     try testing.expect(ast_file.typeExpr(struct_item.fields[2].type_expr).* == .Generic);
 
     const array_type = ast_file.typeExpr(struct_item.fields[0].type_expr).Array;
-    try testing.expectEqualStrings("5", array_type.size.text);
+    try testing.expect(array_type.size == .Integer);
+    try testing.expectEqualStrings("5", array_type.size.Integer.text);
     try testing.expect(ast_file.typeExpr(array_type.element).* == .Path);
     try testing.expectEqualStrings("u256", ast_file.typeExpr(array_type.element).Path.name);
 
@@ -2845,6 +2846,33 @@ test "compiler preserves generic struct and contract template metadata in AST" {
     try testing.expect(contract_item.template_parameters[0].is_comptime);
 }
 
+test "compiler preserves integer comptime template metadata in AST" {
+    const source_text =
+        \\struct FixedPoint(comptime T: type, comptime SCALE: u256) {
+        \\    raw: T,
+        \\}
+        \\
+        \\type Scaled(comptime SCALE: u256) = FixedPoint<u256, SCALE>;
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+
+    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
+    try testing.expect(struct_item.is_generic);
+    try testing.expectEqual(@as(usize, 2), struct_item.template_parameters.len);
+    try testing.expect(struct_item.template_parameters[0].is_comptime);
+    try testing.expect(struct_item.template_parameters[1].is_comptime);
+
+    const alias_item = ast_file.item(ast_file.root_items[1]).TypeAlias;
+    try testing.expect(alias_item.is_generic);
+    try testing.expectEqual(@as(usize, 1), alias_item.template_parameters.len);
+    try testing.expect(alias_item.template_parameters[0].is_comptime);
+}
+
 test "compiler preserves generic bitfield and enum template metadata in AST" {
     const source_text =
         \\bitfield Flags(comptime T: type): u256 {
@@ -2940,6 +2968,28 @@ test "compiler monomorphizes generic contract function calls in HIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @first("));
 }
 
+test "compiler monomorphizes integer generic contract function calls in HIR" {
+    const source_text =
+        \\contract Math {
+        \\    fn shl_by(comptime N: u256, value: u256) -> u256 {
+        \\        return value << N;
+        \\    }
+        \\
+        \\    pub fn apply(value: u256) -> u256 {
+        \\        return shl_by(8, value);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @apply"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+}
+
 test "compiler monomorphizes generic struct types on type use" {
     const source_text =
         \\struct Pair(comptime T: type) {
@@ -2965,6 +3015,38 @@ test "compiler monomorphizes generic struct types on type use" {
     try testing.expectEqualStrings("Pair__u256", param_type.name().?);
     try testing.expectEqualStrings("Pair__u256", typecheck.body_types[function.body.index()].name().?);
     try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+}
+
+test "compiler monomorphizes value-parameter generic struct types on type use" {
+    const source_text =
+        \\struct FixedPoint(comptime T: type, comptime SCALE: u256) {
+        \\    raw: T,
+        \\}
+        \\
+        \\pub fn identity(value: FixedPoint<u256, 18>) -> FixedPoint<u256, 18> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("FixedPoint__u256__18", param_type.name().?);
+    try testing.expectEqualStrings("FixedPoint__u256__18", typecheck.body_types[function.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedStructByName("FixedPoint__u256__18") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"FixedPoint__u256__18\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"FixedPoint__u256__18\">"));
 }
 
 test "compiler monomorphizes generic struct return types in non-generic functions" {
@@ -3162,6 +3244,145 @@ test "compiler forwards type aliases into generic struct instantiation" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "type_alias"));
 }
 
+test "compiler forwards integer generic aliases into value-parameter instantiation" {
+    const source_text =
+        \\struct FixedPoint(comptime T: type, comptime SCALE: u256) {
+        \\    raw: T,
+        \\}
+        \\
+        \\type Scaled(comptime SCALE: u256) = FixedPoint<u256, SCALE>;
+        \\
+        \\pub fn identity(value: Scaled<18>) -> Scaled<18> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("FixedPoint__u256__18", param_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("FixedPoint__u256__18") != null);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"FixedPoint__u256__18\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"FixedPoint__u256__18\">"));
+}
+
+test "compiler resolves value-generic refinement aliases through substitution" {
+    const source_text =
+        \\type Bounded(comptime MIN: u256, comptime MAX: u256) = InRange<u256, MIN, MAX>;
+        \\
+        \\pub fn clamp(value: Bounded<0, 100>) -> Bounded<0, 100> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.refinement, param_type.kind());
+    try testing.expectEqualStrings("InRange", param_type.name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, param_type.refinementBaseType().?.kind());
+    try testing.expectEqual(@as(usize, 3), param_type.refinement.args.len);
+    try testing.expect(param_type.refinement.args[1] == .Integer);
+    try testing.expectEqualStrings("0", param_type.refinement.args[1].Integer.text);
+    try testing.expect(param_type.refinement.args[2] == .Integer);
+    try testing.expectEqualStrings("100", param_type.refinement.args[2].Integer.text);
+}
+
+test "compiler lowers value-generic refinement aliases in HIR" {
+    const source_text =
+        \\type Bounded(comptime MIN: u256, comptime MAX: u256) = InRange<u256, MIN, MAX>;
+        \\
+        \\pub fn clamp(value: Bounded<0, 100>) -> Bounded<0, 100> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.in_range"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @clamp"));
+}
+
+test "compiler preserves comptime array-size template metadata in AST" {
+    const source_text =
+        \\type BoundedArray(comptime T: type, comptime N: u256) = [T; N];
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const alias_item = ast_file.item(ast_file.root_items[0]).TypeAlias;
+
+    try testing.expect(alias_item.is_generic);
+    try testing.expectEqual(@as(usize, 2), alias_item.template_parameters.len);
+
+    const target = ast_file.typeExpr(alias_item.target_type);
+    try testing.expect(target.* == .Array);
+    try testing.expect(target.Array.size == .Name);
+    try testing.expectEqualStrings("N", target.Array.size.Name.name);
+}
+
+test "compiler resolves value-generic array aliases through substitution" {
+    const source_text =
+        \\type BoundedArray(comptime T: type, comptime N: u256) = [T; N];
+        \\
+        \\pub fn identity(value: BoundedArray<u256, 10>) -> BoundedArray<u256, 10> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.array, param_type.kind());
+    try testing.expectEqual(@as(?u32, 10), param_type.arrayLen());
+    try testing.expectEqual(compiler.sema.TypeKind.integer, param_type.elementType().?.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.array, typecheck.body_types[function.body.index()].kind());
+    try testing.expectEqual(@as(?u32, 10), typecheck.body_types[function.body.index()].arrayLen());
+}
+
+test "compiler lowers value-generic array aliases in HIR" {
+    const source_text =
+        \\type BoundedArray(comptime T: type, comptime N: u256) = [T; N];
+        \\
+        \\pub fn identity(value: BoundedArray<u256, 10>) -> BoundedArray<u256, 10> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<10xi256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity"));
+}
+
 test "compiler lowers instantiated generic struct declarations in HIR" {
     const source_text =
         \\struct Pair(comptime T: type) {
@@ -3353,6 +3574,33 @@ test "compiler monomorphizes generic enum types on type use" {
     try testing.expect(typecheck.instantiatedEnumByName("Choice__u256") != null);
 }
 
+test "compiler monomorphizes value-parameter generic enum types on type use" {
+    const source_text =
+        \\enum Choice(comptime T: type, comptime TAG: u256) {
+        \\    left,
+        \\    right,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256, 7>) -> Choice<u256, 7> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.enum_, param_type.kind());
+    try testing.expectEqualStrings("Choice__u256__7", param_type.name().?);
+    try testing.expectEqualStrings("Choice__u256__7", typecheck.body_types[function.body.index()].name().?);
+    try testing.expect(typecheck.instantiatedEnumByName("Choice__u256__7") != null);
+}
+
 test "compiler lowers instantiated generic enum declarations in HIR" {
     const source_text =
         \\enum Choice(comptime T: type) {
@@ -3372,6 +3620,26 @@ test "compiler lowers instantiated generic enum declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Choice__u256\">"));
+}
+
+test "compiler lowers value-parameter generic enum declarations in HIR" {
+    const source_text =
+        \\enum Choice(comptime T: type, comptime TAG: u256) {
+        \\    left,
+        \\    right,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256, 7>) -> Choice<u256, 7> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256__7\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Choice__u256__7\">"));
 }
 
 test "compiler monomorphizes generic bitfield types on type use" {
@@ -3399,6 +3667,32 @@ test "compiler monomorphizes generic bitfield types on type use" {
     try testing.expect(typecheck.instantiatedBitfieldByName("Flags__u8") != null);
 }
 
+test "compiler monomorphizes value-parameter generic bitfield types on type use" {
+    const source_text =
+        \\bitfield Flags(comptime T: type, comptime WIDTH: u256): u256 {
+        \\    raw: T;
+        \\}
+        \\
+        \\pub fn read(value: Flags<u8, 8>) -> u8 {
+        \\    return value.raw;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.bitfield, param_type.kind());
+    try testing.expectEqualStrings("Flags__u8__8", param_type.name().?);
+    try testing.expect(typecheck.instantiatedBitfieldByName("Flags__u8__8") != null);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.body_types[function.body.index()].kind());
+}
+
 test "compiler lowers instantiated generic bitfield metadata in HIR" {
     const source_text =
         \\bitfield Flags(comptime T: type): u256 {
@@ -3414,6 +3708,25 @@ test "compiler lowers instantiated generic bitfield metadata in HIR" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Flags__u8\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_layout"));
+}
+
+test "compiler lowers value-parameter generic bitfield metadata in HIR" {
+    const source_text =
+        \\bitfield Flags(comptime T: type, comptime WIDTH: u256): u256 {
+        \\    raw: T;
+        \\}
+        \\
+        \\pub fn read(value: Flags<u8, 8>) -> u8 {
+        \\    return value.raw;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Flags__u8__8\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_layout"));
 }

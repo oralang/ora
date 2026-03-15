@@ -175,7 +175,7 @@ pub fn mixin(Builder: type) type {
             const body_id = body orelse return Lowering.malformedItem(self, node, "missing function body");
             var is_generic = false;
             for (parameters) |parameter| {
-                if (Lowering.isGenericTypeParameter(self, parameter)) {
+                if (parameter.is_comptime) {
                     is_generic = true;
                     break;
                 }
@@ -387,9 +387,14 @@ pub fn mixin(Builder: type) type {
             };
         }
 
+        fn isGenericTemplateParameter(self: *Builder, parameter: Parameter) bool {
+            _ = self;
+            return parameter.is_comptime;
+        }
+
         fn hasGenericTemplateParameters(self: *Builder, parameters: []const Parameter) bool {
             for (parameters) |parameter| {
-                if (Lowering.isGenericTypeParameter(self, parameter)) return true;
+                if (Lowering.isGenericTemplateParameter(self, parameter)) return true;
             }
             return false;
         }
@@ -1255,13 +1260,19 @@ pub fn mixin(Builder: type) type {
 
         fn lowerArrayTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             const element_node = firstDirectTypeChild(node) orelse return Lowering.malformedType(self, node, "missing array element type");
-            const size_token = firstDirectIntegerToken(node) orelse return Lowering.malformedType(self, node, "missing array size");
+            const size_token = firstDirectArraySizeToken(node) orelse return Lowering.malformedType(self, node, "missing array size");
             return Support.pushTypeExpr(self, .{ .Array = .{
                 .range = node.range(),
                 .element = try Lowering.lowerTypeNode(self, element_node),
-                .size = .{
-                    .range = size_token.range(),
-                    .text = tokenText(size_token),
+                .size = switch (size_token.kind()) {
+                    .IntegerLiteral, .BinaryLiteral, .HexLiteral => .{ .Integer = .{
+                        .range = size_token.range(),
+                        .text = tokenText(size_token),
+                    } },
+                    else => .{ .Name = .{
+                        .range = size_token.range(),
+                        .name = tokenText(size_token),
+                    } },
                 },
             } });
         }
@@ -1724,6 +1735,20 @@ fn firstDirectIntegerToken(node: SyntaxNode) ?SyntaxToken {
                 .IntegerLiteral, .BinaryLiteral, .HexLiteral => return token,
                 else => {},
             },
+        }
+    }
+    return null;
+}
+
+fn firstDirectArraySizeToken(node: SyntaxNode) ?SyntaxToken {
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .token => |token| switch (token.kind()) {
+                .IntegerLiteral, .BinaryLiteral, .HexLiteral => return token,
+                else => if (isIdentifierLike(token.kind())) return token,
+            },
+            .node => {},
         }
     }
     return null;

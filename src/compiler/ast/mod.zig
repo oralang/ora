@@ -25,6 +25,7 @@ pub const TypeExpr = nodes.TypeExpr;
 pub const PathTypeExpr = nodes.PathTypeExpr;
 pub const TypeArg = nodes.TypeArg;
 pub const TypeIntegerLiteral = nodes.TypeIntegerLiteral;
+pub const TypeArraySize = nodes.TypeArraySize;
 pub const GenericTypeExpr = nodes.GenericTypeExpr;
 pub const TupleTypeExpr = nodes.TupleTypeExpr;
 pub const ArrayTypeExpr = nodes.ArrayTypeExpr;

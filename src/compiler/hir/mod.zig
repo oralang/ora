@@ -157,9 +157,14 @@ pub fn lowerModule(
 }
 
 const Lowerer = struct {
+    pub const GenericBindingValue = union(enum) {
+        ty: sema.Type,
+        integer: []const u8,
+    };
+
     pub const GenericTypeBinding = struct {
         name: []const u8,
-        ty: sema.Type,
+        value: GenericBindingValue,
         mangle_name: []const u8,
     };
 
@@ -221,7 +226,22 @@ const Lowerer = struct {
 
     fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
         for (self.active_type_bindings) |binding| {
-            if (std.mem.eql(u8, binding.name, name)) return binding.ty;
+            if (!std.mem.eql(u8, binding.name, name)) continue;
+            switch (binding.value) {
+                .ty => |ty| return ty,
+                .integer => {},
+            }
+        }
+        return null;
+    }
+
+    pub fn substitutedInteger(self: *const Lowerer, name: []const u8) ?[]const u8 {
+        for (self.active_type_bindings) |binding| {
+            if (!std.mem.eql(u8, binding.name, name)) continue;
+            switch (binding.value) {
+                .integer => |text| return text,
+                .ty => {},
+            }
         }
         return null;
     }
@@ -242,10 +262,20 @@ const Lowerer = struct {
                     if (element_types.items.len == 0) null else element_types.items.ptr,
                 );
             },
-            .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), support.parseArrayLen(array.size.text) orelse 0),
+            .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
             .Error => self.recordTypeFallback(.syntax_error_type, self.typeExprRange(type_expr_id)),
+        };
+    }
+
+    fn lowerArraySize(self: *const Lowerer, size: ast.TypeArraySize) ?u32 {
+        return switch (size) {
+            .Integer => |literal| support.parseArrayLen(literal.text),
+            .Name => |name| if (self.substitutedInteger(std.mem.trim(u8, name.name, " \t\n\r"))) |text|
+                support.parseArrayLen(text)
+            else
+                null,
         };
     }
 
@@ -438,7 +468,7 @@ const Lowerer = struct {
     pub fn runtimeFunctionParameters(self: *const Lowerer, function: ast.FunctionItem) ![]ast.Parameter {
         var parameters: std.ArrayList(ast.Parameter) = .{};
         for (function.parameters) |parameter| {
-            if (self.isGenericTypeParameter(parameter)) continue;
+            if (parameter.is_comptime) continue;
             try parameters.append(self.allocator, parameter);
         }
         return parameters.toOwnedSlice(self.allocator);
@@ -447,7 +477,7 @@ const Lowerer = struct {
     pub fn genericTypeBindingsForCall(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
         var generic_count: usize = 0;
         for (function.parameters) |parameter| {
-            if (!self.isGenericTypeParameter(parameter)) break;
+            if (!parameter.is_comptime) break;
             generic_count += 1;
         }
         if (generic_count == 0) return &.{};
@@ -456,20 +486,31 @@ const Lowerer = struct {
         var bindings: std.ArrayList(GenericTypeBinding) = .{};
         for (function.parameters[0..generic_count], 0..) |parameter, index| {
             const type_name = self.patternName(parameter.pattern) orelse return null;
-            const concrete_name = self.typeArgNameFromExpr(call.args[index]) orelse return null;
+            var value: GenericBindingValue = undefined;
+            var mangle_name: []const u8 = undefined;
+            if (self.isGenericTypeParameter(parameter)) {
+                const concrete_name = self.typeArgNameFromExpr(call.args[index]) orelse return null;
+                value = .{ .ty = descriptorFromPathName(self.file, self.item_index, concrete_name) };
+                mangle_name = try self.allocator.dupe(u8, std.mem.trim(u8, concrete_name, " \t\n\r"));
+            } else if (parameter.is_comptime) {
+                const integer_text = self.integerArgText(call.args[index]) orelse return null;
+                value = .{ .integer = integer_text };
+                mangle_name = try self.allocator.dupe(u8, integer_text);
+            } else return null;
             try bindings.append(self.allocator, .{
                 .name = type_name,
-                .ty = descriptorFromPathName(self.file, self.item_index, concrete_name),
-                .mangle_name = try self.allocator.dupe(u8, std.mem.trim(u8, concrete_name, " \t\n\r")),
+                .value = value,
+                .mangle_name = mangle_name,
             });
         }
         return @constCast(try bindings.toOwnedSlice(self.allocator));
     }
 
     pub fn stripGenericCallArgs(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) []const ast.ExprId {
+        _ = self;
         var generic_count: usize = 0;
         for (function.parameters) |parameter| {
-            if (!self.isGenericTypeParameter(parameter)) break;
+            if (!parameter.is_comptime) break;
             generic_count += 1;
         }
         if (generic_count >= call.args.len) return &.{};
@@ -499,6 +540,14 @@ const Lowerer = struct {
         return switch (self.file.expression(expr_id).*) {
             .Name => |name| name.name,
             .Group => |group| self.typeArgNameFromExpr(group.expr),
+            else => null,
+        };
+    }
+
+    fn integerArgText(self: *const Lowerer, expr_id: ast.ExprId) ?[]const u8 {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
+            .Group => |group| self.integerArgText(group.expr),
             else => null,
         };
     }
@@ -609,11 +658,12 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         return mlir.oraMapTypeGet(lowerer.context, key_type, value_type);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
+        const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;
         const base_type = switch (generic.args[0]) {
             .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
             else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
-        return support.buildRefinementType(lowerer.context, generic.name, base_type, generic.args) orelse
+        return support.buildRefinementType(lowerer.context, generic.name, base_type, resolved_args) orelse
             lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range);
     }
     if (generic.args.len > 0) {
@@ -626,4 +676,30 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         return mlir.oraNonZeroAddressTypeGet(lowerer.context);
     }
     return support.lowerPathType(lowerer.context, generic.name);
+}
+
+fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const ast.TypeArg {
+    var changed = false;
+    const resolved = lowerer.allocator.alloc(ast.TypeArg, args.len) catch return null;
+    for (args, 0..) |arg, index| {
+        resolved[index] = switch (arg) {
+            .Integer => arg,
+            .Type => |type_expr| if (typeExprIntegerBinding(lowerer, type_expr)) |integer| blk: {
+                changed = true;
+                break :blk .{ .Integer = .{
+                    .range = lowerer.typeExprRange(type_expr),
+                    .text = integer,
+                } };
+            } else arg,
+        };
+    }
+    if (!changed) return null;
+    return resolved;
+}
+
+fn typeExprIntegerBinding(lowerer: *const Lowerer, type_expr: ast.TypeExprId) ?[]const u8 {
+    return switch (lowerer.file.typeExpr(type_expr).*) {
+        .Path => |path| lowerer.substitutedInteger(std.mem.trim(u8, path.name, " \t\n\r")),
+        else => null,
+    };
 }

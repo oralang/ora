@@ -1661,7 +1661,7 @@ const Parser = struct {
         } else {
             try self.reportHere("expected ';' in array type");
         }
-        if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+        if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral) or tokenIsIdentifierLike(self.current().kind)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportHere("expected array size");
