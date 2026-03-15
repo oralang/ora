@@ -931,11 +931,7 @@ const TypeChecker = struct {
     }
 
     fn genericTypeBindingsForCall(self: *const TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
-        var generic_count: usize = 0;
-        for (function.parameters) |parameter| {
-            if (!parameter.is_comptime) break;
-            generic_count += 1;
-        }
+        const generic_count = self.leadingComptimeParameterCount(function);
         if (generic_count == 0) return &.{};
         if (call.args.len < generic_count) return null;
 
@@ -957,6 +953,16 @@ const TypeChecker = struct {
         return parameters.toOwnedSlice(self.arena);
     }
 
+    fn leadingComptimeParameterCount(self: *const TypeChecker, function: ast.FunctionItem) usize {
+        _ = self;
+        var count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) break;
+            count += 1;
+        }
+        return count;
+    }
+
     fn exprRange(self: *const TypeChecker, expr_id: ast.ExprId) source.TextRange {
         return switch (self.file.expression(expr_id).*) {
             inline else => |expr| expr.range,
@@ -970,10 +976,20 @@ const TypeChecker = struct {
                 .Function => |function| function,
                 else => return,
             };
+            const generic_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
-            if (runtime_parameters.len != call.args.len) return;
-            for (call.args, runtime_parameters) |arg, parameter| {
-                const param_type = self.pattern_types[parameter.pattern.index()].type;
+            if (call.args.len < generic_count) return;
+            const runtime_args = call.args[generic_count..];
+            if (runtime_parameters.len != runtime_args.len) return;
+            const bindings = if (function.is_generic)
+                self.genericTypeBindingsForCall(function, call) orelse return
+            else
+                &.{};
+            for (runtime_args, runtime_parameters) |arg, parameter| {
+                const param_type = if (function.is_generic)
+                    self.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch Type{ .unknown = {} }
+                else
+                    self.pattern_types[parameter.pattern.index()].type;
                 if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
                 const arg_type = self.expr_types[arg.index()];
                 if (arg_type.kind() != .unknown and param_type.kind() != .unknown and

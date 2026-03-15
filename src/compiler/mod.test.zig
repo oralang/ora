@@ -3048,6 +3048,28 @@ test "compiler does not type-check generic call type args as runtime arguments" 
     try testing.expect(type_diags.isEmpty());
 }
 
+test "compiler type-checks runtime arguments of generic calls" {
+    const source_text =
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(b: u256) -> u256 {
+        \\        return first(u256, true, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "expected argument type 'u256', found 'bool'"));
+}
+
 test "compiler emits user diagnostics for generic arity mismatches" {
     const source_text =
         \\struct Pair(comptime T: type) {
