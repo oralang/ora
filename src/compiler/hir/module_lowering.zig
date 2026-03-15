@@ -34,7 +34,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .Contract => |contract| try self.lowerContract(item_id, contract, parent_block),
                 .Function => |function| try self.lowerFunction(item_id, function, parent_block),
                 .Struct => |struct_item| try self.lowerStructDecl(item_id, struct_item, parent_block),
-                .Bitfield => |bitfield| try self.lowerDeclPlaceholder(item_id, .bitfield, bitfield.name, bitfield.range, "ora.bitfield_decl", parent_block),
+                .Bitfield => |bitfield| {
+                    if (bitfield.is_generic) return;
+                    try self.lowerDeclPlaceholder(item_id, .bitfield, bitfield.name, bitfield.range, "ora.bitfield_decl", parent_block);
+                },
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
@@ -352,6 +355,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerEnumDecl(self: *Lowerer, item_id: ast.ItemId, enum_item: ast.EnumItem, parent_block: mlir.MlirBlock) anyerror!void {
+            if (enum_item.is_generic) return;
             const loc = self.location(enum_item.range);
             const repr_type = defaultIntegerType(self.context);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(enum_item.name), repr_type);

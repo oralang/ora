@@ -641,6 +641,19 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            if (self.at(.Colon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             if (self.at(.Colon)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
@@ -682,6 +695,14 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
         }

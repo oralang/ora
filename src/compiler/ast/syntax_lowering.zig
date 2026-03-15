@@ -222,6 +222,11 @@ pub fn mixin(Builder: type) type {
 
         fn lowerBitfieldItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing bitfield name"));
+            const template_params_node = firstDirectChildOfKind(node, .ParameterList);
+            const template_parameters = if (template_params_node) |params_node|
+                try Lowering.lowerParameterListNode(self, params_node)
+            else
+                &.{};
             var fields: std.ArrayList(BitfieldField) = .{};
             const base_type = firstDirectTypeChild(node);
 
@@ -239,6 +244,8 @@ pub fn mixin(Builder: type) type {
             return Support.pushItem(self, .{ .Bitfield = .{
                 .range = node.range(),
                 .name = name,
+                .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
+                .template_parameters = template_parameters,
                 .base_type = if (base_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .fields = try fields.toOwnedSlice(self.allocator),
             } });
@@ -246,6 +253,11 @@ pub fn mixin(Builder: type) type {
 
         fn lowerEnumItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing enum name"));
+            const template_params_node = firstDirectChildOfKind(node, .ParameterList);
+            const template_parameters = if (template_params_node) |params_node|
+                try Lowering.lowerParameterListNode(self, params_node)
+            else
+                &.{};
             var variants: std.ArrayList(EnumVariant) = .{};
 
             var it = node.children();
@@ -269,6 +281,8 @@ pub fn mixin(Builder: type) type {
             return Support.pushItem(self, .{ .Enum = .{
                 .range = node.range(),
                 .name = name,
+                .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
+                .template_parameters = template_parameters,
                 .variants = try variants.toOwnedSlice(self.allocator),
             } });
         }

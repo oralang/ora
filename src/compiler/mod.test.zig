@@ -2846,6 +2846,35 @@ test "compiler preserves generic struct and contract template metadata in AST" {
     try testing.expect(contract_item.template_parameters[0].is_comptime);
 }
 
+test "compiler preserves generic bitfield and enum template metadata in AST" {
+    const source_text =
+        \\bitfield Flags(comptime T: type): u256 {
+        \\    enabled: bool;
+        \\}
+        \\
+        \\enum Choice(comptime T: type) {
+        \\    left,
+        \\    right,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+
+    const bitfield_item = ast_file.item(ast_file.root_items[0]).Bitfield;
+    try testing.expect(bitfield_item.is_generic);
+    try testing.expectEqual(@as(usize, 1), bitfield_item.template_parameters.len);
+    try testing.expect(bitfield_item.template_parameters[0].is_comptime);
+
+    const enum_item = ast_file.item(ast_file.root_items[1]).Enum;
+    try testing.expect(enum_item.is_generic);
+    try testing.expectEqual(@as(usize, 1), enum_item.template_parameters.len);
+    try testing.expect(enum_item.template_parameters[0].is_comptime);
+}
+
 test "compiler skips generic function templates in HIR" {
     const source_text =
         \\contract Math {
@@ -2864,6 +2893,30 @@ test "compiler skips generic function templates in HIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @concrete"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @max"));
+}
+
+test "compiler skips generic bitfield and enum templates in HIR" {
+    const source_text =
+        \\bitfield Flags(comptime T: type): u256 {
+        \\    enabled: bool;
+        \\}
+        \\
+        \\enum Choice(comptime T: type) {
+        \\    left,
+        \\    right,
+        \\}
+        \\
+        \\pub fn concrete() -> u256 {
+        \\    return 1;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @concrete"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_decl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
 }
 
 test "compiler monomorphizes generic contract function calls in HIR" {

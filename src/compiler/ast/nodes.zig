@@ -555,6 +555,8 @@ pub const StructItem = struct {
 pub const BitfieldItem = struct {
     range: source.TextRange,
     name: []const u8,
+    is_generic: bool = false,
+    template_parameters: []const Parameter,
     base_type: ?TypeExprId,
     fields: []BitfieldField,
 };
@@ -562,6 +564,8 @@ pub const BitfieldItem = struct {
 pub const EnumItem = struct {
     range: source.TextRange,
     name: []const u8,
+    is_generic: bool = false,
+    template_parameters: []const Parameter,
     variants: []EnumVariant,
 };
 
