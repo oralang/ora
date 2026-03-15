@@ -2,7 +2,6 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
-const descriptors = @import("../sema/type_descriptors.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -13,7 +12,7 @@ const module_lowering = @import("module_lowering.zig");
 const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
 
-const descriptorFromPathName = descriptors.descriptorFromPathName;
+const descriptorFromPathName = sema.descriptorFromPathName;
 
 pub const HirSymbolKind = enum {
     contract,

@@ -466,7 +466,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const callee_name = if (callee_function != null and callee_item_id != null)
-                (try self.parent.ensureMonomorphizedFunction(callee_item_id.?, callee_function.?, call)) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+                (try self.parent.ensureMonomorphizedFunction(callee_item_id.?, callee_function.?, call, runtime_parameters)) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
             else
                 (@This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range));
 

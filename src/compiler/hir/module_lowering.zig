@@ -81,12 +81,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{});
         }
 
-        pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr) anyerror!?[]const u8 {
+        pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr, parameters: []const ast.Parameter) anyerror!?[]const u8 {
             if (!function.is_generic) return function.name;
             const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
             const mangled_name = try self.mangleGenericFunctionName(function.name, bindings);
             if (!self.monomorphized_function_names.contains(mangled_name)) {
-                const parameters = try self.runtimeFunctionParameters(function);
                 const parent_block = if (function.parent_contract) |contract_id|
                     self.contract_body_blocks[contract_id.index()]
                 else
@@ -102,7 +101,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             item_id: ast.ItemId,
             function: ast.FunctionItem,
             symbol_name: []const u8,
-            parameters: []ast.Parameter,
+            parameters: []const ast.Parameter,
             parent_block: mlir.MlirBlock,
             type_bindings: []const Lowerer.GenericTypeBinding,
         ) anyerror!void {
@@ -165,7 +164,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var specialized_function = function;
             specialized_function.name = symbol_name;
             specialized_function.is_generic = false;
-            specialized_function.parameters = parameters;
+            specialized_function.parameters = @constCast(parameters);
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
             try function_lowerer.lower();
         }

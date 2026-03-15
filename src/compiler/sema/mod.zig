@@ -5,6 +5,7 @@ const region = @import("region.zig");
 const resolve = @import("resolve.zig");
 const type_check = @import("type_check.zig");
 const verification = @import("verification.zig");
+const type_descriptors = @import("type_descriptors.zig");
 
 pub const ModuleImport = model.ModuleImport;
 pub const ModuleGraphInput = model.ModuleGraphInput;
@@ -42,3 +43,4 @@ pub const regionAssignable = region.regionAssignable;
 pub const locatedTypeEql = region.locatedTypeEql;
 pub const locatedTypeAssignable = region.isAssignable;
 pub const verificationFacts = verification.verificationFacts;
+pub const descriptorFromPathName = type_descriptors.descriptorFromPathName;
