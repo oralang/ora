@@ -826,6 +826,40 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
+test "compiler types bare self in impl bodies as the impl target" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return self.value > 0;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const impl_id = item_index.lookupImpl("Marker", "Box").?;
+    const impl_item = ast_file.item(impl_id).Impl;
+    const method_id = impl_item.methods[0];
+    const method = ast_file.item(method_id).Function;
+    try testing.expectEqualStrings("Box", typecheck.itemLocatedType(method_id).type.function.param_types[0].name().?);
+    try testing.expectEqualStrings("Box", typecheck.pattern_types[method.parameters[0].pattern.index()].type.name().?);
+}
+
 test "compiler lowers generic impl methods for trait-bound calls" {
     const source_text =
         \\trait Marker {

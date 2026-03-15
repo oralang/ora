@@ -341,6 +341,21 @@ pub fn typeCheck(
         .diagnostics = &result.diagnostics,
     };
 
+    for (file.items, 0..) |item, index| {
+        switch (item) {
+            .Function => |function| {
+                for (function.parameters) |parameter| {
+                    const resolved_type = if (typechecker.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter)) |ty|
+                        ty
+                    else
+                        Type{ .unknown = {} };
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(resolved_type, .calldata);
+                }
+            },
+            else => {},
+        }
+    }
+
     try result.diagnostics.appendList(&const_eval.diagnostics);
 
     for (file.items, 0..) |item, index| {
@@ -348,7 +363,10 @@ pub fn typeCheck(
             .Function => |function| {
                 const resolved_params = try arena.alloc(Type, function.parameters.len);
                 for (function.parameters, 0..) |parameter, param_index| {
-                    const resolved_type = try typechecker.resolveTypeExpr(parameter.type_expr);
+                    const resolved_type = if (typechecker.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter)) |ty|
+                        ty
+                    else
+                        try typechecker.resolveTypeExpr(parameter.type_expr);
                     resolved_params[param_index] = resolved_type;
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegion(resolved_type, .calldata);
                 }
@@ -693,6 +711,31 @@ const TypeChecker = struct {
         const pattern = self.file.pattern(first.pattern).*;
         if (pattern != .Name) return false;
         return std.mem.eql(u8, pattern.Name.name, "self");
+    }
+
+    fn parameterTypeForFunctionItem(self: *TypeChecker, function_item_id: ast.ItemId, parameter: ast.Parameter) ?Type {
+        if (!self.parameterIsBareSelf(parameter)) return null;
+        const impl_item = self.enclosingImplForMethod(function_item_id) orelse return null;
+        const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return null;
+        const target_type = self.item_types[target_item_id.index()];
+        if (target_type.kind() == .unknown) return null;
+        return target_type;
+    }
+
+    fn parameterIsBareSelf(self: *TypeChecker, parameter: ast.Parameter) bool {
+        const pattern = self.file.pattern(parameter.pattern).*;
+        if (pattern != .Name) return false;
+        return std.mem.eql(u8, pattern.Name.name, "self");
+    }
+
+    fn enclosingImplForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ImplItem {
+        for (self.file.items) |item| {
+            if (item != .Impl) continue;
+            for (item.Impl.methods) |candidate_id| {
+                if (candidate_id.index() == method_item_id.index()) return item.Impl;
+            }
+        }
+        return null;
     }
 
     fn buildTraitMethodSignature(self: *TypeChecker, trait_method: anytype) anyerror!TraitMethodSignature {
