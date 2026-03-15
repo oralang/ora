@@ -158,6 +158,40 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return mangled_name;
         }
 
+        pub fn ensureLoweredImplMethod(
+            self: *Lowerer,
+            impl_item_id: ast.ItemId,
+            method_item_id: ast.ItemId,
+            function: ast.FunctionItem,
+            trait_name: []const u8,
+            target_name: []const u8,
+        ) anyerror![]const u8 {
+            const symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
+            if (!self.monomorphized_function_names.contains(symbol_name)) {
+                const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
+                    if (self.file.item(target_item_id).* == .Contract) {
+                        const block = self.contract_body_blocks[target_item_id.index()];
+                        if (!mlir.oraBlockIsNull(block)) break :blk block;
+                    }
+                    break :blk self.module_body;
+                } else self.module_body;
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{});
+                try self.monomorphized_function_names.put(symbol_name, {});
+                _ = impl_item_id;
+            }
+            return symbol_name;
+        }
+
+        fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
+            var name = std.ArrayList(u8){};
+            try name.appendSlice(self.allocator, target_name);
+            try name.appendSlice(self.allocator, "__");
+            try name.appendSlice(self.allocator, trait_name);
+            try name.appendSlice(self.allocator, "__");
+            try name.appendSlice(self.allocator, method_name);
+            return name.toOwnedSlice(self.allocator);
+        }
+
         fn lowerConcreteFunction(
             self: *Lowerer,
             item_id: ast.ItemId,

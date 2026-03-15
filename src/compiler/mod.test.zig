@@ -789,6 +789,40 @@ test "compiler resolves trait-bound methods in generic bodies" {
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(call_expr).kind());
 }
 
+test "compiler lowers trait-bound generic method calls to concrete impl symbols" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return self.value > 0;
+        \\    }
+        \\}
+        \\
+        \\contract Test {
+        \\    fn choose(comptime T: type, a: T) -> bool where T: Marker {
+        \\        return a.marked();
+        \\    }
+        \\
+        \\    pub fn run(a: Box) -> bool {
+        \\        return choose(Box, a);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box__Marker__marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box__Marker__marked"));
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {

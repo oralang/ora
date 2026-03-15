@@ -211,6 +211,7 @@ const Lowerer = struct {
     pub const createPlaceholderOp = ModuleLowering.createPlaceholderOp;
     pub const appendItemHandle = ModuleLowering.appendItemHandle;
     pub const ensureMonomorphizedFunction = ModuleLowering.ensureMonomorphizedFunction;
+    pub const ensureLoweredImplMethod = ModuleLowering.ensureLoweredImplMethod;
     pub const attachBitfieldParamMetadata = ModuleLowering.attachBitfieldParamMetadata;
     pub const attachBitfieldParamMetadataForType = ModuleLowering.attachBitfieldParamMetadataForType;
     pub const attachBitfieldOpMetadata = ModuleLowering.attachBitfieldOpMetadata;
@@ -225,7 +226,7 @@ const Lowerer = struct {
         return support.locationFromRange(self.context, self.sources, self.file.file_id, range);
     }
 
-    fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
+    pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
         for (self.active_type_bindings) |binding| {
             if (!std.mem.eql(u8, binding.name, name)) continue;
             switch (binding.value) {

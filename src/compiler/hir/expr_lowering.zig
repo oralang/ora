@@ -443,6 +443,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
+
             var args: std.ArrayList(mlir.MlirValue) = .{};
             const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
             const callee_function = if (callee_item_id) |item_id| switch (self.parent.file.item(item_id).*) {
@@ -485,12 +487,111 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, call.range);
+            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
+            const resolved = @This().resolveTraitBoundMethodCall(self, call.callee) orelse return null;
+
+            var args: std.ArrayList(mlir.MlirValue) = .{};
+            var receiver_value = try self.lowerExpr(resolved.receiver_expr, locals);
+            const receiver_type = self.parent.lowerExprType(resolved.receiver_expr);
+            receiver_value = try self.convertValueForFlow(receiver_value, receiver_type, exprRange(self.parent.file, resolved.receiver_expr));
+            try args.append(self.parent.allocator, receiver_value);
+
+            for (call.args, 0..) |arg, index| {
+                var arg_value = try self.lowerExpr(arg, locals);
+                const parameter = resolved.function.parameters[index + 1];
+                const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
+                arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                try args.append(self.parent.allocator, arg_value);
+            }
+
+            const callee_name = try self.parent.ensureLoweredImplMethod(
+                resolved.impl_item_id,
+                resolved.method_item_id,
+                resolved.function,
+                resolved.trait_name,
+                resolved.target_name,
+            );
+
+            const result_type = self.parent.lowerExprType(expr_id);
+            var result_types: [1]mlir.MlirType = .{result_type};
+            const op = mlir.oraFuncCallOpCreate(
+                self.parent.context,
+                self.parent.location(call.range),
+                strRef(callee_name),
+                if (args.items.len == 0) null else args.items.ptr,
+                args.items.len,
+                if (self.typeIsVoid(result_type)) null else &result_types,
+                if (self.typeIsVoid(result_type)) 0 else 1,
+            );
+            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            if (self.typeIsVoid(result_type)) {
+                appendOp(self.block, op);
+                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+            }
+            return appendValueOp(self.block, op);
+        }
+
+        const ResolvedTraitBoundMethodCall = struct {
+            impl_item_id: ast.ItemId,
+            method_item_id: ast.ItemId,
+            function: ast.FunctionItem,
+            trait_name: []const u8,
+            target_name: []const u8,
+            receiver_expr: ast.ExprId,
+        };
+
+        fn resolveTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId) ?ResolvedTraitBoundMethodCall {
+            const field = switch (self.parent.file.expression(expr_id).*) {
+                .Field => |field| field,
+                .Group => |group| return @This().resolveTraitBoundMethodCall(self, group.expr),
+                else => return null,
+            };
+            const function = self.function orelse return null;
+            const receiver_type = self.parent.typecheck.exprType(field.base);
+            const receiver_name = receiver_type.name() orelse return null;
+            const concrete_type = self.parent.substitutedType(receiver_name) orelse return null;
+            const target_name = concrete_type.name() orelse return null;
+
+            var matched_trait: ?[]const u8 = null;
+            for (function.trait_bounds) |bound| {
+                if (!std.mem.eql(u8, bound.parameter_name, receiver_name)) continue;
+                const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
+                var found_method = false;
+                for (trait_interface.methods) |method| {
+                    if (std.mem.eql(u8, method.name, field.name)) {
+                        found_method = true;
+                        break;
+                    }
+                }
+                if (!found_method) continue;
+                if (matched_trait != null) return null;
+                matched_trait = bound.trait_name;
+            }
+            const trait_name = matched_trait orelse return null;
+            const impl_item_id = self.parent.item_index.lookupImpl(trait_name, target_name) orelse return null;
+            const impl_item = self.parent.file.item(impl_item_id).Impl;
+            for (impl_item.methods) |method_item_id| {
+                const item = self.parent.file.item(method_item_id).*;
+                if (item != .Function) continue;
+                if (!std.mem.eql(u8, item.Function.name, field.name)) continue;
+                return .{
+                    .impl_item_id = impl_item_id,
+                    .method_item_id = method_item_id,
+                    .function = item.Function,
+                    .trait_name = trait_name,
+                    .target_name = target_name,
+                    .receiver_expr = field.base,
+                };
+            }
+            return null;
         }
 
         fn calleeName(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
