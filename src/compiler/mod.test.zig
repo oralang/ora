@@ -3069,6 +3069,83 @@ test "compiler lowers instantiated generic struct declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
 }
 
+test "compiler monomorphizes nested generic struct types on type use" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn nested(value: Pair<Pair<u256>>) -> Pair<Pair<u256>> {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("Pair__Pair__u256", param_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__Pair__u256") != null);
+}
+
+test "compiler lowers nested generic struct instantiations in HIR" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn nested(value: Pair<Pair<u256>>) -> Pair<Pair<u256>> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__Pair__u256\">"));
+}
+
+test "compiler forwards nested aliases into generic struct instantiation" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\type Inner = Pair<u256>;
+        \\type Outer = Pair<Inner>;
+        \\
+        \\pub fn nested(value: Outer) -> Outer {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[3] });
+    const function = ast_file.item(ast_file.root_items[3]).Function;
+
+    const param_type = typecheck.pattern_types[function.parameters[0].pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, param_type.kind());
+    try testing.expectEqualStrings("Pair__Pair__u256", param_type.name().?);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__Pair__u256") != null);
+}
+
 test "compiler monomorphizes generic enum types on type use" {
     const source_text =
         \\enum Choice(comptime T: type) {
