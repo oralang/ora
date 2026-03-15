@@ -1147,10 +1147,12 @@ const TypeChecker = struct {
                 const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
                 self.expr_types[expr_id.index()] = result_type;
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
-                    try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
-                        typeDisplayName(base_type),
-                        field.name,
-                    });
+                    if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
+                        try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
+                            typeDisplayName(base_type),
+                            field.name,
+                        });
+                    }
                 }
             },
             .Index => |index| {
@@ -3132,6 +3134,133 @@ const TypeChecker = struct {
         if (self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
         const base_type = self.expr_types[base_expr_id.index()];
         return self.fieldAccessType(base_type, field_name);
+    }
+
+    fn emitTraitMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
+        if (try self.emitTraitBoundMethodFieldError(expr_id, field, base_type)) return true;
+        if (try self.emitConcreteImplMethodFieldError(expr_id, field)) return true;
+        return false;
+    }
+
+    fn emitTraitBoundMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
+        const function_item_id = self.current_function_item orelse return false;
+        const function = switch (self.file.item(function_item_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+
+        if (self.genericTypeParameterNameForExpr(field.base)) |parameter_name| {
+            var matching_bounds: usize = 0;
+            var bounds_with_method: usize = 0;
+            var unique_trait: ?[]const u8 = null;
+            for (function.trait_bounds) |bound| {
+                if (!std.mem.eql(u8, bound.parameter_name, parameter_name)) continue;
+                matching_bounds += 1;
+                const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
+                const method = self.findTraitMethodSignature(trait_interface, field.name) orelse continue;
+                _ = method;
+                bounds_with_method += 1;
+                if (unique_trait == null) unique_trait = bound.trait_name;
+            }
+
+            if (matching_bounds == 0) return false;
+            if (bounds_with_method == 0) {
+                try self.emitExprError(expr_id, "type parameter '{s}' has no trait bound providing method '{s}'", .{
+                    parameter_name,
+                    field.name,
+                });
+                return true;
+            }
+            if (bounds_with_method > 1) {
+                try self.emitExprError(expr_id, "method '{s}' is ambiguous for type parameter '{s}' across multiple trait bounds", .{
+                    field.name,
+                    parameter_name,
+                });
+                return true;
+            }
+
+            return false;
+        }
+
+        if (base_type.name()) |receiver_name| {
+            if (!self.currentFunctionHasGenericTypeParameterNamed(receiver_name)) return false;
+            var bounds_with_method: usize = 0;
+            var unique_trait: ?[]const u8 = null;
+            for (function.trait_bounds) |bound| {
+                if (!std.mem.eql(u8, bound.parameter_name, receiver_name)) continue;
+                const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
+                const method = self.findTraitMethodSignature(trait_interface, field.name) orelse continue;
+                if (!method.has_self) continue;
+                bounds_with_method += 1;
+                if (unique_trait == null) unique_trait = bound.trait_name;
+            }
+            if (bounds_with_method > 1) {
+                try self.emitExprError(expr_id, "method '{s}' is ambiguous for type parameter '{s}' across multiple trait bounds", .{
+                    field.name,
+                    receiver_name,
+                });
+                return true;
+            }
+            if (bounds_with_method == 0) {
+                try self.emitExprError(expr_id, "type parameter '{s}' has no trait bound providing method '{s}'", .{
+                    receiver_name,
+                    field.name,
+                });
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn emitConcreteImplMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr) !bool {
+        const target_name = self.concreteTypeNameForExpr(field.base) orelse return false;
+        var matching_impls: usize = 0;
+        for (self.impl_interfaces.items) |impl_interface| {
+            if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
+            for (impl_interface.methods) |method| {
+                if (std.mem.eql(u8, method.name, field.name)) {
+                    matching_impls += 1;
+                    break;
+                }
+            }
+        }
+        if (matching_impls > 1) {
+            try self.emitExprError(expr_id, "method '{s}' is ambiguous for type '{s}' across multiple impls", .{
+                field.name,
+                target_name,
+            });
+            return true;
+        }
+        if (matching_impls == 0 and self.anyTraitDefinesMethod(field.name)) {
+            try self.emitExprError(expr_id, "type '{s}' has no impl providing method '{s}'", .{
+                target_name,
+                field.name,
+            });
+            return true;
+        }
+        return false;
+    }
+
+    fn anyTraitDefinesMethod(self: *const TypeChecker, method_name: []const u8) bool {
+        for (self.trait_interfaces.items) |trait_interface| {
+            if (self.findTraitMethodSignature(trait_interface, method_name) != null) return true;
+        }
+        return false;
+    }
+
+    fn currentFunctionHasGenericTypeParameterNamed(self: *const TypeChecker, name: []const u8) bool {
+        const function_item_id = self.current_function_item orelse return false;
+        const function = switch (self.file.item(function_item_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+        for (function.parameters) |parameter| {
+            if (!self.isGenericTypeParameter(parameter)) continue;
+            const pattern_name = self.patternName(parameter.pattern) orelse continue;
+            if (std.mem.eql(u8, pattern_name, name)) return true;
+        }
+        return false;
     }
 
     fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {

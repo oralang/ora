@@ -943,6 +943,79 @@ test "compiler type checks associated trait calls in generic bodies" {
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(call_expr).kind());
 }
 
+test "compiler reports missing trait bounds for trait method calls" {
+    const source_text =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\fn choose(comptime T: type, a: T) -> bool {
+        \\    return a.marked();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type parameter 'T' has no trait bound providing method 'marked'"));
+}
+
+test "compiler reports missing impls for concrete associated trait calls" {
+    const source_text =
+        \\trait Factory {
+        \\    fn make() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\pub fn run() -> bool {
+        \\    return Box.make();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    if (!diagnosticMessagesContain(&typecheck.diagnostics, "type 'Box' has no impl providing method 'make'")) {
+        for (typecheck.diagnostics.items.items) |diag| std.debug.print("MISSING_IMPL_DIAG: {s}\n", .{diag.message});
+    }
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'Box' has no impl providing method 'make'"));
+}
+
+test "compiler reports ambiguous trait method names across impls" {
+    const source_text =
+        \\trait Left {
+        \\    fn mark() -> bool;
+        \\}
+        \\
+        \\trait Right {
+        \\    fn mark() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Left for Box {
+        \\    fn mark() -> bool { return true; }
+        \\}
+        \\
+        \\impl Right for Box {
+        \\    fn mark() -> bool { return false; }
+        \\}
+        \\
+        \\fn choose() -> bool {
+        \\    return Box.mark();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "method 'mark' is ambiguous for type 'Box' across multiple impls"));
+}
+
 test "compiler lowers associated trait impl calls to concrete symbols" {
     const source_text =
         \\trait Factory {
