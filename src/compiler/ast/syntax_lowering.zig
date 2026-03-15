@@ -164,9 +164,17 @@ pub fn mixin(Builder: type) type {
             }
 
             const body_id = body orelse return Lowering.malformedItem(self, node, "missing function body");
+            var is_generic = false;
+            for (parameters) |parameter| {
+                if (Lowering.isGenericTypeParameter(self, parameter)) {
+                    is_generic = true;
+                    break;
+                }
+            }
             return Support.pushItem(self, .{ .Function = .{
                 .range = node.range(),
                 .name = name,
+                .is_generic = is_generic,
                 .visibility = visibility,
                 .parameters = parameters,
                 .return_type = if (return_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
@@ -317,8 +325,17 @@ pub fn mixin(Builder: type) type {
                 try Lowering.malformedType(self, node, "missing parameter type");
             return .{
                 .range = node.range(),
+                .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
                 .pattern = pattern,
                 .type_expr = type_expr,
+            };
+        }
+
+        fn isGenericTypeParameter(self: *Builder, parameter: Parameter) bool {
+            if (!parameter.is_comptime) return false;
+            return switch (self.type_exprs.items[parameter.type_expr.index()]) {
+                .Path => |path| std.mem.eql(u8, path.name, "type"),
+                else => false,
             };
         }
 

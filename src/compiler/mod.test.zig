@@ -2792,6 +2792,51 @@ test "compiler syntax splits nested generic closing tokens" {
     try testing.expectEqual(@as(usize, 1), inner_close.range().end - inner_close.range().start);
 }
 
+test "compiler preserves generic function template parameters in AST" {
+    const source_text =
+        \\contract Math {
+        \\    fn max(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const function = ast_file.item(contract.members[0]).Function;
+
+    try testing.expect(function.is_generic);
+    try testing.expectEqual(@as(usize, 3), function.parameters.len);
+    try testing.expect(function.parameters[0].is_comptime);
+    try testing.expect(ast_file.typeExpr(function.parameters[0].type_expr).* == .Path);
+    try testing.expectEqualStrings("type", ast_file.typeExpr(function.parameters[0].type_expr).Path.name);
+    try testing.expect(!function.parameters[1].is_comptime);
+}
+
+test "compiler skips generic function templates in HIR" {
+    const source_text =
+        \\contract Math {
+        \\    fn max(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn concrete(a: u256) -> u256 {
+        \\        return a;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @concrete"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "func.func @max"));
+}
+
 test "compiler lowers builtin, quantified, and verification expressions" {
     const source_text =
         \\pub fn verify(values: slice[u256], next: address) -> u256

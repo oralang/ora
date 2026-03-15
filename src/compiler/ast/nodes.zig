@@ -463,6 +463,7 @@ pub const Body = struct {
 
 pub const Parameter = struct {
     range: source.TextRange,
+    is_comptime: bool = false,
     pattern: PatternId,
     type_expr: TypeExprId,
 };
@@ -532,6 +533,7 @@ pub const FunctionItem = struct {
     range: source.TextRange,
     name: []const u8,
     is_ghost: bool = false,
+    is_generic: bool = false,
     visibility: Visibility,
     parameters: []Parameter,
     return_type: ?TypeExprId,

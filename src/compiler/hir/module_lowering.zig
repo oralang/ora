@@ -74,6 +74,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, parent_block: mlir.MlirBlock) anyerror!void {
+            if (function.is_generic) return;
+
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
             const return_type = if (function.return_type) |type_id| self.lowerTypeExpr(type_id) else null;
 
