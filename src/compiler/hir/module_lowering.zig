@@ -88,14 +88,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerImpl(self: *Lowerer, impl_item_id: ast.ItemId, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
+            _ = impl_item_id;
             _ = parent_block;
-            const impl_parent_block = if (self.item_index.lookup(impl_item.target_name)) |target_item_id| blk: {
-                if (self.file.item(target_item_id).* == .Contract) {
-                    const block = self.contract_body_blocks[target_item_id.index()];
-                    if (!mlir.oraBlockIsNull(block)) break :blk block;
-                }
-                break :blk self.module_body;
-            } else self.module_body;
+            const impl_parent_block = @This().implParentBlock(self, impl_item.target_name);
 
             for (impl_item.methods) |method_item_id| {
                 const function = switch (self.file.item(method_item_id).*) {
@@ -107,7 +102,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (self.monomorphized_function_names.contains(symbol_name)) continue;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{});
                 try self.monomorphized_function_names.put(symbol_name, {});
-                _ = impl_item_id;
             }
         }
 
@@ -184,7 +178,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn ensureLoweredImplMethod(
             self: *Lowerer,
-            impl_item_id: ast.ItemId,
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
             target_name: []const u8,
@@ -197,34 +190,30 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const runtime_parameters = try self.runtimeFunctionParameters(function);
                 const symbol_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
-                    const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
-                        if (self.file.item(target_item_id).* == .Contract) {
-                            const block = self.contract_body_blocks[target_item_id.index()];
-                            if (!mlir.oraBlockIsNull(block)) break :blk block;
-                        }
-                        break :blk self.module_body;
-                    } else self.module_body;
+                    const parent_block = @This().implParentBlock(self, target_name);
                     try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings);
                     try self.monomorphized_function_names.put(symbol_name, {});
-                    _ = impl_item_id;
                 }
                 return symbol_name;
             }
 
             const symbol_name = base_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
-                const parent_block = if (self.item_index.lookup(target_name)) |target_item_id| blk: {
-                    if (self.file.item(target_item_id).* == .Contract) {
-                        const block = self.contract_body_blocks[target_item_id.index()];
-                        if (!mlir.oraBlockIsNull(block)) break :blk block;
-                    }
-                    break :blk self.module_body;
-                } else self.module_body;
+                const parent_block = @This().implParentBlock(self, target_name);
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{});
                 try self.monomorphized_function_names.put(symbol_name, {});
-                _ = impl_item_id;
             }
             return symbol_name;
+        }
+
+        fn implParentBlock(self: *Lowerer, target_name: []const u8) mlir.MlirBlock {
+            if (self.item_index.lookup(target_name)) |target_item_id| {
+                if (self.file.item(target_item_id).* == .Contract) {
+                    const block = self.contract_body_blocks[target_item_id.index()];
+                    if (!mlir.oraBlockIsNull(block)) return block;
+                }
+            }
+            return self.module_body;
         }
 
         fn implMethodSymbolName(self: *Lowerer, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {

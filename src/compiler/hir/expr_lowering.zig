@@ -519,7 +519,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const callee_name = try self.parent.ensureLoweredImplMethod(
-                resolved.impl_item_id,
                 resolved.method_item_id,
                 resolved.function,
                 resolved.target_name,
@@ -619,7 +618,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const callee_name = try self.parent.ensureLoweredImplMethod(
-                resolved.impl_item_id,
                 resolved.method_item_id,
                 resolved.function,
                 resolved.target_name,

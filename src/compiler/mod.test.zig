@@ -1003,9 +1003,6 @@ test "compiler reports missing impls for concrete associated trait calls" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    if (!diagnosticMessagesContain(&typecheck.diagnostics, "type 'Box' has no impl providing method 'make'")) {
-        for (typecheck.diagnostics.items.items) |diag| std.debug.print("MISSING_IMPL_DIAG: {s}\n", .{diag.message});
-    }
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'Box' has no impl providing method 'make'"));
 }
 
