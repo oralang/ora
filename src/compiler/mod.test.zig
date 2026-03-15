@@ -385,6 +385,21 @@ test "compiler reports trait method body parse error" {
     try testing.expect(diagnosticMessagesContain(diags, "trait methods cannot have a body"));
 }
 
+test "compiler reports non-method elements in trait bodies clearly" {
+    const source_text =
+        \\trait ERC20 {
+        \\    let value = 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(diags, "expected method signature in trait body"));
+}
+
 test "compiler reports impl syntax errors for missing body and missing for" {
     const source_text =
         \\impl ERC20 Token {

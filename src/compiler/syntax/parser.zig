@@ -222,30 +222,7 @@ const Parser = struct {
         } else {
             try self.reportHere("expected 'fn' in function declaration");
         }
-
-        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
-        } else {
-            try self.reportHere("expected parameter list in function declaration");
-        }
-
-        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
-            if (self.at(.Semicolon)) break;
-            if (self.at(.Arrow)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Requires, .Ensures, .Semicolon }) });
-                continue;
-            }
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        while (self.at(.Requires) or self.at(.Ensures)) {
-            try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
-        }
+        try self.parseFunctionSignatureCore(&children, "function declaration");
 
         if (self.at(.LeftBrace)) {
             try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
@@ -271,30 +248,7 @@ const Parser = struct {
         } else {
             try self.reportHere("expected 'fn' in trait method declaration");
         }
-
-        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
-        } else {
-            try self.reportHere("expected parameter list in trait method declaration");
-        }
-
-        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
-            if (self.at(.Semicolon)) break;
-            if (self.at(.Arrow)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Requires, .Ensures, .Semicolon }) });
-                continue;
-            }
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        while (self.at(.Requires) or self.at(.Ensures)) {
-            try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
-        }
+        try self.parseFunctionSignatureCore(&children, "trait method declaration");
 
         if (self.at(.LeftBrace)) {
             _ = try self.parseBodyNode();
@@ -326,6 +280,11 @@ const Parser = struct {
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            if (!self.at(.Comptime) and !self.at(.Fn)) {
+                try self.reportHere("expected method signature in trait body");
+                try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
                 continue;
             }
             try children.append(self.allocator, .{ .node = try self.parseTraitMethodSignature() });
@@ -395,7 +354,21 @@ const Parser = struct {
         } else {
             try self.reportHere("expected 'fn' in impl method declaration");
         }
+        try self.parseFunctionSignatureCore(&children, "impl method declaration");
 
+        if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        } else if (self.at(.Semicolon)) {
+            _ = self.bump();
+            try self.reportHere("impl methods must have a body");
+        } else if (!self.at(.Eof)) {
+            try self.reportHere("expected function body");
+        }
+
+        return self.finishNode(SyntaxKind.FunctionItem, children.items);
+    }
+
+    fn parseFunctionSignatureCore(self: *Parser, children: *std.ArrayList(ChildRef), comptime context: []const u8) anyerror!void {
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
             try children.append(self.allocator, try self.parseElement(null));
         }
@@ -403,7 +376,7 @@ const Parser = struct {
         if (self.at(.LeftParen)) {
             try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
         } else {
-            try self.reportHere("expected parameter list in impl method declaration");
+            try self.reportHere("expected parameter list in " ++ context);
         }
 
         while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures)) {
@@ -419,17 +392,6 @@ const Parser = struct {
         while (self.at(.Requires) or self.at(.Ensures)) {
             try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
         }
-
-        if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
-        } else if (self.at(.Semicolon)) {
-            _ = self.bump();
-            try self.reportHere("impl methods must have a body");
-        } else if (!self.at(.Eof)) {
-            try self.reportHere("expected function body");
-        }
-
-        return self.finishNode(SyntaxKind.FunctionItem, children.items);
     }
 
     fn parseParameterListNode(self: *Parser) anyerror!green.GreenNodeId {
