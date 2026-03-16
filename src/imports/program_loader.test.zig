@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const loader = @import("program_loader.zig");
-const lib = @import("ora_lib");
+const ast = @import("ora_ast");
 
 fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
@@ -61,7 +61,7 @@ test "program loader: preserves module-qualified calls and injects imported runt
                     if (member != .Function) continue;
                     const f = member.Function;
                     if (std.mem.eql(u8, f.name, "add")) {
-                        try testing.expectEqual(lib.ast.Visibility.Private, f.visibility);
+                        try testing.expectEqual(ast.Visibility.Private, f.visibility);
                         saw_injected_math_fn = true;
                         continue;
                     }
@@ -907,18 +907,18 @@ test "program loader: module export map carries exported type info" {
     const me = program.module_exports.?;
 
     const add_ty = me.lookupExportType("util", "add").?;
-    try testing.expectEqual(lib.ast.Types.TypeCategory.Integer, add_ty.category);
+    try testing.expectEqual(ast.Types.TypeCategory.Integer, add_ty.category);
     try testing.expect(add_ty.ora_type != null);
     try testing.expect(add_ty.ora_type.? == .u256);
 
     const point_ty = me.lookupExportType("util", "Point").?;
-    try testing.expectEqual(lib.ast.Types.TypeCategory.Struct, point_ty.category);
+    try testing.expectEqual(ast.Types.TypeCategory.Struct, point_ty.category);
     try testing.expect(point_ty.ora_type != null);
     try testing.expect(point_ty.ora_type.? == .struct_type);
     try testing.expectEqualStrings("Point", point_ty.ora_type.?.struct_type);
 
     const flags_ty = me.lookupExportType("util", "Flags").?;
-    try testing.expectEqual(lib.ast.Types.TypeCategory.Bitfield, flags_ty.category);
+    try testing.expectEqual(ast.Types.TypeCategory.Bitfield, flags_ty.category);
     try testing.expect(flags_ty.ora_type != null);
     try testing.expect(flags_ty.ora_type.? == .bitfield_type);
     try testing.expectEqualStrings("Flags", flags_ty.ora_type.?.bitfield_type);
@@ -969,7 +969,7 @@ test "program loader: typed load infers imported type declaration for qualified 
             if (first_stmt != .VariableDecl) continue;
 
             const var_decl = first_stmt.VariableDecl;
-            try testing.expectEqual(lib.ast.Types.TypeCategory.Struct, var_decl.type_info.category);
+            try testing.expectEqual(ast.Types.TypeCategory.Struct, var_decl.type_info.category);
             try testing.expect(var_decl.type_info.ora_type != null);
             try testing.expect(var_decl.type_info.ora_type.? == .struct_type);
             try testing.expectEqualStrings("Point", var_decl.type_info.ora_type.?.struct_type);
@@ -1115,13 +1115,13 @@ test "program loader: module export map supports constant export metadata" {
     const member = try allocator.dupe(u8, "FEE_BPS");
     try exports.put(member, .{
         .kind = .Constant,
-        .type_info = lib.ast.Types.TypeInfo.fromOraType(.{ .u256 = {} }),
+        .type_info = ast.Types.TypeInfo.fromOraType(.{ .u256 = {} }),
     });
     try me.entries.put(alias, exports);
 
     try testing.expectEqual(loader.ExportKind.Constant, me.lookupExport("math", "FEE_BPS").?);
     const type_info = me.lookupExportType("math", "FEE_BPS").?;
-    try testing.expectEqual(lib.ast.Types.TypeCategory.Integer, type_info.category);
+    try testing.expectEqual(ast.Types.TypeCategory.Integer, type_info.category);
     try testing.expect(type_info.ora_type != null);
     try testing.expect(type_info.ora_type.? == .u256);
 }

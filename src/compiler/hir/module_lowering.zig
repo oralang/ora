@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto = std.crypto;
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
@@ -254,6 +255,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .private => "private",
                 },
             ));
+            if (std.mem.eql(u8, function.name, "init")) {
+                try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.init", true));
+            }
+            if (function.visibility == .public and function.parent_contract != null) {
+                @This().attachPublicAbiAttrs(self, &attrs, function, parameters) catch |err| switch (err) {
+                    error.UnsupportedAbiType => {},
+                    else => return err,
+                };
+            }
 
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
@@ -304,6 +314,88 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             specialized_function.parameters = @constCast(parameters);
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
             try function_lowerer.lower();
+        }
+
+        fn attachPublicAbiAttrs(
+            self: *Lowerer,
+            attrs: *std.ArrayList(mlir.MlirNamedAttribute),
+            function: ast.FunctionItem,
+            parameters: []const ast.Parameter,
+        ) anyerror!void {
+            var signature_parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (signature_parts.items) |part| self.allocator.free(part);
+                signature_parts.deinit(self.allocator);
+            }
+            var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer abi_param_attrs.deinit(self.allocator);
+
+            for (parameters) |parameter| {
+                const abi_type = try @This().canonicalAbiType(self, self.typecheck.pattern_types[parameter.pattern.index()].type);
+                defer self.allocator.free(abi_type);
+                try signature_parts.append(self.allocator, try self.allocator.dupe(u8, abi_type));
+                abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
+            }
+
+            const joined = try std.mem.join(self.allocator, ",", signature_parts.items);
+            defer self.allocator.free(joined);
+            const signature = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ function.name, joined });
+            defer self.allocator.free(signature);
+            const selector = try @This().keccakSelectorHex(self.allocator, signature);
+            defer self.allocator.free(selector);
+
+            try attrs.append(self.allocator, namedStringAttr(self.context, "ora.selector", selector));
+            if (abi_param_attrs.items.len != 0) {
+                const abi_params_attr = mlir.oraArrayAttrCreate(self.context, @intCast(abi_param_attrs.items.len), abi_param_attrs.items.ptr);
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.abi_params"),
+                    .attribute = abi_params_attr,
+                });
+            }
+
+            if (function.return_type) |_| {
+                const abi_return = try @This().canonicalAbiType(self, self.typecheck.body_types[function.body.index()]);
+                defer self.allocator.free(abi_return);
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
+            }
+        }
+
+        fn canonicalAbiType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
+            return switch (ty) {
+                .bool => self.allocator.dupe(u8, "bool"),
+                .address => self.allocator.dupe(u8, "address"),
+                .string => self.allocator.dupe(u8, "string"),
+                .bytes => self.allocator.dupe(u8, "bytes"),
+                .integer => |integer| blk: {
+                    const spelling = integer.spelling orelse "u256";
+                    if (std.mem.eql(u8, spelling, "u256")) break :blk self.allocator.dupe(u8, "uint256");
+                    if (std.mem.eql(u8, spelling, "i256")) break :blk self.allocator.dupe(u8, "int256");
+                    if (std.mem.startsWith(u8, spelling, "u")) break :blk std.fmt.allocPrint(self.allocator, "uint{s}", .{spelling[1..]});
+                    if (std.mem.startsWith(u8, spelling, "i")) break :blk std.fmt.allocPrint(self.allocator, "int{s}", .{spelling[1..]});
+                    break :blk self.allocator.dupe(u8, spelling);
+                },
+                .refinement => |refinement| @This().canonicalAbiType(self, refinement.base_type.*),
+                .array => |array| blk: {
+                    const element = try @This().canonicalAbiType(self, array.element_type.*);
+                    defer self.allocator.free(element);
+                    if (array.len) |len| break :blk std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ element, len });
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                },
+                else => error.UnsupportedAbiType,
+            };
+        }
+
+        fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
+            var hash: [32]u8 = undefined;
+            crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
+            const selector = hash[0..4];
+
+            var hex: [8]u8 = undefined;
+            for (selector, 0..) |byte, index| {
+                hex[index * 2] = std.fmt.hex_charset[byte >> 4];
+                hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
+            }
+            return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
         }
 
         pub fn lowerField(self: *Lowerer, item_id: ast.ItemId, field: ast.FieldItem, parent_block: mlir.MlirBlock) anyerror!void {

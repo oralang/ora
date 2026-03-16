@@ -87,6 +87,16 @@ pub fn build(b: *std.Build) void {
     });
     ora_fmt_mod.addImport("ora_lib", lib_mod);
 
+    const ora_frontend_mod = b.createModule(.{
+        .root_source_file = b.path("src/ora_frontend.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_frontend_mod.addImport("ora_ast", ora_ast_mod);
+    ora_frontend_mod.addImport("ora_lexer", ora_lexer_mod);
+    ora_frontend_mod.addImport("ora_types", ora_types_mod);
+    ora_frontend_mod.addImport("log", log_mod);
+
     const mlir_c_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/c.zig"),
         .target = target,
@@ -102,6 +112,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_lib", lib_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
     exe_mod.addImport("log", log_mod);
+    exe_mod.addImport("ora_lexer", ora_lexer_mod);
+    exe_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("log", log_mod);
     lib_mod.addImport("ora_types", ora_types_mod);
@@ -460,7 +472,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    import_resolver_test_mod.addImport("ora_lib", lib_mod);
+    import_resolver_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    import_resolver_test_mod.addImport("ora_types", ora_types_mod);
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
 
@@ -470,7 +483,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    import_program_loader_test_mod.addImport("ora_lib", lib_mod);
+    import_program_loader_test_mod.addImport("ora_lib", ora_frontend_mod);
+    import_program_loader_test_mod.addImport("ora_ast", ora_ast_mod);
+    import_program_loader_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    import_program_loader_test_mod.addImport("ora_types", ora_types_mod);
     const import_program_loader_tests = b.addTest(.{ .root_module = import_program_loader_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_program_loader_tests).step);
 
@@ -706,6 +722,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     compiler_test_mod.addImport("ora_root", lib_mod);
+    compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     const compiler_tests = b.addTest(.{ .root_module = compiler_test_mod });
     linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(compiler_tests).step);

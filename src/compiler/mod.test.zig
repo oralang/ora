@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
+const mlir = @import("mlir_c_api").c;
 
 fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
@@ -13,6 +14,18 @@ fn renderHirTextForSource(source_text: []const u8) ![]u8 {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     return hir_result.renderText(testing.allocator);
+}
+
+fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {
+    return compiler.compilePackage(testing.allocator, root_path);
+}
+
+fn expectOraToSirConverts(path: []const u8) !void {
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
 }
 
 fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
@@ -1816,6 +1829,49 @@ test "compiler invalidates dependent module caches after source update" {
     try testing.expectEqual(@as(usize, 3), graph_after.modules.len);
 
     _ = c_module;
+}
+
+test "compiler package loader bridges import graph into source modules" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\pub fn helper() -> u256 {
+        \\    return 7;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\pub fn run() -> u256 {
+        \\    return 1;
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const package = compilation.db.sources.package(compilation.package_id);
+    try testing.expectEqual(@as(usize, 2), package.modules.items.len);
+    try testing.expectEqualStrings("main", compilation.db.sources.module(compilation.root_module_id).name);
+
+    const graph = try compilation.db.moduleGraph(compilation.package_id);
+    try testing.expectEqual(@as(usize, 2), graph.modules.len);
+
+    const root_summary = for (graph.modules) |summary| {
+        if (summary.module_id == compilation.root_module_id) break summary;
+    } else unreachable;
+    try testing.expectEqual(@as(usize, 1), root_summary.imports.len);
+    try testing.expect(root_summary.imports[0].target_module_id != null);
 }
 
 test "compiler parses log, error, and bitfield declarations" {
@@ -8063,4 +8119,37 @@ test "compiler allows passing calldata values to function parameters" {
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(module_typecheck.diagnostics.isEmpty());
+}
+
+test "compiler emits ABI attrs for public contract entries" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn init(owner: address) {}
+        \\
+        \\    pub fn run(owner: address, amount: u256) -> bool {
+        \\        return owner == owner && amount > 0;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_params"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"address\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
+}
+
+test "compiler v2 examples convert through SIR" {
+    const example_paths = [_][]const u8{
+        "ora-example/smoke.ora",
+        "ora-example/no_return_test.ora",
+        "ora-example/dce_test.ora",
+        "ora-example/statements/contract_declaration.ora",
+    };
+
+    for (example_paths) |path| {
+        try expectOraToSirConverts(path);
+    }
 }

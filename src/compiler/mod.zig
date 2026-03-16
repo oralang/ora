@@ -26,4 +26,5 @@ pub const PatternId = ast.PatternId;
 pub const HirModuleHandle = hir.HirModuleHandle;
 pub const HirItemHandle = hir.HirItemHandle;
 pub const compilePackage = driver.compilePackage;
+pub const compilePackageWithResolverOptions = driver.compilePackageWithResolverOptions;
 pub const compileSource = driver.compileSource;

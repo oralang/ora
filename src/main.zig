@@ -551,20 +551,29 @@ pub fn main() !void {
     const file_path = input_file.?;
 
     if (use_v2) {
-        if (emit_cfg or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
-            std.debug.print("error: --v2 currently supports only AST and typed-AST emission.\n", .{});
+        const v2_resolver = try discoverResolverOptionsForFile(allocator, file_path);
+        defer if (v2_resolver.include_roots) |include_roots| {
+            freeResolvedIncludeRoots(allocator, include_roots);
+        };
+
+        if (emit_cfg or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
+            std.debug.print("error: --v2 currently supports only AST, typed-AST, and MLIR emission.\n", .{});
             std.process.exit(2);
         }
-        if (!emit_ast and !emit_typed_ast) {
-            std.debug.print("error: --v2 currently requires --emit-ast or --emit-typed-ast.\n", .{});
+        if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
+            std.debug.print("error: --v2 currently requires --emit-ast, --emit-typed-ast, or --emit-mlir.\n", .{});
             std.process.exit(2);
         }
 
-        const format = if (emit_typed_ast)
-            (emit_typed_ast_format orelse "tree")
-        else
-            (emit_ast_format orelse "tree");
-        try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, &metrics);
+        if (emit_ast or emit_typed_ast) {
+            const format = if (emit_typed_ast)
+                (emit_typed_ast_format orelse "tree")
+            else
+                (emit_ast_format orelse "tree");
+            try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, v2_resolver.options, &metrics);
+        } else {
+            try runCompilerV2MlirEmit(allocator, file_path, mlir_options, v2_resolver.options);
+        }
 
         var stderr_buffer_v2: [1024]u8 = undefined;
         var stderr_writer_v2 = std.fs.File.stderr().writer(&stderr_buffer_v2);
@@ -1019,6 +1028,54 @@ fn runBuildFromDiscoveredConfig(
     }
 }
 
+fn discoverResolverOptionsForFile(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+) !struct {
+    include_roots: ?[]const []const u8,
+    options: import_program.ResolverOptions,
+} {
+    const start_dir = std.fs.path.dirname(file_path) orelse ".";
+    const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
+        std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+
+    if (loaded_opt == null) {
+        return .{
+            .include_roots = null,
+            .options = .{},
+        };
+    }
+
+    var loaded = loaded_opt.?;
+    defer loaded.deinit(allocator);
+
+    const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, file_path) catch |err| {
+        std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+
+    if (target_idx_opt) |target_idx| {
+        const target = loaded.config.targets[target_idx];
+        const include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
+            std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
+            std.process.exit(2);
+        };
+        return .{
+            .include_roots = include_roots,
+            .options = .{
+                .include_roots = include_roots,
+            },
+        };
+    }
+
+    return .{
+        .include_roots = null,
+        .options = .{},
+    };
+}
+
 // ============================================================================
 // SECTION 2: Usage & Help Text
 // ============================================================================
@@ -1313,6 +1370,7 @@ fn runCompilerV2AstEmit(
     file_path: []const u8,
     format: []const u8,
     include_types: bool,
+    resolver_options: import_program.ResolverOptions,
     m: *Metrics,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -1320,7 +1378,7 @@ fn runCompilerV2AstEmit(
     const stdout = &stdout_writer.interface;
 
     m.begin("compiler v2");
-    var compilation = compiler.driver.compilePackage(allocator, file_path) catch |err| {
+    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
         m.end();
         try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
         try stdout.flush();
@@ -1343,6 +1401,54 @@ fn runCompilerV2AstEmit(
         },
         else => return err,
     };
+    try stdout.flush();
+}
+
+fn runCompilerV2MlirEmit(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    mlir_options: MlirOptions,
+    resolver_options: import_program.ResolverOptions,
+) !void {
+    const c = @import("mlir_c_api").c;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    const m = mlir_options.metrics;
+
+    m.begin("compiler v2");
+    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+        m.end();
+        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    m.end();
+    defer compilation.deinit();
+
+    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    if (mlir_options.emit_mlir_sir) {
+        if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module)) {
+            try stdout.print("Compiler V2 error: Ora to SIR conversion failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+    }
+
+    const module_op = c.oraModuleGetOperation(lowering.module.raw_module);
+    const text_ref = c.oraOperationPrintToString(module_op);
+    defer if (text_ref.data != null) {
+        const mlir_c = @import("mlir_c_api");
+        mlir_c.freeStringRef(text_ref);
+    };
+
+    if (text_ref.data == null or text_ref.length == 0) {
+        try stdout.print("Compiler V2 error: failed to print MLIR module\n", .{});
+        try stdout.flush();
+        std.process.exit(1);
+    }
+    try stdout.print("{s}", .{text_ref.data[0..text_ref.length]});
     try stdout.flush();
 }
 
