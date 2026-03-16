@@ -24,6 +24,16 @@ const evalBinary = bridge.evalBinary;
 const evalUnary = bridge.evalUnary;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
 
+pub const TypeQuery = struct {
+    context: *anyopaque,
+    ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
+};
+
+pub const ConstEvalOptions = struct {
+    module_id: ?source.ModuleId = null,
+    type_query: ?TypeQuery = null,
+};
+
 /// Compiler-AST constant evaluator.
 ///
 /// This is the migration boundary for moving the refactored compiler onto the
@@ -35,7 +45,7 @@ const parseIntegerLiteral = bridge.parseIntegerLiteral;
 /// - legacy AST walker remains isolated in `ast_eval.zig`
 /// - the lightweight compiler walker can later be upgraded to use the full
 ///   shared environment/value engine without moving the compiler call sites again
-pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstEvalResult {
+pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options: ConstEvalOptions) !ConstEvalResult {
     var result = ConstEvalResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .values = &[_]?ConstValue{},
@@ -52,6 +62,8 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile) !ConstE
         .file = file,
         .values = values,
         .env = CtEnv.init(arena, .{}),
+        .module_id = options.module_id,
+        .type_query = options.type_query,
     };
     defer evaluator.env.deinit();
     for (file.root_items) |item_id| {
@@ -92,6 +104,9 @@ const ConstEvaluator = struct {
     file: *const ast.AstFile,
     values: []?ConstValue,
     env: CtEnv,
+    module_id: ?source.ModuleId = null,
+    type_query: ?TypeQuery = null,
+    current_typecheck_key: ?model.TypeCheckKey = null,
     call_depth: u32 = 0,
     max_call_depth: u32 = 64,
     last_error: ?error_mod.CtError = null,
@@ -109,6 +124,10 @@ const ConstEvaluator = struct {
     };
 
     fn visitItem(self: *ConstEvaluator, item_id: ast.ItemId) void {
+        const previous_key = self.current_typecheck_key;
+        self.current_typecheck_key = .{ .item = item_id };
+        defer self.current_typecheck_key = previous_key;
+
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
                 for (contract.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
@@ -136,6 +155,10 @@ const ConstEvaluator = struct {
     }
 
     fn visitBody(self: *ConstEvaluator, body_id: ast.BodyId) void {
+        const previous_key = self.current_typecheck_key;
+        self.current_typecheck_key = .{ .body = body_id };
+        defer self.current_typecheck_key = previous_key;
+
         self.env.pushScope(false) catch return;
         defer self.env.popScope();
 
@@ -225,7 +248,11 @@ const ConstEvaluator = struct {
             .StringLiteral => |literal| ConstValue{ .string = literal.text },
             .BoolLiteral => |literal| ConstValue{ .boolean = literal.value },
             .AddressLiteral, .BytesLiteral => null,
-            .TypeValue => null,
+            .TypeValue => |type_value| blk: {
+                try self.ensureTypeExprTypeChecked(type_value.type_expr);
+                if (self.current_typecheck_key) |key| try self.ensureTypeChecked(key);
+                break :blk null;
+            },
             .Tuple => |tuple| blk: {
                 for (tuple.elements) |element| _ = try self.evalExprImpl(element, use_cache);
                 break :blk null;
@@ -235,6 +262,7 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .StructLiteral => |struct_literal| blk: {
+                try self.ensureNamedItemTypeChecked(struct_literal.type_name);
                 for (struct_literal.fields) |field| _ = try self.evalExprImpl(field.value, use_cache);
                 break :blk null;
             },
@@ -663,7 +691,44 @@ const ConstEvaluator = struct {
         return null;
     }
 
-    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?ast.FunctionItem {
+    const CallableFunction = struct {
+        item_id: ast.ItemId,
+        function: ast.FunctionItem,
+    };
+
+    fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
+        const module_id = self.module_id orelse return;
+        const type_query = self.type_query orelse return;
+        _ = try type_query.ensure_typecheck(type_query.context, module_id, key);
+    }
+
+    fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {
+        const item_id = self.lookupNamedItem(name) orelse return;
+        try self.ensureTypeChecked(.{ .item = item_id });
+    }
+
+    fn ensureTypeExprTypeChecked(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !void {
+        switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| try self.ensureNamedItemTypeChecked(path.name),
+            .Generic => |generic| {
+                try self.ensureNamedItemTypeChecked(generic.name);
+                for (generic.args) |arg| switch (arg) {
+                    .Type => |nested| try self.ensureTypeExprTypeChecked(nested),
+                    .Integer => {},
+                };
+            },
+            .Tuple => |tuple| for (tuple.elements) |element| try self.ensureTypeExprTypeChecked(element),
+            .Array => |array| try self.ensureTypeExprTypeChecked(array.element),
+            .Slice => |slice| try self.ensureTypeExprTypeChecked(slice.element),
+            .ErrorUnion => |error_union| {
+                try self.ensureTypeExprTypeChecked(error_union.payload);
+                for (error_union.errors) |error_type| try self.ensureTypeExprTypeChecked(error_type);
+            },
+            .Error => {},
+        }
+    }
+
+    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?CallableFunction {
         const function_item_id = switch (self.file.expression(callee).*) {
             .Name => |name| self.lookupNamedItem(name.name) orelse return null,
             .Group => |group| return self.lookupCallableFunction(group.expr),
@@ -672,7 +737,7 @@ const ConstEvaluator = struct {
 
         const item = self.file.item(function_item_id).*;
         if (item != .Function) return null;
-        return item.Function;
+        return .{ .item_id = function_item_id, .function = item.Function };
     }
 
     fn itemName(self: *ConstEvaluator, item_id: ast.ItemId) ?[]const u8 {
@@ -759,11 +824,13 @@ const ConstEvaluator = struct {
     }
 
     fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
-        const function = self.lookupCallableFunction(call.callee) orelse {
+        const callable = self.lookupCallableFunction(call.callee) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
             return null;
         };
+        const function = callable.function;
+        try self.ensureTypeChecked(.{ .item = callable.item_id });
 
         if (self.functionStage(function) == .runtime_only) {
             self.last_error = error_mod.CtError.stageViolation(
@@ -1279,7 +1346,7 @@ const ConstEvaluator = struct {
             else => blk: {
                 const value = (try self.evalExprUncached(expr_id)) orelse break :blk null;
                 break :blk try constToCtValue(value);
-            }
+            },
         };
     }
 
@@ -1546,5 +1613,4 @@ const ConstEvaluator = struct {
             .VariableDecl, .Return, .Expr, .Block, .LabeledBlock => unreachable,
         }
     }
-
 };

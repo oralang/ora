@@ -6562,6 +6562,56 @@ test "compiler const eval sequences comptime block locals" {
     try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval can populate callee type checks on demand" {
+    const source_text =
+        \\comptime fn helper() -> u256 {
+        \\    return 1;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        helper();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const helper_id = ast_file.root_items[0];
+    const cache = &compilation.db.typecheck_slots.items[compilation.root_module_id.index()];
+
+    try testing.expectEqual(@as(usize, 0), cache.entries.count());
+
+    _ = try compilation.db.constEval(compilation.root_module_id);
+    const populated_count = cache.entries.count();
+    try testing.expect(populated_count > 0);
+
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = helper_id });
+    try testing.expectEqual(populated_count, cache.entries.count());
+}
+
+test "compiler db breaks same-key const eval recursion with unknown sentinel" {
+    const source_text =
+        \\comptime fn loop() -> u256 {
+        \\    return loop();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "comptime recursion depth exceeded"));
+}
+
 test "compiler const eval executes comptime if and assignment statements" {
     const source_text =
         \\pub fn choose() -> u256 {

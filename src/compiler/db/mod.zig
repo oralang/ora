@@ -9,14 +9,22 @@ const syntax = @import("../syntax/mod.zig");
 
 const TypeCheckCache = struct {
     entries: std.AutoHashMap(u64, *sema.TypeCheckResult),
+    in_progress: std.AutoHashMap(u64, void),
+    sentinels: std.AutoHashMap(u64, *sema.TypeCheckResult),
 
     fn init(allocator: std.mem.Allocator) TypeCheckCache {
-        return .{ .entries = std.AutoHashMap(u64, *sema.TypeCheckResult).init(allocator) };
+        return .{
+            .entries = std.AutoHashMap(u64, *sema.TypeCheckResult).init(allocator),
+            .in_progress = std.AutoHashMap(u64, void).init(allocator),
+            .sentinels = std.AutoHashMap(u64, *sema.TypeCheckResult).init(allocator),
+        };
     }
 
     fn deinit(self: *TypeCheckCache, allocator: std.mem.Allocator) void {
         self.clear(allocator);
         self.entries.deinit();
+        self.in_progress.deinit();
+        self.sentinels.deinit();
     }
 
     fn clear(self: *TypeCheckCache, allocator: std.mem.Allocator) void {
@@ -25,11 +33,22 @@ const TypeCheckCache = struct {
             result.*.deinit();
             allocator.destroy(result.*);
         }
+        var sentinel_iterator = self.sentinels.valueIterator();
+        while (sentinel_iterator.next()) |result| {
+            result.*.deinit();
+            allocator.destroy(result.*);
+        }
         self.entries.clearRetainingCapacity();
+        self.in_progress.clearRetainingCapacity();
+        self.sentinels.clearRetainingCapacity();
     }
 
     fn lookup(self: *const TypeCheckCache, key: sema.TypeCheckKey) ?*const sema.TypeCheckResult {
         return self.entries.get(typeCheckCacheKey(key));
+    }
+
+    fn lookupSentinel(self: *const TypeCheckCache, key: sema.TypeCheckKey) ?*const sema.TypeCheckResult {
+        return self.sentinels.get(typeCheckCacheKey(key));
     }
 };
 
@@ -69,6 +88,8 @@ pub const CompilerDb = struct {
     resolution_slots: std.ArrayList(?*sema.NameResolutionResult),
     typecheck_slots: std.ArrayList(TypeCheckCache),
     consteval_slots: std.ArrayList(?*sema.ConstEvalResult),
+    consteval_in_progress: std.ArrayList(bool),
+    consteval_sentinel_slots: std.ArrayList(?*sema.ConstEvalResult),
     verification_slots: std.ArrayList(VerificationCache),
     module_verification_slots: std.ArrayList(?*sema.ModuleVerificationFactsResult),
     hir_slots: std.ArrayList(?*hir.LoweringResult),
@@ -84,6 +105,8 @@ pub const CompilerDb = struct {
             .resolution_slots = .{},
             .typecheck_slots = .{},
             .consteval_slots = .{},
+            .consteval_in_progress = .{},
+            .consteval_sentinel_slots = .{},
             .verification_slots = .{},
             .module_verification_slots = .{},
             .hir_slots = .{},
@@ -98,6 +121,8 @@ pub const CompilerDb = struct {
         deinitSlots(self.allocator, &self.resolution_slots);
         deinitCacheSlots(self.allocator, &self.typecheck_slots);
         deinitSlots(self.allocator, &self.consteval_slots);
+        deinitSlots(self.allocator, &self.consteval_sentinel_slots);
+        self.consteval_in_progress.deinit(self.allocator);
         deinitCacheSlots(self.allocator, &self.verification_slots);
         deinitSlots(self.allocator, &self.module_verification_slots);
         deinitSlots(self.allocator, &self.hir_slots);
@@ -124,6 +149,8 @@ pub const CompilerDb = struct {
         try ensureSlots(self.allocator, &self.resolution_slots, required);
         try self.typecheck_slots.append(self.allocator, TypeCheckCache.init(self.allocator));
         try ensureSlots(self.allocator, &self.consteval_slots, required);
+        try self.consteval_in_progress.append(self.allocator, false);
+        try ensureSlots(self.allocator, &self.consteval_sentinel_slots, required);
         try self.verification_slots.append(self.allocator, VerificationCache.init(self.allocator));
         try ensureSlots(self.allocator, &self.module_verification_slots, required);
         try ensureSlots(self.allocator, &self.hir_slots, required);
@@ -213,6 +240,12 @@ pub const CompilerDb = struct {
         if (cache.lookup(key)) |cached| {
             return cached;
         }
+        const cache_key = typeCheckCacheKey(key);
+        if (cache.in_progress.contains(cache_key)) {
+            return try self.unknownTypeCheckResult(module_id, key);
+        }
+        try cache.in_progress.put(cache_key, {});
+        defer _ = cache.in_progress.remove(cache_key);
         const module = self.sources.module(module_id);
         const result = try self.allocator.create(sema.TypeCheckResult);
         errdefer self.allocator.destroy(result);
@@ -254,13 +287,26 @@ pub const CompilerDb = struct {
 
     pub fn constEval(self: *CompilerDb, module_id: source.ModuleId) !*const sema.ConstEvalResult {
         const slot = &self.consteval_slots.items[module_id.index()];
-        if (slot.* == null) {
-            const module = self.sources.module(module_id);
-            const ast_file = try self.astFile(module.file_id);
-            const result = try self.allocator.create(sema.ConstEvalResult);
-            result.* = try comptime_eval.constEval(self.allocator, ast_file);
-            slot.* = result;
+        if (slot.* != null) {
+            return slot.*.?;
         }
+        if (self.consteval_in_progress.items[module_id.index()]) {
+            return try self.unknownConstEvalResult(module_id);
+        }
+        self.consteval_in_progress.items[module_id.index()] = true;
+        defer self.consteval_in_progress.items[module_id.index()] = false;
+
+        const module = self.sources.module(module_id);
+        const ast_file = try self.astFile(module.file_id);
+        const result = try self.allocator.create(sema.ConstEvalResult);
+        result.* = try comptime_eval.constEval(self.allocator, ast_file, .{
+            .module_id = module_id,
+            .type_query = .{
+                .context = self,
+                .ensure_typecheck = ensureTypeCheckedForComptime,
+            },
+        });
+        slot.* = result;
         return slot.*.?;
     }
 
@@ -393,6 +439,8 @@ pub const CompilerDb = struct {
         clearPtrSlot(self.allocator, sema.NameResolutionResult, &self.resolution_slots.items[module_id.index()]);
         self.typecheck_slots.items[module_id.index()].clear(self.allocator);
         clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+        self.consteval_in_progress.items[module_id.index()] = false;
+        clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
         self.verification_slots.items[module_id.index()].clear(self.allocator);
         clearPtrSlot(self.allocator, sema.ModuleVerificationFactsResult, &self.module_verification_slots.items[module_id.index()]);
         clearPtrSlot(self.allocator, hir.LoweringResult, &self.hir_slots.items[module_id.index()]);
@@ -413,7 +461,91 @@ pub const CompilerDb = struct {
             try self.invalidateModuleDependents(graph, module_summary.module_id, visited);
         }
     }
+
+    fn unknownTypeCheckResult(self: *CompilerDb, module_id: source.ModuleId, key: sema.TypeCheckKey) !*const sema.TypeCheckResult {
+        const cache = &self.typecheck_slots.items[module_id.index()];
+        if (cache.lookupSentinel(key)) |cached| {
+            return cached;
+        }
+
+        const module = self.sources.module(module_id);
+        const ast_file = try self.astFile(module.file_id);
+        const result = try self.allocator.create(sema.TypeCheckResult);
+        errdefer self.allocator.destroy(result);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        const item_types = try arena_allocator.alloc(sema.Type, ast_file.items.len);
+        const item_regions = try arena_allocator.alloc(sema.Region, ast_file.items.len);
+        const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
+        const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
+        const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
+        const expr_effects = try arena_allocator.alloc(sema.Effect, ast_file.expressions.len);
+        const body_types = try arena_allocator.alloc(sema.Type, ast_file.bodies.len);
+
+        for (item_types) |*item_type| item_type.* = .{ .unknown = {} };
+        for (item_regions) |*region| region.* = .none;
+        for (item_effects) |*effect| effect.* = .pure;
+        for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
+        for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
+        for (expr_effects) |*effect| effect.* = .pure;
+        for (body_types) |*body_type| body_type.* = .{ .unknown = {} };
+
+        result.* = .{
+            .arena = arena,
+            .key = key,
+            .item_types = item_types,
+            .item_regions = item_regions,
+            .item_effects = item_effects,
+            .pattern_types = pattern_types,
+            .expr_types = expr_types,
+            .expr_effects = expr_effects,
+            .body_types = body_types,
+            .instantiated_structs = &.{},
+            .instantiated_enums = &.{},
+            .instantiated_bitfields = &.{},
+            .trait_interfaces = &.{},
+            .impl_interfaces = &.{},
+            .diagnostics = diagnostics.DiagnosticList.init(self.allocator),
+        };
+
+        try cache.sentinels.put(typeCheckCacheKey(key), result);
+        return result;
+    }
+
+    fn unknownConstEvalResult(self: *CompilerDb, module_id: source.ModuleId) !*const sema.ConstEvalResult {
+        const slot = &self.consteval_sentinel_slots.items[module_id.index()];
+        if (slot.*) |cached| {
+            return cached;
+        }
+
+        const module = self.sources.module(module_id);
+        const ast_file = try self.astFile(module.file_id);
+        const result = try self.allocator.create(sema.ConstEvalResult);
+        errdefer self.allocator.destroy(result);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const values = try arena_allocator.alloc(?sema.ConstValue, ast_file.expressions.len);
+        @memset(values, null);
+
+        result.* = .{
+            .arena = arena,
+            .values = values,
+            .diagnostics = diagnostics.DiagnosticList.init(self.allocator),
+        };
+        slot.* = result;
+        return result;
+    }
 };
+
+fn ensureTypeCheckedForComptime(context: *anyopaque, module_id: source.ModuleId, key: sema.TypeCheckKey) anyerror!*const sema.TypeCheckResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.typeCheck(module_id, key);
+}
 
 fn ensureSlots(allocator: std.mem.Allocator, slots: anytype, len: usize) !void {
     while (slots.items.len < len) {
