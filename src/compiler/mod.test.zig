@@ -1403,6 +1403,33 @@ test "compiler extracts verification facts and lowers HIR handles" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
 }
 
+test "compiler HIR output runs through Z3 verification" {
+    const source_text =
+        \\pub fn keep(next: u256) -> u256
+        \\    requires next >= 0;
+        \\    ensures result >= 0;
+        \\{
+        \\    return next;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    const z3_verification = @import("ora_z3_verification");
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.parallel = false;
+
+    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+}
+
 test "compiler aggregates sema and verification across multiple root items" {
     const source_text =
         \\pub fn first(x: u256) -> u256

@@ -721,10 +721,20 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const z3_verification_mod = b.createModule(.{
+        .root_source_file = b.path("src/z3/verification.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
+    z3_verification_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("ora_root", lib_mod);
+    compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
     const compiler_tests = b.addTest(.{ .root_module = compiler_test_mod });
     linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, compiler_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
     const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
