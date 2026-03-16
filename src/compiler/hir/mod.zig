@@ -620,6 +620,12 @@ const ContractLowerer = struct {
 };
 
 const FunctionLowerer = struct {
+    const DeferredReturnKind = enum {
+        none,
+        ora_yield,
+        scf_yield,
+    };
+
     parent: *Lowerer,
     item_id: ?ast.ItemId,
     function: ?ast.FunctionItem,
@@ -628,6 +634,10 @@ const FunctionLowerer = struct {
     locals: hir_locals.LocalEnv,
     return_type: ?mlir.MlirType,
     current_return_value: ?mlir.MlirValue = null,
+    deferred_return_flag: ?mlir.MlirValue = null,
+    deferred_return_value_slot: ?mlir.MlirValue = null,
+    deferred_return_kind: DeferredReturnKind = .none,
+    deferred_return_carried_locals: []const hir_locals.LocalId = &.{},
     in_try_block: bool = false,
     in_ghost_context: bool = false,
     loop_context: ?*const support.LoopContext = null,
@@ -643,6 +653,9 @@ const FunctionLowerer = struct {
     pub const cloneLocals = FunctionCore.cloneLocals;
     pub const lowerBody = FunctionCore.lowerBody;
     pub const lowerStmt = FunctionCore.lowerStmt;
+    pub const ensureDeferredReturnSlots = FunctionCore.ensureDeferredReturnSlots;
+    pub const appendDeferredReturnTerminator = FunctionCore.appendDeferredReturnTerminator;
+    pub const appendDeferredReturnCheck = FunctionCore.appendDeferredReturnCheck;
     pub const bindPatternValue = FunctionCore.bindPatternValue;
     pub const storePattern = FunctionCore.storePattern;
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;

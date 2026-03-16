@@ -8305,6 +8305,82 @@ test "compiler lowers real HIR if regions with carried locals" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
 }
 
+test "compiler lowers if statements with early return without placeholders" {
+    const source_text =
+        \\pub fn choose(ok: bool, start: u256) -> u256 {
+        \\    if (ok) {
+        \\        return start;
+        \\    } else {
+        \\        assert(start >= 0);
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
+test "compiler lowers if statements with carried locals and early return without placeholders" {
+    const source_text =
+        \\pub fn choose(ok: bool, start: u256) -> u256 {
+        \\    let value = start;
+        \\    if (ok) {
+        \\        return value;
+        \\    } else {
+        \\        value = value + 2;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
+test "compiler lowers try statements with early return without placeholders" {
+    const source_text =
+        \\pub fn recover(ok: bool, start: u256) -> u256 {
+        \\    let value = start;
+        \\    try {
+        \\        if (ok) {
+        \\            return value;
+        \\        }
+        \\        value = value + 1;
+        \\    } catch (err) {
+        \\        value = value + 2;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_stmt"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_placeholder"));
+}
+
 test "compiler lowers real HIR try regions with carried locals" {
     const source_text =
         \\pub fn recover(start: u256) -> u256 {
@@ -8781,6 +8857,32 @@ test "compiler lowers real HIR while loops with nested switch expressions" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
+test "compiler lowers while loops with early return without placeholders" {
+    const source_text =
+        \\pub fn count(limit: u256, stop_at: u256) -> u256 {
+        \\    let value = 0;
+        \\    while (value < limit) {
+        \\        if (value == stop_at) {
+        \\            return value;
+        \\        }
+        \\        value = value + 1;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 

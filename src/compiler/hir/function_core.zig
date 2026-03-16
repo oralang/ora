@@ -43,6 +43,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .block = block,
                 .locals = LocalEnv.init(parent.allocator),
                 .return_type = return_type,
+                .deferred_return_flag = null,
+                .deferred_return_value_slot = null,
+                .deferred_return_kind = .none,
+                .deferred_return_carried_locals = &.{},
                 .in_try_block = false,
                 .in_ghost_context = function.is_ghost,
             };
@@ -75,6 +79,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .block = block,
                 .locals = LocalEnv.init(parent.allocator),
                 .return_type = null,
+                .deferred_return_flag = null,
+                .deferred_return_value_slot = null,
+                .deferred_return_kind = .none,
+                .deferred_return_carried_locals = &.{},
                 .in_try_block = false,
                 .in_ghost_context = false,
             };
@@ -310,6 +318,68 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        pub fn ensureDeferredReturnSlots(self: *FunctionLowerer, range: source.TextRange) anyerror!void {
+            if (self.deferred_return_flag != null) return;
+
+            const loc = self.parent.location(range);
+            const flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, support.memRefType(self.parent.context, boolType(self.parent.context)));
+            if (mlir.oraOperationIsNull(flag_alloc)) return error.MlirOperationCreationFailed;
+            self.deferred_return_flag = appendValueOp(self.block, flag_alloc);
+
+            const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const clear_flag = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, false_value, self.deferred_return_flag.?, null, 0);
+            if (mlir.oraOperationIsNull(clear_flag)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, clear_flag);
+
+            if (self.return_type) |return_type| {
+                const value_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, support.memRefType(self.parent.context, return_type));
+                if (mlir.oraOperationIsNull(value_alloc)) return error.MlirOperationCreationFailed;
+                self.deferred_return_value_slot = appendValueOp(self.block, value_alloc);
+            }
+        }
+
+        pub fn appendDeferredReturnTerminator(self: *FunctionLowerer, range: source.TextRange, locals: *LocalEnv) anyerror!void {
+            switch (self.deferred_return_kind) {
+                .none => return,
+                .ora_yield => try self.appendOraYieldFromLocals(self.block, range, locals, self.deferred_return_carried_locals),
+                .scf_yield => try self.appendScfYieldFromLocals(self.block, range, locals, self.deferred_return_carried_locals),
+            }
+        }
+
+        pub fn appendDeferredReturnCheck(self: *FunctionLowerer, range: source.TextRange) anyerror!void {
+            const flag = self.deferred_return_flag orelse return;
+            const loc = self.parent.location(range);
+            const flag_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, flag, null, 0, boolType(self.parent.context));
+            if (mlir.oraOperationIsNull(flag_load)) return error.MlirOperationCreationFailed;
+            const should_return = appendValueOp(self.block, flag_load);
+
+            const branch = mlir.oraConditionalReturnOpCreate(self.parent.context, loc, should_return);
+            if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, branch);
+
+            const then_block = mlir.oraConditionalReturnOpGetThenBlock(branch);
+            const else_block = mlir.oraConditionalReturnOpGetElseBlock(branch);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            if (self.deferred_return_value_slot) |slot| {
+                const return_type = self.return_type orelse return error.MlirOperationCreationFailed;
+                const value_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, slot, null, 0, return_type);
+                if (mlir.oraOperationIsNull(value_load)) return error.MlirOperationCreationFailed;
+                const value = appendValueOp(then_block, value_load);
+                const ret = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
+                if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                appendOp(then_block, ret);
+            } else {
+                const ret = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
+                if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                appendOp(then_block, ret);
+            }
+
+            try appendEmptyYield(self.parent.context, else_block, loc);
+        }
+
         pub fn lowerBody(self: *FunctionLowerer, body_id: ast.BodyId, locals: *LocalEnv) anyerror!bool {
             const body = self.parent.file.body(body_id).*;
             for (body.statements) |statement_id| {
@@ -332,6 +402,36 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Return => |ret| {
                     const loc = self.parent.location(ret.range);
+                    if (self.deferred_return_flag) |return_flag| {
+                        if (ret.value) |expr_id| {
+                            const raw_value = try self.lowerExpr(expr_id, locals);
+                            const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                            self.current_return_value = value;
+                            defer self.current_return_value = null;
+                            if (self.function) |function| {
+                                for (function.clauses) |clause| {
+                                    if (clause.kind != .ensures) continue;
+                                    const condition = try self.lowerExpr(clause.expr, locals);
+                                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                                    if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                    appendOp(self.block, ensure);
+                                }
+                            }
+                            if (self.deferred_return_value_slot) |slot| {
+                                const store_value = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, slot, null, 0);
+                                if (mlir.oraOperationIsNull(store_value)) return error.MlirOperationCreationFailed;
+                                appendOp(self.block, store_value);
+                            }
+                        }
+
+                        const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                        const set_flag = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, return_flag, null, 0);
+                        if (mlir.oraOperationIsNull(set_flag)) return error.MlirOperationCreationFailed;
+                        appendOp(self.block, set_flag);
+                        try self.appendDeferredReturnTerminator(ret.range, locals);
+                        return true;
+                    }
+
                     if (ret.value) |expr_id| {
                         const raw_value = try self.lowerExpr(expr_id, locals);
                         const value = try @This().wrapValueForReturn(self, raw_value, ret.range);

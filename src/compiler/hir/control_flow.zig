@@ -36,15 +36,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
     return struct {
         pub fn lowerIfStmt(self: *FunctionLowerer, if_stmt: ast.IfStmt, locals: *LocalEnv) anyerror!bool {
-            if (bodyMayReturn(self.parent.file, if_stmt.then_body) or
-                (if_stmt.else_body != null and bodyMayReturn(self.parent.file, if_stmt.else_body.?)))
-            {
-                try self.appendUnsupportedControlPlaceholder("ora.if_placeholder", if_stmt.range);
-                return false;
-            }
+            const has_return =
+                bodyMayReturn(self.parent.file, if_stmt.then_body) or
+                (if_stmt.else_body != null and bodyMayReturn(self.parent.file, if_stmt.else_body.?));
 
             const condition = try self.lowerExpr(if_stmt.condition, locals);
             const loc = self.parent.location(if_stmt.range);
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(if_stmt.range);
+            }
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectIfCarriedLocals(self.parent.allocator, self.parent.file, if_stmt.then_body, locals, &carried_locals, &carried_seen)) {
@@ -71,6 +72,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                 var then_lowerer = self.*;
                 then_lowerer.block = then_block;
+                if (has_return) {
+                    then_lowerer.deferred_return_kind = .ora_yield;
+                    then_lowerer.deferred_return_carried_locals = &.{};
+                }
                 var then_locals = try self.cloneLocals(locals);
                 _ = try then_lowerer.lowerBody(if_stmt.then_body, &then_locals);
                 if (!blockEndsWithTerminator(then_block)) {
@@ -80,6 +85,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (if_stmt.else_body) |else_body| {
                     var else_lowerer = self.*;
                     else_lowerer.block = else_block;
+                    if (has_return) {
+                        else_lowerer.deferred_return_kind = .ora_yield;
+                        else_lowerer.deferred_return_carried_locals = &.{};
+                    }
                     var else_locals = try self.cloneLocals(locals);
                     _ = try else_lowerer.lowerBody(else_body, &else_locals);
                     if (!blockEndsWithTerminator(else_block)) {
@@ -87,6 +96,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                 } else {
                     try appendEmptyYield(self.parent.context, else_block, loc);
+                }
+                if (created_deferred_return) {
+                    try self.appendDeferredReturnCheck(if_stmt.range);
                 }
                 return false;
             }
@@ -115,6 +127,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var then_lowerer = self.*;
             then_lowerer.block = then_block;
+            if (has_return) {
+                then_lowerer.deferred_return_kind = .scf_yield;
+                then_lowerer.deferred_return_carried_locals = carried_locals.items;
+            }
             var then_locals = try self.cloneLocals(locals);
             _ = try then_lowerer.lowerBody(if_stmt.then_body, &then_locals);
             if (!blockEndsWithTerminator(then_block)) {
@@ -125,6 +141,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (if_stmt.else_body) |else_body| {
                 var else_lowerer = self.*;
                 else_lowerer.block = else_block;
+                if (has_return) {
+                    else_lowerer.deferred_return_kind = .scf_yield;
+                    else_lowerer.deferred_return_carried_locals = carried_locals.items;
+                }
                 _ = try else_lowerer.lowerBody(else_body, &else_locals);
             }
             if (!blockEndsWithTerminator(else_block)) {
@@ -132,6 +152,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
+            if (created_deferred_return) {
+                try self.appendDeferredReturnCheck(if_stmt.range);
+            }
             return false;
         }
 
@@ -140,11 +163,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 bodyMayReturn(self.parent.file, catch_clause.body)
             else
                 false;
-            if (bodyMayReturn(self.parent.file, try_stmt.try_body) or catch_has_return) {
-                try self.appendUnsupportedControlPlaceholder("ora.try_placeholder", try_stmt.range);
-                return false;
-            }
+            const has_return = bodyMayReturn(self.parent.file, try_stmt.try_body) or catch_has_return;
             const loc = self.parent.location(try_stmt.range);
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(try_stmt.range);
+            }
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectTryCarriedLocals(self.parent.allocator, self.parent.file, try_stmt, locals, &carried_locals, &carried_seen)) {
@@ -178,6 +202,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var try_lowerer = self.*;
             try_lowerer.block = try_block;
             try_lowerer.in_try_block = true;
+            if (has_return) {
+                try_lowerer.deferred_return_kind = .ora_yield;
+                try_lowerer.deferred_return_carried_locals = carried_locals.items;
+            }
             var try_locals = try self.cloneLocals(locals);
             _ = try try_lowerer.lowerBody(try_stmt.try_body, &try_locals);
             if (!blockEndsWithTerminator(try_block)) {
@@ -189,6 +217,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var catch_lowerer = self.*;
                 catch_lowerer.block = catch_block;
                 catch_lowerer.in_try_block = true;
+                if (has_return) {
+                    catch_lowerer.deferred_return_kind = .ora_yield;
+                    catch_lowerer.deferred_return_carried_locals = carried_locals.items;
+                }
                 if (catch_clause.error_pattern) |pattern_id| {
                     const error_arg = mlir.mlirBlockAddArgument(catch_block, defaultIntegerType(self.parent.context), self.parent.location(catch_clause.range));
                     try catch_lowerer.bindPatternValue(pattern_id, error_arg, &catch_locals);
@@ -204,18 +236,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
             }
+            if (created_deferred_return) {
+                try self.appendDeferredReturnCheck(try_stmt.range);
+            }
             return false;
         }
 
         pub fn lowerWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
-            if (bodyMayReturn(self.parent.file, while_stmt.body) or
-                bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body))
+            const has_return = bodyMayReturn(self.parent.file, while_stmt.body);
+            if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body))
             {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
                 return false;
             }
 
             const loc = self.parent.location(while_stmt.range);
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(while_stmt.range);
+            }
             const break_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
             if (mlir.oraOperationIsNull(break_flag_alloc)) return error.MlirOperationCreationFailed;
             const break_flag = appendValueOp(self.block, break_flag_alloc);
@@ -298,6 +337,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const loop_enabled = before_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
             if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
             condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, loop_enabled), condition));
+            if (has_return) {
+                const return_flag = self.deferred_return_flag.?;
+                const return_flag_value = appendValueOp(before_block, blk: {
+                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, return_flag, null, 0, boolType(self.parent.context));
+                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                    break :blk load;
+                });
+                const return_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                const return_enabled = before_lowerer.createCompareOp(loc, "eq", return_flag_value, return_flag_clear);
+                if (mlir.oraOperationIsNull(return_enabled)) return error.MlirOperationCreationFailed;
+                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, return_enabled), condition));
+            }
 
             var condition_values: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
@@ -317,6 +368,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var body_lowerer = self.*;
             body_lowerer.block = after_block;
+            if (has_return) {
+                body_lowerer.deferred_return_kind = .scf_yield;
+                body_lowerer.deferred_return_carried_locals = carried_locals.items;
+            }
             var loop_context = LoopContext{
                 .parent = self.loop_context,
                 .break_flag = break_flag,
@@ -333,6 +388,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
+            if (created_deferred_return) {
+                try self.appendDeferredReturnCheck(while_stmt.range);
+            }
             return false;
         }
 
