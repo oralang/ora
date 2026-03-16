@@ -3461,6 +3461,10 @@ test "m3 parity corpus lowers through legacy and v2" {
         "ora-example/dce_test.ora",
         "ora-example/statements/contract_declaration.ora",
         "ora-example/apps/counter.ora",
+        "ora-example/apps/erc20.ora",
+        "ora-example/apps/erc20_verified.ora",
+        "ora-example/apps/defi_lending_pool.ora",
+        "ora-example/apps/erc20_bitfield_comptime_generics.ora",
     };
 
     for (corpus) |file_path| {
