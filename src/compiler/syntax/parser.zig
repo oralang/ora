@@ -1716,9 +1716,11 @@ const Parser = struct {
     }
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        _ = terminators;
         return switch (self.current().kind) {
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
+            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.looksLikeGenericTypeValueExpr(terminators))
+                self.parsePathOrGenericTypeNode()
+            else
+                self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
             .IntegerLiteral, .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
             .LeftParen => self.parseParenLikeExprNode(),
             .LeftBracket => self.parseArrayLiteralExprNode(),
@@ -2505,6 +2507,58 @@ const Parser = struct {
                             .Comma, .RightParen => true,
                             else => false,
                         };
+                    }
+                },
+                .Eof => return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn looksLikeGenericTypeValueExpr(self: *const Parser, terminators: []const green.TokenKind) bool {
+        if (!self.tokenCouldStartTypeValuedCallArg()) return false;
+        if (self.peekKind(1) != .Less) return false;
+
+        var depth: usize = 0;
+        var cursor = self.index + 1;
+        while (cursor < self.tokens.items.len) : (cursor += 1) {
+            switch (self.tokens.items[cursor].kind) {
+                .Less => depth += 1,
+                .Greater => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                    if (depth == 0) {
+                        const next_kind = self.peekTokenKindAt(cursor + 1);
+                        if (next_kind == .Semicolon or
+                            next_kind == .Comma or
+                            next_kind == .RightParen or
+                            next_kind == .RightBrace)
+                        {
+                            return true;
+                        }
+                        for (terminators) |terminator| {
+                            if (next_kind == terminator) return true;
+                        }
+                        return false;
+                    }
+                },
+                .GreaterGreater => {
+                    if (depth < 2) return false;
+                    depth -= 2;
+                    if (depth == 0) {
+                        const next_kind = self.peekTokenKindAt(cursor + 1);
+                        if (next_kind == .Semicolon or
+                            next_kind == .Comma or
+                            next_kind == .RightParen or
+                            next_kind == .RightBrace)
+                        {
+                            return true;
+                        }
+                        for (terminators) |terminator| {
+                            if (next_kind == terminator) return true;
+                        }
+                        return false;
                     }
                 },
                 .Eof => return false,

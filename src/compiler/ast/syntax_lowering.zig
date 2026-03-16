@@ -987,7 +987,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerExprStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
-            const expr_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing expression");
+            const expr_node = firstDirectExprOrTypeValueChild(node) orelse return Lowering.malformedStmt(self, node, "missing expression");
             return Support.pushStmt(self, .{ .Expr = .{
                 .range = node.range(),
                 .expr = try Lowering.lowerExpressionNode(self, expr_node),
@@ -1762,6 +1762,19 @@ fn nthDirectNode(node: SyntaxNode, ordinal: usize) ?SyntaxNode {
 
 fn firstDirectExprChild(node: SyntaxNode) ?SyntaxNode {
     return nthDirectExprChild(node, 0);
+}
+
+fn firstDirectExprOrTypeValueChild(node: SyntaxNode) ?SyntaxNode {
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .token => {},
+            .node => |child_node| {
+                if (isExprKind(child_node.kind()) or isTypeKind(child_node.kind())) return child_node;
+            },
+        }
+    }
+    return null;
 }
 
 fn nthDirectExprChild(node: SyntaxNode, ordinal: usize) ?SyntaxNode {
