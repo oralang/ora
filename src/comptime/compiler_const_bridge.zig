@@ -7,6 +7,7 @@ const model = @import("../compiler/sema/model.zig");
 const BigInt = std.math.big.int.Managed;
 pub const ConstValue = model.ConstValue;
 pub const CtEnv = comptime_eval.CtEnv;
+pub const CtHeap = comptime_eval.CtHeap;
 pub const CtValue = comptime_eval.CtValue;
 const Evaluator = comptime_eval.Evaluator;
 const EvalResult = comptime_eval.EvalResult;
@@ -315,10 +316,11 @@ fn zeroSpan() SourceSpan {
     return .{ .line = 0, .column = 0, .length = 0 };
 }
 
-pub fn ctValueToConstValue(allocator: std.mem.Allocator, value: CtValue) !?ConstValue {
+pub fn ctValueToConstValue(allocator: std.mem.Allocator, heap: *const CtHeap, value: CtValue) !?ConstValue {
     return switch (value) {
         .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
         .boolean => |boolean| .{ .boolean = boolean },
+        .string_ref => |heap_id| .{ .string = try allocator.dupe(u8, heap.getString(heap_id)) },
         else => null,
     };
 }

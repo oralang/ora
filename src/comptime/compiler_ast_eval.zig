@@ -249,7 +249,7 @@ const ConstEvaluator = struct {
 
         if (self.file.expression(expr_id).* != .Call) {
             if (try self.evalExprCtValue(expr_id)) |ct_value| {
-                const const_value = try ctValueToConstValue(self.allocator, ct_value);
+                const const_value = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 if (const_value != null) {
                     if (use_cache) self.values[expr_id.index()] = const_value;
                     return const_value;
@@ -328,7 +328,7 @@ const ConstEvaluator = struct {
             },
             .Name => |name| blk: {
                 const value = self.env.lookupValue(name.name) orelse break :blk null;
-                break :blk try ctValueToConstValue(self.allocator, value);
+                break :blk try ctValueToConstValue(self.allocator, &self.env.heap, value);
             },
             .Result => null,
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
@@ -970,7 +970,7 @@ const ConstEvaluator = struct {
                 const target = self.valueConstructionTarget(type_arg);
                 if (target != .none) {
                     if (try self.evalExprCtValueAs(builtin.args[0], target)) |ct_value| {
-                        return try ctValueToConstValue(self.allocator, ct_value);
+                        return try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                     }
                 }
             }
@@ -1499,7 +1499,7 @@ const ConstEvaluator = struct {
                         switch (self.file.expression(expr_id).*) {
                             .Call => |call| if (try self.evalCallCtValue(call, false)) |ct_value| {
                                 try self.bindPatternCtValue(decl.pattern, ct_value);
-                                self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, ct_value);
+                                self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                                 last_value = null;
                                 continue;
                             },
@@ -1507,7 +1507,7 @@ const ConstEvaluator = struct {
                         }
                         if (try self.evalExprCtValue(expr_id)) |ct_value| {
                             try self.bindPatternCtValue(decl.pattern, ct_value);
-                            const persisted = (try ctValueToConstValue(self.allocator, ct_value)) orelse try self.evalExprUncached(expr_id);
+                            const persisted = (try ctValueToConstValue(self.allocator, &self.env.heap, ct_value)) orelse try self.evalExprUncached(expr_id);
                             self.values[expr_id.index()] = persisted;
                         } else {
                             const persisted = try self.evalExprUncached(expr_id);
@@ -1590,7 +1590,7 @@ const ConstEvaluator = struct {
                     if (decl.value) |expr_id| {
                         if (try self.evalExprAsCtValue(expr_id, use_cache)) |ct_value| {
                             try self.bindPatternCtValue(decl.pattern, ct_value);
-                            self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, ct_value);
+                            self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                         } else {
                             const persisted = try self.evalExprUncached(expr_id);
                             try self.bindPattern(decl.pattern, persisted);
@@ -1985,7 +1985,7 @@ const ConstEvaluator = struct {
                         const next_value = switch (assign.op) {
                             .assign => rhs_ct,
                             else => blk_op: {
-                                const current = (try ctValueToConstValue(self.allocator, elems[idx])) orelse break :blk_op null;
+                                const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const computed = switch (assign.op) {
                                     .add_assign => try evalBinary(self.allocator, .add, current, rhs),
                                     .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
@@ -2015,7 +2015,7 @@ const ConstEvaluator = struct {
                         const next_value = switch (assign.op) {
                             .assign => rhs_ct,
                             else => blk_op: {
-                                const current = (try ctValueToConstValue(self.allocator, elems[idx])) orelse break :blk_op null;
+                                const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const computed = switch (assign.op) {
                                     .add_assign => try evalBinary(self.allocator, .add, current, rhs),
                                     .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
@@ -2042,7 +2042,7 @@ const ConstEvaluator = struct {
                         const current: ?ConstValue = blk_current: {
                             for (self.env.heap.getMap(heap_id).entries) |entry| {
                                 if (self.ctValuesEqual(entry.key, index_value)) {
-                                    break :blk_current try ctValueToConstValue(self.allocator, entry.value);
+                                    break :blk_current try ctValueToConstValue(self.allocator, &self.env.heap, entry.value);
                                 }
                             }
                             break :blk_current null;
@@ -2076,7 +2076,7 @@ const ConstEvaluator = struct {
                     else => return null,
                 } orelse return null;
                 self.env.update(base_slot, updated);
-                return try ctValueToConstValue(self.allocator, switch (updated) {
+                return try ctValueToConstValue(self.allocator, &self.env.heap, switch (updated) {
                     .array_ref => |heap_id| self.env.heap.getArray(heap_id).elems[maybe_idx orelse return null],
                     .slice_ref => |heap_id| self.env.heap.getSlice(heap_id).elems[maybe_idx orelse return null],
                     .map_ref => |heap_id| blk: {
@@ -2105,7 +2105,7 @@ const ConstEvaluator = struct {
                         const next_value = switch (assign.op) {
                             .assign => rhs_ct,
                             else => blk_op: {
-                                const current = (try ctValueToConstValue(self.allocator, struct_data.fields[field_index].value)) orelse break :blk_op null;
+                                const current = (try ctValueToConstValue(self.allocator, &self.env.heap, struct_data.fields[field_index].value)) orelse break :blk_op null;
                                 const computed = switch (assign.op) {
                                     .add_assign => try evalBinary(self.allocator, .add, current, rhs),
                                     .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
@@ -2133,7 +2133,7 @@ const ConstEvaluator = struct {
                 } orelse return null;
 
                 self.env.update(base_slot, updated);
-                return try ctValueToConstValue(self.allocator, switch (updated) {
+                return try ctValueToConstValue(self.allocator, &self.env.heap, switch (updated) {
                     .struct_ref => |heap_id| blk: {
                         const struct_data = self.env.heap.getStruct(heap_id);
                         const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
@@ -2148,7 +2148,7 @@ const ConstEvaluator = struct {
 
     fn readBoundName(self: *ConstEvaluator, name: []const u8) anyerror!?ConstValue {
         const value = self.env.lookupValue(name) orelse return null;
-        return try ctValueToConstValue(self.allocator, value);
+        return try ctValueToConstValue(self.allocator, &self.env.heap, value);
     }
 
     fn constConditionTruthy(self: *ConstEvaluator, value: ConstValue) ?bool {

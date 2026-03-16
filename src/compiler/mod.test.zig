@@ -6844,6 +6844,33 @@ test "compiler const eval executes multi statement comptime aggregate calls" {
     try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval bridges comptime string values into sema results" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let name = "ERC20";
+        \\        name.len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const name_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualStrings("ERC20", consteval.values[name_decl.value.?.index()].?.string);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval can populate callee type checks on demand" {
     const source_text =
         \\comptime fn helper() -> u256 {
