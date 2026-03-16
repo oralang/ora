@@ -419,8 +419,8 @@ fn stmtContainsLoopControlInContext(file: *const ast.AstFile, statement_id: ast.
         .Break, .Continue => nested,
         .If => |if_stmt| bodyContainsLoopControlInContext(file, if_stmt.then_body, nested) or
             (if_stmt.else_body != null and bodyContainsLoopControlInContext(file, if_stmt.else_body.?, nested)),
-        .While => |while_stmt| bodyContainsLoopControlInContext(file, while_stmt.body, true),
-        .For => |for_stmt| bodyContainsLoopControlInContext(file, for_stmt.body, true),
+        .While => |while_stmt| bodyContainsLoopControlInContext(file, while_stmt.body, false),
+        .For => |for_stmt| bodyContainsLoopControlInContext(file, for_stmt.body, false),
         .Switch => |switch_stmt| blk: {
             for (switch_stmt.arms) |arm| {
                 if (bodyContainsLoopControlInContext(file, arm.body, nested)) break :blk true;

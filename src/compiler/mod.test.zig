@@ -8592,6 +8592,35 @@ test "compiler lowers real HIR while loops with branch-local break and continue"
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
+test "compiler lowers real HIR while loops with nested inner-loop control" {
+    const source_text =
+        \\pub fn count(limit: u256) -> u256 {
+        \\    let value = 0;
+        \\    while (value < limit) {
+        \\        let step = 0;
+        \\        while (step < 1) {
+        \\            step = step + 1;
+        \\            continue;
+        \\        }
+        \\        while (value < limit) {
+        \\            break;
+        \\        }
+        \\        value = value + 1;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
 test "compiler lowers real HIR while loops with nested merged if locals" {
     const source_text =
         \\pub fn count(limit: u256, take_big_step: bool) -> u256 {
