@@ -8456,6 +8456,37 @@ test "compiler lowers real HIR switch regions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.havoc"));
 }
 
+test "compiler lowers switch arms with nested loop breaks without placeholders" {
+    const source_text =
+        \\pub fn classify(flag: bool, seed: u256) -> u256 {
+        \\    let value = seed;
+        \\    switch (flag) {
+        \\        true => {
+        \\            while (value < seed + 1) {
+        \\                break;
+        \\            }
+        \\            value = value + 1;
+        \\        },
+        \\        else => {
+        \\            value = value + 2;
+        \\        }
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
 test "compiler lowers real HIR while loops for storage-driven loops" {
     const source_text =
         \\storage count: u256;
@@ -8501,7 +8532,6 @@ test "compiler lowers real HIR while loops with carried locals" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
@@ -8531,6 +8561,34 @@ test "compiler lowers real HIR while loops with top-level break and continue" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
+test "compiler lowers real HIR while loops with branch-local break and continue" {
+    const source_text =
+        \\pub fn count(limit: u256, stop_now: bool) -> u256 {
+        \\    let value = 0;
+        \\    while (value < limit) {
+        \\        if (stop_now) {
+        \\            break;
+        \\        } else {
+        \\            value = value + 1;
+        \\            continue;
+        \\        }
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 

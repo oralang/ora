@@ -351,25 +351,37 @@ fn stmtMayReturn(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
 }
 
 fn stmtContainsSwitchBreak(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
+    return stmtContainsSwitchBreakInContext(file, statement_id, false);
+}
+
+fn stmtContainsSwitchBreakInContext(file: *const ast.AstFile, statement_id: ast.StmtId, nested_break_scope: bool) bool {
     return switch (file.statement(statement_id).*) {
-        .Break => true,
-        .If => |if_stmt| bodyContainsSwitchBreak(file, if_stmt.then_body) or
-            (if_stmt.else_body != null and bodyContainsSwitchBreak(file, if_stmt.else_body.?)),
-        .While => |while_stmt| bodyContainsSwitchBreak(file, while_stmt.body),
-        .For => |for_stmt| bodyContainsSwitchBreak(file, for_stmt.body),
+        .Break => !nested_break_scope,
+        .If => |if_stmt| stmtBodyContainsSwitchBreakInContext(file, if_stmt.then_body, nested_break_scope) or
+            (if_stmt.else_body != null and stmtBodyContainsSwitchBreakInContext(file, if_stmt.else_body.?, nested_break_scope)),
+        .While => |while_stmt| stmtBodyContainsSwitchBreakInContext(file, while_stmt.body, true),
+        .For => |for_stmt| stmtBodyContainsSwitchBreakInContext(file, for_stmt.body, true),
         .Switch => |switch_stmt| blk: {
             for (switch_stmt.arms) |arm| {
-                if (bodyContainsSwitchBreak(file, arm.body)) break :blk true;
+                if (stmtBodyContainsSwitchBreakInContext(file, arm.body, true)) break :blk true;
             }
-            if (switch_stmt.else_body) |else_body| break :blk bodyContainsSwitchBreak(file, else_body);
+            if (switch_stmt.else_body) |else_body| break :blk stmtBodyContainsSwitchBreakInContext(file, else_body, true);
             break :blk false;
         },
-        .Try => |try_stmt| bodyContainsSwitchBreak(file, try_stmt.try_body) or
-            (try_stmt.catch_clause != null and bodyContainsSwitchBreak(file, try_stmt.catch_clause.?.body)),
-        .Block => |block_stmt| bodyContainsSwitchBreak(file, block_stmt.body),
-        .LabeledBlock => |block_stmt| bodyContainsSwitchBreak(file, block_stmt.body),
+        .Try => |try_stmt| stmtBodyContainsSwitchBreakInContext(file, try_stmt.try_body, nested_break_scope) or
+            (try_stmt.catch_clause != null and stmtBodyContainsSwitchBreakInContext(file, try_stmt.catch_clause.?.body, nested_break_scope)),
+        .Block => |block_stmt| stmtBodyContainsSwitchBreakInContext(file, block_stmt.body, nested_break_scope),
+        .LabeledBlock => |block_stmt| stmtBodyContainsSwitchBreakInContext(file, block_stmt.body, nested_break_scope),
         else => false,
     };
+}
+
+fn stmtBodyContainsSwitchBreakInContext(file: *const ast.AstFile, body_id: ast.BodyId, nested_break_scope: bool) bool {
+    const body = file.body(body_id).*;
+    for (body.statements) |statement_id| {
+        if (stmtContainsSwitchBreakInContext(file, statement_id, nested_break_scope)) return true;
+    }
+    return false;
 }
 
 fn stmtContainsLoopControl(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
@@ -405,21 +417,21 @@ fn bodyContainsLoopControlInContext(file: *const ast.AstFile, body_id: ast.BodyI
 fn stmtContainsLoopControlInContext(file: *const ast.AstFile, statement_id: ast.StmtId, nested: bool) bool {
     return switch (file.statement(statement_id).*) {
         .Break, .Continue => nested,
-        .If => |if_stmt| bodyContainsLoopControlInContext(file, if_stmt.then_body, true) or
-            (if_stmt.else_body != null and bodyContainsLoopControlInContext(file, if_stmt.else_body.?, true)),
+        .If => |if_stmt| bodyContainsLoopControlInContext(file, if_stmt.then_body, nested) or
+            (if_stmt.else_body != null and bodyContainsLoopControlInContext(file, if_stmt.else_body.?, nested)),
         .While => |while_stmt| bodyContainsLoopControlInContext(file, while_stmt.body, true),
         .For => |for_stmt| bodyContainsLoopControlInContext(file, for_stmt.body, true),
         .Switch => |switch_stmt| blk: {
             for (switch_stmt.arms) |arm| {
-                if (bodyContainsLoopControlInContext(file, arm.body, true)) break :blk true;
+                if (bodyContainsLoopControlInContext(file, arm.body, nested)) break :blk true;
             }
-            if (switch_stmt.else_body) |else_body| break :blk bodyContainsLoopControlInContext(file, else_body, true);
+            if (switch_stmt.else_body) |else_body| break :blk bodyContainsLoopControlInContext(file, else_body, nested);
             break :blk false;
         },
-        .Try => |try_stmt| bodyContainsLoopControlInContext(file, try_stmt.try_body, true) or
-            (try_stmt.catch_clause != null and bodyContainsLoopControlInContext(file, try_stmt.catch_clause.?.body, true)),
-        .Block => |block_stmt| bodyContainsLoopControlInContext(file, block_stmt.body, true),
-        .LabeledBlock => |block_stmt| bodyContainsLoopControlInContext(file, block_stmt.body, true),
+        .Try => |try_stmt| bodyContainsLoopControlInContext(file, try_stmt.try_body, nested) or
+            (try_stmt.catch_clause != null and bodyContainsLoopControlInContext(file, try_stmt.catch_clause.?.body, nested)),
+        .Block => |block_stmt| bodyContainsLoopControlInContext(file, block_stmt.body, nested),
+        .LabeledBlock => |block_stmt| bodyContainsLoopControlInContext(file, block_stmt.body, nested),
         else => false,
     };
 }
