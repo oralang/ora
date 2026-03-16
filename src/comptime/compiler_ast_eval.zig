@@ -901,6 +901,72 @@ const ConstEvaluator = struct {
         return try self.evalComptimeBody(function.body);
     }
 
+    fn evalCallCtValue(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
+        const callable = self.lookupCallableFunction(call.callee) orelse {
+            _ = try self.evalExprImpl(call.callee, use_cache);
+            for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
+            return null;
+        };
+        const function = callable.function;
+        try self.ensureTypeChecked(.{ .item = callable.item_id });
+
+        if (self.functionStage(function) == .runtime_only) {
+            self.last_error = error_mod.CtError.stageViolation(
+                self.sourceSpan(call.range),
+                function.name,
+            );
+            return null;
+        }
+
+        if (function.parameters.len != call.args.len) return null;
+        if (self.call_depth >= self.max_call_depth) {
+            self.last_error = error_mod.CtError.init(
+                .recursion_limit,
+                self.sourceSpan(call.range),
+                "comptime recursion depth exceeded",
+            );
+            return null;
+        }
+
+        var arg_values = try self.allocator.alloc(CtValue, call.args.len);
+        for (call.args, function.parameters, 0..) |arg, parameter, idx| {
+            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg, use_cache)) orelse return null;
+        }
+
+        self.env.pushScope(false) catch return null;
+        defer self.env.popScope();
+
+        for (function.parameters, 0..) |parameter, idx| {
+            try self.bindPatternCtValue(parameter.pattern, arg_values[idx]);
+        }
+
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+
+        for (function.clauses) |clause| {
+            if (clause.kind != .requires) continue;
+            const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
+            const truthy = self.constConditionTruthy(condition) orelse return null;
+            if (!truthy) return null;
+        }
+
+        const body = self.file.body(function.body).*;
+        if (body.statements.len == 1) {
+            switch (self.file.statement(body.statements[0]).*) {
+                .Return => |ret| if (ret.value) |ret_value| {
+                    _ = try self.evalExprImpl(ret_value, use_cache);
+                    return (try self.evalExprCtValue(ret_value)) orelse blk: {
+                        const const_value = (try self.evalExprImpl(ret_value, use_cache)) orelse return null;
+                        break :blk (try constToCtValue(const_value)) orelse return null;
+                    };
+                },
+                else => {},
+            }
+        }
+
+        return null;
+    }
+
     fn evalCallArgumentCtValue(self: *ConstEvaluator, parameter: ast.Parameter, arg: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
         if (parameter.is_comptime and self.parameterExpectsTypeValue(parameter)) {
             return self.typeExprCtValue(arg);
@@ -1213,6 +1279,15 @@ const ConstEvaluator = struct {
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {
+                        switch (self.file.expression(expr_id).*) {
+                            .Call => |call| if (try self.evalCallCtValue(call, false)) |ct_value| {
+                                try self.bindPatternCtValue(decl.pattern, ct_value);
+                                self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, ct_value);
+                                last_value = null;
+                                continue;
+                            },
+                            else => {},
+                        }
                         if (try self.evalExprCtValue(expr_id)) |ct_value| {
                             try self.bindPatternCtValue(decl.pattern, ct_value);
                             const persisted = (try ctValueToConstValue(self.allocator, ct_value)) orelse try self.evalExprUncached(expr_id);

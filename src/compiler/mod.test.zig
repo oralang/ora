@@ -6769,6 +6769,45 @@ test "compiler const eval generic calls accept generic instantiated arguments" {
     try testing.expectEqual(@as(i128, 2), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval generic calls can return generic struct values" {
+    const source_text =
+        \\struct Box(comptime T: type) {
+        \\    value: T,
+        \\}
+        \\
+        \\comptime fn make_box(comptime T: type, value: T) -> Box<T> {
+        \\    return Box<T> { value: value };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let box = make_box(u256, 42);
+        \\        box.value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const box_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+    const field_stmt = ast_file.statement(comptime_body.statements[1]).Expr;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, typecheck.exprType(box_decl.value.?).kind());
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_stmt.expr).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler db breaks same-key const eval recursion with unknown sentinel" {
     const source_text =
         \\comptime fn loop() -> u256 {
