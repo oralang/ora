@@ -6633,6 +6633,42 @@ test "compiler const eval instantiates generic type values in comptime blocks" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
 }
 
+test "compiler const eval resolves generic type aliases in comptime blocks" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\type U256Pair = Pair<u256>;
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        U256Pair;
+        \\        9;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const type_stmt = ast_file.statement(comptime_body.statements[0]).Expr;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[type_stmt.expr.index()] == null);
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+}
+
 test "compiler db breaks same-key const eval recursion with unknown sentinel" {
     const source_text =
         \\comptime fn loop() -> u256 {
