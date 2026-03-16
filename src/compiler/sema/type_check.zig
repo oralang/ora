@@ -1011,7 +1011,10 @@ const TypeChecker = struct {
             },
             .StructLiteral => |struct_literal| {
                 for (struct_literal.fields) |field| try self.visitExpr(field.value);
-                self.expr_types[expr_id.index()] = self.structLiteralType(struct_literal.type_name);
+                self.expr_types[expr_id.index()] = if (struct_literal.type_expr) |type_expr|
+                    try self.resolveTypeExpr(type_expr)
+                else
+                    self.structLiteralType(struct_literal.type_name);
             },
             .Switch => |switch_expr| {
                 try self.visitExpr(switch_expr.condition);

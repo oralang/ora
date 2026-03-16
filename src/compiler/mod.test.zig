@@ -6669,6 +6669,43 @@ test "compiler const eval resolves generic type aliases in comptime blocks" {
     try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
 }
 
+test "compiler const eval instantiates generic struct literals in comptime blocks" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let pair = Pair<u256> { left: 1, right: 2 };
+        \\        pair.left;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const pair_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+    const field_stmt = ast_file.statement(comptime_body.statements[1]).Expr;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expectEqualStrings("Pair__u256", typecheck.exprType(pair_decl.value.?).name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_stmt.expr).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 1), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+}
+
 test "compiler db breaks same-key const eval recursion with unknown sentinel" {
     const source_text =
         \\comptime fn loop() -> u256 {

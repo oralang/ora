@@ -217,6 +217,7 @@ pub const StructFieldInit = struct {
 pub const StructLiteralExpr = struct {
     range: source.TextRange,
     type_name: []const u8,
+    type_expr: ?TypeExprId,
     fields: []StructFieldInit,
 };
 

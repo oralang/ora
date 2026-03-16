@@ -1,6 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
+const sema = @import("../sema/mod.zig");
 const const_bridge = @import("../../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
@@ -1275,7 +1276,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             struct_literal: ast.StructLiteralExpr,
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
+            const expr_type = self.parent.typecheck.exprType(expr_id);
+            const concrete_name = expr_type.name() orelse struct_literal.type_name;
             const struct_item_id = self.parent.item_index.lookup(struct_literal.type_name) orelse {
+                if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
+                    return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
+                }
                 return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)));
             };
             const item = self.parent.file.item(struct_item_id).*;
@@ -1294,7 +1300,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             const struct_item = switch (item) {
                 .Struct => |struct_item| struct_item,
-                else => return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id))),
+                else => {
+                    if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
+                        return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
+                    }
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)));
+                },
             };
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -1309,7 +1320,37 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const op = mlir.oraStructInstantiateOpCreate(
                 self.parent.context,
                 self.parent.location(struct_literal.range),
-                strRef(struct_literal.type_name),
+                strRef(concrete_name),
+                if (operands.items.len == 0) null else operands.items.ptr,
+                operands.items.len,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) {
+                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
+            }
+            return appendValueOp(self.block, op);
+        }
+
+        fn lowerInstantiatedStructLiteral(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            struct_literal: ast.StructLiteralExpr,
+            fields: []const sema.InstantiatedStructField,
+            concrete_name: []const u8,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const result_type = self.parent.lowerExprType(expr_id);
+            var operands: std.ArrayList(mlir.MlirValue) = .{};
+            for (fields) |decl_field| {
+                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
+                };
+                try operands.append(self.parent.allocator, try self.lowerExpr(init.value, locals));
+            }
+            const op = mlir.oraStructInstantiateOpCreate(
+                self.parent.context,
+                self.parent.location(struct_literal.range),
+                strRef(concrete_name),
                 if (operands.items.len == 0) null else operands.items.ptr,
                 operands.items.len,
                 result_type,

@@ -1202,6 +1202,7 @@ pub fn mixin(Builder: type) type {
             const base_node = nthDirectNode(node, 0) orelse return Lowering.malformedExpr(self, node, "missing struct literal base");
             const base_expr = try Lowering.lowerExpressionNode(self, base_node);
             const type_name = Lowering.structLiteralTypeName(self, base_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type");
+            const type_expr = Lowering.structLiteralTypeExpr(self, base_expr);
 
             var fields: std.ArrayList(nodes.StructFieldInit) = .{};
             var it = node.children();
@@ -1218,6 +1219,7 @@ pub fn mixin(Builder: type) type {
             return Support.pushExpr(self, .{ .StructLiteral = .{
                 .range = node.range(),
                 .type_name = type_name,
+                .type_expr = type_expr,
                 .fields = try fields.toOwnedSlice(self.allocator),
             } });
         }
@@ -1225,7 +1227,24 @@ pub fn mixin(Builder: type) type {
         fn structLiteralTypeName(self: *Builder, expr_id: ExprId) ?[]const u8 {
             return switch (Support.exprRef(self, expr_id).*) {
                 .Name => |name| name.name,
+                .TypeValue => |type_value| Lowering.typeValueBaseName(self, type_value.type_expr),
                 .Group => |group| Lowering.structLiteralTypeName(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn structLiteralTypeExpr(self: *Builder, expr_id: ExprId) ?TypeExprId {
+            return switch (Support.exprRef(self, expr_id).*) {
+                .TypeValue => |type_value| type_value.type_expr,
+                .Group => |group| Lowering.structLiteralTypeExpr(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn typeValueBaseName(self: *Builder, type_expr_id: TypeExprId) ?[]const u8 {
+            return switch (Support.typeExprRef(self, type_expr_id).*) {
+                .Path => |path| path.name,
+                .Generic => |generic| generic.name,
                 else => null,
             };
         }

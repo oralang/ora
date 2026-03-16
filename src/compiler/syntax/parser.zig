@@ -2495,7 +2495,8 @@ const Parser = struct {
         if (next_kind == .Semicolon or
             next_kind == .Comma or
             next_kind == .RightParen or
-            next_kind == .RightBrace)
+            next_kind == .RightBrace or
+            next_kind == .LeftBrace)
         {
             return true;
         }

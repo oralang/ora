@@ -262,7 +262,10 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .StructLiteral => |struct_literal| blk: {
-                try self.ensureNamedItemTypeChecked(struct_literal.type_name);
+                if (struct_literal.type_expr) |type_expr|
+                    try self.ensureTypeExprTypeChecked(type_expr)
+                else
+                    try self.ensureNamedItemTypeChecked(struct_literal.type_name);
                 for (struct_literal.fields) |field| _ = try self.evalExprImpl(field.value, use_cache);
                 break :blk null;
             },
@@ -400,7 +403,7 @@ const ConstEvaluator = struct {
                         .value = (try self.evalExprCtValue(field.value)) orelse break :blk null,
                     };
                 }
-                const type_id = self.structTypeId(struct_literal.type_name) orelse break :blk null;
+                const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
                 const heap_id = try self.env.heap.allocStruct(type_id, fields);
                 break :blk CtValue{ .struct_ref = heap_id };
             },
@@ -576,6 +579,21 @@ const ConstEvaluator = struct {
         return @intCast(item_id.index());
     }
 
+    fn structTypeIdForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !?u32 {
+        if (try self.currentTypeCheckResult()) |typecheck| {
+            const expr_type = typecheck.exprType(expr_id);
+            if (expr_type == .struct_) {
+                if (self.lookupNamedItem(expr_type.struct_.name)) |item_id| {
+                    if (self.file.item(item_id).* == .Struct) return @intCast(item_id.index());
+                }
+                if (typecheck.instantiatedStructByName(expr_type.struct_.name)) |instantiated| {
+                    return @intCast(instantiated.template_item_id.index());
+                }
+            }
+        }
+        return self.structTypeId(struct_literal.type_name);
+    }
+
     fn lookupNamedEnumVariant(self: *ConstEvaluator, enum_name: []const u8, variant_name: []const u8) ?CtValue {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
@@ -700,6 +718,13 @@ const ConstEvaluator = struct {
         const module_id = self.module_id orelse return;
         const type_query = self.type_query orelse return;
         _ = try type_query.ensure_typecheck(type_query.context, module_id, key);
+    }
+
+    fn currentTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
+        const key = self.current_typecheck_key orelse return null;
+        const module_id = self.module_id orelse return null;
+        const type_query = self.type_query orelse return null;
+        return try type_query.ensure_typecheck(type_query.context, module_id, key);
     }
 
     fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {

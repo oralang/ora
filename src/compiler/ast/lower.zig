@@ -273,6 +273,9 @@ const Validator = struct {
                 for (array.elements) |expr_id| _ = try self.expectExpr(expr_id, expr_range, "array literal references invalid element id");
             },
             .StructLiteral => |struct_literal| {
+                if (struct_literal.type_expr) |type_id| {
+                    _ = try self.expectType(type_id, expr_range, "struct literal references invalid type id");
+                }
                 for (struct_literal.fields) |field| _ = try self.expectExpr(field.value, field.range, "struct literal field references invalid expression id");
             },
             .Switch => |switch_expr| {
