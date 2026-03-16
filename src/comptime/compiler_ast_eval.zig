@@ -15,6 +15,7 @@ const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
+const type_ids = comptime_mod.type_ids;
 const SourceSpan = error_mod.SourceSpan;
 const Stage = stage_mod.Stage;
 const constEquals = bridge.constEquals;
@@ -876,12 +877,8 @@ const ConstEvaluator = struct {
         }
 
         var arg_values = try self.allocator.alloc(CtValue, call.args.len);
-        for (call.args, 0..) |arg, idx| {
-            _ = try self.evalExprImpl(arg, use_cache);
-            arg_values[idx] = (try self.evalExprCtValue(arg)) orelse blk: {
-                const const_value = (try self.evalExprImpl(arg, use_cache)) orelse return null;
-                break :blk (try constToCtValue(const_value)) orelse return null;
-            };
+        for (call.args, function.parameters, 0..) |arg, parameter, idx| {
+            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg, use_cache)) orelse return null;
         }
 
         self.env.pushScope(false) catch return null;
@@ -902,6 +899,77 @@ const ConstEvaluator = struct {
         }
 
         return try self.evalComptimeBody(function.body);
+    }
+
+    fn evalCallArgumentCtValue(self: *ConstEvaluator, parameter: ast.Parameter, arg: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
+        if (parameter.is_comptime and self.parameterExpectsTypeValue(parameter)) {
+            return self.typeExprCtValue(arg);
+        }
+
+        _ = try self.evalExprImpl(arg, use_cache);
+        return (try self.evalExprCtValue(arg)) orelse blk: {
+            const const_value = (try self.evalExprImpl(arg, use_cache)) orelse return null;
+            break :blk (try constToCtValue(const_value)) orelse return null;
+        };
+    }
+
+    fn parameterExpectsTypeValue(self: *ConstEvaluator, parameter: ast.Parameter) bool {
+        return switch (self.file.typeExpr(parameter.type_expr).*) {
+            .Path => |path| std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "type"),
+            else => false,
+        };
+    }
+
+    fn typeExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) ?CtValue {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => |type_value| if (self.typeExprTypeId(type_value.type_expr)) |type_id|
+                CtValue{ .type_val = type_id }
+            else
+                null,
+            .Name => |name| if (self.pathTypeId(name.name)) |type_id|
+                CtValue{ .type_val = type_id }
+            else
+                null,
+            .Group => |group| self.typeExprCtValue(group.expr),
+            else => null,
+        };
+    }
+
+    fn typeExprTypeId(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?u32 {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| self.pathTypeId(path.name),
+            .Generic => |generic| self.pathTypeId(generic.name),
+            else => null,
+        };
+    }
+
+    fn pathTypeId(self: *ConstEvaluator, name: []const u8) ?u32 {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (self.env.lookupValue(trimmed)) |value| {
+            return switch (value) {
+                .type_val => |type_id| type_id,
+                else => null,
+            };
+        }
+        if (std.mem.eql(u8, trimmed, "u8")) return type_ids.u8_id;
+        if (std.mem.eql(u8, trimmed, "u16")) return type_ids.u16_id;
+        if (std.mem.eql(u8, trimmed, "u32")) return type_ids.u32_id;
+        if (std.mem.eql(u8, trimmed, "u64")) return type_ids.u64_id;
+        if (std.mem.eql(u8, trimmed, "u128")) return type_ids.u128_id;
+        if (std.mem.eql(u8, trimmed, "u256")) return type_ids.u256_id;
+        if (std.mem.eql(u8, trimmed, "i8")) return type_ids.i8_id;
+        if (std.mem.eql(u8, trimmed, "i16")) return type_ids.i16_id;
+        if (std.mem.eql(u8, trimmed, "i32")) return type_ids.i32_id;
+        if (std.mem.eql(u8, trimmed, "i64")) return type_ids.i64_id;
+        if (std.mem.eql(u8, trimmed, "i128")) return type_ids.i128_id;
+        if (std.mem.eql(u8, trimmed, "i256")) return type_ids.i256_id;
+        if (std.mem.eql(u8, trimmed, "bool")) return type_ids.bool_id;
+        if (std.mem.eql(u8, trimmed, "address")) return type_ids.address_id;
+        if (std.mem.eql(u8, trimmed, "string")) return type_ids.string_id;
+        if (std.mem.eql(u8, trimmed, "bytes")) return type_ids.bytes_id;
+        if (std.mem.eql(u8, trimmed, "void")) return type_ids.void_id;
+        if (self.lookupNamedItem(trimmed)) |item_id| return @intCast(item_id.index());
+        return null;
     }
 
     fn functionStage(self: *ConstEvaluator, function: ast.FunctionItem) Stage {
