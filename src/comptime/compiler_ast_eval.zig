@@ -991,6 +991,38 @@ const ConstEvaluator = struct {
         return null;
     }
 
+    fn materializeCallArgumentCtValues(
+        self: *ConstEvaluator,
+        callable: CallableFunction,
+        call: ast.CallExpr,
+        comptime use_cache: bool,
+    ) anyerror!?[]CtValue {
+        const function = callable.function;
+        const self_param_index = self.functionRuntimeSelfParameterIndex(function);
+        const expected_args = function.parameters.len - @intFromBool(callable.synthetic_self_arg != null and self_param_index != null);
+        if (expected_args != call.args.len) return null;
+
+        var arg_values = try self.allocator.alloc(CtValue, function.parameters.len);
+        var user_arg_index: usize = 0;
+        for (function.parameters, 0..) |parameter, idx| {
+            const arg_expr = if (callable.synthetic_self_arg != null and self_param_index != null and idx == self_param_index.?)
+                callable.synthetic_self_arg.?
+            else blk: {
+                const arg = call.args[user_arg_index];
+                user_arg_index += 1;
+                break :blk arg;
+            };
+            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg_expr, use_cache)) orelse return null;
+        }
+        return arg_values;
+    }
+
+    fn bindCallArguments(self: *ConstEvaluator, function: ast.FunctionItem, arg_values: []const CtValue) !void {
+        for (function.parameters, 0..) |parameter, idx| {
+            try self.bindPatternCtValue(parameter.pattern, arg_values[idx]);
+        }
+    }
+
     fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
         const callable = self.lookupCallableFunction(call.callee) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
@@ -1019,9 +1051,6 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        const self_param_index = self.functionRuntimeSelfParameterIndex(function);
-        const expected_args = function.parameters.len - @intFromBool(callable.synthetic_self_arg != null and self_param_index != null);
-        if (expected_args != call.args.len) return null;
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
@@ -1031,25 +1060,11 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        var arg_values = try self.allocator.alloc(CtValue, function.parameters.len);
-        var user_arg_index: usize = 0;
-        for (function.parameters, 0..) |parameter, idx| {
-            const arg_expr = if (callable.synthetic_self_arg != null and self_param_index != null and idx == self_param_index.?)
-                callable.synthetic_self_arg.?
-            else blk: {
-                const arg = call.args[user_arg_index];
-                user_arg_index += 1;
-                break :blk arg;
-            };
-            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg_expr, use_cache)) orelse return null;
-        }
+        const arg_values = (try self.materializeCallArgumentCtValues(callable, call, use_cache)) orelse return null;
 
         self.env.pushScope(false) catch return null;
         defer self.env.popScope();
-
-        for (function.parameters, 0..) |parameter, idx| {
-            try self.bindPatternCtValue(parameter.pattern, arg_values[idx]);
-        }
+        try self.bindCallArguments(function, arg_values);
 
         self.call_depth += 1;
         defer self.call_depth -= 1;
@@ -1092,9 +1107,6 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        const self_param_index = self.functionRuntimeSelfParameterIndex(function);
-        const expected_args = function.parameters.len - @intFromBool(callable.synthetic_self_arg != null and self_param_index != null);
-        if (expected_args != call.args.len) return null;
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
@@ -1104,25 +1116,11 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        var arg_values = try self.allocator.alloc(CtValue, function.parameters.len);
-        var user_arg_index: usize = 0;
-        for (function.parameters, 0..) |parameter, idx| {
-            const arg_expr = if (callable.synthetic_self_arg != null and self_param_index != null and idx == self_param_index.?)
-                callable.synthetic_self_arg.?
-            else blk: {
-                const arg = call.args[user_arg_index];
-                user_arg_index += 1;
-                break :blk arg;
-            };
-            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg_expr, use_cache)) orelse return null;
-        }
+        const arg_values = (try self.materializeCallArgumentCtValues(callable, call, use_cache)) orelse return null;
 
         self.env.pushScope(false) catch return null;
         defer self.env.popScope();
-
-        for (function.parameters, 0..) |parameter, idx| {
-            try self.bindPatternCtValue(parameter.pattern, arg_values[idx]);
-        }
+        try self.bindCallArguments(function, arg_values);
 
         self.call_depth += 1;
         defer self.call_depth -= 1;
