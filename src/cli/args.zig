@@ -6,6 +6,7 @@ const std = @import("std");
 
 pub const CliOptions = struct {
     use_v2: bool = false,
+    use_legacy: bool = false,
     output_dir: ?[]const u8 = null,
     input_file: ?[]const u8 = null,
     emit_tokens: bool = false,
@@ -68,6 +69,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 2;
         } else if (std.mem.eql(u8, arg, "--v2")) {
             opts.use_v2 = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--legacy")) {
+            opts.use_legacy = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-tokens")) {
             opts.emit_tokens = true;

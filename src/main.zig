@@ -82,6 +82,29 @@ const CommandKind = enum {
     Fmt,
 };
 
+fn shouldUseCompilerV2(command_kind: CommandKind, parsed: cli_args.CliOptions) bool {
+    if (parsed.use_legacy) return false;
+    if (parsed.use_v2) return true;
+    if (command_kind != .Emit) return false;
+
+    if (parsed.emit_tokens or
+        parsed.emit_cfg or
+        parsed.emit_sir_text or
+        parsed.emit_bytecode or
+        parsed.emit_abi or
+        parsed.emit_abi_solidity or
+        parsed.emit_abi_extras)
+    {
+        return false;
+    }
+
+    if (parsed.emit_ast or parsed.emit_typed_ast or parsed.emit_mlir or parsed.emit_mlir_sir) {
+        return true;
+    }
+
+    return true;
+}
+
 const Subcommand = enum {
     None,
     Build,
@@ -262,7 +285,6 @@ pub fn main() !void {
     }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
-    const use_v2: bool = parsed.use_v2;
     const input_file: ?[]const u8 = parsed.input_file;
     const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
@@ -333,6 +355,7 @@ pub fn main() !void {
         .Emit => .Emit,
         .None => if (emit_flags_requested) .Emit else .Build,
     };
+    const use_v2: bool = shouldUseCompilerV2(command_kind, parsed);
 
     // handle state analysis (also a special analysis mode)
     if (analyze_state) {
@@ -349,8 +372,13 @@ pub fn main() !void {
         std.process.exit(2);
     }
 
-    if (use_v2 and command_kind == .Build) {
-        std.debug.print("error: --v2 currently supports only 'ora emit --emit-ast' and 'ora emit --emit-typed-ast'.\n", .{});
+    if (parsed.use_v2 and command_kind == .Build) {
+        std.debug.print("error: --v2 currently supports only 'ora emit' flows.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (parsed.use_v2 and parsed.use_legacy) {
+        std.debug.print("error: --v2 and --legacy are mutually exclusive.\n", .{});
         std.process.exit(2);
     }
 
@@ -1099,7 +1127,8 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --v2                   - Use the new compiler for supported emit modes\n", .{});
+    try stdout.print("  --v2                   - Force the new compiler for supported emit modes\n", .{});
+    try stdout.print("  --legacy               - Force the legacy compiler path for emit mode\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -3451,6 +3480,21 @@ test "compiler v2 JSON AST writer includes diagnostics array" {
 
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);
+}
+
+test "v2 routing defaults emit MLIR to compiler v2" {
+    const parsed = cli_args.CliOptions{ .emit_mlir = true };
+    try std.testing.expect(shouldUseCompilerV2(.Emit, parsed));
+}
+
+test "legacy flag overrides default v2 emit routing" {
+    const parsed = cli_args.CliOptions{ .emit_mlir = true, .use_legacy = true };
+    try std.testing.expect(!shouldUseCompilerV2(.Emit, parsed));
+}
+
+test "unsupported emit flows stay on legacy by default" {
+    const parsed = cli_args.CliOptions{ .emit_sir_text = true };
+    try std.testing.expect(!shouldUseCompilerV2(.Emit, parsed));
 }
 
 test "m3 parity corpus lowers through legacy and v2" {

@@ -23,6 +23,15 @@ test "v2 flag parses without consuming input file" {
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 
+test "legacy flag parses without consuming input file" {
+    const args = [_][]const u8{ "--legacy", "--emit-mlir", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.use_legacy);
+    try testing.expect(parsed.emit_mlir);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
 test "emit-cfg does not skip subsequent flags" {
     const args = [_][]const u8{ "--emit-cfg", "--emit-ast", "contract.ora" };
     const parsed = try cli.parseArgs(&args);
