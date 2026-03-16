@@ -361,18 +361,19 @@ pub fn typeCheck(
     for (file.items, 0..) |item, index| {
         switch (item) {
             .Function => |function| {
+                const function_bindings = try typechecker.genericBindingsForFunctionTemplate(function);
                 const resolved_params = try arena.alloc(Type, function.parameters.len);
                 for (function.parameters, 0..) |parameter, param_index| {
                     const resolved_type = if (typechecker.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter)) |ty|
                         ty
                     else
-                        try typechecker.resolveTypeExpr(parameter.type_expr);
+                        try typechecker.resolveTypeExprWithBindings(parameter.type_expr, function_bindings);
                     resolved_params[param_index] = resolved_type;
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegion(resolved_type, .calldata);
                 }
                 const resolved_returns = if (function.return_type) |type_expr| blk_returns: {
                     const slice = try arena.alloc(Type, 1);
-                    slice[0] = try typechecker.resolveTypeExpr(type_expr);
+                    slice[0] = try typechecker.resolveTypeExprWithBindings(type_expr, function_bindings);
                     break :blk_returns slice;
                 } else &.{};
                 item_types[index] = .{ .function = .{
@@ -381,7 +382,7 @@ pub fn typeCheck(
                     .return_types = resolved_returns,
                 } };
                 body_types[function.body.index()] = if (function.return_type) |type_expr|
-                    try typechecker.resolveTypeExpr(type_expr)
+                    try typechecker.resolveTypeExprWithBindings(type_expr, function_bindings)
                 else
                     .{ .void = {} };
             },
@@ -466,7 +467,11 @@ const TypeChecker = struct {
             .Function => |function| {
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
-                self.current_return_type = if (function.return_type) |type_expr| try self.resolveTypeExpr(type_expr) else .{ .void = {} };
+                const function_bindings = try self.genericBindingsForFunctionTemplate(function);
+                self.current_return_type = if (function.return_type) |type_expr|
+                    try self.resolveTypeExprWithBindings(type_expr, function_bindings)
+                else
+                    .{ .void = {} };
                 self.current_function_item = item_id;
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
@@ -724,6 +729,51 @@ const TypeChecker = struct {
         return target_type;
     }
 
+    fn genericBindingsForFunctionTemplate(self: *TypeChecker, function: ast.FunctionItem) ![]const GenericTypeBinding {
+        if (!function.is_generic) return &.{};
+
+        var count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) continue;
+            if (!self.isGenericTypeParameter(parameter) and !self.comptimeIntegerParameter(parameter)) continue;
+            count += 1;
+        }
+
+        const bindings = try self.arena.alloc(GenericTypeBinding, count);
+        var index: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) continue;
+            const name = self.patternName(parameter.pattern) orelse continue;
+            if (self.isGenericTypeParameter(parameter)) {
+                bindings[index] = .{
+                    .name = name,
+                    .value = .{ .ty = .{ .named = .{ .name = name } } },
+                };
+                index += 1;
+                continue;
+            }
+            if (self.comptimeIntegerParameter(parameter)) {
+                bindings[index] = .{
+                    .name = name,
+                    .value = .{ .integer = name },
+                };
+                index += 1;
+            }
+        }
+        return bindings[0..index];
+    }
+
+    fn currentFunctionGenericBindings(self: *TypeChecker) ![]const GenericTypeBinding {
+        const function_item_id = self.current_function_item orelse return &.{};
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function) return &.{};
+        return self.genericBindingsForFunctionTemplate(item.Function);
+    }
+
+    fn resolveTypeExprInCurrentContext(self: *TypeChecker, type_expr: ast.TypeExprId) !Type {
+        return self.resolveTypeExprWithBindings(type_expr, try self.currentFunctionGenericBindings());
+    }
+
     fn parameterIsBareSelf(self: *TypeChecker, parameter: ast.Parameter) bool {
         const pattern = self.file.pattern(parameter.pattern).*;
         if (pattern != .Name) return false;
@@ -976,7 +1026,7 @@ const TypeChecker = struct {
             .AddressLiteral => self.expr_types[expr_id.index()] = .{ .address = {} },
             .BytesLiteral => self.expr_types[expr_id.index()] = .{ .bytes = {} },
             .TypeValue => |type_value| {
-                self.expr_types[expr_id.index()] = try self.resolveTypeExpr(type_value.type_expr);
+                self.expr_types[expr_id.index()] = try self.resolveTypeExprInCurrentContext(type_value.type_expr);
             },
             .Tuple => |tuple| {
                 for (tuple.elements) |element| try self.visitExpr(element);
@@ -1012,7 +1062,7 @@ const TypeChecker = struct {
             .StructLiteral => |struct_literal| {
                 for (struct_literal.fields) |field| try self.visitExpr(field.value);
                 self.expr_types[expr_id.index()] = if (struct_literal.type_expr) |type_expr|
-                    try self.resolveTypeExpr(type_expr)
+                    try self.resolveTypeExprInCurrentContext(type_expr)
                 else
                     self.structLiteralType(struct_literal.type_name);
             },

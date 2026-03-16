@@ -6808,6 +6808,75 @@ test "compiler const eval generic calls can return generic struct values" {
     try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval generic calls propagate comptime integer bindings" {
+    const source_text =
+        \\comptime fn shl_by(comptime N: u256, value: u256) -> u256 {
+        \\    return value << N;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        shl_by(8, 1);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(ret_stmt.value.?).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 256), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval generic calls can return value-generic struct values" {
+    const source_text =
+        \\struct FixedPoint(comptime T: type, comptime SCALE: u256) {
+        \\    value: T,
+        \\}
+        \\
+        \\comptime fn make_fixed(comptime T: type, comptime SCALE: u256, value: T) -> FixedPoint<T, SCALE> {
+        \\    return FixedPoint<T, SCALE> { value: value };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let fp = make_fixed(u256, 18, 42);
+        \\        fp.value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const fp_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+    const field_stmt = ast_file.statement(comptime_body.statements[1]).Expr;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, typecheck.exprType(fp_decl.value.?).kind());
+    try testing.expectEqualStrings("FixedPoint__u256__18", typecheck.exprType(fp_decl.value.?).name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_stmt.expr).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler db breaks same-key const eval recursion with unknown sentinel" {
     const source_text =
         \\comptime fn loop() -> u256 {
