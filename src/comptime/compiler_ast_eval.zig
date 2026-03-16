@@ -28,6 +28,9 @@ const parseIntegerLiteral = bridge.parseIntegerLiteral;
 pub const TypeQuery = struct {
     context: *anyopaque,
     ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
+    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
+    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
+    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
 };
 
 pub const ConstEvalOptions = struct {
@@ -711,6 +714,8 @@ const ConstEvaluator = struct {
     }
 
     const CallableFunction = struct {
+        module_id: source.ModuleId,
+        file: *const ast.AstFile,
         item_id: ast.ItemId,
         function: ast.FunctionItem,
     };
@@ -731,6 +736,22 @@ const ConstEvaluator = struct {
     fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {
         const item_id = self.lookupNamedItem(name) orelse return;
         try self.ensureTypeChecked(.{ .item = item_id });
+    }
+
+    fn astFileForModule(self: *ConstEvaluator, module_id: source.ModuleId) !*const ast.AstFile {
+        const type_query = self.type_query orelse return error.MissingTypeQuery;
+        return try type_query.ast_file(type_query.context, module_id);
+    }
+
+    fn lookupNamedItemInModule(self: *ConstEvaluator, module_id: source.ModuleId, name: []const u8) !?ast.ItemId {
+        const type_query = self.type_query orelse return null;
+        return try type_query.lookup_item(type_query.context, module_id, name);
+    }
+
+    fn resolveImportAlias(self: *ConstEvaluator, alias: []const u8) !?source.ModuleId {
+        const module_id = self.module_id orelse return null;
+        const type_query = self.type_query orelse return null;
+        return try type_query.resolve_import_alias(type_query.context, module_id, alias);
     }
 
     fn ensureTypeExprTypeChecked(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !void {
@@ -755,15 +776,38 @@ const ConstEvaluator = struct {
     }
 
     fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?CallableFunction {
-        const function_item_id = switch (self.file.expression(callee).*) {
-            .Name => |name| self.lookupNamedItem(name.name) orelse return null,
+        switch (self.file.expression(callee).*) {
+            .Name => |name| {
+                const function_item_id = self.lookupNamedItem(name.name) orelse return null;
+                const item = self.file.item(function_item_id).*;
+                if (item != .Function) return null;
+                return .{
+                    .module_id = self.module_id orelse return null,
+                    .file = self.file,
+                    .item_id = function_item_id,
+                    .function = item.Function,
+                };
+            },
+            .Field => |field| {
+                const base_name = switch (self.file.expression(field.base).*) {
+                    .Name => |name| name.name,
+                    else => return null,
+                };
+                const target_module_id = (self.resolveImportAlias(base_name) catch return null) orelse return null;
+                const target_file = self.astFileForModule(target_module_id) catch return null;
+                const function_item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch return null) orelse return null;
+                const item = target_file.item(function_item_id).*;
+                if (item != .Function) return null;
+                return .{
+                    .module_id = target_module_id,
+                    .file = target_file,
+                    .item_id = function_item_id,
+                    .function = item.Function,
+                };
+            },
             .Group => |group| return self.lookupCallableFunction(group.expr),
             else => return null,
-        };
-
-        const item = self.file.item(function_item_id).*;
-        if (item != .Function) return null;
-        return .{ .item_id = function_item_id, .function = item.Function };
+        }
     }
 
     fn itemName(self: *ConstEvaluator, item_id: ast.ItemId) ?[]const u8 {
@@ -856,6 +900,17 @@ const ConstEvaluator = struct {
             return null;
         };
         const function = callable.function;
+        const previous_file = self.file;
+        const previous_module_id = self.module_id;
+        const previous_key = self.current_typecheck_key;
+        self.file = callable.file;
+        self.module_id = callable.module_id;
+        self.current_typecheck_key = .{ .item = callable.item_id };
+        defer {
+            self.file = previous_file;
+            self.module_id = previous_module_id;
+            self.current_typecheck_key = previous_key;
+        }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
         if (self.functionStage(function) == .runtime_only) {
@@ -908,6 +963,17 @@ const ConstEvaluator = struct {
             return null;
         };
         const function = callable.function;
+        const previous_file = self.file;
+        const previous_module_id = self.module_id;
+        const previous_key = self.current_typecheck_key;
+        self.file = callable.file;
+        self.module_id = callable.module_id;
+        self.current_typecheck_key = .{ .item = callable.item_id };
+        defer {
+            self.file = previous_file;
+            self.module_id = previous_module_id;
+            self.current_typecheck_key = previous_key;
+        }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
         if (self.functionStage(function) == .runtime_only) {

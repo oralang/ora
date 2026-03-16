@@ -304,6 +304,9 @@ pub const CompilerDb = struct {
             .type_query = .{
                 .context = self,
                 .ensure_typecheck = ensureTypeCheckedForComptime,
+                .ast_file = astFileForComptime,
+                .lookup_item = lookupItemForComptime,
+                .resolve_import_alias = resolveImportAliasForComptime,
             },
         });
         slot.* = result;
@@ -545,6 +548,31 @@ pub const CompilerDb = struct {
 fn ensureTypeCheckedForComptime(context: *anyopaque, module_id: source.ModuleId, key: sema.TypeCheckKey) anyerror!*const sema.TypeCheckResult {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.typeCheck(module_id, key);
+}
+
+fn astFileForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.astFile(self.sources.module(module_id).file_id);
+}
+
+fn lookupItemForComptime(context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return (try self.itemIndex(module_id)).lookup(name);
+}
+
+fn resolveImportAliasForComptime(context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    const module = self.sources.module(module_id);
+    const graph = try self.moduleGraph(module.package_id);
+    const summary = for (graph.modules) |summary| {
+        if (summary.module_id == module_id) break summary;
+    } else return null;
+
+    for (summary.imports) |import_info| {
+        const import_alias = import_info.alias orelse std.fs.path.stem(std.fs.path.basename(import_info.path));
+        if (std.mem.eql(u8, import_alias, alias)) return import_info.target_module_id;
+    }
+    return null;
 }
 
 fn ensureSlots(allocator: std.mem.Allocator, slots: anytype, len: usize) !void {

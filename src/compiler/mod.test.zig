@@ -1874,6 +1874,47 @@ test "compiler package loader bridges import graph into source modules" {
     try testing.expect(root_summary.imports[0].target_module_id != null);
 }
 
+test "compiler const eval executes cross-module comptime calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\comptime fn helper() -> u256 {
+        \\    return 7;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        dep.helper();
+        \\    };
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler parses log, error, and bitfield declarations" {
     const source_text =
         \\contract Ledger {
