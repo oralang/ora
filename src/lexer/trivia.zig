@@ -89,7 +89,6 @@ pub const StringPool = struct {
 /// Simplified for smart contract language usage:
 /// - Only ASCII characters are supported
 /// - Limited escape sequences (\n, \t, \", \\)
-/// - Max string length is restricted to 1KB
 /// This simplification improves security, reduces gas costs, and simplifies the implementation
 pub const StringProcessor = struct {
     allocator: Allocator,
@@ -104,7 +103,6 @@ pub const StringProcessor = struct {
     /// Follows the simplified string model for smart contracts:
     /// - Only ASCII characters are allowed
     /// - Only supports limited escape sequences: \n, \t, \", \\
-    /// - String length is limited (enforced elsewhere)
     pub fn processString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
         var result = std.ArrayList(u8){};
         defer result.deinit(self.allocator);
@@ -141,7 +139,7 @@ pub const StringProcessor = struct {
         }
 
         switch (sequence[0]) {
-            // simplified set of escape sequences for smart contract language
+            // Intentionally minimal — matches Solidity's supported escapes
             'n' => return .{ .char = '\n', .consumed = 1 }, // Newline
             't' => return .{ .char = '\t', .consumed = 1 }, // Tab
             '\\' => return .{ .char = '\\', .consumed = 1 }, // Backslash

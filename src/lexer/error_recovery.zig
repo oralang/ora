@@ -334,7 +334,6 @@ pub const ErrorRecovery = struct {
         const diagnostic = try LexerDiagnostic.createDetailed(self.allocator, error_type, range, source, message);
         try self.errors.append(self.allocator, diagnostic);
 
-        std.debug.print("Added error to recovery: {s} at {}:{}\n", .{ @errorName(error_type), range.start_line, range.start_column });
     }
 
     /// Record a detailed error with source context and suggestion
