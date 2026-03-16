@@ -5667,6 +5667,34 @@ test "compiler lowers while loops with nested for carried locals" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers for loops with nested try carried locals" {
+    const source_text =
+        \\pub fn sum(values: slice[u256]) -> u256 {
+        \\    let total = 0;
+        \\    for (values) |value| {
+        \\        try {
+        \\            total = total + value;
+        \\        } catch (err) {
+        \\            total = total + 1;
+        \\        }
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_stmt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_placeholder"));
+}
+
 test "compiler lowers direct map index load and store through real map ops" {
     const source_text =
         \\contract Maps {
@@ -8568,6 +8596,37 @@ test "compiler lowers switch arms with nested for carried locals" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
+test "compiler lowers for loops with nested switch carried locals" {
+    const source_text =
+        \\pub fn sum(values: slice[u256], step: u256) -> u256 {
+        \\    let total = 0;
+        \\    for (values) |value| {
+        \\        switch (step) {
+        \\            1 => {
+        \\                total = total + value;
+        \\            },
+        \\            else => {
+        \\                total = total + 1;
+        \\            }
+        \\        }
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
 }
 
 test "compiler lowers real HIR switch expressions" {
