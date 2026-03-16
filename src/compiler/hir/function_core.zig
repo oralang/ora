@@ -1381,6 +1381,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
                 return false;
             }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             var init_operands: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
@@ -1660,6 +1661,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try result_types.append(self.parent.allocator, mlir.oraValueGetType(value));
             }
             return result_types;
+        }
+
+        pub fn filterCarriedLocals(
+            self: *FunctionLowerer,
+            locals: *const LocalEnv,
+            carried_locals: []const LocalId,
+        ) anyerror!LocalIdList {
+            var filtered: LocalIdList = .{};
+            for (carried_locals) |local_id| {
+                if (!locals.hasLocal(local_id)) continue;
+                if (self.parent.typecheck.pattern_types[local_id.index()].type.kind() == .unknown) continue;
+                try filtered.append(self.parent.allocator, local_id);
+            }
+            return filtered;
         }
 
         pub fn appendOraYieldFromLocals(

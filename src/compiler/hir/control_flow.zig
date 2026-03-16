@@ -58,6 +58,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 }
             }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             if (carried_locals.items.len == 0) {
                 const op = mlir.oraConditionalReturnOpCreate(self.parent.context, loc, condition);
@@ -175,6 +176,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendUnsupportedControlPlaceholder("ora.try_placeholder", try_stmt.range);
                 return false;
             }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             const result_types = if (carried_locals.items.len == 0)
                 null
@@ -271,6 +273,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
                 return false;
             }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             var init_operands: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
@@ -408,6 +411,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
                 return false;
             }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             const pattern_data = (try self.buildSwitchPatternData(switch_stmt, carried_locals.items.len > 0 and switch_stmt.else_body == null)) orelse {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);

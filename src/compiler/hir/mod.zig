@@ -664,6 +664,7 @@ const FunctionLowerer = struct {
     pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;
     pub const createBitfieldFieldUpdate = FunctionCore.createBitfieldFieldUpdate;
     pub const appendUnsupportedControlPlaceholder = FunctionCore.appendUnsupportedControlPlaceholder;
+    pub const filterCarriedLocals = FunctionCore.filterCarriedLocals;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;

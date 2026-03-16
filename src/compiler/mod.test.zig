@@ -5639,6 +5639,31 @@ test "compiler lowers for loops with early return without placeholders" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler skips unknown carried locals in for lowering" {
+    const source_text =
+        \\pub fn scan(values: slice[u256]) -> u256 {
+        \\    let total = 0;
+        \\    let bad = total.missing;
+        \\    for (values) |value| {
+        \\        bad = value.missing;
+        \\        total = total + value;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers while loops with nested for carried locals" {
     const source_text =
         \\pub fn sum(limit: u256, values: slice[u256]) -> u256 {
@@ -8435,6 +8460,33 @@ test "compiler lowers if statements with carried locals and early return without
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
 }
 
+test "compiler skips unknown carried locals in if lowering" {
+    const source_text =
+        \\pub fn choose(flag: bool, value: u256) -> u256 {
+        \\    let total = 0;
+        \\    let bad = value.missing;
+        \\    if (flag) {
+        \\        bad = value.missing;
+        \\        total = 1;
+        \\    } else {
+        \\        total = 2;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
 test "compiler lowers try statements with early return without placeholders" {
     const source_text =
         \\pub fn recover(ok: bool, start: u256) -> u256 {
@@ -8564,6 +8616,36 @@ test "compiler lowers switch statements with early return without placeholders" 
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
+test "compiler skips unknown carried locals in switch lowering" {
+    const source_text =
+        \\pub fn choose(flag: bool, value: u256) -> u256 {
+        \\    let total = 0;
+        \\    let bad = value.missing;
+        \\    switch (flag) {
+        \\        true => {
+        \\            bad = value.missing;
+        \\            total = total + 1;
+        \\        },
+        \\        else => {
+        \\            total = total + 2;
+        \\        }
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
 }
 
@@ -8758,6 +8840,31 @@ test "compiler lowers real HIR while loops for storage-driven loops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.condition"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
+test "compiler skips unknown carried locals in while lowering" {
+    const source_text =
+        \\pub fn count(limit: u256) -> u256 {
+        \\    let total = 0;
+        \\    let bad = total.missing;
+        \\    while (total < limit) {
+        \\        bad = total.missing;
+        \\        total = total + 1;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
