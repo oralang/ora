@@ -85,6 +85,7 @@ const CommandKind = enum {
 fn shouldUseCompilerV2(command_kind: CommandKind, parsed: cli_args.CliOptions) bool {
     if (parsed.use_legacy) return false;
     if (parsed.use_v2) return true;
+    if (command_kind == .Build) return true;
     if (command_kind != .Emit) return false;
 
     if (parsed.emit_tokens or
@@ -372,11 +373,6 @@ pub fn main() !void {
         std.process.exit(2);
     }
 
-    if (parsed.use_v2 and command_kind == .Build) {
-        std.debug.print("error: --v2 currently supports only 'ora emit' flows.\n", .{});
-        std.process.exit(2);
-    }
-
     if (parsed.use_v2 and parsed.use_legacy) {
         std.debug.print("error: --v2 and --legacy are mutually exclusive.\n", .{});
         std.process.exit(2);
@@ -552,11 +548,12 @@ pub fn main() !void {
                 build_file_path,
                 build_output_dir,
                 mlir_options,
+                use_v2,
                 build_resolver_options,
                 if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
             )
         else
-            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options);
+            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, use_v2);
 
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
@@ -670,6 +667,7 @@ fn runBuildArtifacts(
     file_path: []const u8,
     output_dir: ?[]const u8,
     base_options: MlirOptions,
+    use_v2: bool,
     resolver_options: import_program.ResolverOptions,
     configured_init_args: []const project_config.InitArg,
 ) !void {
@@ -736,7 +734,11 @@ fn runBuildArtifacts(
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
-    runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options) catch |err| switch (err) {
+    const build_emit_result = if (use_v2)
+        runMlirEmitAdvancedV2(allocator, file_path, build_mlir_options, resolver_options)
+    else
+        runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options);
+    build_emit_result catch |err| switch (err) {
         error.VerificationFailed => verification_failed = true,
         else => return err,
     };
@@ -985,6 +987,7 @@ fn runBuildFromDiscoveredConfig(
     allocator: std.mem.Allocator,
     cli_output_dir: ?[]const u8,
     base_options: MlirOptions,
+    use_v2: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -1048,6 +1051,7 @@ fn runBuildFromDiscoveredConfig(
             root_path,
             target_output,
             base_options,
+            use_v2,
             .{
                 .include_roots = include_roots,
             },
@@ -1127,8 +1131,8 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --v2                   - Force the new compiler for supported emit modes\n", .{});
-    try stdout.print("  --legacy               - Force the legacy compiler path for emit mode\n", .{});
+    try stdout.print("  --v2                   - Force the new compiler for supported build/emit modes\n", .{});
+    try stdout.print("  --legacy               - Force the legacy compiler path for build/emit mode\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -1479,6 +1483,289 @@ fn runCompilerV2MlirEmit(
     }
     try stdout.print("{s}", .{text_ref.data[0..text_ref.length]});
     try stdout.flush();
+}
+
+fn runMlirEmitAdvancedV2(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    mlir_options: MlirOptions,
+    resolver_options: import_program.ResolverOptions,
+) !void {
+    const c = @import("mlir_c_api").c;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    const m = mlir_options.metrics;
+
+    var mlir_arena = std.heap.ArenaAllocator.init(allocator);
+    defer mlir_arena.deinit();
+    const mlir_allocator = mlir_arena.allocator();
+
+    m.begin("compiler v2");
+    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+        m.end();
+        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    m.end();
+    defer compilation.deinit();
+
+    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    const final_module = lowering.module.raw_module;
+    const ctx = lowering.context;
+
+    var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
+    var verification_failed = false;
+    defer {
+        if (verification_result_opt) |*vr| vr.deinit();
+    }
+
+    if (mlir_options.verify_z3) {
+        m.begin("z3 verification");
+        const z3_verification = @import("z3/verification.zig");
+        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        defer verifier.deinit();
+
+        if (mlir_options.verify_mode) |mode| {
+            if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
+        }
+        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
+        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        verifier.setVerifyStats(mlir_options.verify_stats);
+
+        const verification_result = try verifier.runVerificationPass(final_module);
+
+        if (verification_result.diagnostics.items.len > 0) {
+            try stdout.print("⚠ Z3 counterexamples ({d} guard(s) can be violated):\n", .{verification_result.diagnostics.items.len});
+            for (verification_result.diagnostics.items) |diag| {
+                try stdout.print("  {s} in {s}:\n", .{ diag.guard_id, diag.function_name });
+                var it = diag.counterexample.variables.iterator();
+                while (it.next()) |entry| {
+                    try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                }
+            }
+            if (mlir_options.fail_on_verification_diagnostics) {
+                try stdout.print("❌ Z3 verification failed: {d} refinement guard(s) are violable.\n", .{verification_result.diagnostics.items.len});
+                try stdout.flush();
+                verification_failed = true;
+            }
+        }
+
+        if (mlir_options.emit_smt_report) {
+            var smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            defer smt_report.deinit(mlir_allocator);
+            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
+        }
+
+        if (!verification_result.success) {
+            try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
+            for (verification_result.errors.items) |err| {
+                try stdout.print("  - {s}\n", .{err.message});
+                if (err.counterexample) |ce| {
+                    var it = ce.variables.iterator();
+                    while (it.next()) |entry| {
+                        try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    }
+                }
+            }
+            try stdout.flush();
+            verification_failed = true;
+        }
+
+        verification_result_opt = verification_result;
+        m.end();
+    }
+
+    if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
+        m.begin("smt report");
+        const z3_verification = @import("z3/verification.zig");
+        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        defer verifier.deinit();
+        if (mlir_options.verify_mode) |mode| {
+            if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
+        }
+        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
+        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        var smt_report = try verifier.buildSmtReport(final_module, file_path, null);
+        defer smt_report.deinit(mlir_allocator);
+        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
+        m.end();
+    }
+
+    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+        m.begin("canonicalization");
+        if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
+            try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+        m.end();
+    }
+
+    if (mlir_options.emit_mlir_sir) {
+        const refinement_guards = @import("mlir/refinement_guards.zig");
+        if (verification_result_opt) |*vr| {
+            refinement_guards.cleanupRefinementGuards(ctx, final_module, &vr.proven_guard_ids);
+        } else {
+            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
+            defer empty_guards.deinit();
+            refinement_guards.cleanupRefinementGuards(ctx, final_module, &empty_guards);
+        }
+    }
+
+    if (mlir_options.emit_mlir or mlir_options.persist_ora_mlir) {
+        const module_op_ora = c.oraModuleGetOperation(final_module);
+        const mlir_str_ora = c.oraOperationPrintToString(module_op_ora);
+        defer if (mlir_str_ora.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(mlir_str_ora);
+        };
+
+        if (mlir_str_ora.data != null and mlir_str_ora.length > 0) {
+            const mlir_content_ora = mlir_str_ora.data[0..mlir_str_ora.length];
+            if (mlir_options.persist_ora_mlir) {
+                if (mlir_options.output_dir) |output_dir| {
+                    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                        error.PathAlreadyExists => {},
+                        else => return err,
+                    };
+                    const basename = std.fs.path.stem(file_path);
+                    const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ora.mlir" });
+                    defer allocator.free(filename);
+                    const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                    defer allocator.free(output_file);
+                    var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+                    defer mlir_file.close();
+                    try mlir_file.writeAll(mlir_content_ora);
+                }
+            }
+            if (mlir_options.emit_mlir) {
+                try stdout.print("//===----------------------------------------------------------------------===//\n", .{});
+                try stdout.print("// Ora MLIR (before conversion)\n", .{});
+                try stdout.print("//===----------------------------------------------------------------------===//\n\n", .{});
+                try stdout.print("{s}\n", .{mlir_content_ora});
+                try stdout.flush();
+            }
+        }
+    }
+
+    if (mlir_options.emit_mlir_sir) {
+        if (!c.oraConvertToSIR(ctx, final_module)) {
+            try stdout.print("Error: Ora to SIR conversion failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+    }
+
+    const explicit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
+    const emit_sir_mlir_output = explicit_sir_mlir_output or mlir_options.persist_sir_mlir;
+
+    if (emit_sir_mlir_output) {
+        const module_op_sir = c.oraModuleGetOperation(final_module);
+        const mlir_str_sir = c.oraOperationPrintToString(module_op_sir);
+        defer if (mlir_str_sir.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(mlir_str_sir);
+        };
+
+        if (mlir_str_sir.data == null or mlir_str_sir.length == 0) {
+            try stdout.print("Failed to print SIR MLIR\n", .{});
+            return;
+        }
+
+        const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
+        if (mlir_options.persist_sir_mlir and mlir_options.output_dir != null) {
+            const output_dir = mlir_options.output_dir.?;
+            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+            const basename = std.fs.path.stem(file_path);
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.mlir" });
+            defer allocator.free(filename);
+            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+            defer allocator.free(output_file);
+            var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+            defer mlir_file.close();
+            try mlir_file.writeAll(mlir_content_sir);
+        }
+        if (explicit_sir_mlir_output) {
+            if (mlir_options.output_dir) |output_dir| {
+                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+                const basename = std.fs.path.stem(file_path);
+                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
+                defer allocator.free(filename);
+                const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                defer allocator.free(output_file);
+                var mlir_file = try std.fs.cwd().createFile(output_file, .{});
+                defer mlir_file.close();
+                try mlir_file.writeAll(mlir_content_sir);
+                try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
+            } else {
+                try stdout.print("{s}", .{mlir_content_sir});
+            }
+        }
+    }
+
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
+        if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
+            try stdout.print("Error: SIR dispatcher build failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+        if (!c.oraLegalizeSIRText(ctx, final_module)) {
+            try stdout.print("Error: SIR text legalizer failed\n", .{});
+            try stdout.flush();
+            std.process.exit(1);
+        }
+
+        m.begin("sir text emission");
+        const sir_text_ref = c.oraEmitSIRText(ctx, final_module);
+        defer if (sir_text_ref.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(sir_text_ref);
+        };
+        if (sir_text_ref.data == null or sir_text_ref.length == 0) {
+            m.end();
+            try stdout.print("Failed to emit SIR text\n", .{});
+            return;
+        }
+        m.end();
+
+        const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        if (mlir_options.emit_sir_text) {
+            if (mlir_options.output_dir) |output_dir| {
+                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+                const basename = std.fs.path.stem(file_path);
+                const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir" });
+                defer allocator.free(filename);
+                const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+                defer allocator.free(output_file);
+                var sir_file = try std.fs.cwd().createFile(output_file, .{});
+                defer sir_file.close();
+                try sir_file.writeAll(sir_text);
+            } else {
+                try stdout.print("{s}", .{sir_text});
+            }
+        }
+        if (mlir_options.emit_bytecode) {
+            if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
+            m.begin("bytecode generation");
+            try emitBytecodeFromSirText(allocator, sir_text, file_path, mlir_options.output_dir, stdout);
+            m.end();
+        }
+    }
+
+    try stdout.flush();
+    if (verification_failed) return error.VerificationFailed;
 }
 
 fn printVersion() !void {
@@ -3487,9 +3774,19 @@ test "v2 routing defaults emit MLIR to compiler v2" {
     try std.testing.expect(shouldUseCompilerV2(.Emit, parsed));
 }
 
+test "v2 routing defaults build to compiler v2" {
+    const parsed = cli_args.CliOptions{};
+    try std.testing.expect(shouldUseCompilerV2(.Build, parsed));
+}
+
 test "legacy flag overrides default v2 emit routing" {
     const parsed = cli_args.CliOptions{ .emit_mlir = true, .use_legacy = true };
     try std.testing.expect(!shouldUseCompilerV2(.Emit, parsed));
+}
+
+test "legacy flag overrides default v2 build routing" {
+    const parsed = cli_args.CliOptions{ .use_legacy = true };
+    try std.testing.expect(!shouldUseCompilerV2(.Build, parsed));
 }
 
 test "unsupported emit flows stay on legacy by default" {
