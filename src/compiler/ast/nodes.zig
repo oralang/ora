@@ -567,6 +567,7 @@ pub const FunctionItem = struct {
     range: source.TextRange,
     name: []const u8,
     is_ghost: bool = false,
+    is_comptime: bool = false,
     is_generic: bool = false,
     visibility: Visibility,
     parameters: []Parameter,

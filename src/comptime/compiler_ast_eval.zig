@@ -24,10 +24,12 @@ const constToCtValue = bridge.constToCtValue;
 const evalBinary = bridge.evalBinary;
 const evalUnary = bridge.evalUnary;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
+const named_type_id_base: u32 = 1_000_000;
 
 pub const TypeQuery = struct {
     context: *anyopaque,
     ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
+    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.TypeCheckResult,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
     lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
     resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
@@ -580,7 +582,7 @@ const ConstEvaluator = struct {
     fn structTypeId(self: *ConstEvaluator, type_name: []const u8) ?u32 {
         const item_id = self.lookupNamedItem(type_name) orelse return null;
         if (self.file.item(item_id).* != .Struct) return null;
-        return @intCast(item_id.index());
+        return self.namedTypeId(item_id);
     }
 
     fn structTypeIdForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !?u32 {
@@ -588,10 +590,10 @@ const ConstEvaluator = struct {
             const expr_type = typecheck.exprType(expr_id);
             if (expr_type == .struct_) {
                 if (self.lookupNamedItem(expr_type.struct_.name)) |item_id| {
-                    if (self.file.item(item_id).* == .Struct) return @intCast(item_id.index());
+                    if (self.file.item(item_id).* == .Struct) return self.namedTypeId(item_id);
                 }
                 if (typecheck.instantiatedStructByName(expr_type.struct_.name)) |instantiated| {
-                    return @intCast(instantiated.template_item_id.index());
+                    return self.namedTypeId(instantiated.template_item_id);
                 }
             }
         }
@@ -605,7 +607,7 @@ const ConstEvaluator = struct {
         for (item.Enum.variants, 0..) |variant, idx| {
             if (std.mem.eql(u8, variant.name, variant_name)) {
                 return CtValue{ .enum_val = CtEnum{
-                    .type_id = @intCast(item_id.index()),
+                    .type_id = self.namedTypeId(item_id),
                     .variant_id = @intCast(idx),
                     .payload = null,
                 } };
@@ -695,7 +697,7 @@ const ConstEvaluator = struct {
     }
 
     fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) ?usize {
-        const item_id = ast.ItemId.fromIndex(type_id);
+        const item_id = self.itemIdForNamedTypeId(type_id) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Struct) return null;
         for (item.Struct.fields, 0..) |field, idx| {
@@ -739,6 +741,12 @@ const ConstEvaluator = struct {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
         return try type_query.ensure_typecheck(type_query.context, module_id, key);
+    }
+
+    fn currentModuleTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
+        const module_id = self.module_id orelse return null;
+        const type_query = self.type_query orelse return null;
+        return try type_query.module_typecheck(type_query.context, module_id);
     }
 
     fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {
@@ -789,7 +797,7 @@ const ConstEvaluator = struct {
             type_ids.string_id => "string",
             type_ids.bytes_id => "bytes",
             type_ids.void_id => "void",
-            else => self.itemName(ast.ItemId.fromIndex(type_id)),
+            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
         };
     }
 
@@ -802,8 +810,8 @@ const ConstEvaluator = struct {
     }
 
     fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) ?CallableFunction {
-        const typecheck = (self.currentTypeCheckResult() catch return null) orelse return null;
-        const base_value = self.evalExprCtValue(field.base) catch null;
+        const typecheck = (self.currentModuleTypeCheckResult() catch return null) orelse return null;
+        const base_value = (self.evalExprCtValue(field.base) catch null) orelse self.typeExprCtValue(field.base);
         const target_name = if (base_value) |value|
             self.concreteTypeNameForCtValue(value)
         else
@@ -1216,8 +1224,19 @@ const ConstEvaluator = struct {
         if (std.mem.eql(u8, trimmed, "string")) return type_ids.string_id;
         if (std.mem.eql(u8, trimmed, "bytes")) return type_ids.bytes_id;
         if (std.mem.eql(u8, trimmed, "void")) return type_ids.void_id;
-        if (self.lookupNamedItem(trimmed)) |item_id| return @intCast(item_id.index());
+        if (self.lookupNamedItem(trimmed)) |item_id| return self.namedTypeId(item_id);
         return null;
+    }
+
+    fn namedTypeId(self: *ConstEvaluator, item_id: ast.ItemId) u32 {
+        _ = self;
+        return named_type_id_base + @as(u32, @intCast(item_id.index()));
+    }
+
+    fn itemIdForNamedTypeId(self: *ConstEvaluator, type_id: u32) ?ast.ItemId {
+        _ = self;
+        if (type_id < named_type_id_base) return null;
+        return ast.ItemId.fromIndex(type_id - named_type_id_base);
     }
 
     fn functionStage(self: *ConstEvaluator, function: ast.FunctionItem) Stage {

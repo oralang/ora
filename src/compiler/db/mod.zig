@@ -304,6 +304,7 @@ pub const CompilerDb = struct {
             .type_query = .{
                 .context = self,
                 .ensure_typecheck = ensureTypeCheckedForComptime,
+                .module_typecheck = moduleTypeCheckForComptime,
                 .ast_file = astFileForComptime,
                 .lookup_item = lookupItemForComptime,
                 .resolve_import_alias = resolveImportAliasForComptime,
@@ -548,6 +549,11 @@ pub const CompilerDb = struct {
 fn ensureTypeCheckedForComptime(context: *anyopaque, module_id: source.ModuleId, key: sema.TypeCheckKey) anyerror!*const sema.TypeCheckResult {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.typeCheck(module_id, key);
+}
+
+fn moduleTypeCheckForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.moduleTypeCheck(module_id);
 }
 
 fn astFileForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile {

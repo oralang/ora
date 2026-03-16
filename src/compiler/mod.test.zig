@@ -8051,6 +8051,76 @@ test "compiler const eval rejects runtime-only statements in called functions" {
     try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[ret_stmt.value.?.index()]);
 }
 
+test "compiler const eval executes comptime associated trait methods" {
+    const source_text =
+        \\trait Selector {
+        \\    comptime fn selector() -> u256;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Selector for Box {
+        \\    comptime fn selector() -> u256 {
+        \\        return 7;
+        \\    }
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        Box.selector();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[3]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval executes comptime receiver trait methods" {
+    const source_text =
+        \\trait Marker {
+        \\    comptime fn marked(self) -> u256;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    comptime fn marked(self) -> u256 {
+        \\        return self.value + 1;
+        \\    }
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        Box { value: 4 }.marked();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[3]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler surfaces comptime stage diagnostics through db and typecheck" {
     const source_text =
         \\log Ping(value: u256);

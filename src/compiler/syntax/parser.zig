@@ -329,7 +329,7 @@ const Parser = struct {
                 try children.append(self.allocator, .{ .token = self.bump() });
                 continue;
             }
-            if (self.at(.Fn)) {
+            if (self.at(.Fn) or self.at(.Comptime)) {
                 try children.append(self.allocator, .{ .node = try self.parseImplMethodItem() });
                 continue;
             }
@@ -350,6 +350,10 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.Comptime)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
 

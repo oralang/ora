@@ -652,6 +652,15 @@ const TypeChecker = struct {
     }
 
     fn checkImplMethodSignature(self: *TypeChecker, trait_name: []const u8, trait_method: anytype, impl_method: ast.FunctionItem) anyerror!void {
+        if (impl_method.is_comptime != trait_method.is_comptime) {
+            try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature for trait '{s}': expected {s}comptime fn", .{
+                impl_method.name,
+                trait_name,
+                if (trait_method.is_comptime) "" else "non-",
+            });
+            return;
+        }
+
         const impl_has_self = self.functionHasBareSelf(impl_method);
         if (impl_has_self != trait_method.has_self) {
             try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature: expected {s}self parameter", .{
@@ -823,6 +832,7 @@ const TypeChecker = struct {
         return .{
             .name = function.name,
             .has_self = has_self,
+            .is_comptime = function.is_comptime,
             .param_types = param_types,
             .return_type = return_type,
         };
