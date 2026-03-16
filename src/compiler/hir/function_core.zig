@@ -460,6 +460,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Expr => |expr_stmt| {
+                    if (self.parent.file.expression(expr_stmt.expr).* == .TypeValue) {
+                        return false;
+                    }
                     _ = try self.lowerExpr(expr_stmt.expr, locals);
                     return false;
                 },

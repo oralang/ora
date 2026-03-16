@@ -2321,6 +2321,31 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.address_const"));
 }
 
+test "compiler does not lower type-value expression statements to placeholder ops" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        Pair<u256>;
+        \\        1;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.type_value"));
+}
+
 test "compiler lowers top-level const items through ora.const" {
     const source_text =
         \\const LIMIT: u256 = 2;
@@ -6630,7 +6655,7 @@ test "compiler const eval instantiates generic type values in comptime blocks" {
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.type_value"));
 }
 
 test "compiler const eval resolves generic type aliases in comptime blocks" {
