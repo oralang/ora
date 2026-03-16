@@ -50,10 +50,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         strRef(literal.text),
                         stringType(self.parent.context),
                     );
-                    if (mlir.oraOperationIsNull(op)) {
-                        const placeholder = try self.createValuePlaceholder("ora.string_const", literal.text, literal.range, stringType(self.parent.context));
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
                     mlir.oraOperationSetAttributeByName(
                         op,
                         strRef("length"),
@@ -74,21 +70,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch break :blk2 null_attr;
                         break :blk2 mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
                     };
-                    if (mlir.oraAttributeIsNull(addr_attr)) {
-                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
                     const int_const = mlir.oraArithConstantOpCreate(self.parent.context, self.parent.location(literal.range), i160_type, addr_attr);
-                    if (mlir.oraOperationIsNull(int_const)) {
-                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
                     const i160_value = appendValueOp(self.block, int_const);
                     const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, self.parent.location(literal.range), i160_value);
-                    if (mlir.oraOperationIsNull(addr_op)) {
-                        const placeholder = try self.createValuePlaceholder("ora.address_const", literal.text, literal.range, addressType(self.parent.context));
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
                     break :blk appendValueOp(self.block, addr_op);
                 },
                 .BytesLiteral => |literal| blk: {
@@ -98,10 +82,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         strRef(literal.text),
                         bytesType(self.parent.context),
                     );
-                    if (mlir.oraOperationIsNull(op)) {
-                        const placeholder = try self.createValuePlaceholder("ora.bytes_const", literal.text, literal.range, bytesType(self.parent.context));
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
                     mlir.oraOperationSetAttributeByName(
                         op,
                         strRef("length"),
