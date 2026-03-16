@@ -713,11 +713,19 @@ const ConstEvaluator = struct {
         return null;
     }
 
+    fn patternName(self: *ConstEvaluator, pattern_id: ast.PatternId) ?[]const u8 {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| name.name,
+            else => null,
+        };
+    }
+
     const CallableFunction = struct {
         module_id: source.ModuleId,
         file: *const ast.AstFile,
         item_id: ast.ItemId,
         function: ast.FunctionItem,
+        synthetic_self_arg: ?ast.ExprId = null,
     };
 
     fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
@@ -752,6 +760,92 @@ const ConstEvaluator = struct {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
         return try type_query.resolve_import_alias(type_query.context, module_id, alias);
+    }
+
+    fn functionRuntimeSelfParameterIndex(self: *ConstEvaluator, function: ast.FunctionItem) ?usize {
+        for (function.parameters, 0..) |parameter, index| {
+            if (parameter.is_comptime) continue;
+            return if (std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) index else null;
+        }
+        return null;
+    }
+
+    fn typeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
+        return switch (type_id) {
+            type_ids.u8_id => "u8",
+            type_ids.u16_id => "u16",
+            type_ids.u32_id => "u32",
+            type_ids.u64_id => "u64",
+            type_ids.u128_id => "u128",
+            type_ids.u256_id => "u256",
+            type_ids.i8_id => "i8",
+            type_ids.i16_id => "i16",
+            type_ids.i32_id => "i32",
+            type_ids.i64_id => "i64",
+            type_ids.i128_id => "i128",
+            type_ids.i256_id => "i256",
+            type_ids.bool_id => "bool",
+            type_ids.address_id => "address",
+            type_ids.string_id => "string",
+            type_ids.bytes_id => "bytes",
+            type_ids.void_id => "void",
+            else => self.itemName(ast.ItemId.fromIndex(type_id)),
+        };
+    }
+
+    fn concreteTypeNameForCtValue(self: *ConstEvaluator, value: CtValue) ?[]const u8 {
+        return switch (value) {
+            .type_val => |type_id| self.typeNameForTypeId(type_id),
+            .struct_ref => |heap_id| self.typeNameForTypeId(self.env.heap.getStruct(heap_id).type_id),
+            else => null,
+        };
+    }
+
+    fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) ?CallableFunction {
+        const typecheck = (self.currentTypeCheckResult() catch return null) orelse return null;
+        const base_value = self.evalExprCtValue(field.base) catch null;
+        const target_name = if (base_value) |value|
+            self.concreteTypeNameForCtValue(value)
+        else
+            typecheck.exprType(field.base).name();
+        const concrete_name = target_name orelse return null;
+        var matched_impl_item_id: ?ast.ItemId = null;
+        var matched_method_item_id: ?ast.ItemId = null;
+        var matched_function: ?ast.FunctionItem = null;
+
+        for (typecheck.impl_interfaces) |impl_interface| {
+            if (!std.mem.eql(u8, impl_interface.target_name, concrete_name)) continue;
+            const trait_interface = typecheck.traitInterfaceByName(impl_interface.trait_name) orelse continue;
+            var trait_is_comptime = false;
+            for (trait_interface.methods) |trait_method| {
+                if (!std.mem.eql(u8, trait_method.name, field.name)) continue;
+                trait_is_comptime = trait_method.is_comptime;
+                break;
+            }
+            if (!trait_is_comptime) continue;
+
+            const impl_item = self.file.item(impl_interface.impl_item_id).Impl;
+            for (impl_item.methods) |method_item_id| {
+                const item = self.file.item(method_item_id).*;
+                if (item != .Function) continue;
+                if (!std.mem.eql(u8, item.Function.name, field.name)) continue;
+                if (matched_impl_item_id != null) return null;
+                matched_impl_item_id = impl_interface.impl_item_id;
+                matched_method_item_id = method_item_id;
+                matched_function = item.Function;
+            }
+        }
+
+        _ = matched_impl_item_id orelse return null;
+        const method_item_id = matched_method_item_id orelse return null;
+        const function = matched_function orelse return null;
+        return .{
+            .module_id = self.module_id orelse return null,
+            .file = self.file,
+            .item_id = method_item_id,
+            .function = function,
+            .synthetic_self_arg = if (self.functionRuntimeSelfParameterIndex(function) != null) field.base else null,
+        };
     }
 
     fn ensureTypeExprTypeChecked(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !void {
@@ -789,21 +883,25 @@ const ConstEvaluator = struct {
                 };
             },
             .Field => |field| {
-                const base_name = switch (self.file.expression(field.base).*) {
+                if (switch (self.file.expression(field.base).*) {
                     .Name => |name| name.name,
-                    else => return null,
-                };
-                const target_module_id = (self.resolveImportAlias(base_name) catch return null) orelse return null;
-                const target_file = self.astFileForModule(target_module_id) catch return null;
-                const function_item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch return null) orelse return null;
-                const item = target_file.item(function_item_id).*;
-                if (item != .Function) return null;
-                return .{
-                    .module_id = target_module_id,
-                    .file = target_file,
-                    .item_id = function_item_id,
-                    .function = item.Function,
-                };
+                    else => null,
+                }) |base_name| {
+                    if ((self.resolveImportAlias(base_name) catch null)) |target_module_id| {
+                        const target_file = self.astFileForModule(target_module_id) catch return null;
+                        const function_item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch return null) orelse return null;
+                        const item = target_file.item(function_item_id).*;
+                        if (item == .Function) {
+                            return .{
+                                .module_id = target_module_id,
+                                .file = target_file,
+                                .item_id = function_item_id,
+                                .function = item.Function,
+                            };
+                        }
+                    }
+                }
+                return self.resolveConcreteTraitMethodCall(field);
             },
             .Group => |group| return self.lookupCallableFunction(group.expr),
             else => return null,
@@ -921,7 +1019,9 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (function.parameters.len != call.args.len) return null;
+        const self_param_index = self.functionRuntimeSelfParameterIndex(function);
+        const expected_args = function.parameters.len - @intFromBool(callable.synthetic_self_arg != null and self_param_index != null);
+        if (expected_args != call.args.len) return null;
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
@@ -931,9 +1031,17 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        var arg_values = try self.allocator.alloc(CtValue, call.args.len);
-        for (call.args, function.parameters, 0..) |arg, parameter, idx| {
-            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg, use_cache)) orelse return null;
+        var arg_values = try self.allocator.alloc(CtValue, function.parameters.len);
+        var user_arg_index: usize = 0;
+        for (function.parameters, 0..) |parameter, idx| {
+            const arg_expr = if (callable.synthetic_self_arg != null and self_param_index != null and idx == self_param_index.?)
+                callable.synthetic_self_arg.?
+            else blk: {
+                const arg = call.args[user_arg_index];
+                user_arg_index += 1;
+                break :blk arg;
+            };
+            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg_expr, use_cache)) orelse return null;
         }
 
         self.env.pushScope(false) catch return null;
@@ -984,7 +1092,9 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (function.parameters.len != call.args.len) return null;
+        const self_param_index = self.functionRuntimeSelfParameterIndex(function);
+        const expected_args = function.parameters.len - @intFromBool(callable.synthetic_self_arg != null and self_param_index != null);
+        if (expected_args != call.args.len) return null;
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
@@ -994,9 +1104,17 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        var arg_values = try self.allocator.alloc(CtValue, call.args.len);
-        for (call.args, function.parameters, 0..) |arg, parameter, idx| {
-            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg, use_cache)) orelse return null;
+        var arg_values = try self.allocator.alloc(CtValue, function.parameters.len);
+        var user_arg_index: usize = 0;
+        for (function.parameters, 0..) |parameter, idx| {
+            const arg_expr = if (callable.synthetic_self_arg != null and self_param_index != null and idx == self_param_index.?)
+                callable.synthetic_self_arg.?
+            else blk: {
+                const arg = call.args[user_arg_index];
+                user_arg_index += 1;
+                break :blk arg;
+            };
+            arg_values[idx] = (try self.evalCallArgumentCtValue(parameter, arg_expr, use_cache)) orelse return null;
         }
 
         self.env.pushScope(false) catch return null;
