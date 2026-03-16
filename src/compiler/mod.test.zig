@@ -6784,6 +6784,66 @@ test "compiler const eval sequences comptime block locals" {
     try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval executes multi statement comptime scalar calls" {
+    const source_text =
+        \\comptime fn helper() -> u256 {
+        \\    let base = 2;
+        \\    let sum = base + 3;
+        \\    return sum;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        helper();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval executes multi statement comptime aggregate calls" {
+    const source_text =
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\comptime fn make() -> Box {
+        \\    let value = 42;
+        \\    return Box { value: value };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let built = make();
+        \\        built.value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval can populate callee type checks on demand" {
     const source_text =
         \\comptime fn helper() -> u256 {
