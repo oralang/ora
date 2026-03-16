@@ -320,7 +320,15 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Comptime => |comptime_expr| blk: {
-                break :blk try self.evalComptimeBody(comptime_expr.body);
+                const value = try self.evalComptimeBody(comptime_expr.body);
+                if (value == null) {
+                    self.recordMissingComptimeValue(
+                        self.sourceSpan(comptime_expr.range),
+                        "comptime block did not produce a value",
+                        null,
+                    );
+                }
+                break :blk value;
             },
             .ErrorReturn => |error_return| blk: {
                 for (error_return.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
@@ -1093,7 +1101,15 @@ const ConstEvaluator = struct {
             if (!truthy) return null;
         }
 
-        return try self.evalComptimeBody(function.body);
+        const value = try self.evalComptimeBody(function.body);
+        if (value == null) {
+            self.recordMissingComptimeValue(
+                self.sourceSpan(call.range),
+                "comptime call did not produce a value",
+                function.name,
+            );
+        }
+        return value;
     }
 
     fn evalCallCtValue(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
@@ -1149,7 +1165,15 @@ const ConstEvaluator = struct {
             if (!truthy) return null;
         }
 
-        return try self.evalComptimeBodyCtValue(function.body, use_cache);
+        const value = try self.evalComptimeBodyCtValue(function.body, use_cache);
+        if (value == null) {
+            self.recordMissingComptimeValue(
+                self.sourceSpan(call.range),
+                "comptime call did not produce a value",
+                function.name,
+            );
+        }
+        return value;
     }
 
     fn evalExprAsCtValue(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
@@ -1403,6 +1427,19 @@ const ConstEvaluator = struct {
             .length = @intCast(range.end - range.start),
             .byte_offset = @intCast(range.start),
         };
+    }
+
+    fn recordMissingComptimeValue(
+        self: *ConstEvaluator,
+        span: SourceSpan,
+        message: []const u8,
+        reason: ?[]const u8,
+    ) void {
+        if (self.last_error != null) return;
+        self.last_error = if (reason) |detail|
+            error_mod.CtError.withReason(.not_comptime, span, message, detail)
+        else
+            error_mod.CtError.init(.not_comptime, span, message);
     }
 
     fn statementRange(self: *ConstEvaluator, statement_id: ast.StmtId) source.TextRange {

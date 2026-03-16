@@ -8394,6 +8394,45 @@ test "compiler surfaces comptime stage diagnostics through db and typecheck" {
     try testing.expect(std.mem.containsAtLeast(u8, typecheck_diags.items.items[0].message, 1, "runtime-only operation in comptime context"));
 }
 
+test "compiler reports missing top-level comptime values through diagnostics" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let value = missingName;
+        \\        value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "comptime block did not produce a value"));
+}
+
+test "compiler reports missing comptime call values through diagnostics" {
+    const source_text =
+        \\comptime fn broken() -> u256 {
+        \\    let value = missingName;
+        \\    value;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        broken();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "comptime call did not produce a value"));
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "broken"));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {
