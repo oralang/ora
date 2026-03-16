@@ -214,9 +214,6 @@ fn collectCarriedLocalsFromStmt(
         .Try => |try_stmt| collectTryCarriedLocalsFromEnv(allocator, file, try_stmt, outer_env, current_env, carried_locals, carried_seen),
         .While => |while_stmt| blk: {
             var loop_env = try current_env.clone();
-            if (bodyMayReturn(file, while_stmt.body) or bodyContainsLoopControl(file, while_stmt.body)) {
-                break :blk !(try bodyMutatesOuterLocalsInEnv(file, while_stmt.body, outer_env, &loop_env));
-            }
             break :blk collectCarriedLocalsInEnv(allocator, file, while_stmt.body, outer_env, &loop_env, carried_locals, carried_seen);
         },
         .For => |for_stmt| blk: {
@@ -225,7 +222,7 @@ fn collectCarriedLocalsFromStmt(
             if (for_stmt.index_pattern) |index_pattern| {
                 try loop_env.bindPatternWithoutValue(file, index_pattern);
             }
-            break :blk !(try bodyMutatesOuterLocalsInEnv(file, for_stmt.body, outer_env, &loop_env));
+            break :blk collectCarriedLocalsInEnv(allocator, file, for_stmt.body, outer_env, &loop_env, carried_locals, carried_seen);
         },
         else => true,
     };
