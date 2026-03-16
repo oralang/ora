@@ -247,7 +247,7 @@ const ConstEvaluator = struct {
             if (self.values[expr_id.index()]) |cached| return cached;
         }
 
-        if (self.file.expression(expr_id).* != .Call) {
+        if (!self.exprUsesConstFallbackForCtValue(expr_id)) {
             if (try self.evalExprCtValue(expr_id)) |ct_value| {
                 const const_value = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 if (const_value != null) {
@@ -399,6 +399,10 @@ const ConstEvaluator = struct {
             .Name => |name| self.env.lookupValue(name.name),
             .Group => |group| try self.evalExprCtValue(group.expr),
             .Call => |call| try self.evalCallCtValue(call, true),
+            .Unary, .Switch, .Comptime => blk: {
+                const const_value = (try self.evalExprImpl(expr_id, true)) orelse break :blk null;
+                break :blk (try constToCtValue(const_value)) orelse null;
+            },
             .ArrayLiteral => |array| blk: {
                 const elems = try self.allocator.alloc(CtValue, array.elements.len);
                 for (array.elements, 0..) |element_id, idx| {
@@ -540,6 +544,13 @@ const ConstEvaluator = struct {
             .Slice => .slice,
             .Generic => |generic| if (std.mem.eql(u8, generic.name, "map")) .map else .none,
             else => .none,
+        };
+    }
+
+    fn exprUsesConstFallbackForCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Call, .Unary, .Switch, .Comptime => true,
+            else => false,
         };
     }
 

@@ -8433,6 +8433,85 @@ test "compiler reports missing comptime call values through diagnostics" {
     try testing.expect(diagnosticMessagesContain(consteval_diags, "broken"));
 }
 
+test "compiler const eval executes unary returns through comptime call fallback" {
+    const source_text =
+        \\comptime fn invert(flag: bool) -> bool {
+        \\    return !flag;
+        \\}
+        \\
+        \\pub fn run() -> bool {
+        \\    return comptime {
+        \\        invert(false);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler const eval executes switch returns through comptime call fallback" {
+    const source_text =
+        \\comptime fn choose(flag: bool) -> u256 {
+        \\    return switch (flag) {
+        \\        true => 7,
+        \\        else => 9,
+        \\    };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        choose(true);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval executes nested comptime expressions through ct fallback" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        comptime {
+        \\            7;
+        \\        };
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler lowers ghost items into ghost AST nodes" {
     const source_text =
         \\contract Spec {
