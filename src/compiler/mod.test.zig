@@ -7088,6 +7088,100 @@ test "compiler const eval generic calls can return value-generic refinement alia
     try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval generic calls can return nested generic struct values" {
+    const source_text =
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\comptime fn make_nested(comptime T: type, left: T, right: T) -> Pair<Pair<T>> {
+        \\    return Pair<Pair<T>> {
+        \\        left: Pair<T> { left: left, right: right },
+        \\        right: Pair<T> { left: right, right: left },
+        \\    };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let nested = make_nested(u256, 1, 2);
+        \\        nested.right.left;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const nested_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+    const field_stmt = ast_file.statement(comptime_body.statements[1]).Expr;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, typecheck.exprType(nested_decl.value.?).kind());
+    try testing.expectEqualStrings("Pair__Pair__u256", typecheck.exprType(nested_decl.value.?).name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_stmt.expr).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 2), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval generic calls can return nested value-generic alias values" {
+    const source_text =
+        \\struct FixedPoint(comptime T: type, comptime SCALE: u256) {
+        \\    value: T,
+        \\}
+        \\
+        \\struct Pair(comptime T: type) {
+        \\    left: T,
+        \\    right: T,
+        \\}
+        \\
+        \\type Scaled(comptime SCALE: u256) = FixedPoint<u256, SCALE>;
+        \\
+        \\comptime fn make_scaled_pair(comptime SCALE: u256, left: u256, right: u256) -> Pair<Scaled<SCALE>> {
+        \\    return Pair<Scaled<SCALE>> {
+        \\        left: Scaled<SCALE> { value: left },
+        \\        right: Scaled<SCALE> { value: right },
+        \\    };
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let pair = make_scaled_pair(18, 4, 5);
+        \\        pair.right.value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[4]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_expr = ast_file.expression(ret_stmt.value.?).Comptime;
+    const comptime_body = ast_file.body(comptime_expr.body);
+    const pair_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+    const field_stmt = ast_file.statement(comptime_body.statements[1]).Expr;
+
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[4] });
+    try testing.expectEqual(compiler.sema.TypeKind.struct_, typecheck.exprType(pair_decl.value.?).kind());
+    try testing.expectEqualStrings("Pair__FixedPoint__u256__18", typecheck.exprType(pair_decl.value.?).name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_stmt.expr).kind());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler db breaks same-key const eval recursion with unknown sentinel" {
     const source_text =
         \\comptime fn loop() -> u256 {
