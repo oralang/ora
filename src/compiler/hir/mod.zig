@@ -666,6 +666,7 @@ const FunctionLowerer = struct {
     pub const appendUnsupportedControlPlaceholder = FunctionCore.appendUnsupportedControlPlaceholder;
     pub const filterCarriedLocals = FunctionCore.filterCarriedLocals;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
+    pub const materializeCarriedLocalValue = FunctionCore.materializeCarriedLocalValue;
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;

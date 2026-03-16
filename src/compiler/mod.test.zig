@@ -5664,6 +5664,28 @@ test "compiler skips unknown carried locals in for lowering" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers for loops with typed carried locals without explicit initializer" {
+    const source_text =
+        \\pub fn sum(values: slice[u256]) -> u256 {
+        \\    let total: u256;
+        \\    for (values) |value| {
+        \\        total = total + value;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers while loops with nested for carried locals" {
     const source_text =
         \\pub fn sum(limit: u256, values: slice[u256]) -> u256 {
@@ -9162,6 +9184,30 @@ test "compiler lowers while loops with early return without placeholders" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
+test "compiler lowers while loops with typed carried locals without explicit initializer" {
+    const source_text =
+        \\pub fn count(limit: u256) -> u256 {
+        \\    let value: u256;
+        \\    let i = 0;
+        \\    while (i < limit) {
+        \\        value = value + 1;
+        \\        i = i + 1;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 

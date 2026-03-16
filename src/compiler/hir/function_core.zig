@@ -1385,10 +1385,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var init_operands: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
-                const value = locals.getValue(local_id) orelse {
-                    try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
-                    return false;
-                };
+                const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
             }
 
@@ -1655,10 +1652,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
         ) anyerror!?std.ArrayList(mlir.MlirType) {
+            _ = locals;
             var result_types: std.ArrayList(mlir.MlirType) = .{};
             for (carried_locals) |local_id| {
-                const value = locals.getValue(local_id) orelse return null;
-                try result_types.append(self.parent.allocator, mlir.oraValueGetType(value));
+                const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
+                if (sema_type.kind() == .unknown) return null;
+                try result_types.append(self.parent.allocator, self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, local_id)));
             }
             return result_types;
         }
@@ -1677,6 +1676,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return filtered;
         }
 
+        pub fn materializeCarriedLocalValue(
+            self: *FunctionLowerer,
+            locals: *const LocalEnv,
+            local_id: LocalId,
+        ) anyerror!mlir.MlirValue {
+            if (locals.getValue(local_id)) |value| return value;
+
+            const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
+            if (sema_type.kind() == .unknown) return error.MlirOperationCreationFailed;
+            return self.defaultValue(
+                self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, local_id)),
+                patternRange(self.parent.file, local_id),
+            );
+        }
+
         pub fn appendOraYieldFromLocals(
             self: *FunctionLowerer,
             block: mlir.MlirBlock,
@@ -1691,7 +1705,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals) |local_id| {
-                const value = locals.getValue(local_id) orelse return error.MlirOperationCreationFailed;
+                const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);
             }
             try appendOraYieldValues(self.parent.context, block, self.parent.location(range), yielded_values.items);
@@ -1711,7 +1725,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals) |local_id| {
-                const value = locals.getValue(local_id) orelse return error.MlirOperationCreationFailed;
+                const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);
             }
             try appendScfYieldValues(self.parent.context, block, self.parent.location(range), yielded_values.items);

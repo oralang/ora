@@ -277,10 +277,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var init_operands: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
-                const value = locals.getValue(local_id) orelse {
-                    try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
-                    return false;
-                };
+                const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
             }
             const result_types = (try self.buildCarriedResultTypes(locals, carried_locals.items)) orelse {
@@ -355,7 +352,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var condition_values: std.ArrayList(mlir.MlirValue) = .{};
             for (carried_locals.items) |local_id| {
-                const value = before_locals.getValue(local_id) orelse return error.MlirOperationCreationFailed;
+                const value = try before_lowerer.materializeCarriedLocalValue(&before_locals, local_id);
                 try condition_values.append(self.parent.allocator, value);
             }
 
