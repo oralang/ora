@@ -1341,13 +1341,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const loc = self.parent.location(for_stmt.range);
             const iterable = try self.lowerExpr(for_stmt.iterable, locals);
             const iterable_type = mlir.oraValueGetType(iterable);
+            const has_return = bodyMayReturn(self.parent.file, for_stmt.body);
 
             if (!mlir.oraTypeIsAMemRef(iterable_type) or
-                mlir.oraShapedTypeGetRank(iterable_type) != 1 or
-                bodyMayReturn(self.parent.file, for_stmt.body))
+                mlir.oraShapedTypeGetRank(iterable_type) != 1)
             {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
                 return false;
+            }
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(for_stmt.range);
             }
 
             const has_loop_control = bodyContainsLoopControl(self.parent.file, for_stmt.body);
@@ -1466,19 +1470,43 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try body_lowerer.bindPatternValue(index_pattern, index_value, &body_locals);
             }
 
-            if (has_loop_control) {
-                const break_flag_value = appendValueOp(body_block, blk: {
-                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, break_flag, null, 0, boolType(self.parent.context));
-                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
-                    break :blk load;
-                });
-                const break_flag_clear = appendValueOp(
+            const has_execution_guard = has_loop_control or has_return;
+            if (has_execution_guard) {
+                var loop_condition = if (has_loop_control) guard_blk: {
+                    const break_flag_value = appendValueOp(body_block, load_blk: {
+                        const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, break_flag, null, 0, boolType(self.parent.context));
+                        if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                        break :load_blk load;
+                    });
+                    const break_flag_clear = appendValueOp(
+                        body_block,
+                        createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                    );
+                    const loop_enabled = body_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
+                    if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
+                    break :guard_blk appendValueOp(body_block, loop_enabled);
+                } else appendValueOp(
                     body_block,
-                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1),
                 );
-                const loop_enabled = body_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
-                if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
-                const loop_condition = appendValueOp(body_block, loop_enabled);
+
+                if (has_return) {
+                    const return_flag_value = appendValueOp(body_block, blk: {
+                        const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, self.deferred_return_flag.?, null, 0, boolType(self.parent.context));
+                        if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                        break :blk load;
+                    });
+                    const return_flag_clear = appendValueOp(
+                        body_block,
+                        createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                    );
+                    const return_enabled = body_lowerer.createCompareOp(loc, "eq", return_flag_value, return_flag_clear);
+                    if (mlir.oraOperationIsNull(return_enabled)) return error.MlirOperationCreationFailed;
+                    loop_condition = appendValueOp(
+                        body_block,
+                        mlir.oraArithAndIOpCreate(self.parent.context, loc, loop_condition, appendValueOp(body_block, return_enabled)),
+                    );
+                }
 
                 const result_types = if (carried_locals.items.len == 0)
                     null
@@ -1507,6 +1535,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                 var then_lowerer = body_lowerer;
                 then_lowerer.block = then_block;
+                if (has_return) {
+                    then_lowerer.deferred_return_kind = .scf_yield;
+                    then_lowerer.deferred_return_carried_locals = carried_locals.items;
+                }
                 var then_locals = try self.cloneLocals(&body_locals);
                 try @This().lowerLoopInvariants(&then_lowerer, for_stmt.invariants, &then_locals);
                 _ = try then_lowerer.lowerBody(for_stmt.body, &then_locals);
@@ -1530,6 +1562,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
+            if (created_deferred_return) {
+                try self.appendDeferredReturnCheck(for_stmt.range);
+            }
             return false;
         }
 

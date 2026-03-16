@@ -395,9 +395,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
-            if (switchMayReturn(self.parent.file, switch_stmt)) {
-                try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
-                return false;
+            const has_return = switchMayReturn(self.parent.file, switch_stmt);
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(switch_stmt.range);
             }
 
             const condition = try self.lowerExpr(switch_stmt.condition, locals);
@@ -432,13 +433,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
             for (switch_stmt.arms, 0..) |arm, case_index| {
-                try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items);
+                try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items, has_return);
             }
 
             if (switch_stmt.else_body) |else_body| {
-                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, switch_stmt.range, locals, carried_locals.items);
+                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, switch_stmt.range, locals, carried_locals.items, has_return);
             } else if (carried_locals.items.len > 0) {
-                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, switch_stmt.range, locals, carried_locals.items);
+                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, switch_stmt.range, locals, carried_locals.items, has_return);
             }
 
             mlir.oraSwitchOpSetCasePatterns(
@@ -453,6 +454,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, op);
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
+            }
+            if (created_deferred_return) {
+                try self.appendDeferredReturnCheck(switch_stmt.range);
             }
             return false;
         }
@@ -542,12 +546,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             range: source.TextRange,
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
+            has_return: bool,
         ) anyerror!void {
             const case_block = mlir.oraSwitchOpGetCaseBlock(op, case_index);
             if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
 
             var case_lowerer = self.*;
             case_lowerer.block = case_block;
+            if (has_return) {
+                case_lowerer.deferred_return_kind = .ora_yield;
+                case_lowerer.deferred_return_carried_locals = carried_locals;
+            }
             var switch_context = SwitchContext{ .parent = self.switch_context };
             case_lowerer.switch_context = &switch_context;
             var case_locals = try self.cloneLocals(locals);

@@ -5613,6 +5613,32 @@ test "compiler lowers for invariants through ora.invariant" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers for loops with early return without placeholders" {
+    const source_text =
+        \\pub fn scan(values: slice[u256], stop_at: u256) -> u256 {
+        \\    let total = 0;
+        \\    for (values) |value| {
+        \\        if (value == stop_at) {
+        \\            return total;
+        \\        }
+        \\        total = total + value;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers direct map index load and store through real map ops" {
     const source_text =
         \\contract Maps {
@@ -8454,6 +8480,34 @@ test "compiler lowers real HIR switch regions with carried locals" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
+test "compiler lowers switch statements with early return without placeholders" {
+    const source_text =
+        \\pub fn choose(tag: u256, start: u256) -> u256 {
+        \\    let value = start;
+        \\    switch (tag) {
+        \\        0 => {
+        \\            return value;
+        \\        },
+        \\        else => {
+        \\            value = value + 2;
+        \\        }
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
 }
 
