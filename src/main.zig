@@ -1191,7 +1191,7 @@ fn compilerDiagnosticSeverityName(severity: compiler.diagnostics.Severity) []con
 }
 
 fn writeJsonString(writer: anytype, text: []const u8) !void {
-    try std.json.stringify(text, .{}, writer);
+    try std.json.Stringify.value(text, .{}, writer);
 }
 
 fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
