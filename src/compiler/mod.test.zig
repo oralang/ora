@@ -604,6 +604,96 @@ test "compiler allows writes around extern staticcall" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
+test "compiler allows post-call writes when pre-call storage write is branch-local" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Test {
+        \\    storage var balance: u256 = 0;
+        \\    storage var token: address;
+        \\
+        \\    pub fn example(flag: bool, addr: address) {
+        \\        if (flag) {
+        \\            balance = 100;
+        \\        }
+        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        _ = ok;
+        \\        balance += 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
+test "compiler rejects post-call writes when all branches wrote same storage slot before call" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Test {
+        \\    storage var balance: u256 = 0;
+        \\    storage var token: address;
+        \\
+        \\    pub fn example(flag: bool, addr: address) {
+        \\        if (flag) {
+        \\            balance = 100;
+        \\        } else {
+        \\            balance = 200;
+        \\        }
+        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        _ = ok;
+        \\        balance += 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot 'balance' after external call because it was written before the call"));
+}
+
+test "compiler still rejects same-slot write before and after extern call without branches" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Test {
+        \\    storage var balance: u256 = 0;
+        \\    storage var token: address;
+        \\
+        \\    pub fn example(addr: address) {
+        \\        balance = 100;
+        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        _ = ok;
+        \\        balance += 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot 'balance' after external call because it was written before the call"));
+}
+
 test "compiler lowers extern trait calls to abi and external call ops" {
     const source_text =
         \\extern trait ERC20 {

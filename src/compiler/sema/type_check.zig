@@ -2342,7 +2342,9 @@ const TypeChecker = struct {
     }
 
     fn mergeExternalCallValidationState(self: *TypeChecker, dst: *ExternalCallValidationState, src: ExternalCallValidationState) !void {
-        try self.mergeStorageSlots(&dst.current_writes, src.current_writes.items);
+        const intersected_current = try self.intersectStorageSlots(dst.current_writes.items, src.current_writes.items);
+        dst.current_writes.deinit(self.arena);
+        dst.current_writes = intersected_current;
         try self.mergeStorageSlots(&dst.frozen_pre_call_writes, src.frozen_pre_call_writes.items);
     }
 
@@ -2817,6 +2819,20 @@ const TypeChecker = struct {
         var result: std.ArrayList(EffectSlot) = .{};
         for (lhs) |lhs_slot| {
             for (rhs) |rhs_slot| {
+                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
+                try result.append(self.arena, lhs_slot);
+                break;
+            }
+        }
+        return result;
+    }
+
+    fn intersectStorageSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
+        var result: std.ArrayList(EffectSlot) = .{};
+        for (lhs) |lhs_slot| {
+            if (lhs_slot.region != .storage) continue;
+            for (rhs) |rhs_slot| {
+                if (rhs_slot.region != .storage) continue;
                 if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
                 try result.append(self.arena, lhs_slot);
                 break;
