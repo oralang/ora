@@ -489,7 +489,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveExternProxyMethodCall(self, call.callee) orelse return null;
             switch (resolved.method.return_type.kind()) {
-                .bool, .address, .integer => {},
+                .bool, .address, .integer, .string, .bytes, .struct_, .contract => {},
                 else => return error.UnsupportedExternTraitLowering,
             }
 
@@ -520,7 +520,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const arg_types_attr = mlir.oraArrayAttrCreate(self.parent.context, @intCast(arg_type_attrs.items.len), if (arg_type_attrs.items.len == 0) null else arg_type_attrs.items.ptr);
 
             var return_type_attrs: [1]mlir.MlirAttribute = .{undefined};
-            const abi_return = try abi_support.canonicalAbiType(self.parent.allocator, resolved.method.return_type);
+            const abi_return = try abi_support.externReturnAbiType(self.parent.allocator, resolved.method.return_type);
             defer self.parent.allocator.free(abi_return);
             return_type_attrs[0] = mlir.oraStringAttrCreate(self.parent.context, strRef(abi_return));
             const return_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &return_type_attrs);

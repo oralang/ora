@@ -713,6 +713,118 @@ test "compiler converts call-kind extern traits with bool and address returns th
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
 
+test "compiler converts extern trait calls with narrow integer returns through SIR" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    staticcall fn decimals(self) -> u8;
+        \\    staticcall fn basisPoints(self) -> u16;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn tokenDecimals() -> !u8 | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).decimals();
+        \\    }
+        \\
+        \\    pub fn feeBps() -> !u16 | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).basisPoints();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
+test "compiler converts extern trait calls with dynamic bytes and string returns through SIR" {
+    const source_text =
+        \\extern trait ERC20Meta {
+        \\    staticcall fn name(self) -> string;
+        \\    staticcall fn symbolBytes(self) -> bytes;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn tokenName() -> !string | ExternalCallFailed {
+        \\        return external<ERC20Meta>(token, gas: 50000).name();
+        \\    }
+        \\
+        \\    pub fn tokenSymbolBytes() -> !bytes | ExternalCallFailed {
+        \\        return external<ERC20Meta>(token, gas: 50000).symbolBytes();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatasize"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
+test "compiler converts extern trait calls with static struct returns through SIR" {
+    const source_text =
+        \\struct Snapshot {
+        \\    owner: address;
+        \\    amount: u256;
+        \\}
+        \\
+        \\extern trait VaultView {
+        \\    staticcall fn snapshot(self) -> Snapshot;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var target: address;
+        \\
+        \\    pub fn snapshotView() -> !Snapshot | ExternalCallFailed {
+        \\        return external<VaultView>(target, gas: 50000).snapshot();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
 test "compiler computes extern trait ABI signatures" {
     const source_text =
         \\extern trait ERC20 {

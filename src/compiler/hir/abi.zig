@@ -27,6 +27,13 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
     };
 }
 
+pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
+    return switch (ty) {
+        .struct_, .contract => allocator.dupe(u8, "tuple"),
+        else => canonicalAbiType(allocator, ty),
+    };
+}
+
 pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_self: bool, param_types: []const sema.Type) ![]const u8 {
     var signature_parts: std.ArrayList([]const u8) = .{};
     defer {

@@ -2048,7 +2048,7 @@ LogicalResult ConvertAbiEncodeOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.external_call - scalar v1 call/staticcall boundary
+// Lower ora.external_call - scalar/dynamic v1 call/staticcall boundary
 // -----------------------------------------------------------------------------
 LogicalResult ConvertExternalCallOp::matchAndRewrite(
     ora::ExternalCallOp op,
@@ -2077,11 +2077,11 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         op.getLoc(),
         u256Type,
         mlir::IntegerAttr::get(ui64Type, calldataBytes));
-    Value returnLen = rewriter.create<sir::ConstOp>(
+    Value scratchReturnLen = rewriter.create<sir::ConstOp>(
         op.getLoc(),
         u256Type,
         mlir::IntegerAttr::get(ui64Type, 32));
-    Value returnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, returnLen);
+    Value scratchReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, scratchReturnLen);
     Value calldataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getCalldata());
     Value gas = ensureU256(rewriter, op.getLoc(), adaptor.getGas());
     Value target = ensureU256(rewriter, op.getLoc(), adaptor.getTarget());
@@ -2096,8 +2096,8 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
             target,
             calldataPtr,
             calldataLen,
-            returnPtr,
-            returnLen);
+            scratchReturnPtr,
+            scratchReturnLen);
     }
     else if (callKind.getValue() == "call")
     {
@@ -2113,8 +2113,8 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
             zeroValue,
             calldataPtr,
             calldataLen,
-            returnPtr,
-            returnLen);
+            scratchReturnPtr,
+            scratchReturnLen);
     }
     else
     {
@@ -2131,13 +2131,20 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         callOp->setAttr("ora.selector", selectorAttr);
 
     Value callSuccess = callOp->getResult(0);
-    Value returnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, returnPtr);
-    rewriter.replaceOp(op, ValueRange{callSuccess, returnPtrU256});
+    Value fullReturnLen = rewriter.create<sir::ReturnDataSizeOp>(op.getLoc(), u256Type);
+    Value fullReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, fullReturnLen);
+    Value zeroOffset = rewriter.create<sir::ConstOp>(
+        op.getLoc(),
+        u256Type,
+        mlir::IntegerAttr::get(ui64Type, 0));
+    rewriter.create<sir::ReturnDataCopyOp>(op.getLoc(), fullReturnPtr, zeroOffset, fullReturnLen);
+    Value fullReturnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, fullReturnPtr);
+    rewriter.replaceOp(op, ValueRange{callSuccess, fullReturnPtrU256});
     return success();
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.abi_decode - scalar v1 decode from return buffer
+// Lower ora.abi_decode - scalar/dynamic v1 decode from return buffer
 // -----------------------------------------------------------------------------
 LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     ora::AbiDecodeOp op,
@@ -2156,6 +2163,38 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
     Value returndataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getReturndata());
+
+    Type origType = op.getResult().getType();
+    if (llvm::isa<ora::StringType, ora::BytesType>(origType))
+    {
+        Type convertedType = typeConverter->convertType(origType);
+        if (!convertedType)
+            convertedType = ptrType;
+
+        Value offset = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
+        Value dataPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, returndataPtr, offset);
+        if (convertedType != ptrType)
+            rewriter.replaceOp(op, rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, dataPtr));
+        else
+            rewriter.replaceOp(op, dataPtr);
+        return success();
+    }
+
+    if (auto structType = llvm::dyn_cast<ora::StructType>(origType))
+    {
+        Type convertedType = typeConverter->convertType(origType);
+        if (!convertedType)
+            convertedType = ptrType;
+
+        Value decodedPtr = returndataPtr;
+        if (convertedType != ptrType)
+            decodedPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, decodedPtr);
+
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(op.getLoc(), TypeRange{origType}, ValueRange{decodedPtr});
+        rewriter.replaceOp(op, cast.getResults());
+        return success();
+    }
+
     Value loaded = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
 
     Type convertedType = typeConverter->convertType(op.getResult().getType());
