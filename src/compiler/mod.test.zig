@@ -667,6 +667,44 @@ test "compiler converts extern trait calls through SIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
 
+test "compiler converts call-kind extern traits with bool and address returns through SIR" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\    staticcall fn owner(self) -> address;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) -> !bool | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\
+        \\    pub fn currentOwner() -> !address | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).owner();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.call"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
 test "compiler computes extern trait ABI signatures" {
     const source_text =
         \\extern trait ERC20 {
