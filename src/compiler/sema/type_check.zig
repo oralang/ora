@@ -1135,7 +1135,13 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = .{ .named = .{ .name = error_return.name } };
             },
             .Name => {
-                self.expr_types[expr_id.index()] = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
+                const binding_type = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
+                self.expr_types[expr_id.index()] = if (binding_type.kind() != .unknown)
+                    binding_type
+                else switch (self.file.expression(expr_id).*) {
+                    .Name => |name| self.typeValueNameType(name.name),
+                    else => .{ .unknown = {} },
+                };
             },
             .Result => {
                 self.expr_types[expr_id.index()] = self.current_return_type orelse .{ .unknown = {} };
@@ -1157,11 +1163,14 @@ const TypeChecker = struct {
                 try self.visitExpr(binary.rhs);
                 const lhs_type = self.expr_types[binary.lhs.index()];
                 const rhs_type = self.expr_types[binary.rhs.index()];
-                const result_type = self.binaryResultType(
-                    binary.op,
-                    lhs_type,
-                    rhs_type,
-                );
+                const result_type = if ((binary.op == .eq or binary.op == .ne) and self.exprIsTypeValue(binary.lhs) and self.exprIsTypeValue(binary.rhs))
+                    Type{ .bool = {} }
+                else
+                    self.binaryResultType(
+                        binary.op,
+                        lhs_type,
+                        rhs_type,
+                    );
                 var final_type = result_type;
                 if (result_type.kind() != .unknown and try self.hasInvalidConstantShiftAmount(expr_id, binary.op, lhs_type, binary.rhs)) {
                     final_type = .{ .unknown = {} };
@@ -2115,6 +2124,14 @@ const TypeChecker = struct {
                 return .{ .tuple = tuple_types };
             }
             return .{ .unknown = {} };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256")) {
+            return descriptorFromPathName(self.file, self.item_index, "u256");
+        }
+
+        if (std.mem.eql(u8, builtin.name, "typeName")) {
+            return .{ .string = {} };
         }
 
         return .{ .unknown = {} };
@@ -3114,12 +3131,69 @@ const TypeChecker = struct {
     fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
         _ = self;
         return switch (op) {
-            .add, .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .pow, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),
+            .add => if (lhs_type.kind() == .string and rhs_type.kind() == .string)
+                .{ .string = {} }
+            else
+                arithmeticResultType(lhs_type, rhs_type),
+            .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .pow, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),
             .bit_and, .bit_or, .bit_xor, .shl, .wrapping_shl, .shr, .wrapping_shr => bitwiseResultType(lhs_type, rhs_type),
             .and_and, .or_or => if (lhs_type.kind() == .bool and rhs_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
             .lt, .le, .gt, .ge => if (orderedTypesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
         };
+    }
+
+    fn exprIsTypeValue(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .TypeValue => true,
+            .Group => |group| self.exprIsTypeValue(group.expr),
+            .Name => |name| blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()];
+                if (binding) |resolved| switch (resolved) {
+                    .pattern => |pattern_id| {
+                        const ty = self.pattern_types[pattern_id.index()].type;
+                        break :blk ty.kind() == .named;
+                    },
+                    .item => |item_id| switch (self.file.item(item_id).*) {
+                        .Struct, .Enum, .Bitfield, .Contract, .TypeAlias => break :blk true,
+                        else => {},
+                    },
+                };
+                break :blk self.typeValueNameType(name.name).kind() != .unknown;
+            },
+            else => false,
+        };
+    }
+
+    fn typeValueNameType(self: *const TypeChecker, name: []const u8) Type {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (std.mem.eql(u8, trimmed, "void") or
+            std.mem.eql(u8, trimmed, "bool") or
+            std.mem.eql(u8, trimmed, "string") or
+            std.mem.eql(u8, trimmed, "address") or
+            std.mem.eql(u8, trimmed, "bytes"))
+        {
+            return descriptorFromPathName(self.file, self.item_index, trimmed);
+        }
+        if (trimmed.len >= 2 and (trimmed[0] == 'u' or trimmed[0] == 'i')) {
+            const digits = trimmed[1..];
+            if (std.mem.eql(u8, digits, "8") or
+                std.mem.eql(u8, digits, "16") or
+                std.mem.eql(u8, digits, "32") or
+                std.mem.eql(u8, digits, "64") or
+                std.mem.eql(u8, digits, "128") or
+                std.mem.eql(u8, digits, "256"))
+            {
+                return descriptorFromPathName(self.file, self.item_index, trimmed);
+            }
+        }
+        if (self.item_index.lookup(trimmed)) |item_id| {
+            return switch (self.file.item(item_id).*) {
+                .Contract, .Struct, .Bitfield, .Enum, .TypeAlias => descriptorFromPathName(self.file, self.item_index, trimmed),
+                else => .{ .unknown = {} },
+            };
+        }
+        return .{ .unknown = {} };
     }
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {

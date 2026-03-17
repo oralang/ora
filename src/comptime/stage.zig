@@ -95,15 +95,16 @@ pub fn isRuntimeOnlyIntrinsic(name: []const u8) bool {
 /// Check if an intrinsic is comptime-only based on name
 pub fn isComptimeOnlyIntrinsic(name: []const u8) bool {
     const comptime_intrinsics = [_][]const u8{
-        "@TypeOf",
-        "@typeInfo",
-        "@sizeOf",
-        "@alignOf",
-        "@bitSizeOf",
-        "@hasField",
-        "@hasDecl",
-        "@typeName",
-        "@errorName",
+        "TypeOf",
+        "typeInfo",
+        "sizeOf",
+        "alignOf",
+        "bitSizeOf",
+        "hasField",
+        "hasDecl",
+        "typeName",
+        "errorName",
+        "keccak256",
     };
 
     for (comptime_intrinsics) |ci| {
@@ -135,7 +136,9 @@ test "runtime-only intrinsic detection" {
 }
 
 test "comptime-only intrinsic detection" {
-    try std.testing.expect(isComptimeOnlyIntrinsic("@TypeOf"));
-    try std.testing.expect(isComptimeOnlyIntrinsic("@sizeOf"));
+    try std.testing.expect(isComptimeOnlyIntrinsic("TypeOf"));
+    try std.testing.expect(isComptimeOnlyIntrinsic("sizeOf"));
+    try std.testing.expect(isComptimeOnlyIntrinsic("typeName"));
+    try std.testing.expect(isComptimeOnlyIntrinsic("keccak256"));
     try std.testing.expect(!isComptimeOnlyIntrinsic("msg.sender"));
 }

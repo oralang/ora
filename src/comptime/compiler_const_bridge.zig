@@ -55,7 +55,14 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
     const right = rhs.?;
     if (try tryEvalBinaryWithSharedEngine(allocator, op, left, right)) |shared| return shared;
     return switch (op) {
-        .add, .wrapping_add => try evalIntInt(allocator, left, right, BigInt.add),
+        .add => switch (left) {
+            .string => |a| switch (right) {
+                .string => |b| .{ .string = try std.fmt.allocPrint(allocator, "{s}{s}", .{ a, b }) },
+                else => null,
+            },
+            else => try evalIntInt(allocator, left, right, BigInt.add),
+        },
+        .wrapping_add => try evalIntInt(allocator, left, right, BigInt.add),
         .sub, .wrapping_sub => try evalIntInt(allocator, left, right, BigInt.sub),
         .mul, .wrapping_mul => try evalIntInt(allocator, left, right, BigInt.mul),
         .div => try evalIntDiv(allocator, left, right),

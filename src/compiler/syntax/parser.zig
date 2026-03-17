@@ -2047,13 +2047,19 @@ const Parser = struct {
             if (builtin_name != null and
                 (std.mem.eql(u8, builtin_name.?, "cast") or
                     std.mem.eql(u8, builtin_name.?, "bitCast") or
-                    std.mem.eql(u8, builtin_name.?, "truncate")) and
+                    std.mem.eql(u8, builtin_name.?, "truncate") or
+                    std.mem.eql(u8, builtin_name.?, "sizeOf") or
+                    std.mem.eql(u8, builtin_name.?, "typeName")) and
                 !self.at(.RightParen))
             {
                 try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 if (self.at(.Comma)) {
                     try children.append(self.allocator, .{ .token = self.bump() });
-                } else if (!self.at(.RightParen)) {
+                } else if (!self.at(.RightParen) and
+                    (std.mem.eql(u8, builtin_name.?, "cast") or
+                        std.mem.eql(u8, builtin_name.?, "bitCast") or
+                        std.mem.eql(u8, builtin_name.?, "truncate")))
+                {
                     try self.reportHere("expected ',' after builtin cast type");
                 }
             }

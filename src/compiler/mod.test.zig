@@ -8364,6 +8364,113 @@ test "compiler const eval executes comptime receiver trait methods" {
     try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval supports sizeOf on concrete and generic types" {
+    const source_text =
+        \\comptime fn width(comptime T: type) -> u256 {
+        \\    return @sizeOf(T);
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        width(address) + @sizeOf([u8; 4]);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 24), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval supports typeName and string concat for ABI signatures" {
+    const source_text =
+        \\pub fn run() -> string {
+        \\    return comptime {
+        \\        "transfer(" + @typeName(address) + "," + @typeName(u256) + ")";
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(std.mem.eql(u8, "transfer(address,uint256)", consteval.values[ret_stmt.value.?.index()].?.string));
+}
+
+test "compiler const eval supports keccak256 for ABI selector hashes" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @keccak256("transfer(" + @typeName(address) + "," + @typeName(u256) + ")");
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("transfer(address,uint256)", &hash, .{});
+    var hex: [64]u8 = undefined;
+    for (hash, 0..) |byte, index| {
+        hex[index * 2] = std.fmt.hex_charset[byte >> 4];
+        hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
+    }
+    var expected = try std.math.big.int.Managed.init(testing.allocator);
+    defer expected.deinit();
+    try expected.setString(16, hex[0..]);
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
+}
+
+test "compiler const eval compares type values in generic comptime logic" {
+    const source_text =
+        \\comptime fn is_word(comptime T: type) -> bool {
+        \\    return T == u256;
+        \\}
+        \\
+        \\pub fn run() -> bool {
+        \\    return comptime {
+        \\        is_word(u256);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
 test "compiler surfaces comptime stage diagnostics through db and typecheck" {
     const source_text =
         \\log Ping(value: u256);

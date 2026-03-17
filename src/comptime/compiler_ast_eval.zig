@@ -396,7 +396,10 @@ const ConstEvaluator = struct {
                 const heap_id = try self.env.heap.allocBytes(bytes);
                 break :blk CtValue{ .bytes_ref = heap_id };
             },
-            .Name => |name| self.env.lookupValue(name.name),
+            .Name => |name| self.env.lookupValue(name.name) orelse blk: {
+                if (self.pathTypeId(name.name)) |type_id| break :blk CtValue{ .type_val = type_id };
+                break :blk null;
+            },
             .Group => |group| try self.evalExprCtValue(group.expr),
             .Call => |call| try self.evalCallCtValue(call, true),
             .Unary, .Switch, .Comptime => blk: {
@@ -489,7 +492,8 @@ const ConstEvaluator = struct {
                         break :blk try self.evalExprCtValueAs(builtin.args[0], target);
                     }
                 }
-                break :blk null;
+                const const_value = (try self.evalBuiltin(builtin)) orelse break :blk null;
+                break :blk (try constToCtValue(const_value)) orelse null;
             },
             .Field => |field| blk: {
                 _ = try self.evalExpr(field.base);
@@ -676,6 +680,10 @@ const ConstEvaluator = struct {
                 .enum_val => |other| value.type_id == other.type_id and value.variant_id == other.variant_id and value.payload == other.payload,
                 else => false,
             },
+            .type_val => |value| switch (rhs) {
+                .type_val => |other| value == other,
+                else => false,
+            },
             .void_val => rhs == .void_val,
             else => false,
         };
@@ -826,6 +834,173 @@ const ConstEvaluator = struct {
             type_ids.bytes_id => "bytes",
             type_ids.void_id => "void",
             else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
+        };
+    }
+
+    fn abiTypeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
+        return switch (type_id) {
+            type_ids.u8_id => "uint8",
+            type_ids.u16_id => "uint16",
+            type_ids.u32_id => "uint32",
+            type_ids.u64_id => "uint64",
+            type_ids.u128_id => "uint128",
+            type_ids.u256_id => "uint256",
+            type_ids.i8_id => "int8",
+            type_ids.i16_id => "int16",
+            type_ids.i32_id => "int32",
+            type_ids.i64_id => "int64",
+            type_ids.i128_id => "int128",
+            type_ids.i256_id => "int256",
+            type_ids.bool_id => "bool",
+            type_ids.address_id => "address",
+            type_ids.string_id => "string",
+            type_ids.bytes_id => "bytes",
+            type_ids.void_id => "void",
+            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
+        };
+    }
+
+    fn typeByteSizeForTypeId(self: *ConstEvaluator, type_id: u32) ?u256 {
+        return switch (type_id) {
+            type_ids.u8_id, type_ids.i8_id => 1,
+            type_ids.u16_id, type_ids.i16_id => 2,
+            type_ids.u32_id, type_ids.i32_id => 4,
+            type_ids.u64_id, type_ids.i64_id => 8,
+            type_ids.u128_id, type_ids.i128_id => 16,
+            type_ids.u256_id, type_ids.i256_id => 32,
+            type_ids.bool_id => 1,
+            type_ids.address_id => 20,
+            type_ids.bytes_id, type_ids.string_id => null,
+            type_ids.void_id => 0,
+            else => if (self.itemIdForNamedTypeId(type_id)) |item_id|
+                self.itemByteSize(item_id)
+            else
+                null,
+        };
+    }
+
+    fn itemByteSize(self: *ConstEvaluator, item_id: ast.ItemId) ?u256 {
+        return switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| blk: {
+                if (struct_item.is_generic) break :blk null;
+                var total: u256 = 0;
+                for (struct_item.fields) |field| {
+                    total += self.typeExprByteSize(field.type_expr) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .Bitfield => |bitfield_item| if (bitfield_item.base_type) |base_type|
+                self.typeExprByteSize(base_type)
+            else
+                null,
+            .TypeAlias => |type_alias| self.typeExprByteSize(type_alias.target_type),
+            else => null,
+        };
+    }
+
+    fn arraySizeValue(self: *ConstEvaluator, size: ast.TypeArraySize) ?u256 {
+        return switch (size) {
+            .Integer => |literal| std.fmt.parseInt(u256, literal.text, 10) catch null,
+            .Name => |name| blk: {
+                const value = self.env.lookupValue(name.name) orelse break :blk null;
+                break :blk switch (value) {
+                    .integer => |integer| integer,
+                    else => null,
+                };
+            },
+        };
+    }
+
+    fn typeExprByteSize(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?u256 {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| if (self.pathTypeId(path.name)) |type_id|
+                self.typeByteSizeForTypeId(type_id)
+            else
+                null,
+            .Generic => |generic| blk: {
+                if (std.mem.eql(u8, generic.name, "MinValue") or
+                    std.mem.eql(u8, generic.name, "MaxValue") or
+                    std.mem.eql(u8, generic.name, "InRange") or
+                    std.mem.eql(u8, generic.name, "Scaled") or
+                    std.mem.eql(u8, generic.name, "Exact") or
+                    std.mem.eql(u8, generic.name, "NonZero") or
+                    std.mem.eql(u8, generic.name, "NonZeroAddress") or
+                    std.mem.eql(u8, generic.name, "BasisPoints"))
+                {
+                    if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprByteSize(generic.args[0].Type);
+                }
+                if (self.pathTypeId(generic.name)) |type_id| break :blk self.typeByteSizeForTypeId(type_id);
+                break :blk null;
+            },
+            .Tuple => |tuple| blk: {
+                var total: u256 = 0;
+                for (tuple.elements) |element| {
+                    total += self.typeExprByteSize(element) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .Array => |array| blk: {
+                const element_size = self.typeExprByteSize(array.element) orelse break :blk null;
+                const len = self.arraySizeValue(array.size) orelse break :blk null;
+                break :blk element_size * len;
+            },
+            .Slice, .ErrorUnion, .Error => null,
+        };
+    }
+
+    fn typeExprAbiName(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) anyerror!?[]const u8 {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| blk: {
+                if (self.pathTypeId(path.name)) |type_id| break :blk self.abiTypeNameForTypeId(type_id);
+                break :blk null;
+            },
+            .Generic => |generic| blk: {
+                if (std.mem.eql(u8, generic.name, "MinValue") or
+                    std.mem.eql(u8, generic.name, "MaxValue") or
+                    std.mem.eql(u8, generic.name, "InRange") or
+                    std.mem.eql(u8, generic.name, "Scaled") or
+                    std.mem.eql(u8, generic.name, "Exact") or
+                    std.mem.eql(u8, generic.name, "NonZero") or
+                    std.mem.eql(u8, generic.name, "NonZeroAddress") or
+                    std.mem.eql(u8, generic.name, "BasisPoints"))
+                {
+                    if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprAbiName(generic.args[0].Type);
+                }
+                var rendered_args: std.ArrayList([]const u8) = .{};
+                defer rendered_args.deinit(self.allocator);
+                for (generic.args) |arg| switch (arg) {
+                    .Type => |nested| {
+                        const name = (try self.typeExprAbiName(nested)) orelse break :blk null;
+                        try rendered_args.append(self.allocator, name);
+                    },
+                    .Integer => |integer| try rendered_args.append(self.allocator, integer.text),
+                };
+                const joined = try std.mem.join(self.allocator, ",", rendered_args.items);
+                return if (rendered_args.items.len == 0)
+                    try self.allocator.dupe(u8, generic.name)
+                else
+                    try std.fmt.allocPrint(self.allocator, "{s}<{s}>", .{ generic.name, joined });
+            },
+            .Tuple => |tuple| blk: {
+                var rendered_elements: std.ArrayList([]const u8) = .{};
+                defer rendered_elements.deinit(self.allocator);
+                for (tuple.elements) |element| {
+                    const name = (try self.typeExprAbiName(element)) orelse break :blk null;
+                    try rendered_elements.append(self.allocator, name);
+                }
+                const joined = try std.mem.join(self.allocator, ",", rendered_elements.items);
+                break :blk try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+            },
+            .Array => |array| blk: {
+                const element = (try self.typeExprAbiName(array.element)) orelse break :blk null;
+                const len = self.arraySizeValue(array.size) orelse break :blk null;
+                break :blk try std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ element, len });
+            },
+            .Slice => |slice| blk: {
+                const element = (try self.typeExprAbiName(slice.element)) orelse break :blk null;
+                break :blk try std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+            },
+            .ErrorUnion, .Error => null,
         };
     }
 
@@ -982,9 +1157,8 @@ const ConstEvaluator = struct {
     }
 
     fn evalBuiltin(self: *ConstEvaluator, builtin: ast.BuiltinExpr) anyerror!?ConstValue {
-        if (builtin.args.len == 0) return null;
-
         if (std.mem.eql(u8, builtin.name, "cast")) {
+            if (builtin.args.len == 0) return null;
             if (builtin.type_arg) |type_arg| {
                 const target = self.valueConstructionTarget(type_arg);
                 if (target != .none) {
@@ -994,6 +1168,45 @@ const ConstEvaluator = struct {
                 }
             }
             return try self.evalExpr(builtin.args[0]);
+        }
+
+        if (std.mem.eql(u8, builtin.name, "sizeOf")) {
+            const type_arg = builtin.type_arg orelse return null;
+            const size = self.typeExprByteSize(type_arg) orelse return null;
+            return .{ .integer = try std.math.big.int.Managed.initSet(self.allocator, size) };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "typeName")) {
+            const type_arg = builtin.type_arg orelse return null;
+            const name = (try self.typeExprAbiName(type_arg)) orelse return null;
+            return .{ .string = name };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "keccak256")) {
+            if (builtin.args.len == 0) return null;
+            const bytes: []const u8 = if (try self.evalExprCtValue(builtin.args[0])) |value|
+                switch (value) {
+                    .string_ref => |heap_id| self.env.heap.getString(heap_id),
+                    .bytes_ref => |heap_id| self.env.heap.getBytes(heap_id),
+                    else => return null,
+                }
+            else if (try self.evalExpr(builtin.args[0])) |value|
+                switch (value) {
+                    .string => |string| string,
+                    else => return null,
+                }
+            else
+                return null;
+            var hash: [32]u8 = undefined;
+            std.crypto.hash.sha3.Keccak256.hash(bytes, &hash, .{});
+            var text: [64]u8 = undefined;
+            for (hash, 0..) |byte, index| {
+                text[index * 2] = std.fmt.hex_charset[byte >> 4];
+                text[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
+            }
+            var integer = try std.math.big.int.Managed.init(self.allocator);
+            try integer.setString(16, text[0..]);
+            return .{ .integer = integer };
         }
 
         if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
