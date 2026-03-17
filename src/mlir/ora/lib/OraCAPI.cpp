@@ -4781,6 +4781,75 @@ MlirOperation oraMethodCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStrin
     }
 }
 
+MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute selector, MlirAttribute argTypes, const MlirValue *operands, size_t numOperands, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.abi_encode");
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
+        state.addAttribute("selector", unwrap(selector));
+        state.addAttribute("arg_types", unwrap(argTypes));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraExternalCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef callKind, MlirStringRef traitName, MlirStringRef methodName, MlirValue target, MlirValue gas, MlirValue calldata, MlirType successType, MlirType returndataType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OperationState state(location, "ora.external_call");
+        state.addOperands({unwrap(target), unwrap(gas), unwrap(calldata)});
+        state.addTypes({unwrap(successType), unwrap(returndataType)});
+        state.addAttribute("call_kind", StringAttr::get(context, unwrap(callKind)));
+        state.addAttribute("trait_name", StringAttr::get(context, unwrap(traitName)));
+        state.addAttribute("method_name", StringAttr::get(context, unwrap(methodName)));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAbiDecodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute returnTypes, MlirValue returndata, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.abi_decode");
+        state.addOperands(unwrap(returndata));
+        state.addTypes(resultTy);
+        state.addAttribute("return_types", unwrap(returnTypes));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraBinaryConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, const MlirNamedAttribute *attrs, size_t numAttrs)
 {
     try

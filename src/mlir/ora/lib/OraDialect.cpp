@@ -912,6 +912,63 @@ namespace mlir
             return success();
         }
 
+        ::mlir::LogicalResult AbiEncodeOp::verify()
+        {
+            auto selectorAttr = (*this)->getAttr("selector");
+            if (!selectorAttr)
+                return emitOpError("requires 'selector' attribute");
+            auto selector = llvm::dyn_cast<::mlir::IntegerAttr>(selectorAttr);
+            if (!selector)
+                return emitOpError("'selector' must be an integer attribute");
+            if (selector.getType().getIntOrFloatBitWidth() != 32)
+                return emitOpError("'selector' must be a 32-bit integer attribute");
+
+            auto argTypesAttr = (*this)->getAttrOfType<::mlir::ArrayAttr>("arg_types");
+            if (!argTypesAttr)
+                return emitOpError("requires 'arg_types' array attribute");
+            if (argTypesAttr.size() != getOperands().size())
+                return emitOpError("'arg_types' entry count must match operand count");
+            for (auto attr : argTypesAttr)
+            {
+                if (!llvm::isa<::mlir::StringAttr>(attr))
+                    return emitOpError("'arg_types' entries must be string attributes");
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult ExternalCallOp::verify()
+        {
+            auto callKind = getCallKindAttr();
+            if (!callKind)
+                return emitOpError("requires 'call_kind' attribute");
+            auto callKindValue = callKind.getValue();
+            if (callKindValue != "call" && callKindValue != "staticcall")
+                return emitOpError("'call_kind' must be 'call' or 'staticcall'");
+            if (!getTraitNameAttr())
+                return emitOpError("requires 'trait_name' attribute");
+            if (!getMethodNameAttr())
+                return emitOpError("requires 'method_name' attribute");
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AbiDecodeOp::verify()
+        {
+            auto returnTypesAttr = (*this)->getAttrOfType<::mlir::ArrayAttr>("return_types");
+            if (!returnTypesAttr)
+                return emitOpError("requires 'return_types' array attribute");
+            if (returnTypesAttr.empty())
+                return emitOpError("'return_types' must contain at least one entry");
+            for (auto attr : returnTypesAttr)
+            {
+                if (!llvm::isa<::mlir::StringAttr>(attr))
+                    return emitOpError("'return_types' entries must be string attributes");
+            }
+
+            return success();
+        }
+
         ::mlir::LogicalResult RefinementToBaseOp::verify()
         {
             auto expectedBaseType = getRefinementBaseType(getValue().getType());

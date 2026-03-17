@@ -1595,6 +1595,50 @@ def Ora_ErrorGetErrorOp : Ora_PureOp<"error.get_error"> {
   let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
 }
 
+//===----------------------------------------------------------------------===//
+// External Call Operations
+//===----------------------------------------------------------------------===//
+
+def Ora_AbiEncodeOp : Ora_Op<"abi_encode"> {
+  let summary = "ABI-encode external call arguments";
+  let description = [{
+    Encodes arguments into calldata format for an external call.
+  }];
+
+  let arguments = (ins AnyAttr:$selector, AnyAttr:$arg_types, Variadic<AnyType>:$operands);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$operands attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_ExternalCallOp : Ora_Op<"external_call"> {
+  let summary = "External CALL/STATICCALL security boundary";
+  let description = [{
+    Represents an external call with explicit call kind, target, gas, and calldata.
+  }];
+
+  let arguments = (ins StrAttr:$call_kind, StrAttr:$trait_name, StrAttr:$method_name,
+                       AnyType:$target, AnyType:$gas, AnyType:$calldata);
+  let results = (outs I1:$success, AnyType:$returndata);
+
+  let assemblyFormat = "$target `,` $gas `,` $calldata attr-dict `:` type($target) `,` type($gas) `,` type($calldata) `->` type($success) `,` type($returndata)";
+  let hasVerifier = 1;
+}
+
+def Ora_AbiDecodeOp : Ora_Op<"abi_decode"> {
+  let summary = "ABI-decode external call returndata";
+  let description = [{
+    Decodes returndata into a typed value.
+  }];
+
+  let arguments = (ins AnyAttr:$return_types, AnyType:$returndata);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$returndata attr-dict `:` type($returndata) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 def Ora_TryOp : Ora_Op<"try_catch"> {
   let summary = "Try-catch operation";
   let description = [{

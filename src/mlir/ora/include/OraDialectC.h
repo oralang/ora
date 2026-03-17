@@ -1139,6 +1139,37 @@ extern "C"
         size_t numOperands,
         MlirType resultType);
 
+    /// Create an ora.abi_encode operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAbiEncodeOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirAttribute selector,
+        MlirAttribute argTypes,
+        const MlirValue *operands,
+        size_t numOperands,
+        MlirType resultType);
+
+    /// Create an ora.external_call operation
+    MLIR_CAPI_EXPORTED MlirOperation oraExternalCallOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef callKind,
+        MlirStringRef traitName,
+        MlirStringRef methodName,
+        MlirValue target,
+        MlirValue gas,
+        MlirValue calldata,
+        MlirType successType,
+        MlirType returndataType);
+
+    /// Create an ora.abi_decode operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAbiDecodeOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirAttribute returnTypes,
+        MlirValue returndata,
+        MlirType resultType);
+
     /// Create an ora.binary.constant operation
     MLIR_CAPI_EXPORTED MlirOperation oraBinaryConstantOpCreate(
         MlirContext ctx,

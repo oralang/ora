@@ -10215,6 +10215,82 @@ test "compiler emits ABI attrs for public contract entries" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
 }
 
+test "ora dialect exposes external call ops through C API" {
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    try testing.expect(mlir.oraDialectRegister(ctx));
+
+    const loc = mlir.oraLocationUnknownGet(ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    defer mlir.oraModuleDestroy(module);
+    const body = mlir.oraModuleGetBody(module);
+
+    const i32_ty = mlir.oraIntegerTypeCreate(ctx, 32);
+    const i1_ty = mlir.oraBoolTypeGet(ctx);
+    const i256_ty = mlir.oraIntegerTypeGet(ctx, 256, false);
+    const addr_ty = mlir.oraAddressTypeGet(ctx);
+
+    const selector_attr = mlir.oraIntegerAttrCreateI64FromType(i32_ty, 0xa9059cbb);
+    const arg_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("address")),
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("uint256")),
+    };
+    const arg_types_attr = mlir.oraArrayAttrCreate(ctx, arg_type_attrs.len, &arg_type_attrs);
+    const return_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("bool")),
+    };
+    const return_types_attr = mlir.oraArrayAttrCreate(ctx, return_type_attrs.len, &return_type_attrs);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const gas_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 50000);
+    const amount_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+
+    const target_const = mlir.oraArithConstantOpCreate(ctx, loc, addr_ty, zero_attr);
+    const gas_const = mlir.oraArithConstantOpCreate(ctx, loc, i256_ty, gas_attr);
+    const amount_const = mlir.oraArithConstantOpCreate(ctx, loc, i256_ty, amount_attr);
+    mlir.oraBlockAppendOwnedOperation(body, target_const);
+    mlir.oraBlockAppendOwnedOperation(body, gas_const);
+    mlir.oraBlockAppendOwnedOperation(body, amount_const);
+
+    const target = mlir.oraOperationGetResult(target_const, 0);
+    const gas = mlir.oraOperationGetResult(gas_const, 0);
+    const amount = mlir.oraOperationGetResult(amount_const, 0);
+
+    const encode_operands = [_]mlir.MlirValue{ target, amount };
+    const encode_op = mlir.oraAbiEncodeOpCreate(ctx, loc, selector_attr, arg_types_attr, &encode_operands, encode_operands.len, i256_ty);
+    mlir.oraBlockAppendOwnedOperation(body, encode_op);
+
+    const calldata = mlir.oraOperationGetResult(encode_op, 0);
+    const external_call_op = mlir.oraExternalCallOpCreate(
+        ctx,
+        loc,
+        mlir.oraStringRefCreateFromCString("call"),
+        mlir.oraStringRefCreateFromCString("ERC20"),
+        mlir.oraStringRefCreateFromCString("transfer"),
+        target,
+        gas,
+        calldata,
+        i1_ty,
+        i256_ty,
+    );
+    mlir.oraBlockAppendOwnedOperation(body, external_call_op);
+
+    const returndata = mlir.oraOperationGetResult(external_call_op, 1);
+    const decode_op = mlir.oraAbiDecodeOpCreate(ctx, loc, return_types_attr, returndata, i1_ty);
+    mlir.oraBlockAppendOwnedOperation(body, decode_op);
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ERC20\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"transfer\""));
+}
+
 test "compiler v2 examples convert through SIR" {
     const example_paths = [_][]const u8{
         "ora-example/smoke.ora",
