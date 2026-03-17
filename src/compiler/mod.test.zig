@@ -459,6 +459,34 @@ test "compiler type-checks trait ghost blocks during impl checking" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "assert condition must be 'bool'"));
 }
 
+test "compiler lowers trait ghost blocks into verification HIR" {
+    const source_text =
+        \\trait SafeCounter {
+        \\    fn get(self) -> u256;
+        \\
+        \\    ghost {
+        \\        assert(true, "safe");
+        \\    }
+        \\}
+        \\
+        \\contract Counter {}
+        \\
+        \\impl SafeCounter for Counter {
+        \\    fn get(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+}
+
 test "compiler reports trait method body parse error" {
     const source_text =
         \\trait ERC20 {

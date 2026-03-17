@@ -104,6 +104,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{});
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
+
+            const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return;
+            const trait_item = switch (self.file.item(trait_item_id).*) {
+                .Trait => |trait_item| trait_item,
+                else => return,
+            };
+            if (trait_item.ghost_block) |ghost_id| {
+                const ghost_block = self.file.item(ghost_id).GhostBlock;
+                try @This().lowerGhostBlock(self, ghost_block, impl_parent_block);
+            }
         }
 
         pub fn lowerInstantiatedStructDecl(self: *Lowerer, instantiated: sema.InstantiatedStruct, parent_block: mlir.MlirBlock) anyerror!void {
