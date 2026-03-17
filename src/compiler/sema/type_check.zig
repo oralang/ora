@@ -480,6 +480,9 @@ const TypeChecker = struct {
                 try self.ensureFunctionEffectSummary(item_id, function);
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
                 try self.validateBodyLocks(function.body, &locked_slots);
+                var external_call_state = try self.initExternalCallValidationState();
+                defer external_call_state.deinit(self.arena);
+                try self.validateBodyExternalCalls(function.body, &external_call_state);
             },
             .Trait => |trait_item| {
                 if (trait_item.is_extern and trait_item.ghost_block != null) {
@@ -2316,6 +2319,190 @@ const TypeChecker = struct {
         }
     }
 
+    const ExternalCallValidationState = struct {
+        current_writes: std.ArrayList(EffectSlot) = .{},
+        frozen_pre_call_writes: std.ArrayList(EffectSlot) = .{},
+
+        fn deinit(self: *ExternalCallValidationState, allocator: std.mem.Allocator) void {
+            self.current_writes.deinit(allocator);
+            self.frozen_pre_call_writes.deinit(allocator);
+        }
+    };
+
+    fn initExternalCallValidationState(self: *TypeChecker) !ExternalCallValidationState {
+        _ = self;
+        return .{};
+    }
+
+    fn cloneExternalCallValidationState(self: *TypeChecker, src: ExternalCallValidationState) !ExternalCallValidationState {
+        return .{
+            .current_writes = try self.cloneEffectSlots(src.current_writes.items),
+            .frozen_pre_call_writes = try self.cloneEffectSlots(src.frozen_pre_call_writes.items),
+        };
+    }
+
+    fn mergeExternalCallValidationState(self: *TypeChecker, dst: *ExternalCallValidationState, src: ExternalCallValidationState) !void {
+        try self.mergeStorageSlots(&dst.current_writes, src.current_writes.items);
+        try self.mergeStorageSlots(&dst.frozen_pre_call_writes, src.frozen_pre_call_writes.items);
+    }
+
+    fn validateBodyExternalCalls(self: *TypeChecker, body_id: ast.BodyId, state: *ExternalCallValidationState) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| {
+            try self.validateStmtExternalCalls(statement_id, state);
+        }
+    }
+
+    fn overwriteExternalCallValidationState(self: *TypeChecker, dst: *ExternalCallValidationState, src: ExternalCallValidationState) !void {
+        dst.deinit(self.arena);
+        dst.* = try self.cloneExternalCallValidationState(src);
+    }
+
+    fn validateStmtExternalCalls(self: *TypeChecker, statement_id: ast.StmtId, state: *ExternalCallValidationState) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl, .Return, .Assert, .Assume, .Expr, .Havoc, .Break, .Continue, .Error => {
+                if (self.statementExpr(statement_id)) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+            },
+            .If => |if_stmt| {
+                try self.validateExprExternalCalls(if_stmt.condition, state);
+                var then_state = try self.cloneExternalCallValidationState(state.*);
+                var else_state = try self.cloneExternalCallValidationState(state.*);
+                defer then_state.deinit(self.arena);
+                defer else_state.deinit(self.arena);
+                try self.validateBodyExternalCalls(if_stmt.then_body, &then_state);
+                if (if_stmt.else_body) |else_body| try self.validateBodyExternalCalls(else_body, &else_state);
+                try self.mergeExternalCallValidationState(&then_state, else_state);
+                try self.overwriteExternalCallValidationState(state, then_state);
+            },
+            .While => |while_stmt| {
+                try self.validateExprExternalCalls(while_stmt.condition, state);
+                for (while_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+                var loop_state = try self.cloneExternalCallValidationState(state.*);
+                defer loop_state.deinit(self.arena);
+                try self.validateBodyExternalCalls(while_stmt.body, &loop_state);
+                try self.mergeExternalCallValidationState(state, loop_state);
+            },
+            .For => |for_stmt| {
+                try self.validateExprExternalCalls(for_stmt.iterable, state);
+                for (for_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+                var loop_state = try self.cloneExternalCallValidationState(state.*);
+                defer loop_state.deinit(self.arena);
+                try self.validateBodyExternalCalls(for_stmt.body, &loop_state);
+                try self.mergeExternalCallValidationState(state, loop_state);
+            },
+            .Switch => |switch_stmt| {
+                try self.validateExprExternalCalls(switch_stmt.condition, state);
+                var merged_state = try self.cloneExternalCallValidationState(state.*);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.validateExprExternalCalls(expr_id, state),
+                        .Range => |range_pattern| {
+                            try self.validateExprExternalCalls(range_pattern.start, state);
+                            try self.validateExprExternalCalls(range_pattern.end, state);
+                        },
+                        .Else => {},
+                    }
+                    var case_state = try self.cloneExternalCallValidationState(state.*);
+                    defer case_state.deinit(self.arena);
+                    try self.validateBodyExternalCalls(arm.body, &case_state);
+                    try self.mergeExternalCallValidationState(&merged_state, case_state);
+                }
+                if (switch_stmt.else_body) |else_body| {
+                    var else_state = try self.cloneExternalCallValidationState(state.*);
+                    defer else_state.deinit(self.arena);
+                    try self.validateBodyExternalCalls(else_body, &else_state);
+                    try self.mergeExternalCallValidationState(&merged_state, else_state);
+                }
+                defer merged_state.deinit(self.arena);
+                try self.overwriteExternalCallValidationState(state, merged_state);
+            },
+            .Try => |try_stmt| {
+                var try_state = try self.cloneExternalCallValidationState(state.*);
+                defer try_state.deinit(self.arena);
+                try self.validateBodyExternalCalls(try_stmt.try_body, &try_state);
+                if (try_stmt.catch_clause) |catch_clause| {
+                    var catch_state = try self.cloneExternalCallValidationState(state.*);
+                    defer catch_state.deinit(self.arena);
+                    try self.validateBodyExternalCalls(catch_clause.body, &catch_state);
+                    try self.mergeExternalCallValidationState(&try_state, catch_state);
+                }
+                try self.overwriteExternalCallValidationState(state, try_state);
+            },
+            .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateExprExternalCalls(arg, state),
+            .Block => |block| try self.validateBodyExternalCalls(block.body, state),
+            .LabeledBlock => |block| try self.validateBodyExternalCalls(block.body, state),
+            .Lock => |lock_stmt| try self.validateExprExternalCalls(lock_stmt.path, state),
+            .Unlock => |unlock_stmt| try self.validateExprExternalCalls(unlock_stmt.path, state),
+            .Assign => |assign| {
+                try self.validateExprExternalCalls(assign.value, state);
+                var effects = EffectCollectorState.init();
+                try self.collectPatternTargetEffects(assign.target, assign.op, &effects);
+                try self.emitExternalCallWriteDiagnostics(assign.range, effects.writes.items, state.frozen_pre_call_writes.items);
+                try self.mergeStorageSlots(&state.current_writes, effects.writes.items);
+            },
+        }
+    }
+
+    fn validateExprExternalCalls(self: *TypeChecker, expr_id: ast.ExprId, state: *ExternalCallValidationState) anyerror!void {
+        switch (self.file.expression(expr_id).*) {
+            .TypeValue => {},
+            .Call => |call| {
+                try self.validateExprExternalCalls(call.callee, state);
+                for (call.args) |arg| try self.validateExprExternalCalls(arg, state);
+
+                if (self.externProxyMethodSignature(call.callee)) |method| {
+                    if (method.extern_call_kind == .call) {
+                        try self.mergeStorageSlots(&state.frozen_pre_call_writes, state.current_writes.items);
+                    }
+                    return;
+                }
+
+                if (self.calleeFunctionItem(call.callee)) |callee_id| {
+                    switch (self.file.item(callee_id).*) {
+                        .Function => |function| {
+                            try self.ensureFunctionEffectSummary(callee_id, function);
+                            const writes = self.effectWrites(self.item_effects[callee_id.index()]);
+                            try self.emitExternalCallWriteDiagnostics(call.range, writes, state.frozen_pre_call_writes.items);
+                            try self.mergeStorageSlots(&state.current_writes, writes);
+                        },
+                        else => {},
+                    }
+                }
+            },
+            .Unary => |unary| try self.validateExprExternalCalls(unary.operand, state),
+            .Binary => |binary| {
+                try self.validateExprExternalCalls(binary.lhs, state);
+                try self.validateExprExternalCalls(binary.rhs, state);
+            },
+            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprExternalCalls(element, state),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprExternalCalls(element, state),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprExternalCalls(field.value, state),
+            .Switch => |switch_expr| {
+                try self.validateExprExternalCalls(switch_expr.condition, state);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.validateExprExternalCalls(pattern_expr, state),
+                        .Range => |range_pattern| {
+                            try self.validateExprExternalCalls(range_pattern.start, state);
+                            try self.validateExprExternalCalls(range_pattern.end, state);
+                        },
+                        .Else => {},
+                    }
+                    try self.validateExprExternalCalls(arm.value, state);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.validateExprExternalCalls(else_expr, state);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprExternalCalls(arg, state),
+            .Field => |field| try self.validateExprExternalCalls(field.base, state),
+            .Index => |index| {
+                try self.validateExprExternalCalls(index.base, state);
+                try self.validateExprExternalCalls(index.index, state);
+            },
+            .Group => |group| try self.validateExprExternalCalls(group.expr, state),
+            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+        }
+    }
+
     fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl, .Return, .Assert, .Assume, .Expr, .Havoc, .Break, .Continue, .Error => {
@@ -2517,6 +2704,19 @@ const TypeChecker = struct {
         }
     }
 
+    fn emitExternalCallWriteDiagnostics(self: *TypeChecker, range: source.TextRange, writes: []const EffectSlot, frozen_pre_call_writes: []const EffectSlot) !void {
+        for (writes) |write_slot| {
+            if (write_slot.region != .storage) continue;
+            for (frozen_pre_call_writes) |frozen_slot| {
+                if (!self.effectSlotsMayAlias(write_slot, frozen_slot)) continue;
+                try self.emitRangeError(range, "cannot write storage slot '{s}' after external call because it was written before the call", .{
+                    write_slot.name,
+                });
+                break;
+            }
+        }
+    }
+
     fn effectWrites(self: *TypeChecker, effect: Effect) []const EffectSlot {
         _ = self;
         return switch (effect) {
@@ -2604,6 +2804,13 @@ const TypeChecker = struct {
 
     fn mergeLockedSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
         for (src) |slot| try self.appendUniqueSlot(dst, slot);
+    }
+
+    fn mergeStorageSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
+        for (src) |slot| {
+            if (slot.region != .storage) continue;
+            try self.appendUniqueSlot(dst, slot);
+        }
     }
 
     fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {

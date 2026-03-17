@@ -518,6 +518,92 @@ test "compiler reports external proxy misuse" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'external proxy' has no field 'missing'"));
 }
 
+test "compiler rejects storage write after extern call on same slot" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\    storage var balance: u256;
+        \\    storage var other: u256;
+        \\
+        \\    pub fn bad(to: address) {
+        \\        balance = 1;
+        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, balance);
+        \\        _ = result;
+        \\        balance = 2;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot 'balance' after external call because it was written before the call"));
+}
+
+test "compiler allows writes to different storage slots around extern call" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\    storage var balance: u256;
+        \\    storage var other: u256;
+        \\
+        \\    pub fn ok(to: address) {
+        \\        balance = 1;
+        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, balance);
+        \\        _ = result;
+        \\        other = 2;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
+test "compiler allows writes around extern staticcall" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\    storage var balance: u256;
+        \\
+        \\    pub fn ok(user: address) {
+        \\        balance = 1;
+        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
+        \\        _ = result;
+        \\        balance = 2;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
 test "compiler preserves trait ghost blocks in AST" {
     const source_text =
         \\trait ERC20 {
