@@ -1996,6 +1996,168 @@ LogicalResult ConvertCallOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Lower ora.abi_encode - allocate calldata buffer and store selector/args
+// -----------------------------------------------------------------------------
+LogicalResult ConvertAbiEncodeOp::matchAndRewrite(
+    ora::AbiEncodeOp op,
+    typename ora::AbiEncodeOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = op.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+
+    auto selectorAttr = op->getAttrOfType<mlir::IntegerAttr>("selector");
+    auto argTypesAttr = op->getAttrOfType<mlir::ArrayAttr>("arg_types");
+    if (!selectorAttr || !argTypesAttr)
+        return rewriter.notifyMatchFailure(op, "missing ABI encode attrs");
+    if (argTypesAttr.size() != adaptor.getOperands().size())
+        return rewriter.notifyMatchFailure(op, "arg_types count does not match operands");
+
+    const uint64_t calldataBytes = 4 + (32 * adaptor.getOperands().size());
+    Value totalSize = rewriter.create<sir::ConstOp>(
+        op.getLoc(),
+        u256Type,
+        mlir::IntegerAttr::get(ui64Type, calldataBytes));
+    Value basePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, totalSize);
+
+    llvm::APInt selectorWord = selectorAttr.getValue().zextOrTrunc(256);
+    selectorWord = selectorWord.shl(224);
+    Value selectorValue = rewriter.create<sir::ConstOp>(
+        op.getLoc(),
+        u256Type,
+        mlir::IntegerAttr::get(u256IntType, selectorWord));
+    rewriter.create<sir::StoreOp>(op.getLoc(), basePtr, selectorValue);
+
+    for (auto [index, operand] : llvm::enumerate(adaptor.getOperands()))
+    {
+        Value abiValue = ensureU256(rewriter, op.getLoc(), operand);
+        Value offset = rewriter.create<sir::ConstOp>(
+            op.getLoc(),
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, 4 + (32 * index)));
+        Value slotPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, basePtr, offset);
+        rewriter.create<sir::StoreOp>(op.getLoc(), slotPtr, abiValue);
+    }
+
+    Value result = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, basePtr);
+    rewriter.replaceOp(op, result);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.external_call - scalar v1 call/staticcall boundary
+// -----------------------------------------------------------------------------
+LogicalResult ConvertExternalCallOp::matchAndRewrite(
+    ora::ExternalCallOp op,
+    typename ora::ExternalCallOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *ctx = op.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    auto callKind = op->getAttrOfType<mlir::StringAttr>("call_kind");
+    if (!callKind)
+        return rewriter.notifyMatchFailure(op, "missing call_kind attr");
+
+    auto encodedDef = op.getCalldata().getDefiningOp<ora::AbiEncodeOp>();
+    if (!encodedDef)
+        return rewriter.notifyMatchFailure(op, "expected calldata from ora.abi_encode");
+    auto encodedArgTypes = encodedDef->getAttrOfType<mlir::ArrayAttr>("arg_types");
+    if (!encodedArgTypes)
+        return rewriter.notifyMatchFailure(op, "missing arg_types on ora.abi_encode");
+
+    const uint64_t calldataBytes = 4 + (32 * encodedArgTypes.size());
+    Value calldataLen = rewriter.create<sir::ConstOp>(
+        op.getLoc(),
+        u256Type,
+        mlir::IntegerAttr::get(ui64Type, calldataBytes));
+    Value returnLen = rewriter.create<sir::ConstOp>(
+        op.getLoc(),
+        u256Type,
+        mlir::IntegerAttr::get(ui64Type, 32));
+    Value returnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, returnLen);
+    Value calldataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getCalldata());
+    Value gas = ensureU256(rewriter, op.getLoc(), adaptor.getGas());
+    Value target = ensureU256(rewriter, op.getLoc(), adaptor.getTarget());
+
+    Value callSuccess;
+    if (callKind.getValue() == "staticcall")
+    {
+        callSuccess = rewriter.create<sir::StaticCallOp>(
+            op.getLoc(),
+            u256Type,
+            gas,
+            target,
+            calldataPtr,
+            calldataLen,
+            returnPtr,
+            returnLen);
+    }
+    else if (callKind.getValue() == "call")
+    {
+        Value zeroValue = rewriter.create<sir::ConstOp>(
+            op.getLoc(),
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, 0));
+        callSuccess = rewriter.create<sir::CallOp>(
+            op.getLoc(),
+            u256Type,
+            gas,
+            target,
+            zeroValue,
+            calldataPtr,
+            calldataLen,
+            returnPtr,
+            returnLen);
+    }
+    else
+    {
+        return rewriter.notifyMatchFailure(op, "unsupported extern call kind");
+    }
+
+    Value returnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, returnPtr);
+    rewriter.replaceOp(op, ValueRange{callSuccess, returnPtrU256});
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Lower ora.abi_decode - scalar v1 decode from return buffer
+// -----------------------------------------------------------------------------
+LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
+    ora::AbiDecodeOp op,
+    typename ora::AbiDecodeOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+
+    auto returnTypesAttr = op->getAttrOfType<mlir::ArrayAttr>("return_types");
+    if (!returnTypesAttr || returnTypesAttr.size() != 1)
+        return rewriter.notifyMatchFailure(op, "only single scalar ABI decode is supported");
+
+    auto *ctx = op.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    Value returndataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getReturndata());
+    Value loaded = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
+
+    Type convertedType = typeConverter->convertType(op.getResult().getType());
+    if (!convertedType)
+        return rewriter.notifyMatchFailure(op, "failed to convert ABI decode result type");
+    if (convertedType != loaded.getType())
+        loaded = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, loaded);
+
+    rewriter.replaceOp(op, loaded);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Lower ora.contract by splicing its body into the parent module
 // -----------------------------------------------------------------------------
 LogicalResult ConvertContractOp::matchAndRewrite(
@@ -2093,6 +2255,62 @@ LogicalResult ConvertErrorDeclOp::matchAndRewrite(
     state.addAttributes(attrs);
     rewriter.create(state);
     rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertErrorReturnOp::matchAndRewrite(
+    ora::ErrorReturnOp op,
+    typename ora::ErrorReturnOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op.getNumOperands() != 0)
+        return rewriter.notifyMatchFailure(op, "only zero-payload error.return is supported");
+
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+
+    auto findErrorId = [&](StringRef name) -> mlir::IntegerAttr {
+        if (auto module = op->getParentOfType<mlir::ModuleOp>())
+        {
+            mlir::IntegerAttr foundId;
+            module.walk([&](Operation *decl) {
+                if (foundId)
+                    return;
+                if (!isa<ora::ErrorDeclOp>(decl) && !isa<sir::ErrorDeclOp>(decl))
+                    return;
+                auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                if (!sym || sym.getValue() != name)
+                    return;
+                if (auto attr = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id"))
+                    foundId = attr;
+                else if (auto attr = decl->getAttrOfType<mlir::IntegerAttr>("sir.error_id"))
+                    foundId = attr;
+            });
+            return foundId;
+        }
+        return {};
+    };
+
+    auto errorId = findErrorId(op.getSymName());
+    if (!errorId)
+        return rewriter.notifyMatchFailure(op, "could not resolve error id for error.return");
+
+    auto *ctx = op.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    auto idVal = errorId.getValue().zextOrTrunc(256);
+    auto idAttr = mlir::IntegerAttr::get(u256IntType, idVal);
+    Value idConst = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, idAttr);
+    idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
+
+    Type convertedType = typeConverter->convertType(op.getResult().getType());
+    if (!convertedType)
+        return rewriter.notifyMatchFailure(op, "unable to convert error.return result type");
+    if (convertedType != u256Type)
+        idConst = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, idConst);
+
+    rewriter.replaceOp(op, idConst);
     return success();
 }
 

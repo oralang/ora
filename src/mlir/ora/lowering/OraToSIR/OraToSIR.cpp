@@ -835,6 +835,12 @@ public:
             patterns.add<ConvertFuncOp>(typeConverter, ctx);
         if (enable_func)
             patterns.add<ConvertCallOp>(typeConverter, ctx);
+        if (enable_func)
+        {
+            patterns.add<ConvertAbiEncodeOp>(typeConverter, ctx);
+            patterns.add<ConvertExternalCallOp>(typeConverter, ctx);
+            patterns.add<ConvertAbiDecodeOp>(typeConverter, ctx);
+        }
         if (enable_arith)
         {
             // ora.add/sub/mul/div/rem no longer emitted; arith.* used directly.
@@ -897,6 +903,7 @@ public:
             patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
         patterns.add<ConvertErrorDeclOp>(typeConverter, ctx);
+        patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
         patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
         patterns.add<EraseOpByName>("ora.log.decl", ctx);
@@ -1438,6 +1445,9 @@ public:
             phase4Target.addIllegalOp<ora::StructDeclOp>();
             phase4Target.addIllegalOp<ora::BaseToRefinementOp>();
             phase4Target.addIllegalOp<ora::RefinementToBaseOp>();
+            phase4Target.addIllegalOp<ora::AbiEncodeOp>();
+            phase4Target.addIllegalOp<ora::ExternalCallOp>();
+            phase4Target.addIllegalOp<ora::AbiDecodeOp>();
             phase4Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before Phase 4.

@@ -590,10 +590,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const error_type = self.parent.typecheck.exprType(expr_id).errorTypes()[0];
             const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, call.callee));
             const error_name = error_type.name() orelse "ExternalCallFailed";
-            const error_return = mlir.oraErrorReturnOpCreate(self.parent.context, loc, strRef(error_name), null, 0, lowered_error_type);
-            if (mlir.oraOperationIsNull(error_return)) return error.MlirOperationCreationFailed;
-            appendOp(else_block, error_return);
-            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_return, 0), result_type);
+            var error_result_types: [1]mlir.MlirType = .{lowered_error_type};
+            const error_call = mlir.oraFuncCallOpCreate(
+                self.parent.context,
+                loc,
+                strRef(error_name),
+                null,
+                0,
+                &error_result_types,
+                1,
+            );
+            if (mlir.oraOperationIsNull(error_call)) return error.MlirOperationCreationFailed;
+            appendOp(else_block, error_call);
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_call, 0), result_type);
             if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
             appendOp(else_block, err_op);
             try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(err_op, 0)});
