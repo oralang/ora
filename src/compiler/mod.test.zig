@@ -484,7 +484,7 @@ test "compiler lowers trait ghost blocks into verification HIR" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 }
 
 test "compiler verifies impls with trait ghost blocks end to end" {
@@ -515,7 +515,52 @@ test "compiler verifies impls with trait ghost blocks end to end" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
+
+    const z3_verification = @import("ora_z3_verification");
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.parallel = false;
+
+    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+}
+
+test "compiler verifies trait ghost method calls with self end to end" {
+    const source_text =
+        \\trait SafeCounter {
+        \\    fn get(self) -> u256;
+        \\
+        \\    ghost {
+        \\        assert(get(self) >= 0, "safe");
+        \\    }
+        \\}
+        \\
+        \\contract Counter {}
+        \\
+        \\impl SafeCounter for Counter {
+        \\    fn get(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const resolution = try compilation.db.resolveNames(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), resolution.diagnostics.items.items.len);
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 
     const z3_verification = @import("ora_z3_verification");
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);

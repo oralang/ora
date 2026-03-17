@@ -105,15 +105,65 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
 
-            const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return;
-            const trait_item = switch (self.file.item(trait_item_id).*) {
-                .Trait => |trait_item| trait_item,
-                else => return,
-            };
-            if (trait_item.ghost_block) |ghost_id| {
-                const ghost_block = self.file.item(ghost_id).GhostBlock;
-                try @This().lowerGhostBlock(self, ghost_block, impl_parent_block);
+        }
+
+        fn lowerImplGhostBlock(self: *Lowerer, impl_item: ast.ImplItem, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
+            var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
+            function_lowerer.in_ghost_context = true;
+
+            var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
+            if (@This().firstImplSelfPattern(self, impl_item)) |pattern_id| {
+                function_lowerer.trait_ghost_self_pattern = pattern_id;
+                const self_value = try @This().lowerImplGhostSelfValue(self, impl_item, ghost_block.range, &function_lowerer);
+                try locals.bindPattern(self.file, pattern_id, self_value);
             }
+
+            _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
+        }
+
+        fn lowerImplGhostSelfValue(self: *Lowerer, impl_item: ast.ImplItem, range: source.TextRange, function_lowerer: *FunctionLowerer) anyerror!mlir.MlirValue {
+            const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return error.MlirOperationCreationFailed;
+            const self_type = mlir.oraStructTypeGet(self.context, strRef(impl_item.target_name));
+
+            switch (self.file.item(target_item_id).*) {
+                .Contract => {
+                    const created = mlir.oraStructInstantiateOpCreate(self.context, self.location(range), strRef(impl_item.target_name), null, 0, self_type);
+                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
+                },
+                .Struct => |struct_item| {
+                    var operands: std.ArrayList(mlir.MlirValue) = .{};
+                    for (struct_item.fields) |field| {
+                        try operands.append(self.allocator, try function_lowerer.defaultValue(self.lowerTypeExpr(field.type_expr), field.range));
+                    }
+                    const created = mlir.oraStructInstantiateOpCreate(
+                        self.context,
+                        self.location(range),
+                        strRef(impl_item.target_name),
+                        if (operands.items.len == 0) null else operands.items.ptr,
+                        operands.items.len,
+                        self_type,
+                    );
+                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
+                },
+                else => {},
+            }
+
+            return error.MlirOperationCreationFailed;
+        }
+
+        fn firstImplSelfPattern(self: *Lowerer, impl_item: ast.ImplItem) ?ast.PatternId {
+            for (impl_item.methods) |method_item_id| {
+                const item = self.file.item(method_item_id).*;
+                if (item != .Function) continue;
+                for (item.Function.parameters) |parameter| {
+                    if (parameter.is_comptime) continue;
+                    const pattern = self.file.pattern(parameter.pattern).*;
+                    if (pattern != .Name) break;
+                    if (std.mem.eql(u8, pattern.Name.name, "self")) return parameter.pattern;
+                    break;
+                }
+            }
+            return null;
         }
 
         pub fn lowerInstantiatedStructDecl(self: *Lowerer, instantiated: sema.InstantiatedStruct, parent_block: mlir.MlirBlock) anyerror!void {
@@ -173,6 +223,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr, parameters: []const ast.Parameter) anyerror!?[]const u8 {
+            if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
+                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.target_name, call);
+                return symbol_name;
+            }
             if (!function.is_generic) return function.name;
             const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
             const mangled_name = try self.mangleGenericFunctionName(function.name, bindings);
@@ -185,6 +239,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try self.monomorphized_function_names.put(mangled_name, {});
             }
             return mangled_name;
+        }
+
+        fn enclosingImplForMethod(self: *Lowerer, method_item_id: ast.ItemId) ?ast.ImplItem {
+            for (self.file.items) |item| {
+                if (item != .Impl) continue;
+                for (item.Impl.methods) |candidate_id| {
+                    if (candidate_id.index() == method_item_id.index()) return item.Impl;
+                }
+            }
+            return null;
         }
 
         pub fn ensureLoweredImplMethod(
@@ -323,7 +387,42 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             specialized_function.is_generic = false;
             specialized_function.parameters = @constCast(parameters);
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
+            function_lowerer.extra_verification_clauses = try @This().traitGhostClausesForImplMethod(self, item_id);
             try function_lowerer.lower();
+        }
+
+        fn traitGhostClausesForImplMethod(self: *Lowerer, method_item_id: ast.ItemId) anyerror![]const FunctionLowerer.ExtraVerificationClause {
+            const impl_item = @This().enclosingImplForMethod(self, method_item_id) orelse return &.{};
+            const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return &.{};
+            const trait_item = switch (self.file.item(trait_item_id).*) {
+                .Trait => |trait_item| trait_item,
+                else => return &.{},
+            };
+            const ghost_id = trait_item.ghost_block orelse return &.{};
+            const ghost_block = self.file.item(ghost_id).GhostBlock;
+            const body = self.file.body(ghost_block.body).*;
+
+            var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
+            for (body.statements) |stmt_id| {
+                switch (self.file.statement(stmt_id).*) {
+                    .Assert => |assert_stmt| {
+                        try clauses.append(self.allocator, .{
+                            .kind = .ensures,
+                            .expr = assert_stmt.condition,
+                            .range = assert_stmt.range,
+                        });
+                    },
+                    .Assume => |assume_stmt| {
+                        try clauses.append(self.allocator, .{
+                            .kind = .requires,
+                            .expr = assume_stmt.condition,
+                            .range = assume_stmt.range,
+                        });
+                    },
+                    else => {},
+                }
+            }
+            return clauses.toOwnedSlice(self.allocator);
         }
 
         fn attachPublicAbiAttrs(

@@ -626,6 +626,12 @@ const FunctionLowerer = struct {
         scf_yield,
     };
 
+    pub const ExtraVerificationClause = struct {
+        kind: ast.SpecClauseKind,
+        expr: ast.ExprId,
+        range: source.TextRange,
+    };
+
     parent: *Lowerer,
     item_id: ?ast.ItemId,
     function: ?ast.FunctionItem,
@@ -640,6 +646,8 @@ const FunctionLowerer = struct {
     deferred_return_carried_locals: []const hir_locals.LocalId = &.{},
     in_try_block: bool = false,
     in_ghost_context: bool = false,
+    extra_verification_clauses: []const ExtraVerificationClause = &.{},
+    trait_ghost_self_pattern: ?ast.PatternId = null,
     loop_context: ?*const support.LoopContext = null,
     switch_context: ?*const support.SwitchContext = null,
 

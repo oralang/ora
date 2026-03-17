@@ -742,9 +742,7 @@ const TypeChecker = struct {
         if (!self.parameterIsBareSelf(parameter)) return null;
         const impl_item = self.enclosingImplForMethod(function_item_id) orelse return null;
         const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return null;
-        const target_type = self.item_types[target_item_id.index()];
-        if (target_type.kind() == .unknown) return null;
-        return target_type;
+        return self.nominalItemSelfType(target_item_id);
     }
 
     fn genericBindingsForFunctionTemplate(self: *TypeChecker, function: ast.FunctionItem) ![]const GenericTypeBinding {
@@ -806,6 +804,16 @@ const TypeChecker = struct {
             }
         }
         return null;
+    }
+
+    fn nominalItemSelfType(self: *const TypeChecker, item_id: ast.ItemId) ?Type {
+        return switch (self.file.item(item_id).*) {
+            .Contract => |contract| Type{ .contract = .{ .name = contract.name } },
+            .Struct => |struct_item| Type{ .struct_ = .{ .name = struct_item.name } },
+            .Enum => |enum_item| Type{ .enum_ = .{ .name = enum_item.name } },
+            .Bitfield => |bitfield| Type{ .bitfield = .{ .name = bitfield.name } },
+            else => null,
+        };
     }
 
     fn buildTraitMethodSignature(self: *TypeChecker, trait_method: anytype) anyerror!TraitMethodSignature {

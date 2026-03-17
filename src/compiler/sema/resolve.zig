@@ -110,6 +110,40 @@ const Resolver = struct {
                 }
                 try self.resolveBody(function.body, &function_env);
             },
+            .Trait => |trait_item| {
+                var trait_env = try Env.init(self.arena, env);
+                for (trait_item.methods) |method| {
+                    if (method.has_self) {
+                        for (method.parameters) |parameter| {
+                            try self.bindPatternIfName(&trait_env, parameter.pattern);
+                            break;
+                        }
+                    }
+                    for (method.clauses) |clause| {
+                        try self.resolveExpr(clause.expr, &trait_env);
+                    }
+                }
+            },
+            .Impl => |impl_item| {
+                var impl_env = try Env.init(self.arena, env);
+                for (impl_item.methods) |method_id| {
+                    const item = self.file.item(method_id).*;
+                    if (item != .Function) continue;
+                    try impl_env.bindings.put(item.Function.name, .{ .item = method_id });
+                }
+                if (self.firstImplSelfPattern(impl_item)) |pattern_id| {
+                    const pattern = self.file.pattern(pattern_id).*;
+                    if (pattern == .Name) {
+                        try impl_env.bindings.put(pattern.Name.name, .{ .pattern = pattern_id });
+                    }
+                }
+                if (self.lookupTraitGhostItem(impl_item.trait_name, env)) |ghost_id| {
+                    try self.resolveItem(ghost_id, &impl_env);
+                }
+                for (impl_item.methods) |method_id| {
+                    try self.resolveItem(method_id, &impl_env);
+                }
+            },
             .Field => |field| {
                 if (field.value) |expr_id| try self.resolveExpr(expr_id, env);
             },
@@ -287,5 +321,31 @@ const Resolver = struct {
             },
             else => {},
         }
+    }
+
+    fn firstImplSelfPattern(self: *Resolver, impl_item: ast.ImplItem) ?ast.PatternId {
+        for (impl_item.methods) |method_id| {
+            const item = self.file.item(method_id).*;
+            if (item != .Function) continue;
+            for (item.Function.parameters) |parameter| {
+                if (parameter.is_comptime) continue;
+                const pattern = self.file.pattern(parameter.pattern).*;
+                if (pattern != .Name) break;
+                if (std.mem.eql(u8, pattern.Name.name, "self")) return parameter.pattern;
+                break;
+            }
+        }
+        return null;
+    }
+
+    fn lookupTraitGhostItem(self: *Resolver, trait_name: []const u8, env: *const Env) ?ast.ItemId {
+        const binding = env.lookup(trait_name) orelse return null;
+        const item_id = switch (binding) {
+            .item => |item_id| item_id,
+            .pattern => return null,
+        };
+        const item = self.file.item(item_id).*;
+        if (item != .Trait) return null;
+        return item.Trait.ghost_block;
     }
 };

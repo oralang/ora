@@ -424,6 +424,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
 
@@ -475,6 +476,42 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerCurrentMethodSelfCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {
+            const current_result = self.current_return_value orelse return null;
+            const current_item_id = self.item_id orelse return null;
+            const current_function = self.function orelse return null;
+            if (!@This().functionHasRuntimeSelf(self, current_function)) return null;
+
+            const callee_item_id = @This().calleeFunctionItemId(self, call.callee) orelse return null;
+            if (callee_item_id.index() != current_item_id.index()) return null;
+
+            const runtime_args = if (current_function.is_generic)
+                self.parent.stripGenericCallArgs(current_function, call)
+            else
+                call.args;
+            if (runtime_args.len != 1) return null;
+
+            const self_pattern = blk: {
+                for (current_function.parameters) |parameter| {
+                    if (parameter.is_comptime) continue;
+                    if (std.mem.eql(u8, self.parent.patternName(parameter.pattern) orelse "", "self")) {
+                        break :blk parameter.pattern;
+                    }
+                    break :blk null;
+                }
+                break :blk null;
+            } orelse return null;
+
+            const self_binding = self.parent.resolution.expr_bindings[runtime_args[0].index()] orelse return null;
+            switch (self_binding) {
+                .pattern => |pattern_id| {
+                    if (pattern_id.index() != self_pattern.index()) return null;
+                    return current_result;
+                },
+                .item => return null,
+            }
         }
 
         fn lowerTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {

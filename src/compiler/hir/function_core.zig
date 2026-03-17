@@ -98,6 +98,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
                 }
+                for (self.extra_verification_clauses) |clause| {
+                    if (clause.kind != .requires) continue;
+                    const condition = try self.lowerExpr(clause.expr, &self.locals);
+                    const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    appendOp(self.block, op);
+                }
 
                 var locals = try self.cloneLocals(&self.locals);
                 const terminated = try self.lowerBody(function.body, &locals);
@@ -417,6 +424,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                     appendOp(self.block, ensure);
                                 }
                             }
+                            for (self.extra_verification_clauses) |clause| {
+                                if (clause.kind != .ensures) continue;
+                                const condition = try self.lowerExpr(clause.expr, locals);
+                                const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                                if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                appendOp(self.block, ensure);
+                            }
                             if (self.deferred_return_value_slot) |slot| {
                                 const store_value = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, slot, null, 0);
                                 if (mlir.oraOperationIsNull(store_value)) return error.MlirOperationCreationFailed;
@@ -445,6 +459,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, ensure);
                             }
+                        }
+                        for (self.extra_verification_clauses) |clause| {
+                            if (clause.kind != .ensures) continue;
+                            const condition = try self.lowerExpr(clause.expr, locals);
+                            const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                            if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, ensure);
                         }
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
