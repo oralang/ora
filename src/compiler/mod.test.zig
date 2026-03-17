@@ -604,6 +604,27 @@ test "compiler allows writes around extern staticcall" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
+test "compiler extern trait calls are not yet lowerable in HIR" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn probe(user: address) {
+        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
+        \\        _ = result;
+        \\    }
+        \\}
+    ;
+
+    try testing.expectError(error.UnsupportedExternTraitLowering, renderHirTextForSource(source_text));
+}
+
 test "compiler preserves trait ghost blocks in AST" {
     const source_text =
         \\trait ERC20 {

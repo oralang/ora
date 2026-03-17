@@ -379,6 +379,7 @@ pub const CompilerDb = struct {
             const typecheck = try self.moduleTypeCheck(module_id);
             _ = try self.moduleVerificationFacts(module_id);
             const result = try self.allocator.create(hir.LoweringResult);
+            errdefer self.allocator.destroy(result);
             result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, try self.constEval(module_id), typecheck);
             slot.* = result;
         }

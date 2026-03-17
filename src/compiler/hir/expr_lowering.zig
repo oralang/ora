@@ -7,7 +7,6 @@ const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
 
-const addressType = support.addressType;
 const appendOp = support.appendOp;
 const appendScfYieldValues = support.appendScfYieldValues;
 const appendValueOp = support.appendValueOp;
@@ -127,10 +126,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
                 },
                 .Switch => |switch_expr| try self.lowerSwitchExpr(expr_id, switch_expr, locals),
-                .ExternalProxy => |proxy| blk: {
-                    const placeholder = try self.createValuePlaceholder("ora.external_proxy", "external proxy", proxy.range, addressType(self.parent.context));
-                    break :blk appendValueOp(self.block, placeholder);
-                },
+                .ExternalProxy => |_| error.UnsupportedExternTraitLowering,
                 .Comptime => |comptime_expr| blk: {
                     var child_locals = try self.cloneLocals(locals);
                     const body = self.parent.file.body(comptime_expr.body).*;
@@ -428,6 +424,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (@This().isExternProxyMethodCall(self, call.callee)) {
+                return error.UnsupportedExternTraitLowering;
+            }
             if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
@@ -480,6 +479,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn isExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            const field = switch (self.parent.file.expression(expr_id).*) {
+                .Field => |field| field,
+                .Group => |group| return @This().isExternProxyMethodCall(self, group.expr),
+                else => return false,
+            };
+            const base_type = self.parent.typecheck.exprType(field.base);
+            if (base_type.kind() != .external_proxy) return false;
+            const trait_interface = self.parent.typecheck.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return false;
+            for (trait_interface.methods) |method| {
+                if (std.mem.eql(u8, method.name, field.name)) return true;
+            }
+            return false;
         }
 
         fn lowerCurrentMethodSelfCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {
