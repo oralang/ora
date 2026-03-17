@@ -2984,6 +2984,22 @@ test "compiler lowers try expressions through real error helper ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
 }
 
+test "compiler carries tuple-payload error unions through HIR" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn probe(maybe: !(u256, bool) | Failure) -> !bool | Failure {
+        \\    try maybe;
+        \\    return true;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.error_union<!ora.tuple<i256, i1>>"));
+}
+
 test "compiler lowers struct field mutation through real field update op" {
     const source_text =
         \\struct Pair {

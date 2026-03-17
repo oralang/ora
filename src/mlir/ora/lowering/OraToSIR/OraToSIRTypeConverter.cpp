@@ -60,6 +60,15 @@ namespace
             return false;
         return *widthOpt <= 255;
     }
+
+    static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
+    {
+        if (!ctx)
+            return Type();
+        if (llvm::isa<ora::TupleType>(successType))
+            return sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        return sir::U256Type::get(ctx);
+    }
 }
 
 static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
@@ -126,7 +135,7 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
-            // ora.error_union<T> → sir.u256 or (sir.u256, sir.u256) depending on payload width
+            // ora.error_union<T> → sir.u256 or (sir.u256, carrier(T)) depending on payload width
             addConversion([](ora::ErrorUnionType type, SmallVectorImpl<Type> &results) -> LogicalResult
                           {
                 auto *ctx = type.getDialect().getContext();
@@ -139,7 +148,7 @@ namespace mlir
                     results.push_back(u256);
                 } else {
                     results.push_back(u256); // tag
-                    results.push_back(u256); // payload
+                    results.push_back(getWideErrorUnionCarrierType(ctx, type.getSuccessType())); // payload carrier
                 }
                 return success(); });
             addConversion([](ora::ErrorUnionType type) -> Type
@@ -158,6 +167,8 @@ namespace mlir
                     return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
                 return type;
             });
+            addConversion([](ora::TupleType type) -> Type
+                          { return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1); });
 
             // Preserve tensor types until we explicitly enable lowering.
             addConversion([this](UnrankedTensorType type) -> Type
@@ -562,7 +573,7 @@ namespace mlir
                                          return Value(); // Don't handle other cases
                                      });
 
-            // Wide error union N:1 packing: 2x sir.u256 → ora.error_union via
+            // Wide error union N:1 packing: (sir.u256, carrier(T)) → ora.error_union via
             // unrealized_conversion_cast.
             addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -587,7 +598,7 @@ namespace mlir
                                          return cast.getResult(0);
                                      });
 
-            // Wide error union 1:N splitting: ora.error_union → 2x sir.u256.
+            // Wide error union 1:N splitting: ora.error_union → (sir.u256, carrier(T)).
             // The conversion framework calls this when it needs to adapt a single
             // error_union value into the two converted values for an op adaptor.
             addTargetMaterialization([](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs, Location loc) -> SmallVector<Value>
@@ -612,10 +623,10 @@ namespace mlir
                                          auto ptrType = sir::PtrType::get(builder.getContext(), 1);
                                          auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
                                          Value bitcast = builder.create<sir::BitcastOp>(loc, ptrType, input);
-                                         Value tag = builder.create<sir::LoadOp>(loc, u256, bitcast);
+                                         Value tag = builder.create<sir::LoadOp>(loc, resultTypes[0], bitcast);
                                          Value off = builder.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64, 32));
                                          Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, bitcast, off);
-                                         Value payload = builder.create<sir::LoadOp>(loc, u256, ptr2);
+                                         Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
                                          return SmallVector<Value>{tag, payload};
                                      });
 
@@ -715,6 +726,12 @@ namespace mlir
                                                 auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
                                                 return cast.getResult(0);
                                             }
+                                        }
+
+                                        if (llvm::isa<ora::TupleType>(type) && llvm::isa<sir::PtrType>(input.getType()))
+                                        {
+                                            auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
+                                            return cast.getResult(0);
                                         }
 
                                         // ptr -> memref: memrefs are ptrs in SIR, forward via bitcast.
