@@ -2155,7 +2155,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.abi_decode - scalar/dynamic v1 decode from return buffer
+// Lower ora.abi_decode - scalar/dynamic/aggregate v1 decode from return buffer
 // -----------------------------------------------------------------------------
 LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     ora::AbiDecodeOp op,
@@ -2168,7 +2168,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
 
     auto returnTypesAttr = op->getAttrOfType<mlir::ArrayAttr>("return_types");
     if (!returnTypesAttr || returnTypesAttr.size() != 1)
-        return rewriter.notifyMatchFailure(op, "only single scalar ABI decode is supported");
+        return rewriter.notifyMatchFailure(op, "only single-result ABI decode is supported");
 
     auto *ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
@@ -2193,6 +2193,23 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
 
     if (auto structType = llvm::dyn_cast<ora::StructType>(origType))
     {
+        (void)structType;
+        Type convertedType = typeConverter->convertType(origType);
+        if (!convertedType)
+            convertedType = ptrType;
+
+        Value decodedPtr = returndataPtr;
+        if (convertedType != ptrType)
+            decodedPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, decodedPtr);
+
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(op.getLoc(), TypeRange{origType}, ValueRange{decodedPtr});
+        rewriter.replaceOp(op, cast.getResults());
+        return success();
+    }
+
+    if (auto tupleType = llvm::dyn_cast<ora::TupleType>(origType))
+    {
+        (void)tupleType;
         Type convertedType = typeConverter->convertType(origType);
         if (!convertedType)
             convertedType = ptrType;
@@ -2580,6 +2597,35 @@ static LogicalResult convertOraReturn(
 
         if (!sizeConst)
             return rewriter.notifyMatchFailure(op, "failed to resolve struct byte size");
+
+        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
+    if (auto tupleType = llvm::dyn_cast<ora::TupleType>(origType))
+    {
+        Value sizeConst;
+        const uint64_t byteSize = static_cast<uint64_t>(tupleType.getElementTypes().size()) * 32ULL;
+        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
+        sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+        {
+            if (llvm::isa<ora::TupleType>(retVal.getType()))
+            {
+                retVal = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, retVal).getResult(0);
+            }
+            else if (tc)
+            {
+                Type convertedType = tc->convertType(origType);
+                if (convertedType && convertedType != retVal.getType())
+                    retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+            }
+        }
+
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+            return rewriter.notifyMatchFailure(op, "tuple return expects SIR ptr value");
 
         rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
         rewriter.eraseOp(op);

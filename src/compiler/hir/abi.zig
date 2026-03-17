@@ -29,6 +29,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
 
 pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
     return switch (ty) {
+        .tuple => allocator.dupe(u8, "tuple"),
         .struct_, .contract => allocator.dupe(u8, "tuple"),
         else => canonicalAbiType(allocator, ty),
     };
