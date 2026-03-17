@@ -408,6 +408,33 @@ test "compiler preserves trait ghost blocks in AST" {
     try testing.expectEqual(@as(usize, 1), body.statements.len);
 }
 
+test "compiler collects verification facts from trait ghost blocks" {
+    const source_text =
+        \\trait SafeCounter {
+        \\    fn get(self) -> u256;
+        \\
+        \\    ghost {
+        \\        assume(true);
+        \\        assert(get(self) >= 0, "non-negative");
+        \\        get(self) >= 0;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const trait_id = ast_file.root_items[0];
+
+    const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = trait_id });
+    try testing.expectEqual(@as(usize, 3), facts.facts.len);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, facts.facts[0].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, facts.facts[1].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.invariant, facts.facts[2].kind);
+}
+
 test "compiler reports trait method body parse error" {
     const source_text =
         \\trait ERC20 {
