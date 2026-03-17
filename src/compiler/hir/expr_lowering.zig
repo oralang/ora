@@ -127,6 +127,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
                 },
                 .Switch => |switch_expr| try self.lowerSwitchExpr(expr_id, switch_expr, locals),
+                .ExternalProxy => |proxy| blk: {
+                    const placeholder = try self.createValuePlaceholder("ora.external_proxy", "external proxy", proxy.range, addressType(self.parent.context));
+                    break :blk appendValueOp(self.block, placeholder);
+                },
                 .Comptime => |comptime_expr| blk: {
                     var child_locals = try self.cloneLocals(locals);
                     const body = self.parent.file.body(comptime_expr.body).*;

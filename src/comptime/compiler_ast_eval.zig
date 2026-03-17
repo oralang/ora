@@ -283,6 +283,7 @@ const ConstEvaluator = struct {
                 for (struct_literal.fields) |field| _ = try self.evalExprImpl(field.value, use_cache);
                 break :blk null;
             },
+            .ExternalProxy => null,
             .Switch => |switch_expr| blk: {
                 const condition = (try self.evalExprImpl(switch_expr.condition, use_cache)) orelse {
                     for (switch_expr.arms) |arm| {
@@ -1575,6 +1576,7 @@ const ConstEvaluator = struct {
                 self.exprStage(call.callee),
                 self.argsStage(call.args),
             }),
+            .ExternalProxy => .runtime_only,
             .Field => |field| self.exprStage(field.base),
             .Index => |index| self.mergeStages(.{
                 self.exprStage(index.base),

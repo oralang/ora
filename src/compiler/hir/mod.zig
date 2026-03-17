@@ -292,6 +292,7 @@ const Lowerer = struct {
             .address => support.addressType(self.context),
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
+            .external_proxy => support.addressType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
             .array => |array| support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), array.len orelse 0),
             .slice => |slice| support.sliceMemRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),

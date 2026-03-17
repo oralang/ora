@@ -50,6 +50,7 @@ pub const StructLiteralExpr = nodes.StructLiteralExpr;
 pub const SwitchExprArm = nodes.SwitchExprArm;
 pub const SwitchExpr = nodes.SwitchExpr;
 pub const ComptimeExpr = nodes.ComptimeExpr;
+pub const ExternalProxyExpr = nodes.ExternalProxyExpr;
 pub const ErrorReturnExpr = nodes.ErrorReturnExpr;
 pub const NameExpr = nodes.NameExpr;
 pub const ResultExpr = nodes.ResultExpr;

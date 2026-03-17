@@ -1728,7 +1728,9 @@ const Parser = struct {
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
         return switch (self.current().kind) {
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.looksLikeGenericTypeValueExpr(terminators))
+            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
+                self.parseExternalProxyExprNode()
+            else if (self.looksLikeGenericTypeValueExpr(terminators))
                 self.parsePathOrGenericTypeNode()
             else
                 self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
@@ -1755,6 +1757,76 @@ const Parser = struct {
             try self.reportHere("expected body after comptime");
         }
         return self.finishNode(SyntaxKind.ComptimeExpr, children.items);
+    }
+
+    fn parseExternalProxyExprNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.Less)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '<' after external");
+            return self.finishNode(SyntaxKind.ExternalProxyExpr, children.items);
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected extern trait name");
+        }
+
+        if (self.typeAtGreaterToken()) {
+            try children.append(self.allocator, .{ .token = self.bumpTypeGreater() });
+        } else {
+            try self.reportHere("expected '>' after extern trait name");
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '(' after external trait");
+            return self.finishNode(SyntaxKind.ExternalProxyExpr, children.items);
+        }
+
+        if (!self.at(.RightParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+        } else {
+            try self.reportHere("expected address expression in external proxy");
+        }
+
+        if (self.at(.Comma)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ', gas: ...' in external proxy");
+        }
+
+        if (self.at(.Identifier) and self.currentTokenTextEql("gas")) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected gas argument in external proxy");
+        }
+
+        if (self.at(.Colon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ':' after gas");
+        }
+
+        if (!self.at(.RightParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
+        } else {
+            try self.reportHere("expected gas expression in external proxy");
+        }
+
+        if (self.at(.RightParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ')' after external proxy arguments");
+        }
+
+        return self.finishNode(SyntaxKind.ExternalProxyExpr, children.items);
     }
 
     fn parseTypeExprNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {

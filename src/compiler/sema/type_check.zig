@@ -1112,6 +1112,32 @@ const TypeChecker = struct {
                 else
                     self.structLiteralType(struct_literal.type_name);
             },
+            .ExternalProxy => |proxy| {
+                try self.visitExpr(proxy.address_expr);
+                try self.visitExpr(proxy.gas_expr);
+                const address_type = self.expr_types[proxy.address_expr.index()];
+                const gas_type = self.expr_types[proxy.gas_expr.index()];
+                if (address_type.kind() != .unknown and address_type.kind() != .address) {
+                    try self.emitExprError(expr_id, "external proxy address must be 'address', found '{s}'", .{
+                        typeDisplayName(address_type),
+                    });
+                }
+                if (gas_type.kind() != .unknown and gas_type.kind() != .integer) {
+                    try self.emitExprError(expr_id, "external proxy gas must be integer, found '{s}'", .{
+                        typeDisplayName(gas_type),
+                    });
+                }
+                const trait_interface = self.traitInterfaceByName(proxy.trait_name);
+                if (trait_interface == null) {
+                    try self.emitExprError(expr_id, "unknown extern trait '{s}'", .{proxy.trait_name});
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                } else if (!trait_interface.?.is_extern) {
+                    try self.emitExprError(expr_id, "trait '{s}' is not extern", .{proxy.trait_name});
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                } else {
+                    self.expr_types[expr_id.index()] = .{ .external_proxy = .{ .trait_name = proxy.trait_name } };
+                }
+            },
             .Switch => |switch_expr| {
                 try self.visitExpr(switch_expr.condition);
                 var result_type: Type = .{ .unknown = {} };
@@ -1315,6 +1341,7 @@ const TypeChecker = struct {
 
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
         if (self.genericCallReturnType(call)) |result| return result;
+        if (self.externProxyCallReturnType(call)) |result| return result;
         const callee_type = self.callableType(call.callee);
         if (callee_type.kind() != .function) return .{ .unknown = {} };
 
@@ -1362,6 +1389,16 @@ const TypeChecker = struct {
             return self.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
         }
         return .{ .void = {} };
+    }
+
+    fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+        const method = self.externProxyMethodSignature(call.callee) orelse return null;
+        const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        error_types[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
+        return .{ .error_union = .{
+            .payload_type = self.storeType(method.return_type) catch return .{ .unknown = {} },
+            .error_types = error_types,
+        } };
     }
 
     fn expectedCallArgCount(self: *const TypeChecker, call: ast.CallExpr) ?usize {
@@ -2430,7 +2467,7 @@ const TypeChecker = struct {
                 try self.validateExprLocks(index.index, locked_slots);
             },
             .Group => |group| try self.validateExprLocks(group.expr, locked_slots),
-            .Comptime, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
         }
     }
 
@@ -2728,7 +2765,7 @@ const TypeChecker = struct {
                 }
                 if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, &expr_state);
             },
-            .Comptime => {},
+            .Comptime, .ExternalProxy => {},
             .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, &expr_state),
             .Name => {
                 if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
@@ -3113,7 +3150,7 @@ const TypeChecker = struct {
                 try self.collectExprDirectCallees(index.index, callees);
             },
             .Group => |group| try self.collectExprDirectCallees(group.expr, callees),
-            .Comptime, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+            .Comptime, .ExternalProxy, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
         }
     }
 
@@ -3233,6 +3270,7 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
+        if (self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
         if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
             if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
@@ -3307,6 +3345,25 @@ const TypeChecker = struct {
         if (self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
         const base_type = self.expr_types[base_expr_id.index()];
         return self.fieldAccessType(base_type, field_name);
+    }
+
+    fn externalProxyMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+        if (base_type.kind() != .external_proxy) return null;
+        const trait_interface = self.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
+        const method = self.findTraitMethodSignature(trait_interface, field_name) orelse return null;
+        return self.functionTypeFromTraitSignature(method);
+    }
+
+    fn externProxyMethodSignature(self: *const TypeChecker, expr_id: ast.ExprId) ?TraitMethodSignature {
+        const field = switch (self.file.expression(expr_id).*) {
+            .Field => |field| field,
+            .Group => |group| return self.externProxyMethodSignature(group.expr),
+            else => return null,
+        };
+        const base_type = self.expr_types[field.base.index()];
+        if (base_type.kind() != .external_proxy) return null;
+        const trait_interface = self.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
+        return self.findTraitMethodSignature(trait_interface, field.name);
     }
 
     fn emitTraitMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
@@ -3747,6 +3804,7 @@ const TypeChecker = struct {
         return switch (self.file.expression(expr_id).*) {
             // Located: region inherited from binding or base expression.
             .Name => self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]),
+            .ExternalProxy => LocatedType.unlocated(self.expr_types[expr_id.index()]),
             .Field => |field| blk: {
                 const base = self.exprLocatedType(field.base);
                 break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
@@ -3894,6 +3952,7 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
     if (lhs_type.kind() != rhs_type.kind()) return false;
     return switch (lhs_type) {
         .unknown, .void, .bool, .string, .address, .bytes => true,
+        .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
         .integer => |left| blk: {
             const right = rhs_type.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);
@@ -3959,6 +4018,7 @@ fn typeDisplayName(ty: Type) []const u8 {
         .string => "string",
         .address => "address",
         .bytes => "bytes",
+        .external_proxy => "external proxy",
         .named => |named| named.name,
         .function => |function| function.name orelse "function",
         .contract => |named| named.name,

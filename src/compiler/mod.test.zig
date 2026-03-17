@@ -442,6 +442,82 @@ test "compiler rejects invalid extern trait semantics" {
     try testing.expect(diagnosticMessagesContain(diags, "extern trait 'Bad' cannot be implemented with an impl block"));
 }
 
+test "compiler type checks external proxy method calls" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn probe(user: address) {
+        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const contract = ast_file.item(ast_file.root_items[2]).Contract;
+    const function = ast_file.item(contract.members[1]).Function;
+    const decl = ast_file.statement(ast_file.body(function.body).statements[0]).VariableDecl;
+    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "result").?;
+    const result_type = typecheck.pattern_types[result_pattern.index()].type;
+    _ = decl;
+    try testing.expectEqual(compiler.sema.TypeKind.error_union, result_type.kind());
+    try testing.expectEqual(compiler.sema.TypeKind.integer, result_type.payloadType().?.kind());
+    try testing.expectEqualStrings("ExternalCallFailed", result_type.errorTypes()[0].named.name);
+}
+
+test "compiler reports external proxy misuse" {
+    const source_text =
+        \\trait Plain {
+        \\    fn ping(self) -> bool;
+        \\}
+        \\
+        \\extern trait ERC20 {
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn badMissingGas(user: address) -> !u256 | ExternalCallFailed {
+        \\        return external<ERC20>(token).balanceOf(user);
+        \\    }
+        \\
+        \\    pub fn badTrait() -> !bool | ExternalCallFailed {
+        \\        return external<Plain>(token, gas: 50000).ping();
+        \\    }
+        \\
+        \\    pub fn badMethod(user: address) -> !u256 | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).missing(user);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const syntax_diags = try compilation.db.syntaxDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(diagnosticMessagesContain(syntax_diags, "expected ', gas: ...' in external proxy"));
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "trait 'Plain' is not extern"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'external proxy' has no field 'missing'"));
+}
+
 test "compiler preserves trait ghost blocks in AST" {
     const source_text =
         \\trait ERC20 {

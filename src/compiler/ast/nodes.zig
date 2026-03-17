@@ -152,6 +152,7 @@ pub const Expr = union(enum) {
     ArrayLiteral: ArrayLiteralExpr,
     StructLiteral: StructLiteralExpr,
     Switch: SwitchExpr,
+    ExternalProxy: ExternalProxyExpr,
     Comptime: ComptimeExpr,
     ErrorReturn: ErrorReturnExpr,
     Name: NameExpr,
@@ -237,6 +238,13 @@ pub const SwitchExpr = struct {
 pub const ComptimeExpr = struct {
     range: source.TextRange,
     body: BodyId,
+};
+
+pub const ExternalProxyExpr = struct {
+    range: source.TextRange,
+    trait_name: []const u8,
+    address_expr: ExprId,
+    gas_expr: ExprId,
 };
 
 pub const ErrorReturnExpr = struct {

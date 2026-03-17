@@ -1028,6 +1028,7 @@ pub fn mixin(Builder: type) type {
                 .ArrayLiteral => Lowering.lowerArrayLiteralExprNode(self, node),
                 .StructLiteral => Lowering.lowerStructLiteralExprNode(self, node),
                 .SwitchExpr => Lowering.lowerSwitchExprNode(self, node),
+                .ExternalProxyExpr => Lowering.lowerExternalProxyExprNode(self, node),
                 .QuantifiedExpr => Lowering.lowerQuantifiedExprNode(self, node),
                 .OldExpr => Lowering.lowerOldExprNode(self, node),
                 .ComptimeExpr => Lowering.lowerComptimeExprNode(self, node),
@@ -1382,6 +1383,18 @@ pub fn mixin(Builder: type) type {
             } });
         }
 
+        fn lowerExternalProxyExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            const trait_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedExpr(self, node, "missing extern trait name");
+            const address_node = nthDirectNode(node, 0) orelse return Lowering.malformedExpr(self, node, "missing extern proxy address");
+            const gas_node = nthDirectNode(node, 1) orelse return Lowering.malformedExpr(self, node, "missing extern proxy gas");
+            return Support.pushExpr(self, .{ .ExternalProxy = .{
+                .range = node.range(),
+                .trait_name = tokenText(trait_token),
+                .address_expr = try Lowering.lowerExpressionNode(self, address_node),
+                .gas_expr = try Lowering.lowerExpressionNode(self, gas_node),
+            } });
+        }
+
         fn lowerTypeNode(self: *Builder, node: SyntaxNode) anyerror!TypeExprId {
             return switch (node.kind()) {
                 .PathType => Lowering.lowerPathTypeNode(self, node),
@@ -1714,6 +1727,7 @@ fn isExprKind(kind: SyntaxKind) bool {
         .ArrayLiteral,
         .StructLiteral,
         .SwitchExpr,
+        .ExternalProxyExpr,
         .QuantifiedExpr,
         .OldExpr,
         .BuiltinExpr,

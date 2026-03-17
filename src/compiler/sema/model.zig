@@ -107,6 +107,7 @@ pub const TypeKind = enum {
     string,
     address,
     bytes,
+    external_proxy,
     named,
     function,
     contract,
@@ -131,6 +132,10 @@ pub const Region = enum {
 
 pub const NamedType = struct {
     name: []const u8,
+};
+
+pub const ExternalProxyType = struct {
+    trait_name: []const u8,
 };
 
 pub const IntegerType = struct {
@@ -178,6 +183,7 @@ pub const Type = union(TypeKind) {
     string: void,
     address: void,
     bytes: void,
+    external_proxy: ExternalProxyType,
     named: NamedType,
     function: FunctionType,
     contract: NamedType,
@@ -198,6 +204,7 @@ pub const Type = union(TypeKind) {
     pub fn name(self: *const Type) ?[]const u8 {
         return switch (self.*) {
             .integer => |integer| integer.spelling,
+            .external_proxy => |proxy| proxy.trait_name,
             .named => |named| named.name,
             .function => |function| function.name,
             .contract => |named| named.name,
@@ -287,6 +294,7 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
         .address => try buffer.appendSlice(allocator, "address"),
         .string => try buffer.appendSlice(allocator, "string"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
+        .external_proxy => |proxy| try buffer.writer(allocator).print("external_{s}", .{proxy.trait_name}),
         .void => try buffer.appendSlice(allocator, "void"),
         .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),
         .named => |named| try buffer.appendSlice(allocator, named.name),

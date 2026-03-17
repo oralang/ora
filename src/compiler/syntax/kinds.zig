@@ -54,6 +54,7 @@ pub const SyntaxKind = enum {
     ArrayLiteral,
     StructLiteral,
     SwitchExpr,
+    ExternalProxyExpr,
     QuantifiedExpr,
     OldExpr,
     BuiltinExpr,

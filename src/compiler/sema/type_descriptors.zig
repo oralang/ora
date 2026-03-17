@@ -126,6 +126,7 @@ pub fn inferItemType(allocator: std.mem.Allocator, file: *const ast.AstFile, ite
         .Struct => |struct_item| .{ .struct_ = .{ .name = struct_item.name } },
         .Bitfield => |bitfield_item| .{ .bitfield = .{ .name = bitfield_item.name } },
         .Enum => |enum_item| .{ .enum_ = .{ .name = enum_item.name } },
+        .ErrorDecl => |error_decl| .{ .named = .{ .name = error_decl.name } },
         .TypeAlias => |type_alias| try descriptorFromTypeExpr(allocator, file, item_index, type_alias.target_type),
         .GhostBlock => .{ .unknown = {} },
         .Field => |field| if (field.type_expr) |type_expr| try descriptorFromTypeExpr(allocator, file, item_index, type_expr) else .{ .unknown = {} },
@@ -146,6 +147,7 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
         .unknown, .void, .bool, .string, .address, .bytes => true,
+        .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
         .integer => |left| blk: {
             const right = rhs.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);

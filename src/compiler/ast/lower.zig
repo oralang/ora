@@ -287,6 +287,10 @@ const Validator = struct {
                 if (switch_expr.else_expr) |expr_id| _ = try self.expectExpr(expr_id, expr_range, "switch expression references invalid else expression id");
             },
             .Comptime => |comptime_expr| _ = try self.expectBody(comptime_expr.body, expr_range, "comptime expression references invalid body id"),
+            .ExternalProxy => |proxy| {
+                _ = try self.expectExpr(proxy.address_expr, expr_range, "external proxy references invalid address expression id");
+                _ = try self.expectExpr(proxy.gas_expr, expr_range, "external proxy references invalid gas expression id");
+            },
             .ErrorReturn => |error_return| {
                 for (error_return.args) |expr_id| _ = try self.expectExpr(expr_id, expr_range, "error return references invalid argument expression id");
             },

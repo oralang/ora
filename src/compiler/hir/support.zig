@@ -295,6 +295,7 @@ pub fn exprRange(file: *const ast.AstFile, expr_id: ast.ExprId) source.TextRange
         .ArrayLiteral => |node| node.range,
         .StructLiteral => |node| node.range,
         .Switch => |node| node.range,
+        .ExternalProxy => |node| node.range,
         .Comptime => |node| node.range,
         .ErrorReturn => |node| node.range,
         .Name => |node| node.range,
