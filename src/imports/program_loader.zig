@@ -1,6 +1,6 @@
 const std = @import("std");
 const lib = @import("ora_lib");
-const import_resolver = @import("mod.zig");
+const import_resolver = @import("ora_imports");
 
 pub const ResolverOptions = import_resolver.ResolverOptions;
 

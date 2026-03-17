@@ -1,5 +1,5 @@
 const std = @import("std");
-const import_graph = @import("../../imports/mod.zig");
+const import_graph = @import("ora_imports");
 const ast = @import("../ast/mod.zig");
 const db = @import("../db/mod.zig");
 const sema = @import("../sema/mod.zig");

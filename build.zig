@@ -80,6 +80,13 @@ pub fn build(b: *std.Build) void {
     });
     ora_ast_mod.addImport("ora_types", ora_types_mod);
 
+    const ora_imports_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_imports_mod.addImport("ora_lexer", ora_lexer_mod);
+
     const ora_fmt_mod = b.createModule(.{
         .root_source_file = b.path("src/fmt/mod.zig"),
         .target = target,
@@ -110,6 +117,7 @@ pub fn build(b: *std.Build) void {
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("ora_lib", lib_mod);
+    exe_mod.addImport("ora_imports", ora_imports_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
     exe_mod.addImport("log", log_mod);
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
@@ -119,6 +127,7 @@ pub fn build(b: *std.Build) void {
     lib_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("ora_ast", ora_ast_mod);
     lib_mod.addImport("ora_lexer", ora_lexer_mod);
+    lib_mod.addImport("ora_imports", ora_imports_mod);
 
     // now, we will create a static library based on the module we created above.
     // this creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -484,6 +493,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     import_program_loader_test_mod.addImport("ora_lib", ora_frontend_mod);
+    import_program_loader_test_mod.addImport("ora_imports", ora_imports_mod);
     import_program_loader_test_mod.addImport("ora_ast", ora_ast_mod);
     import_program_loader_test_mod.addImport("ora_lexer", ora_lexer_mod);
     import_program_loader_test_mod.addImport("ora_types", ora_types_mod);
