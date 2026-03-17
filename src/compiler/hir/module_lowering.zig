@@ -1,8 +1,8 @@
 const std = @import("std");
-const crypto = std.crypto;
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const abi_support = @import("abi.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
@@ -440,7 +440,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             defer abi_param_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
-                const abi_type = try @This().canonicalAbiType(self, self.typecheck.pattern_types[parameter.pattern.index()].type);
+                const abi_type = try abi_support.canonicalAbiType(self.allocator, self.typecheck.pattern_types[parameter.pattern.index()].type);
                 defer self.allocator.free(abi_type);
                 try signature_parts.append(self.allocator, try self.allocator.dupe(u8, abi_type));
                 abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
@@ -450,7 +450,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             defer self.allocator.free(joined);
             const signature = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ function.name, joined });
             defer self.allocator.free(signature);
-            const selector = try @This().keccakSelectorHex(self.allocator, signature);
+            const selector = try abi_support.keccakSelectorHex(self.allocator, signature);
             defer self.allocator.free(selector);
 
             try attrs.append(self.allocator, namedStringAttr(self.context, "ora.selector", selector));
@@ -463,48 +463,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             if (function.return_type) |_| {
-                const abi_return = try @This().canonicalAbiType(self, self.typecheck.body_types[function.body.index()]);
+                const abi_return = try abi_support.canonicalAbiType(self.allocator, self.typecheck.body_types[function.body.index()]);
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
             }
-        }
-
-        fn canonicalAbiType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
-            return switch (ty) {
-                .bool => self.allocator.dupe(u8, "bool"),
-                .address => self.allocator.dupe(u8, "address"),
-                .string => self.allocator.dupe(u8, "string"),
-                .bytes => self.allocator.dupe(u8, "bytes"),
-                .integer => |integer| blk: {
-                    const spelling = integer.spelling orelse "u256";
-                    if (std.mem.eql(u8, spelling, "u256")) break :blk self.allocator.dupe(u8, "uint256");
-                    if (std.mem.eql(u8, spelling, "i256")) break :blk self.allocator.dupe(u8, "int256");
-                    if (std.mem.startsWith(u8, spelling, "u")) break :blk std.fmt.allocPrint(self.allocator, "uint{s}", .{spelling[1..]});
-                    if (std.mem.startsWith(u8, spelling, "i")) break :blk std.fmt.allocPrint(self.allocator, "int{s}", .{spelling[1..]});
-                    break :blk self.allocator.dupe(u8, spelling);
-                },
-                .refinement => |refinement| @This().canonicalAbiType(self, refinement.base_type.*),
-                .array => |array| blk: {
-                    const element = try @This().canonicalAbiType(self, array.element_type.*);
-                    defer self.allocator.free(element);
-                    if (array.len) |len| break :blk std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ element, len });
-                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                },
-                else => error.UnsupportedAbiType,
-            };
-        }
-
-        fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
-            var hash: [32]u8 = undefined;
-            crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
-            const selector = hash[0..4];
-
-            var hex: [8]u8 = undefined;
-            for (selector, 0..) |byte, index| {
-                hex[index * 2] = std.fmt.hex_charset[byte >> 4];
-                hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-            }
-            return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
         }
 
         pub fn lowerField(self: *Lowerer, item_id: ast.ItemId, field: ast.FieldItem, parent_block: mlir.MlirBlock) anyerror!void {

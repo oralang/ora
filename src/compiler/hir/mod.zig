@@ -12,6 +12,8 @@ const module_lowering = @import("module_lowering.zig");
 const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
 
+pub const abi = @import("abi.zig");
+
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
 

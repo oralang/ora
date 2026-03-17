@@ -625,6 +625,45 @@ test "compiler extern trait calls are not yet lowerable in HIR" {
     try testing.expectError(error.UnsupportedExternTraitLowering, renderHirTextForSource(source_text));
 }
 
+test "compiler computes extern trait ABI signatures" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const trait_interface = typecheck.traitInterfaceByName("ERC20").?;
+
+    const transfer_signature = try compiler.hir.abi.signatureForMethod(
+        testing.allocator,
+        trait_interface.methods[0].name,
+        trait_interface.methods[0].has_self,
+        trait_interface.methods[0].param_types,
+    );
+    defer testing.allocator.free(transfer_signature);
+    try testing.expectEqualStrings("transfer(address,uint256)", transfer_signature);
+
+    const balance_signature = try compiler.hir.abi.signatureForMethod(
+        testing.allocator,
+        trait_interface.methods[1].name,
+        trait_interface.methods[1].has_self,
+        trait_interface.methods[1].param_types,
+    );
+    defer testing.allocator.free(balance_signature);
+    try testing.expectEqualStrings("balanceOf(address)", balance_signature);
+}
+
+test "compiler computes extern trait selectors" {
+    const selector = try compiler.hir.abi.keccakSelectorHex(testing.allocator, "transfer(address,uint256)");
+    defer testing.allocator.free(selector);
+    try testing.expectEqualStrings("0xa9059cbb", selector);
+}
+
 test "compiler preserves trait ghost blocks in AST" {
     const source_text =
         \\trait ERC20 {
