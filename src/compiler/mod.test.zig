@@ -435,6 +435,30 @@ test "compiler collects verification facts from trait ghost blocks" {
     try testing.expectEqual(compiler.ast.SpecClauseKind.invariant, facts.facts[2].kind);
 }
 
+test "compiler type-checks trait ghost blocks during impl checking" {
+    const source_text =
+        \\trait SafeCounter {
+        \\    fn get(self) -> u256;
+        \\
+        \\    ghost {
+        \\        assert(1, "bad");
+        \\    }
+        \\}
+        \\
+        \\contract Counter {}
+        \\
+        \\impl SafeCounter for Counter {
+        \\    fn get(self) -> u256 { return 0; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "assert condition must be 'bool'"));
+}
+
 test "compiler reports trait method body parse error" {
     const source_text =
         \\trait ERC20 {

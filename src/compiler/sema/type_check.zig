@@ -504,6 +504,15 @@ const TypeChecker = struct {
                 }
                 defer self.current_contract = previous_contract;
 
+                if (self.item_index.lookup(impl_item.trait_name)) |trait_item_id| {
+                    if (self.file.item(trait_item_id).* == .Trait) {
+                        const trait_item = self.file.item(trait_item_id).Trait;
+                        if (trait_item.ghost_block) |ghost_id| {
+                            try self.visitItem(ghost_id);
+                        }
+                    }
+                }
+
                 for (impl_item.methods) |method_id| {
                     try self.visitItem(method_id);
                 }
