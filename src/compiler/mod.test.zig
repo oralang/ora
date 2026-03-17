@@ -664,6 +664,11 @@ test "compiler converts extern trait calls through SIR" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.malloc"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.trait_name"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ERC20\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.method_name"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"balanceOf\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.selector"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
 
@@ -702,6 +707,9 @@ test "compiler converts call-kind extern traits with bool and address returns th
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.call"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.call_kind"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"staticcall\""));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
 

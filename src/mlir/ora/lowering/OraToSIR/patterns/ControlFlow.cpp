@@ -2070,6 +2070,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     auto encodedArgTypes = encodedDef->getAttrOfType<mlir::ArrayAttr>("arg_types");
     if (!encodedArgTypes)
         return rewriter.notifyMatchFailure(op, "missing arg_types on ora.abi_encode");
+    auto selectorAttr = encodedDef->getAttrOfType<mlir::IntegerAttr>("selector");
 
     const uint64_t calldataBytes = 4 + (32 * encodedArgTypes.size());
     Value calldataLen = rewriter.create<sir::ConstOp>(
@@ -2085,10 +2086,10 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     Value gas = ensureU256(rewriter, op.getLoc(), adaptor.getGas());
     Value target = ensureU256(rewriter, op.getLoc(), adaptor.getTarget());
 
-    Value callSuccess;
+    Operation *callOp = nullptr;
     if (callKind.getValue() == "staticcall")
     {
-        callSuccess = rewriter.create<sir::StaticCallOp>(
+        callOp = rewriter.create<sir::StaticCallOp>(
             op.getLoc(),
             u256Type,
             gas,
@@ -2104,7 +2105,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
             op.getLoc(),
             u256Type,
             mlir::IntegerAttr::get(ui64Type, 0));
-        callSuccess = rewriter.create<sir::CallOp>(
+        callOp = rewriter.create<sir::CallOp>(
             op.getLoc(),
             u256Type,
             gas,
@@ -2120,6 +2121,16 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unsupported extern call kind");
     }
 
+    if (!callOp)
+        return rewriter.notifyMatchFailure(op, "failed to create SIR call op");
+
+    callOp->setAttr("ora.trait_name", op->getAttr("trait_name"));
+    callOp->setAttr("ora.method_name", op->getAttr("method_name"));
+    callOp->setAttr("ora.call_kind", callKind);
+    if (selectorAttr)
+        callOp->setAttr("ora.selector", selectorAttr);
+
+    Value callSuccess = callOp->getResult(0);
     Value returnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, returnPtr);
     rewriter.replaceOp(op, ValueRange{callSuccess, returnPtrU256});
     return success();
