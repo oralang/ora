@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const abi_support = @import("abi.zig");
 const const_bridge = @import("../../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
@@ -424,9 +425,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            if (@This().isExternProxyMethodCall(self, call.callee)) {
-                return error.UnsupportedExternTraitLowering;
-            }
+            if (try @This().lowerExternProxyMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
@@ -481,19 +480,144 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
-        fn isExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+        const ResolvedExternProxyMethodCall = struct {
+            field: ast.FieldExpr,
+            trait_name: []const u8,
+            method: sema.TraitMethodSignature,
+        };
+
+        fn lowerExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
+            const resolved = @This().resolveExternProxyMethodCall(self, call.callee) orelse return null;
+            switch (resolved.method.return_type.kind()) {
+                .bool, .address, .integer => {},
+                else => return error.UnsupportedExternTraitLowering,
+            }
+
+            const loc = self.parent.location(call.range);
+            const payload_type = self.parent.lowerSemaType(resolved.method.return_type, exprRange(self.parent.file, resolved.field.base));
+            const result_type = self.parent.lowerExprType(expr_id);
+            const proxy = switch (self.parent.file.expression(resolved.field.base).*) {
+                .ExternalProxy => |proxy| proxy,
+                .Group => |group| switch (self.parent.file.expression(group.expr).*) {
+                    .ExternalProxy => |proxy| proxy,
+                    else => return error.UnsupportedExternTraitLowering,
+                },
+                else => return error.UnsupportedExternTraitLowering,
+            };
+
+            var encode_args: std.ArrayList(mlir.MlirValue) = .{};
+            for (call.args) |arg| {
+                try encode_args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
+            }
+
+            var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer arg_type_attrs.deinit(self.parent.allocator);
+            for (resolved.method.param_types) |param_type| {
+                const abi_type = try abi_support.canonicalAbiType(self.parent.allocator, param_type);
+                defer self.parent.allocator.free(abi_type);
+                try arg_type_attrs.append(self.parent.allocator, mlir.oraStringAttrCreate(self.parent.context, strRef(abi_type)));
+            }
+            const arg_types_attr = mlir.oraArrayAttrCreate(self.parent.context, @intCast(arg_type_attrs.items.len), if (arg_type_attrs.items.len == 0) null else arg_type_attrs.items.ptr);
+
+            var return_type_attrs: [1]mlir.MlirAttribute = .{undefined};
+            const abi_return = try abi_support.canonicalAbiType(self.parent.allocator, resolved.method.return_type);
+            defer self.parent.allocator.free(abi_return);
+            return_type_attrs[0] = mlir.oraStringAttrCreate(self.parent.context, strRef(abi_return));
+            const return_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &return_type_attrs);
+
+            const signature = try abi_support.signatureForMethod(
+                self.parent.allocator,
+                resolved.method.name,
+                resolved.method.has_self,
+                resolved.method.param_types,
+            );
+            defer self.parent.allocator.free(signature);
+            const selector_text = try abi_support.keccakSelectorHex(self.parent.allocator, signature);
+            defer self.parent.allocator.free(selector_text);
+            const selector_value = try std.fmt.parseUnsigned(u32, selector_text[2..], 16);
+            const selector_type = mlir.oraIntegerTypeCreate(self.parent.context, 32);
+            const selector_attr = mlir.oraIntegerAttrCreateI64FromType(selector_type, selector_value);
+
+            const encode_op = mlir.oraAbiEncodeOpCreate(
+                self.parent.context,
+                loc,
+                selector_attr,
+                arg_types_attr,
+                if (encode_args.items.len == 0) null else encode_args.items.ptr,
+                encode_args.items.len,
+                defaultIntegerType(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
+            const calldata = appendValueOp(self.block, encode_op);
+
+            const target = try self.lowerExpr(proxy.address_expr, locals);
+            const gas = try self.lowerExpr(proxy.gas_expr, locals);
+
+            const external_call_op = mlir.oraExternalCallOpCreate(
+                self.parent.context,
+                loc,
+                strRef(if (resolved.method.extern_call_kind == .staticcall) "staticcall" else "call"),
+                strRef(resolved.trait_name),
+                strRef(resolved.method.name),
+                target,
+                gas,
+                calldata,
+                boolType(self.parent.context),
+                defaultIntegerType(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(external_call_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, external_call_op);
+            const success = mlir.oraOperationGetResult(external_call_op, 0);
+            const returndata = mlir.oraOperationGetResult(external_call_op, 1);
+
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, success, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            const decode_op = mlir.oraAbiDecodeOpCreate(self.parent.context, loc, return_types_attr, returndata, payload_type);
+            if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
+            appendOp(then_block, decode_op);
+            const decoded = mlir.oraOperationGetResult(decode_op, 0);
+            const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
+            if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+            appendOp(then_block, ok_op);
+            try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+
+            const error_type = self.parent.typecheck.exprType(expr_id).errorTypes()[0];
+            const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, call.callee));
+            const error_name = error_type.name() orelse "ExternalCallFailed";
+            const error_return = mlir.oraErrorReturnOpCreate(self.parent.context, loc, strRef(error_name), null, 0, lowered_error_type);
+            if (mlir.oraOperationIsNull(error_return)) return error.MlirOperationCreationFailed;
+            appendOp(else_block, error_return);
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_return, 0), result_type);
+            if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+            appendOp(else_block, err_op);
+            try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(err_op, 0)});
+
+            return mlir.oraOperationGetResult(if_op, 0);
+        }
+
+        fn resolveExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId) ?ResolvedExternProxyMethodCall {
             const field = switch (self.parent.file.expression(expr_id).*) {
                 .Field => |field| field,
-                .Group => |group| return @This().isExternProxyMethodCall(self, group.expr),
-                else => return false,
+                .Group => |group| return @This().resolveExternProxyMethodCall(self, group.expr),
+                else => return null,
             };
             const base_type = self.parent.typecheck.exprType(field.base);
-            if (base_type.kind() != .external_proxy) return false;
-            const trait_interface = self.parent.typecheck.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return false;
+            if (base_type.kind() != .external_proxy) return null;
+            const trait_interface = self.parent.typecheck.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
             for (trait_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name)) return true;
+                if (std.mem.eql(u8, method.name, field.name)) return .{
+                    .field = field,
+                    .trait_name = base_type.external_proxy.trait_name,
+                    .method = method,
+                };
             }
-            return false;
+            return null;
         }
 
         fn lowerCurrentMethodSelfCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {

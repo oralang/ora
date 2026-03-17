@@ -604,7 +604,7 @@ test "compiler allows writes around extern staticcall" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
-test "compiler extern trait calls are not yet lowerable in HIR" {
+test "compiler lowers extern trait calls to abi and external call ops" {
     const source_text =
         \\extern trait ERC20 {
         \\    staticcall fn balanceOf(self, owner: address) -> u256;
@@ -615,14 +615,23 @@ test "compiler extern trait calls are not yet lowerable in HIR" {
         \\contract Vault {
         \\    storage var token: address;
         \\
-        \\    pub fn probe(user: address) {
-        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
-        \\        _ = result;
+        \\    pub fn probe(user: address) -> !u256 | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).balanceOf(user);
         \\    }
         \\}
     ;
 
-    try testing.expectError(error.UnsupportedExternTraitLowering, renderHirTextForSource(source_text));
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.external_call"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"staticcall\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"ERC20\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balanceOf\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
 
 test "compiler computes extern trait ABI signatures" {
