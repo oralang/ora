@@ -83,25 +83,9 @@ const CommandKind = enum {
 };
 
 fn shouldUseCompilerV2(command_kind: CommandKind, parsed: cli_args.CliOptions) bool {
-    if (parsed.use_legacy) return false;
     if (parsed.use_v2) return true;
     if (command_kind == .Build) return true;
     if (command_kind != .Emit) return false;
-
-    if (parsed.emit_tokens or
-        parsed.emit_cfg or
-        parsed.emit_sir_text or
-        parsed.emit_bytecode or
-        parsed.emit_abi or
-        parsed.emit_abi_solidity or
-        parsed.emit_abi_extras)
-    {
-        return false;
-    }
-
-    if (parsed.emit_ast or parsed.emit_typed_ast or parsed.emit_mlir or parsed.emit_mlir_sir) {
-        return true;
-    }
 
     return true;
 }
@@ -370,11 +354,6 @@ pub fn main() !void {
 
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
-        std.process.exit(2);
-    }
-
-    if (parsed.use_v2 and parsed.use_legacy) {
-        std.debug.print("error: --v2 and --legacy are mutually exclusive.\n", .{});
         std.process.exit(2);
     }
 
@@ -1131,8 +1110,7 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --v2                   - Force the new compiler for supported build/emit modes\n", .{});
-    try stdout.print("  --legacy               - Force the legacy compiler path for build/emit mode\n", .{});
+    try stdout.print("  --v2                   - Force the new compiler for build/emit modes\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -3779,19 +3757,9 @@ test "v2 routing defaults build to compiler v2" {
     try std.testing.expect(shouldUseCompilerV2(.Build, parsed));
 }
 
-test "legacy flag overrides default v2 emit routing" {
-    const parsed = cli_args.CliOptions{ .emit_mlir = true, .use_legacy = true };
-    try std.testing.expect(!shouldUseCompilerV2(.Emit, parsed));
-}
-
-test "legacy flag overrides default v2 build routing" {
-    const parsed = cli_args.CliOptions{ .use_legacy = true };
-    try std.testing.expect(!shouldUseCompilerV2(.Build, parsed));
-}
-
-test "unsupported emit flows stay on legacy by default" {
+test "unsupported emit flows still route to compiler v2" {
     const parsed = cli_args.CliOptions{ .emit_sir_text = true };
-    try std.testing.expect(!shouldUseCompilerV2(.Emit, parsed));
+    try std.testing.expect(shouldUseCompilerV2(.Emit, parsed));
 }
 
 test "m3 parity corpus lowers through legacy and v2" {
