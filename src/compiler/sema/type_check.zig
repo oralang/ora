@@ -482,7 +482,17 @@ const TypeChecker = struct {
                 try self.validateBodyLocks(function.body, &locked_slots);
             },
             .Trait => |trait_item| {
+                if (trait_item.is_extern and trait_item.ghost_block != null) {
+                    try self.emitRangeError(trait_item.range, "extern trait '{s}' cannot declare a ghost block", .{
+                        trait_item.name,
+                    });
+                }
                 for (trait_item.methods) |method| {
+                    if (trait_item.is_extern and method.extern_call_kind == .none) {
+                        try self.emitRangeError(method.range, "extern trait method '{s}' must use 'call fn' or 'staticcall fn'", .{
+                            method.name,
+                        });
+                    }
                     for (method.parameters) |parameter| {
                         _ = try self.resolveTypeExpr(parameter.type_expr);
                     }
@@ -588,6 +598,12 @@ const TypeChecker = struct {
                 return;
             },
         };
+        if (trait_item.is_extern) {
+            try self.emitRangeError(impl_item.range, "extern trait '{s}' cannot be implemented with an impl block", .{
+                trait_item.name,
+            });
+            return;
+        }
 
         const target_item_id = self.item_index.lookup(impl_item.target_name) orelse {
             try self.emitRangeError(impl_item.range, "impl references unknown target '{s}'", .{
@@ -829,6 +845,7 @@ const TypeChecker = struct {
             .name = trait_method.name,
             .has_self = trait_method.has_self,
             .is_comptime = trait_method.is_comptime,
+            .extern_call_kind = trait_method.extern_call_kind,
             .param_types = param_types,
             .return_type = return_type,
         };
@@ -850,6 +867,7 @@ const TypeChecker = struct {
             .name = function.name,
             .has_self = has_self,
             .is_comptime = function.is_comptime,
+            .extern_call_kind = .none,
             .param_types = param_types,
             .return_type = return_type,
         };
@@ -865,6 +883,7 @@ const TypeChecker = struct {
         try self.trait_interfaces.append(self.arena, .{
             .trait_item_id = trait_item_id,
             .name = trait_item.name,
+            .is_extern = trait_item.is_extern,
             .methods = methods,
         });
     }

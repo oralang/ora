@@ -146,6 +146,7 @@ const Parser = struct {
             .Struct => self.parseStructItem(),
             .Bitfield => self.parseBitfieldItem(),
             .Enum => self.parseEnumItem(),
+            .Extern => self.parseTraitItem(),
             .Trait => self.parseTraitItem(),
             .Impl => self.parseImplItem(),
             .Log => self.parseLogDeclItem(),
@@ -242,6 +243,9 @@ const Parser = struct {
         if (self.at(.Comptime)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
+        if (self.at(.Call) or self.at(.Staticcall)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
 
         if (self.at(.Fn)) {
             try children.append(self.allocator, .{ .token = self.bump() });
@@ -266,6 +270,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        if (self.at(.Extern)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         try children.append(self.allocator, .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
@@ -286,7 +293,7 @@ const Parser = struct {
                 try children.append(self.allocator, .{ .node = try self.parseGhostItem() });
                 continue;
             }
-            if (!self.at(.Comptime) and !self.at(.Fn)) {
+            if (!self.at(.Comptime) and !self.at(.Fn) and !self.at(.Call) and !self.at(.Staticcall)) {
                 try self.reportHere("expected method signature in trait body");
                 try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
                 continue;
@@ -2315,7 +2322,7 @@ const Parser = struct {
     fn startsTopLevelItem(self: *const Parser) bool {
         const kind = self.current().kind;
         return switch (kind) {
-            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
+            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
             .Comptime => self.peekKind(1) == .Const,
             .Identifier => self.startsTypeAliasItem(),
             else => false,

@@ -306,6 +306,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing trait name"));
             var methods: std.ArrayList(TraitMethod) = .{};
             var ghost_block: ?ItemId = null;
+            const is_extern = firstDirectTokenOfKind(node, .Extern) != null;
 
             var it = node.children();
             while (it.next()) |child| {
@@ -324,6 +325,7 @@ pub fn mixin(Builder: type) type {
             return Support.pushItem(self, .{ .Trait = .{
                 .range = node.range(),
                 .name = name,
+                .is_extern = is_extern,
                 .methods = try methods.toOwnedSlice(self.allocator),
                 .ghost_block = ghost_block,
             } });
@@ -430,6 +432,12 @@ pub fn mixin(Builder: type) type {
                 .trait_bounds = try trait_bounds.toOwnedSlice(self.allocator),
                 .clauses = try clauses.toOwnedSlice(self.allocator),
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
+                .extern_call_kind = if (firstDirectTokenOfKind(node, .Call) != null)
+                    .call
+                else if (firstDirectTokenOfKind(node, .Staticcall) != null)
+                    .staticcall
+                else
+                    .none,
             };
         }
 

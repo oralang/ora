@@ -527,6 +527,7 @@ pub const TraitMethod = struct {
     trait_bounds: []TraitBound,
     clauses: []SpecClause,
     is_comptime: bool,
+    extern_call_kind: ExternCallKind = .none,
 };
 
 pub const Item = union(enum) {
@@ -606,8 +607,15 @@ pub const EnumItem = struct {
 pub const TraitItem = struct {
     range: source.TextRange,
     name: []const u8,
+    is_extern: bool = false,
     methods: []TraitMethod,
     ghost_block: ?ItemId = null,
+};
+
+pub const ExternCallKind = enum {
+    none,
+    call,
+    staticcall,
 };
 
 pub const ImplItem = struct {

@@ -368,11 +368,13 @@ test "compiler lowers trait and impl items into AST" {
     try testing.expect(ast_file.item(ast_file.root_items[0]).* == .Trait);
     const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
     try testing.expectEqualStrings("ERC20", trait_item.name);
+    try testing.expect(!trait_item.is_extern);
     try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
     try testing.expectEqual(@as(?compiler.ast.ItemId, null), trait_item.ghost_block);
     try testing.expect(trait_item.methods[0].has_self);
     try testing.expectEqualStrings("totalSupply", trait_item.methods[0].name);
     try testing.expectEqual(@as(usize, 0), trait_item.methods[0].parameters.len);
+    try testing.expectEqual(compiler.ast.ExternCallKind.none, trait_item.methods[0].extern_call_kind);
     try testing.expect(trait_item.methods[1].is_comptime);
     try testing.expectEqualStrings("decimals", trait_item.methods[1].name);
 
@@ -382,6 +384,62 @@ test "compiler lowers trait and impl items into AST" {
     try testing.expectEqualStrings("Token", impl_item.target_name);
     try testing.expectEqual(@as(usize, 1), impl_item.methods.len);
     try testing.expect(ast_file.item(impl_item.methods[0]).* == .Function);
+}
+
+test "compiler parses and lowers extern traits" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\    staticcall fn totalSupply(self) -> u256;
+        \\}
+    ;
+
+    var parser_result = try compiler.syntax.parse(testing.allocator, compiler.FileId.fromIndex(0), source_text);
+    defer parser_result.deinit();
+
+    const root = compiler.syntax.rootNode(&parser_result.tree);
+    const trait_item_node = nthChildNodeOfKind(root, .TraitItem, 0).?;
+    try testing.expect(nthChildNodeOfKind(trait_item_node, .TraitMethodSignature, 0) != null);
+
+    var ast_diags: std.ArrayList(compiler.diagnostics.Diagnostic) = .{};
+    defer ast_diags.deinit(testing.allocator);
+    var lower_result = try compiler.ast.lower(testing.allocator, &parser_result.tree);
+    defer lower_result.deinit();
+    try ast_diags.appendSlice(testing.allocator, lower_result.diagnostics.items.items);
+    const ast_file = &lower_result.file;
+    try testing.expectEqual(@as(usize, 0), ast_diags.items.len);
+
+    const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
+    try testing.expect(trait_item.is_extern);
+    try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
+    try testing.expectEqual(compiler.ast.ExternCallKind.call, trait_item.methods[0].extern_call_kind);
+    try testing.expectEqual(compiler.ast.ExternCallKind.staticcall, trait_item.methods[1].extern_call_kind);
+}
+
+test "compiler rejects invalid extern trait semantics" {
+    const source_text =
+        \\extern trait Bad {
+        \\    fn missing(self) -> bool;
+        \\    ghost {
+        \\        assert(true, "nope");
+        \\    }
+        \\}
+        \\
+        \\struct Box { value: u256 }
+        \\
+        \\impl Bad for Box {
+        \\    fn missing(self) -> bool { return true; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &typecheck.diagnostics;
+    try testing.expect(diagnosticMessagesContain(diags, "extern trait method 'missing' must use 'call fn' or 'staticcall fn'"));
+    try testing.expect(diagnosticMessagesContain(diags, "extern trait 'Bad' cannot declare a ghost block"));
+    try testing.expect(diagnosticMessagesContain(diags, "extern trait 'Bad' cannot be implemented with an impl block"));
 }
 
 test "compiler preserves trait ghost blocks in AST" {

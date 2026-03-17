@@ -20,6 +20,7 @@ pub const UnaryOp = nodes.UnaryOp;
 pub const BinaryOp = nodes.BinaryOp;
 pub const AssignmentOp = nodes.AssignmentOp;
 pub const Quantifier = nodes.Quantifier;
+pub const ExternCallKind = nodes.ExternCallKind;
 pub const NodeError = nodes.NodeError;
 pub const TypeExpr = nodes.TypeExpr;
 pub const PathTypeExpr = nodes.PathTypeExpr;

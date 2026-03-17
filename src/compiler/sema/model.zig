@@ -41,6 +41,7 @@ pub const TraitMethodSignature = struct {
     name: []const u8,
     has_self: bool,
     is_comptime: bool = false,
+    extern_call_kind: ast.ExternCallKind = .none,
     param_types: []const Type = &.{},
     return_type: Type = .{ .void = {} },
 };
@@ -48,6 +49,7 @@ pub const TraitMethodSignature = struct {
 pub const TraitInterface = struct {
     trait_item_id: ast.ItemId,
     name: []const u8,
+    is_extern: bool = false,
     methods: []const TraitMethodSignature,
 };
 
