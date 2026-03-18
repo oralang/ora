@@ -1695,7 +1695,7 @@ public:
             }
         }
 
-        // Guard: fail if any Ora ops remain after all lowering phases.
+        // Guard: fail if any lowering-phase dialect ops remain after all lowering phases.
         if (mlir::ora::isDebugEnabled())
         {
             llvm::errs() << "[OraToSIR] Post-Phase4: illegal-op scan start\n";
@@ -1707,21 +1707,23 @@ public:
             if (op->getDialect())
             {
                 StringRef ns = op->getDialect()->getNamespace();
-                // Non-Ora dialects may still appear here; this guard is specifically for
-                // residual Ora ops that should all be gone by the end of OraToSIR.
-                if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
-                    return;
-
                 if (ns == "ora")
                 {
                     llvm::errs() << "[OraToSIR] ERROR: Residual Ora op remains: " << op->getName()
                                  << " at " << op->getLoc() << "\n";
                     illegalFound = true;
+                    return;
+                }
+                if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual lowering dialect op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
                 }
             } });
         if (illegalFound)
         {
-            module.emitError("[OraToSIR] post-conversion: residual Ora ops remain after all phases");
+            module.emitError("[OraToSIR] post-conversion: residual lowering ops remain after all phases");
             signalPassFailure();
             return;
         }
