@@ -142,10 +142,11 @@ namespace mlir
                 SmallVector<Type, 8> inputTypes;
             };
 
-            struct ZeroPayloadErrorInfo
+            struct ErrorInfo
             {
                 uint64_t id = 0;
                 uint32_t selector = 0;
+                uint64_t paramCount = 0;
             };
 
             static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *ctx, uint32_t selector)
@@ -237,12 +238,12 @@ namespace mlir
                     auto ptrType = sir::PtrType::get(ctx, 1);
                     auto i64Type = builder.getI64Type();
 
-                    SmallVector<ZeroPayloadErrorInfo, 8> zeroPayloadErrors;
+                    SmallVector<ErrorInfo, 8> abiErrors;
                     module.walk([&](sir::ErrorDeclOp decl) {
                         auto idAttr = decl->getAttrOfType<IntegerAttr>("sir.error_id");
                         auto selectorAttr = decl->getAttrOfType<StringAttr>("sir.error_selector");
                         auto paramTypes = decl->getAttrOfType<ArrayAttr>("sir.param_types");
-                        if (!idAttr || !selectorAttr || !paramTypes || !paramTypes.empty())
+                        if (!idAttr || !selectorAttr || !paramTypes)
                             return;
 
                         StringRef selStr = selectorAttr.getValue();
@@ -263,9 +264,10 @@ namespace mlir
                                 return;
                         }
 
-                        zeroPayloadErrors.push_back(ZeroPayloadErrorInfo{
+                        abiErrors.push_back(ErrorInfo{
                             idAttr.getValue().getZExtValue(),
                             selector,
+                            static_cast<uint64_t>(paramTypes.size()),
                         });
                     });
 
@@ -1013,21 +1015,51 @@ namespace mlir
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
                             Block *nextErrorBlock = revertError;
-                            for (const ZeroPayloadErrorInfo &errInfo : llvm::reverse(zeroPayloadErrors))
+                            for (const ErrorInfo &errInfo : llvm::reverse(abiErrors))
                             {
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);
 
                                 Value errId = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
-                                Value matches = builder.create<sir::EqOp>(loc, u256Type, payload, errId);
+                                Value compareValue = payload;
+                                if (errInfo.paramCount != 0)
+                                {
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                    compareValue = builder.create<sir::LoadOp>(loc, u256Type, payloadAggPtr);
+                                }
+                                Value matches = builder.create<sir::EqOp>(loc, u256Type, compareValue, errId);
                                 Block *emitBlock = mainFunc.addBlock();
                                 builder.create<sir::CondBrOp>(loc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
 
                                 builder.setInsertionPointToEnd(emitBlock);
-                                Value size4 = getConst(builder, loc, u256Type, i64Type, 4, constCache, emitBlock);
-                                Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size4);
-                                builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
-                                builder.create<sir::RevertOp>(loc, revertPtr, size4);
+                                if (errInfo.paramCount == 0)
+                                {
+                                    Value size4 = getConst(builder, loc, u256Type, i64Type, 4, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size4);
+                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+                                    builder.create<sir::RevertOp>(loc, revertPtr, size4);
+                                }
+                                else
+                                {
+                                    const int64_t totalBytes = 4 + static_cast<int64_t>(errInfo.paramCount) * 32;
+                                    Value revertSize = getConst(builder, loc, u256Type, i64Type, totalBytes, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, revertSize);
+                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                    for (uint64_t index = 0; index < errInfo.paramCount; ++index)
+                                    {
+                                        Value srcOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>((index + 1) * 32), constCache, emitBlock);
+                                        Value srcPtr = builder.create<sir::AddPtrOp>(loc, ptrType, payloadAggPtr, srcOffset);
+                                        Value fieldWord = builder.create<sir::LoadOp>(loc, u256Type, srcPtr);
+
+                                        Value dstOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(4 + index * 32), constCache, emitBlock);
+                                        Value dstPtr = builder.create<sir::AddPtrOp>(loc, ptrType, revertPtr, dstOffset);
+                                        builder.create<sir::StoreOp>(loc, dstPtr, fieldWord);
+                                    }
+
+                                    builder.create<sir::RevertOp>(loc, revertPtr, revertSize);
+                                }
 
                                 nextErrorBlock = compareBlock;
                             }

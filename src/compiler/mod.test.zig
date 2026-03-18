@@ -11096,6 +11096,36 @@ test "dispatcher translates public zero-payload error unions to ABI reverts" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
 }
 
+test "dispatcher translates public payload error unions to ABI reverts" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Check {
+        \\    pub fn run() -> !u256 | Failure {
+        \\        return error.Failure(7);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @main"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.addptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sir.store"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.error_selectors"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
+}
+
 test "ora dialect exposes external call ops through C API" {
     const ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(ctx);
