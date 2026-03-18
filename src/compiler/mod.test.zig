@@ -11126,6 +11126,42 @@ test "dispatcher translates public payload error unions to ABI reverts" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
 }
 
+test "dispatcher translates payload-bearing extern trait errors to ABI reverts" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) -> !bool | ExternalCallFailed | InsufficientBalance {
+        \\        return external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @main"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.call"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.error_selectors"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
 test "ora dialect exposes external call ops through C API" {
     const ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(ctx);
