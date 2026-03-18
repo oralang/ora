@@ -1719,6 +1719,20 @@ public:
                     llvm::errs() << "[OraToSIR] ERROR: Residual lowering dialect op remains: "
                                  << op->getName() << " at " << op->getLoc() << "\n";
                     illegalFound = true;
+                    return;
+                }
+                if (ns == "func" && op->getName().getStringRef() != "func.func")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual func dialect op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
+                    return;
+                }
+                if (ns == "builtin" && op->getName().getStringRef() != "builtin.module")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual builtin op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
                 }
             } });
         if (illegalFound)
