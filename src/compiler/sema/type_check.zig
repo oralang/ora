@@ -959,6 +959,14 @@ const TypeChecker = struct {
     fn visitStmt(self: *TypeChecker, statement_id: ast.StmtId) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| {
+                if (decl.type_expr) |type_expr| {
+                    if (self.pattern_types[decl.pattern.index()].type.kind() == .unknown) {
+                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegion(
+                            try self.resolveTypeExpr(type_expr),
+                            declarationRegion(decl.storage_class),
+                        );
+                    }
+                }
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
                     const actual_type = self.expr_types[expr_id.index()];

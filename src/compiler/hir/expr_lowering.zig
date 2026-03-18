@@ -1769,14 +1769,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const base = try self.lowerExpr(field.base, locals);
-            if (base_type == .bitfield) {
+            if (@This().isBitfieldLikeType(self, base_type)) {
                 const extracted_type = self.parent.lowerExprType(expr_id);
                 return try self.createBitfieldFieldExtract(base, base_type, field.name, extracted_type, field.range);
             }
             if (base_type == .struct_ or (base_type == .named and blk: {
                 const name = base_type.name() orelse break :blk false;
+                if (self.parent.typecheck.instantiatedStructByName(name) != null) break :blk true;
                 const item_id = self.parent.item_index.lookup(name) orelse break :blk false;
-                break :blk self.parent.file.item(item_id).* == .ErrorDecl;
+                break :blk switch (self.parent.file.item(item_id).*) {
+                    .Struct, .ErrorDecl => true,
+                    else => false,
+                };
             })) {
                 const op = mlir.oraStructFieldExtractOpCreate(
                     self.parent.context,
@@ -1788,6 +1792,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
             return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id)));
+        }
+
+        fn isBitfieldLikeType(self: *FunctionLowerer, ty: sema.Type) bool {
+            if (ty.kind() == .bitfield) return true;
+            const name = ty.name() orelse return false;
+            if (self.parent.typecheck.instantiatedBitfieldByName(name) != null) return true;
+            const item_id = self.parent.item_index.lookup(name) orelse return false;
+            return self.parent.file.item(item_id).* == .Bitfield;
         }
 
         fn lowerBuiltinFieldExpr(
@@ -1817,6 +1829,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(error_call)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, error_call);
             }
+            if (try @This().lowerBuiltinFieldCall(self, field, result_type, path)) |value| {
+                return value;
+            }
             if (std.mem.eql(u8, path, "std.constants.ZERO_ADDRESS")) {
                 const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
                 const zero = appendValueOp(
@@ -1841,6 +1856,35 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             return null;
+        }
+
+        fn lowerBuiltinFieldCall(
+            self: *FunctionLowerer,
+            field: ast.FieldExpr,
+            result_type: mlir.MlirType,
+            path: []const u8,
+        ) anyerror!?mlir.MlirValue {
+            const opcode_name = if (std.mem.eql(u8, path, "std.transaction.sender"))
+                "ora.evm.origin"
+            else if (std.mem.eql(u8, path, "std.transaction.gasprice"))
+                "ora.evm.gasprice"
+            else if (std.mem.eql(u8, path, "std.block.timestamp"))
+                "ora.evm.timestamp"
+            else if (std.mem.eql(u8, path, "std.block.number"))
+                "ora.evm.number"
+            else
+                return null;
+
+            const op = mlir.oraEvmOpCreate(
+                self.parent.context,
+                self.parent.location(field.range),
+                strRef(opcode_name),
+                null,
+                0,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
         }
 
         fn fieldExprPath(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror![]const u8 {

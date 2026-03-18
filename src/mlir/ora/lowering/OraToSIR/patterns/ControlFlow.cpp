@@ -984,7 +984,6 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
             return rewriter.notifyMatchFailure(op, "failed to convert try_stmt result type");
         resultTypes.append(convertedTypes.begin(), convertedTypes.end());
     }
-
     SmallVector<ora::ErrorUnwrapOp, 4> unwraps;
     op.getTryRegion().walk([&](ora::ErrorUnwrapOp u) {
         if (u->getParentOfType<ora::TryStmtOp>() == op)
@@ -3858,7 +3857,6 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
     auto *tc = getTypeConverter();
-
     if (op.getNumResults() > 0)
     {
         if (!tc)
@@ -3925,32 +3923,58 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
             caseBlocks[i] = caseBlock;
 
             auto &yields = caseYields[i];
-            if (yields.empty())
-                return failure();
-            for (auto y : yields)
+            if (!yields.empty())
             {
-                if (y.getNumOperands() != resultTypes.size())
-                    return failure();
-                if (hasOpsAfterTerminator(y.getOperation()))
-                    return rewriter.notifyMatchFailure(y, "yield has trailing ops");
-                rewriter.setInsertionPoint(y);
-                SmallVector<Value> convertedOperands;
-                convertedOperands.reserve(y.getNumOperands());
-                for (auto [idx, operand] : llvm::enumerate(y.getOperands()))
+                for (auto y : yields)
                 {
-                    Type targetType = mergeBlock->getArgument(idx).getType();
-                    if (operand.getType() == targetType)
-                    {
-                        convertedOperands.push_back(operand);
-                        continue;
-                    }
-                    Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
-                    if (!converted)
+                    if (y.getNumOperands() != resultTypes.size())
                         return failure();
-                    convertedOperands.push_back(converted);
+                    if (hasOpsAfterTerminator(y.getOperation()))
+                        return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+                    rewriter.setInsertionPoint(y);
+                    SmallVector<Value> convertedOperands;
+                    convertedOperands.reserve(y.getNumOperands());
+                    for (auto [idx, operand] : llvm::enumerate(y.getOperands()))
+                    {
+                        Type targetType = mergeBlock->getArgument(idx).getType();
+                        if (operand.getType() == targetType)
+                        {
+                            convertedOperands.push_back(operand);
+                            continue;
+                        }
+                        Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
+                        if (!converted)
+                            return failure();
+                        convertedOperands.push_back(converted);
+                    }
+                    rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
                 }
-                rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
+                continue;
             }
+
+            Operation *tail = caseBlock->empty() ? nullptr : &caseBlock->back();
+            if (!tail || tail->hasTrait<mlir::OpTrait::IsTerminator>())
+                return failure();
+            if (tail->getNumResults() != resultTypes.size())
+                return failure();
+
+            rewriter.setInsertionPointToEnd(caseBlock);
+            SmallVector<Value> convertedOperands;
+            convertedOperands.reserve(resultTypes.size());
+            for (auto [idx, result] : llvm::enumerate(tail->getResults()))
+            {
+                Type targetType = mergeBlock->getArgument(idx).getType();
+                if (result.getType() == targetType)
+                {
+                    convertedOperands.push_back(result);
+                    continue;
+                }
+                Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, result);
+                if (!converted)
+                    return failure();
+                convertedOperands.push_back(converted);
+            }
+            rewriter.create<sir::BrOp>(loc, convertedOperands, mergeBlock);
         }
 
         auto u256Type = sir::U256Type::get(ctx);
@@ -4078,9 +4102,9 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
                 caseYields[i].push_back(y);
         });
     }
-    for (int64_t i = 0; i < numCases; ++i)
-    {
-        Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
+        for (int64_t i = 0; i < numCases; ++i)
+        {
+            Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
         rewriter.inlineRegionBefore(op.getCases()[i], *parentRegion, afterBlock->getIterator());
         if (!caseBlock)
             caseBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
@@ -4285,20 +4309,26 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         resultTypeGroups.push_back(convertedTypes);
         resultTypes.append(convertedTypes.begin(), convertedTypes.end());
     }
-
     SmallVector<mlir::scf::YieldOp, 4> thenYields;
     SmallVector<mlir::scf::YieldOp, 4> elseYields;
     for (Block &b : op.getThenRegion())
     {
-        if (auto y = dyn_cast<mlir::scf::YieldOp>(b.getTerminator()))
+        if (b.empty())
+            continue;
+        if (!b.back().hasTrait<mlir::OpTrait::IsTerminator>())
+            continue;
+        if (auto y = dyn_cast<mlir::scf::YieldOp>(&b.back()))
             thenYields.push_back(y);
     }
     for (Block &b : op.getElseRegion())
     {
-        if (auto y = dyn_cast<mlir::scf::YieldOp>(b.getTerminator()))
+        if (b.empty())
+            continue;
+        if (!b.back().hasTrait<mlir::OpTrait::IsTerminator>())
+            continue;
+        if (auto y = dyn_cast<mlir::scf::YieldOp>(&b.back()))
             elseYields.push_back(y);
     }
-
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
     auto mergeBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
@@ -4322,7 +4352,9 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                 return rewriter.notifyMatchFailure(y, "scf.if yield/result count mismatch");
             }
             if (hasOpsAfterTerminator(y.getOperation()))
+            {
                 return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+            }
             rewriter.setInsertionPoint(y);
             SmallVector<Value> convertedOperands;
             convertedOperands.reserve(resultTypes.size());
@@ -4382,16 +4414,75 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
     if (failed(replaceYield(elseYields)))
         return failure();
 
-    if (thenBlock->empty() || !thenBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
-    {
-        rewriter.setInsertionPointToEnd(thenBlock);
-        rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
-    }
-    if (elseBlock->empty() || !elseBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
-    {
-        rewriter.setInsertionPointToEnd(elseBlock);
-        rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
-    }
+    auto materializeImplicitBranch = [&](Block *block) -> LogicalResult {
+        if (!block->empty() && block->back().hasTrait<mlir::OpTrait::IsTerminator>())
+            return success();
+
+        rewriter.setInsertionPointToEnd(block);
+        if (resultTypes.empty())
+        {
+            rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+            return success();
+        }
+
+        Operation *tail = block->empty() ? nullptr : &block->back();
+        if (!tail || tail->getNumResults() != resultTypeGroups.size())
+        {
+            return rewriter.notifyMatchFailure(op, "unterminated scf.if branch missing yield values");
+        }
+
+        SmallVector<Value> convertedOperands;
+        convertedOperands.reserve(resultTypes.size());
+        for (auto [idx, result] : llvm::enumerate(tail->getResults()))
+        {
+            auto &group = resultTypeGroups[idx];
+            if (group.size() == 2 && llvm::isa<ora::ErrorUnionType>(result.getType()))
+            {
+                if (failed(materializeWideErrorUnion(rewriter, loc, result, convertedOperands)))
+                {
+                    return rewriter.notifyMatchFailure(op, "failed to materialize implicit wide scf.if branch");
+                }
+                continue;
+            }
+            if (group.size() == 1 && llvm::isa<ora::ErrorUnionType>(result.getType()))
+            {
+                if (auto cast = result.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (cast->hasAttr("ora.normalized_error_union") && cast.getNumOperands() == 1)
+                    {
+                        convertedOperands.push_back(ensureU256(rewriter, loc, cast.getOperand(0)));
+                        continue;
+                    }
+                }
+            }
+            if (group.size() == 2)
+            {
+                return rewriter.notifyMatchFailure(op, "unexpected implicit 1->2 scf.if branch conversion");
+            }
+
+            for (Type targetType : group)
+            {
+                if (result.getType() == targetType)
+                {
+                    convertedOperands.push_back(result);
+                    continue;
+                }
+                Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, result);
+                if (!converted)
+                {
+                    return rewriter.notifyMatchFailure(op, "failed to materialize implicit scf.if branch operand");
+                }
+                convertedOperands.push_back(converted);
+            }
+        }
+        rewriter.create<sir::BrOp>(loc, convertedOperands, mergeBlock);
+        return success();
+    };
+
+    if (failed(materializeImplicitBranch(thenBlock)))
+        return failure();
+    if (failed(materializeImplicitBranch(elseBlock)))
+        return failure();
 
     rewriter.setInsertionPointToEnd(parentBlock);
     Value condU256 = toCondU256(rewriter, loc, adaptor.getCondition());
@@ -4446,7 +4537,9 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
             }
 
             if (failed(convertOraReturn(retOp, rawOperands, tc, rewriter)))
+            {
                 return rewriter.notifyMatchFailure(retOp, "failed to lower ora.return in scf.if merge block");
+            }
         }
     }
 

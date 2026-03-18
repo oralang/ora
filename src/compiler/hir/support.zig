@@ -76,8 +76,8 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.
         .bitfield => defaultIntegerType(ctx),
-        .enum_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
-        .named => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
+        .enum_ => defaultIntegerType(ctx),
+        .named => |named| lowerPathType(ctx, named.name),
         .error_union => |error_union| mlir.oraErrorUnionTypeGet(ctx, lowerTypeDescriptor(ctx, error_union.payload_type.*)),
         else => defaultIntegerType(ctx),
     };

@@ -340,11 +340,16 @@ const Lowerer = struct {
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
             .bitfield => support.defaultIntegerType(self.context),
-            .enum_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
+            .enum_ => support.defaultIntegerType(self.context),
             .named => |named| if (self.substitutedType(named.name)) |substituted|
                 self.lowerSemaType(substituted, range)
             else
-                mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
+                blk: {
+                    if (self.item_index.lookup(named.name)) |item_id| {
+                        if (self.file.item(item_id).* == .Enum) break :blk support.defaultIntegerType(self.context);
+                    }
+                    break :blk mlir.oraStructTypeGet(self.context, support.strRef(named.name));
+                },
             .error_union => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerSemaType(error_union.payload_type.*, range)),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => |function| blk: {

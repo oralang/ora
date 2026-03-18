@@ -922,6 +922,7 @@ public:
         patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
         patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
+        patterns.add<EraseOpByName>("ora.bitfield_decl", ctx);
         patterns.add<EraseOpByName>("ora.log.decl", ctx);
         patterns.add<EraseOpByName>("ora.import", ctx);
         patterns.add<EraseOpByName>("ora.tstore.global", ctx);

@@ -64,7 +64,6 @@ fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
         const as_stmt = try std.fmt.allocPrint(testing.allocator, "\n    {s}", .{needle});
         defer testing.allocator.free(as_stmt);
         if (std.mem.containsAtLeast(u8, rendered, 1, as_result) or std.mem.containsAtLeast(u8, rendered, 1, as_stmt)) {
-            std.debug.print("residual Ora op found: {s}\n", .{needle});
             return error.TestUnexpectedResult;
         }
     }
@@ -3470,6 +3469,29 @@ test "compiler lowers enum variant access through real enum constant op" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers generic named struct field access without placeholder" {
+    const source_text =
+        \\struct Book(T) {
+        \\    sender_before: T;
+        \\    amount: T;
+        \\}
+        \\
+        \\pub fn read() -> u256 {
+        \\    let book = Book(u256) { sender_before: 1, amount: 2 };
+        \\    return book.sender_before;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
+}
+
 test "compiler wraps payload returns into real error ok op" {
     const source_text =
         \\error Failure(code: u256);
@@ -5884,7 +5906,7 @@ test "compiler lowers instantiated generic enum declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Choice__u256\">"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity(%arg0: i256"));
 }
 
 test "compiler lowers value-parameter generic enum declarations in HIR" {
@@ -5904,7 +5926,7 @@ test "compiler lowers value-parameter generic enum declarations in HIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256__7\""));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Choice__u256__7\">"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity(%arg0: i256"));
 }
 
 test "compiler monomorphizes generic bitfield types on type use" {
@@ -11714,6 +11736,32 @@ test "compiler converts contract storage through explicit slot metadata" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sstore"));
 }
 
+test "compiler converts narrowed carried locals in nested scf ifs" {
+    const source_text =
+        \\contract Test {
+        \\    pub fn update(current_status: u8, user_borrow: u256, health: u256) -> u8 {
+        \\        var new_status: u8 = current_status;
+        \\        if (current_status == 0) {
+        \\            if (user_borrow == 0) {
+        \\                new_status = 1;
+        \\            } else {
+        \\                if (health < 10000) {
+        \\                    new_status = 3;
+        \\                }
+        \\            }
+        \\        }
+        \\        return new_status;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+}
+
 test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     const example_paths = [_][]const u8{
         "ora-example/smoke.ora",
@@ -11721,6 +11769,9 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/dce_test.ora",
         "ora-example/statements/contract_declaration.ora",
         "ora-example/apps/erc20.ora",
+        "ora-example/apps/erc20_verified.ora",
+        "ora-example/apps/defi_lending_pool.ora",
+        "ora-example/apps/erc20_bitfield_comptime_generics.ora",
     };
 
     for (example_paths) |path| {

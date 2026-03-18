@@ -264,7 +264,12 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         {
             return MlirOperation{nullptr};
         }
-        return wrap(blk->getTerminator());
+        mlir::Operation &back = blk->back();
+        if (!back.hasTrait<mlir::OpTrait::IsTerminator>())
+        {
+            return MlirOperation{nullptr};
+        }
+        return wrap(&back);
     }
 
     size_t oraBlockGetNumArguments(MlirBlock block)

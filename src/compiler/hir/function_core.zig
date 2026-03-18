@@ -783,7 +783,48 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return mlir.oraOperationGetResult(refine_op, 0);
             }
 
-            return value;
+            const value_is_int = mlir.oraTypeIsAInteger(value_type);
+            const target_is_int = mlir.oraTypeIsAInteger(target_type);
+
+            if (mlir.oraTypeIsAddressType(value_type) and target_is_int and mlir.oraIntegerTypeGetWidth(target_type) == 160) {
+                const op = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            if (value_is_int and mlir.oraTypeIsAddressType(target_type) and mlir.oraIntegerTypeGetWidth(value_type) == 160) {
+                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, value);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            if (mlir.oraTypeEqual(target_type, boolType(self.parent.context)) and value_is_int) {
+                const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_type, 0));
+                return appendValueOp(self.block, self.createCompareOp(loc, "ne", value, zero));
+            }
+
+            if (!(value_is_int and target_is_int)) return value;
+
+            const value_width = mlir.oraIntegerTypeGetWidth(value_type);
+            const target_width = mlir.oraIntegerTypeGetWidth(target_type);
+            if (value_width == target_width) {
+                const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            if (value_width > target_width) {
+                const op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            const op = if (mlir.oraIntegerTypeIsSigned(value_type))
+                mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
+            else
+                mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
         }
 
         pub fn lowerPowerWithOverflow(
@@ -952,12 +993,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn storePattern(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {
             switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| {
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                     if (locals.lookupName(name.name)) |local_id| {
+                        const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
+                        const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                         try locals.setValue(local_id, converted);
                         return;
                     }
+                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
+                    const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                     if (self.parent.item_index.lookup(name.name)) |item_id| {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
@@ -995,8 +1038,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return;
                 },
                 .Field => |field| {
-                    const base_type = @This().patternType(self, field.base);
-                    if (base_type.kind() == .bitfield) {
+                    const base_type = @This().patternType(self, field.base, locals);
+                    if (@This().isBitfieldLikeType(self, base_type)) {
                         const updated_bitfield = try @This().createBitfieldFieldUpdate(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, value, field.range);
                         try self.storePattern(field.base, updated_bitfield, locals);
                         return;
@@ -1319,8 +1362,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 .Field => |field| blk: {
-                    const base_type = @This().patternType(self, field.base);
-                    if (base_type.kind() == .bitfield) {
+                    const base_type = @This().patternType(self, field.base, locals);
+                    if (@This().isBitfieldLikeType(self, base_type)) {
                         const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
                         break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, result_type, field.range);
                     }
@@ -1340,9 +1383,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn patternType(self: *FunctionLowerer, pattern_id: ast.PatternId) sema.Type {
+        fn patternType(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) sema.Type {
             return switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| blk: {
+                    if (locals.lookupName(name.name)) |local_id| {
+                        break :blk self.parent.typecheck.pattern_types[local_id.index()].type;
+                    }
                     if (self.parent.item_index.lookup(name.name)) |item_id| {
                         break :blk self.parent.typecheck.item_types[item_id.index()];
                     }
@@ -1350,6 +1396,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
             };
+        }
+
+        fn isBitfieldLikeType(self: *FunctionLowerer, ty: sema.Type) bool {
+            if (ty.kind() == .bitfield) return true;
+            const name = ty.name() orelse return false;
+            if (self.parent.typecheck.instantiatedBitfieldByName(name) != null) return true;
+            const item_id = self.parent.item_index.lookup(name) orelse return false;
+            return self.parent.file.item(item_id).* == .Bitfield;
         }
 
         pub fn appendUnsupportedControlPlaceholder(self: *FunctionLowerer, op_name: []const u8, range: source.TextRange) anyerror!void {

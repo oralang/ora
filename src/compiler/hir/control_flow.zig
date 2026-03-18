@@ -629,10 +629,31 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
-            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
-            return switch (value) {
-                .integer => |integer| integer.toInt(i64) catch null,
-                .boolean => |boolean| if (boolean) 1 else 0,
+            if (self.parent.const_eval.values[expr_id.index()]) |value| {
+                return switch (value) {
+                    .integer => |integer| integer.toInt(i64) catch null,
+                    .boolean => |boolean| if (boolean) 1 else 0,
+                    else => @This().enumPatternValue(self, expr_id),
+                };
+            }
+            return @This().enumPatternValue(self, expr_id);
+        }
+
+        fn enumPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().enumPatternValue(self, group.expr),
+                .Field => |field| blk: {
+                    const base_type = self.parent.typecheck.exprType(field.base);
+                    const enum_name = base_type.name() orelse break :blk null;
+                    const item_id = self.parent.item_index.lookup(enum_name) orelse break :blk null;
+                    if (self.parent.file.item(item_id).* != .Enum) break :blk null;
+                    const enum_item = self.parent.file.item(item_id).Enum;
+                    for (enum_item.variants, 0..) |variant, index| {
+                        if (std.mem.eql(u8, variant.name, field.name)) break :blk @intCast(index);
+                    }
+                    break :blk null;
+                },
                 else => null,
             };
         }

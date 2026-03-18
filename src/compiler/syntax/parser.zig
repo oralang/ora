@@ -2592,6 +2592,27 @@ const Parser = struct {
         return switch (self.nodes.items[node_id.index()].kind) {
             .NameExpr => true,
             .GenericType => true,
+            .CallExpr => blk: {
+                const node = self.nodes.items[node_id.index()];
+                var callee_ok = false;
+                var saw_arg = false;
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| {
+                            if (!callee_ok) {
+                                callee_ok = self.nodeCouldStartStructLiteral(child_id);
+                                continue;
+                            }
+                            saw_arg = true;
+                            if (!self.nodeCouldBeCallStyleTypeArg(child_id)) break :blk false;
+                        },
+                    }
+                }
+                break :blk callee_ok and saw_arg;
+            },
             .GroupExpr => blk: {
                 const node = self.nodes.items[node_id.index()];
                 var i: usize = 0;
@@ -2600,6 +2621,40 @@ const Parser = struct {
                     switch (child) {
                         .token => {},
                         .node => |child_id| if (self.nodeCouldStartStructLiteral(child_id)) break :blk true,
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn nodeCouldBeCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        return switch (self.nodes.items[node_id.index()].kind) {
+            .NameExpr, .PathType, .GenericType => true,
+            .Literal => blk: {
+                const node = self.nodes.items[node_id.index()];
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => |token_id| switch (self.tokens.items[token_id.index()].kind) {
+                            .IntegerLiteral, .BinaryLiteral, .HexLiteral => break :blk true,
+                            else => {},
+                        },
+                        .node => {},
+                    }
+                }
+                break :blk false;
+            },
+            .GroupExpr => blk: {
+                const node = self.nodes.items[node_id.index()];
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| break :blk self.nodeCouldBeCallStyleTypeArg(child_id),
                     }
                 }
                 break :blk false;

@@ -1224,8 +1224,11 @@ pub fn mixin(Builder: type) type {
         fn lowerStructLiteralExprNode(self: *Builder, node: SyntaxNode) !ExprId {
             const base_node = nthDirectNode(node, 0) orelse return Lowering.malformedExpr(self, node, "missing struct literal base");
             const base_expr = try Lowering.lowerExpressionNode(self, base_node);
-            const type_name = Lowering.structLiteralTypeName(self, base_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type");
-            const type_expr = Lowering.structLiteralTypeExpr(self, base_expr);
+            const type_expr = try Lowering.structLiteralTypeExpr(self, base_expr);
+            const type_name = if (type_expr) |resolved_type_expr|
+                (Lowering.typeValueBaseName(self, resolved_type_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"))
+            else
+                (Lowering.structLiteralTypeName(self, base_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"));
 
             var fields: std.ArrayList(nodes.StructFieldInit) = .{};
             var it = node.children();
@@ -1252,14 +1255,62 @@ pub fn mixin(Builder: type) type {
                 .Name => |name| name.name,
                 .TypeValue => |type_value| Lowering.typeValueBaseName(self, type_value.type_expr),
                 .Group => |group| Lowering.structLiteralTypeName(self, group.expr),
+                .Call => |call| blk: {
+                    const generic_type = Lowering.callStyleGenericTypeExpr(self, call) catch break :blk null;
+                    if (generic_type) |type_expr| break :blk Lowering.typeValueBaseName(self, type_expr);
+                    break :blk null;
+                },
                 else => null,
             };
         }
 
-        fn structLiteralTypeExpr(self: *Builder, expr_id: ExprId) ?TypeExprId {
+        fn structLiteralTypeExpr(self: *Builder, expr_id: ExprId) !?TypeExprId {
             return switch (Support.exprRef(self, expr_id).*) {
                 .TypeValue => |type_value| type_value.type_expr,
-                .Group => |group| Lowering.structLiteralTypeExpr(self, group.expr),
+                .Group => |group| try Lowering.structLiteralTypeExpr(self, group.expr),
+                .Call => |call| try Lowering.callStyleGenericTypeExpr(self, call),
+                else => null,
+            };
+        }
+
+        fn callStyleGenericTypeExpr(self: *Builder, call: nodes.CallExpr) !?TypeExprId {
+            const callee_name = switch (Support.exprRef(self, call.callee).*) {
+                .Name => |name| name.name,
+                .Group => |group| blk: {
+                    const inner = switch (Support.exprRef(self, group.expr).*) {
+                        .Name => |name| name.name,
+                        else => break :blk null,
+                    };
+                    break :blk inner;
+                },
+                else => null,
+            } orelse return null;
+
+            var args: std.ArrayList(TypeArg) = .{};
+            for (call.args) |arg_expr_id| {
+                try args.append(self.allocator, try Lowering.callStyleTypeArg(self, arg_expr_id) orelse return null);
+            }
+            if (args.items.len == 0) return null;
+
+            return try Support.pushTypeExpr(self, .{ .Generic = .{
+                .range = call.range,
+                .name = callee_name,
+                .args = try args.toOwnedSlice(self.allocator),
+            } });
+        }
+
+        fn callStyleTypeArg(self: *Builder, expr_id: ExprId) !?TypeArg {
+            return switch (Support.exprRef(self, expr_id).*) {
+                .Name => |name| .{ .Type = try Support.pushTypeExpr(self, .{ .Path = .{
+                    .range = name.range,
+                    .name = name.name,
+                } }) },
+                .TypeValue => |type_value| .{ .Type = type_value.type_expr },
+                .IntegerLiteral => |literal| .{ .Integer = .{
+                    .range = literal.range,
+                    .text = literal.text,
+                } },
+                .Group => |group| try Lowering.callStyleTypeArg(self, group.expr),
                 else => null,
             };
         }
