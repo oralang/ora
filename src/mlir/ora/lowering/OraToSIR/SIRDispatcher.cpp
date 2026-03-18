@@ -134,10 +134,28 @@ namespace mlir
                 uint32_t selector = 0;
                 unsigned argCount = 0;
                 unsigned retCount = 0;
+                bool returnsErrorUnion = false;
                 SmallVector<AbiType, 8> abiParams;
+                AbiType abiReturn;
+                bool hasAbiReturn = false;
                 int64_t minHeadBytes = 0;
                 SmallVector<Type, 8> inputTypes;
             };
+
+            struct ZeroPayloadErrorInfo
+            {
+                uint64_t id = 0;
+                uint32_t selector = 0;
+            };
+
+            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *ctx, uint32_t selector)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto u256IntType = IntegerType::get(ctx, 256, IntegerType::Unsigned);
+                llvm::APInt selectorWord(256, selector);
+                selectorWord = selectorWord.shl(224);
+                return builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(u256IntType, selectorWord));
+            }
 
             struct SIRDispatcherPass : public PassWrapper<SIRDispatcherPass, OperationPass<ModuleOp>>
             {
@@ -218,6 +236,38 @@ namespace mlir
                     auto u256Type = sir::U256Type::get(ctx);
                     auto ptrType = sir::PtrType::get(ctx, 1);
                     auto i64Type = builder.getI64Type();
+
+                    SmallVector<ZeroPayloadErrorInfo, 8> zeroPayloadErrors;
+                    module.walk([&](sir::ErrorDeclOp decl) {
+                        auto idAttr = decl->getAttrOfType<IntegerAttr>("sir.error_id");
+                        auto selectorAttr = decl->getAttrOfType<StringAttr>("sir.error_selector");
+                        auto paramTypes = decl->getAttrOfType<ArrayAttr>("sir.param_types");
+                        if (!idAttr || !selectorAttr || !paramTypes || !paramTypes.empty())
+                            return;
+
+                        StringRef selStr = selectorAttr.getValue();
+                        if (!selStr.starts_with("0x") || selStr.size() != 10)
+                            return;
+
+                        uint32_t selector = 0;
+                        for (char c : selStr.drop_front(2))
+                        {
+                            selector <<= 4;
+                            if (c >= '0' && c <= '9')
+                                selector |= (c - '0');
+                            else if (c >= 'a' && c <= 'f')
+                                selector |= (c - 'a' + 10);
+                            else if (c >= 'A' && c <= 'F')
+                                selector |= (c - 'A' + 10);
+                            else
+                                return;
+                        }
+
+                        zeroPayloadErrors.push_back(ZeroPayloadErrorInfo{
+                            idAttr.getValue().getZExtValue(),
+                            selector,
+                        });
+                    });
 
                     // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
                     for (func::FuncOp func : module.getOps<func::FuncOp>())
@@ -331,6 +381,22 @@ namespace mlir
                                 info.abiParams.push_back(abi);
                             }
                         }
+
+                        if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
+                        {
+                            AbiType abiReturn;
+                            if (!parseAbiType(abiReturnAttr.getValue(), abiReturn))
+                            {
+                                func.emitError("unsupported ABI return type: " + abiReturnAttr.getValue());
+                                signalPassFailure();
+                                return;
+                            }
+                            info.abiReturn = abiReturn;
+                            info.hasAbiReturn = true;
+                        }
+
+                        if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
+                            info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
 
                         if (!info.abiParams.empty() && info.abiParams.size() != info.argCount)
                         {
@@ -907,7 +973,69 @@ namespace mlir
                             SymbolRefAttr::get(ctx, info.func.getName()),
                             args);
 
-                        if (info.retCount == 2)
+                        if (info.returnsErrorUnion)
+                        {
+                            if (info.retCount != 2)
+                            {
+                                info.func.emitError("public error-union function must return dispatcher ptr/len pair");
+                                signalPassFailure();
+                                return;
+                            }
+                            if (!info.hasAbiReturn || !info.abiReturn.isStaticBase() || info.abiReturn.isArray() || info.abiReturn.baseIsDynamic())
+                            {
+                                info.func.emitError("public error-union dispatcher currently supports only scalar ABI success payloads");
+                                signalPassFailure();
+                                return;
+                            }
+
+                            Value ptr_u = call.getResult(0);
+                            Value len = call.getResult(1);
+                            (void)len;
+                            Value ptr = builder.create<sir::BitcastOp>(loc, ptrType, ptr_u);
+                            Value tag = builder.create<sir::LoadOp>(loc, u256Type, ptr);
+                            Value c32_union = getConst(builder, loc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, c32_union);
+                            Value payload = builder.create<sir::LoadOp>(loc, u256Type, payloadPtr);
+                            Value one = getConst(builder, loc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                            Value maskedTag = builder.create<sir::AndOp>(loc, u256Type, tag, one);
+                            Value isError = builder.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+
+                            Block *successBlock = mainFunc.addBlock();
+                            Block *errorDispatchBlock = mainFunc.addBlock();
+                            builder.create<sir::CondBrOp>(loc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
+
+                            builder.setInsertionPointToEnd(successBlock);
+                            Value size = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                            Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                            setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
+                            builder.create<sir::StoreOp>(loc, retPtr, payload);
+                            builder.create<sir::ReturnOp>(loc, retPtr, size);
+
+                            builder.setInsertionPointToEnd(errorDispatchBlock);
+                            Block *nextErrorBlock = revertError;
+                            for (const ZeroPayloadErrorInfo &errInfo : llvm::reverse(zeroPayloadErrors))
+                            {
+                                Block *compareBlock = mainFunc.addBlock();
+                                builder.setInsertionPointToEnd(compareBlock);
+
+                                Value errId = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
+                                Value matches = builder.create<sir::EqOp>(loc, u256Type, payload, errId);
+                                Block *emitBlock = mainFunc.addBlock();
+                                builder.create<sir::CondBrOp>(loc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
+
+                                builder.setInsertionPointToEnd(emitBlock);
+                                Value size4 = getConst(builder, loc, u256Type, i64Type, 4, constCache, emitBlock);
+                                Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size4);
+                                builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+                                builder.create<sir::RevertOp>(loc, revertPtr, size4);
+
+                                nextErrorBlock = compareBlock;
+                            }
+
+                            builder.setInsertionPointToEnd(errorDispatchBlock);
+                            builder.create<sir::BrOp>(loc, ValueRange{}, nextErrorBlock);
+                        }
+                        else if (info.retCount == 2)
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);

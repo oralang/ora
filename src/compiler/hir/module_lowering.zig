@@ -723,6 +723,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", error_decl.name));
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
+            try attrs.append(self.allocator, .{
+                .name = identifier(self.context, "ora.error_id"),
+                .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(item_id.index() + 1)),
+            });
 
             const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
             defer self.allocator.free(param_types);

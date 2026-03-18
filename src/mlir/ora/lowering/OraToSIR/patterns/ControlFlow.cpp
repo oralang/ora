@@ -2387,9 +2387,42 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
     Value idConst = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, idAttr);
     idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
 
-    Type convertedType = typeConverter->convertType(op.getResult().getType());
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
+    {
+        SmallVector<Type> resultTypes;
+        if (failed(getErrorUnionEncodingTypes(typeConverter, errType, resultTypes)))
+            return rewriter.notifyMatchFailure(op, "unable to convert error.return error-union result type");
+
+        auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
+        Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, oneAttr);
+
+        if (isNarrowErrorUnion(errType))
+        {
+            Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, one, idConst);
+            Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, one);
+            rewriter.replaceOp(op, packed);
+            return success();
+        }
+
+        Value payload = idConst;
+        if (resultTypes.size() >= 2 && payload.getType() != resultTypes[1])
+            payload = rewriter.create<sir::BitcastOp>(op.getLoc(), resultTypes[1], payload);
+        rewriter.replaceOpWithMultiple(op, ArrayRef<ValueRange>{ValueRange{one, payload}});
+        return success();
+    }
+
+    Type origType = op.getResult().getType();
+    Type convertedType = typeConverter->convertType(origType);
     if (!convertedType)
         return rewriter.notifyMatchFailure(op, "unable to convert error.return result type");
+
+    if (convertedType == origType)
+    {
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(op.getLoc(), TypeRange{origType}, ValueRange{idConst});
+        rewriter.replaceOp(op, cast.getResults());
+        return success();
+    }
+
     if (convertedType != u256Type)
         idConst = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, idConst);
 
