@@ -83,6 +83,7 @@ pub const SyntaxKind = enum {
     CatchClause,
     SpecClause,
     TraitBoundClause,
+    ErrorsClause,
     StructField,
     TraitMethodSignature,
     EnumVariant,

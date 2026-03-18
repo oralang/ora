@@ -389,7 +389,7 @@ test "compiler lowers trait and impl items into AST" {
 test "compiler parses and lowers extern traits" {
     const source_text =
         \\extern trait ERC20 {
-        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance, InvalidRecipient);
         \\    staticcall fn totalSupply(self) -> u256;
         \\}
     ;
@@ -414,6 +414,10 @@ test "compiler parses and lowers extern traits" {
     try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
     try testing.expectEqual(compiler.ast.ExternCallKind.call, trait_item.methods[0].extern_call_kind);
     try testing.expectEqual(compiler.ast.ExternCallKind.staticcall, trait_item.methods[1].extern_call_kind);
+    try testing.expectEqual(@as(usize, 2), trait_item.methods[0].errors.len);
+    try testing.expectEqualStrings("InsufficientBalance", trait_item.methods[0].errors[0]);
+    try testing.expectEqualStrings("InvalidRecipient", trait_item.methods[0].errors[1]);
+    try testing.expectEqual(@as(usize, 0), trait_item.methods[1].errors.len);
 }
 
 test "compiler rejects invalid extern trait semantics" {

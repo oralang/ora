@@ -533,6 +533,7 @@ pub const TraitMethod = struct {
     parameters: []Parameter,
     return_type: ?TypeExprId,
     trait_bounds: []TraitBound,
+    errors: []const []const u8,
     clauses: []SpecClause,
     is_comptime: bool,
     extern_call_kind: ExternCallKind = .none,

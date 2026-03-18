@@ -410,6 +410,7 @@ pub fn mixin(Builder: type) type {
             }
 
             var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
+            var errors: std.ArrayList([]const u8) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
             var it = node.children();
             while (it.next()) |child| {
@@ -417,6 +418,17 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |child_node| switch (child_node.kind()) {
                         .TraitBoundClause => try trait_bounds.append(self.allocator, try Lowering.lowerTraitBoundClauseNode(self, child_node)),
+                        .ErrorsClause => {
+                            var errors_it = child_node.children();
+                            while (errors_it.next()) |error_child| {
+                                switch (error_child) {
+                                    .token => |token| if (token.kind() == .Identifier) {
+                                        try errors.append(self.allocator, tokenText(token));
+                                    },
+                                    .node => {},
+                                }
+                            }
+                        },
                         .SpecClause => try clauses.append(self.allocator, try Lowering.lowerSpecClauseNode(self, child_node)),
                         else => {},
                     },
@@ -430,6 +442,7 @@ pub fn mixin(Builder: type) type {
                 .parameters = try parameters.toOwnedSlice(self.allocator),
                 .return_type = if (firstDirectTypeChild(node)) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .trait_bounds = try trait_bounds.toOwnedSlice(self.allocator),
+                .errors = try errors.toOwnedSlice(self.allocator),
                 .clauses = try clauses.toOwnedSlice(self.allocator),
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
                 .extern_call_kind = if (firstDirectTokenOfKind(node, .Call) != null)

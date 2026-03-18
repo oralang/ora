@@ -394,11 +394,11 @@ const Parser = struct {
             try self.reportHere("expected parameter list in " ++ context);
         }
 
-        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Requires) and !self.at(.Ensures)) {
+        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Ensures)) {
             if (self.at(.Semicolon)) break;
             if (self.at(.Arrow)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Requires, .Ensures, .Semicolon }) });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Errors, .Requires, .Ensures, .Semicolon }) });
                 continue;
             }
             try children.append(self.allocator, try self.parseElement(null));
@@ -406,16 +406,57 @@ const Parser = struct {
 
         if (self.at(.Where)) {
             try children.append(self.allocator, .{ .token = self.bump() });
-            while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Ensures) and !self.at(.Semicolon)) {
+            while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Ensures) and !self.at(.Semicolon)) {
                 try children.append(self.allocator, .{ .node = try self.parseTraitBoundClauseNode() });
                 if (!self.at(.Comma)) break;
                 try children.append(self.allocator, .{ .token = self.bump() });
             }
         }
 
+        if (self.at(.Errors)) {
+            try children.append(self.allocator, .{ .node = try self.parseErrorsClauseNode() });
+        }
+
         while (self.at(.Requires) or self.at(.Ensures)) {
             try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
         }
+    }
+
+    fn parseErrorsClauseNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Errors)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'errors' clause");
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '(' after 'errors'");
+            return self.finishNode(SyntaxKind.ErrorsClause, children.items);
+        }
+
+        while (!self.at(.Eof) and !self.at(.RightParen)) {
+            if (self.at(.Identifier)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected error name in errors clause");
+                break;
+            }
+            if (!self.at(.Comma)) break;
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.RightParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ')' after errors clause");
+        }
+
+        return self.finishNode(SyntaxKind.ErrorsClause, children.items);
     }
 
     fn parseTraitBoundClauseNode(self: *Parser) anyerror!green.GreenNodeId {
