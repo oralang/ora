@@ -10931,6 +10931,34 @@ test "compiler emits struct ABI return attrs for public error unions" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return_words"));
 }
 
+test "compiler emits recursive ABI layout attrs for dynamic aggregate public returns" {
+    const source_text =
+        \\struct Snapshot {
+        \\    owner: address;
+        \\    note: string;
+        \\}
+        \\
+        \\error Failure();
+        \\
+        \\contract Vault {
+        \\    pub fn quote() -> !(u256, string) | Failure {
+        \\        return (1, "ok");
+        \\    }
+        \\
+        \\    pub fn snapshot() -> !Snapshot | Failure {
+        \\        return Snapshot { owner: 0x0000000000000000000000000000000000000000, note: "hi" };
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return_layout"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(uint256,string)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(address,string)\""));
+}
+
 test "compiler preserves error selectors through OraToSIR" {
     const source_text =
         \\error InsufficientBalance(required: u256, available: u256);

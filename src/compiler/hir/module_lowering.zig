@@ -478,6 +478,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const abi_return = try abi_support.externReturnAbiType(self.allocator, abi_return_type);
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
+                if (@This().abiLayoutForType(self, abi_return_type)) |layout| {
+                    defer self.allocator.free(layout);
+                    try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return_layout", layout));
+                } else |_| {}
                 if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
                     try attrs.append(self.allocator, .{
                         .name = identifier(self.context, "ora.abi_return_words"),
@@ -892,6 +896,131 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .contract => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
                 .named => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
                 else => null,
+            };
+        }
+
+        fn abiLayoutForPrimitiveName(self: *Lowerer, name: []const u8) ![]const u8 {
+            if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) {
+                return self.allocator.dupe(u8, name);
+            }
+            if (std.mem.eql(u8, name, "u256")) return self.allocator.dupe(u8, "uint256");
+            if (std.mem.eql(u8, name, "i256")) return self.allocator.dupe(u8, "int256");
+            if (std.mem.startsWith(u8, name, "u")) return std.fmt.allocPrint(self.allocator, "uint{s}", .{name[1..]});
+            if (std.mem.startsWith(u8, name, "i")) return std.fmt.allocPrint(self.allocator, "int{s}", .{name[1..]});
+            return error.UnsupportedAbiType;
+        }
+
+        fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
+            return switch (ty) {
+                .bool, .address, .string, .bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
+                .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
+                .array => |array| blk: {
+                    const element = try @This().abiLayoutForType(self, array.element_type.*);
+                    defer self.allocator.free(element);
+                    if (array.len) |len| break :blk std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ element, len });
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                },
+                .slice => |slice| blk: {
+                    const element = try @This().abiLayoutForType(self, slice.element_type.*);
+                    defer self.allocator.free(element);
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                },
+                .tuple => |elements| blk: {
+                    var parts: std.ArrayList([]const u8) = .{};
+                    defer {
+                        for (parts.items) |part| self.allocator.free(part);
+                        parts.deinit(self.allocator);
+                    }
+                    for (elements) |element| try parts.append(self.allocator, try @This().abiLayoutForType(self, element));
+                    const joined = try std.mem.join(self.allocator, ",", parts.items);
+                    defer self.allocator.free(joined);
+                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+                },
+                .struct_ => |named| @This().abiLayoutForNamedStruct(self, named.name),
+                .contract => |named| @This().abiLayoutForNamedStruct(self, named.name),
+                .named => |named| @This().abiLayoutForNamedStruct(self, named.name),
+                else => error.UnsupportedAbiType,
+            };
+        }
+
+        fn abiLayoutForNamedStruct(self: *Lowerer, name: []const u8) anyerror![]const u8 {
+            if (self.typecheck.instantiatedStructByName(name)) |instantiated| {
+                var parts: std.ArrayList([]const u8) = .{};
+                defer {
+                    for (parts.items) |part| self.allocator.free(part);
+                    parts.deinit(self.allocator);
+                }
+                for (instantiated.fields) |field| try parts.append(self.allocator, try @This().abiLayoutForType(self, field.ty));
+                const joined = try std.mem.join(self.allocator, ",", parts.items);
+                defer self.allocator.free(joined);
+                return std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+            }
+
+            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
+            return switch (self.file.item(item_id).*) {
+                .Struct => |struct_item| blk: {
+                    var parts: std.ArrayList([]const u8) = .{};
+                    defer {
+                        for (parts.items) |part| self.allocator.free(part);
+                        parts.deinit(self.allocator);
+                    }
+                    for (struct_item.fields) |field| try parts.append(self.allocator, try @This().abiLayoutForTypeExpr(self, field.type_expr));
+                    const joined = try std.mem.join(self.allocator, ",", parts.items);
+                    defer self.allocator.free(joined);
+                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+                },
+                else => error.UnsupportedAbiType,
+            };
+        }
+
+        fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
+            return switch (self.file.typeExpr(type_expr_id).*) {
+                .Path => |path| blk: {
+                    const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                    break :blk @This().abiLayoutForPrimitiveName(self, trimmed) catch @This().abiLayoutForNamedStruct(self, trimmed);
+                },
+                .Generic => |generic| blk: {
+                    if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
+                        break :blk switch (generic.args[0]) {
+                            .Type => |type_expr| @This().abiLayoutForTypeExpr(self, type_expr),
+                            else => error.UnsupportedAbiType,
+                        };
+                    }
+                    if (std.mem.eql(u8, generic.name, "map")) break :blk error.UnsupportedAbiType;
+                    if ((std.mem.eql(u8, generic.name, "slice") or std.mem.eql(u8, generic.name, "array")) and generic.args.len > 0) {
+                        break :blk switch (generic.args[0]) {
+                            .Type => |type_expr| blk2: {
+                                const element = try @This().abiLayoutForTypeExpr(self, type_expr);
+                                defer self.allocator.free(element);
+                                break :blk2 std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                            },
+                            else => error.UnsupportedAbiType,
+                        };
+                    }
+                    break :blk @This().abiLayoutForNamedStruct(self, generic.name);
+                },
+                .Tuple => |tuple| blk: {
+                    var parts: std.ArrayList([]const u8) = .{};
+                    defer {
+                        for (parts.items) |part| self.allocator.free(part);
+                        parts.deinit(self.allocator);
+                    }
+                    for (tuple.elements) |element| try parts.append(self.allocator, try @This().abiLayoutForTypeExpr(self, element));
+                    const joined = try std.mem.join(self.allocator, ",", parts.items);
+                    defer self.allocator.free(joined);
+                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+                },
+                .Array => |array| blk: {
+                    const element = try @This().abiLayoutForTypeExpr(self, array.element);
+                    defer self.allocator.free(element);
+                    const size_text = switch (array.size) {
+                        .Integer => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
+                        else => "",
+                    };
+                    if (size_text.len == 0) break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}[{s}]", .{ element, size_text });
+                },
+                else => error.UnsupportedAbiType,
             };
         }
 

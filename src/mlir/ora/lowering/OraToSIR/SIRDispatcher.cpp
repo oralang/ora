@@ -139,6 +139,7 @@ namespace mlir
                 AbiType abiReturn;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
+                std::string abiReturnLayout;
                 int64_t minHeadBytes = 0;
                 SmallVector<Type, 8> inputTypes;
             };
@@ -399,6 +400,8 @@ namespace mlir
                         }
                         if (auto abiReturnWordsAttr = func->getAttrOfType<IntegerAttr>("ora.abi_return_words"))
                             info.abiReturnWords = abiReturnWordsAttr.getInt();
+                        if (auto abiReturnLayoutAttr = func->getAttrOfType<StringAttr>("ora.abi_return_layout"))
+                            info.abiReturnLayout = abiReturnLayoutAttr.getValue().str();
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
