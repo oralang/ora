@@ -2295,6 +2295,11 @@ LogicalResult ConvertErrorDeclOp::matchAndRewrite(
             attrs.push_back(rewriter.getNamedAttr("sir.param_names", attr.getValue()));
             continue;
         }
+        if (name == "ora.error_selector")
+        {
+            attrs.push_back(rewriter.getNamedAttr("sir.error_selector", attr.getValue()));
+            continue;
+        }
         if (name == "ora.param_types")
         {
             auto arr = llvm::dyn_cast<ArrayAttr>(attr.getValue());

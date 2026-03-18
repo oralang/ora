@@ -1043,18 +1043,24 @@ public:
                 } });
         DBG("Before conversion: " << totalOps << " total ops, " << oraOps << " Ora ops, " << oraReturnOps << " ora.return ops");
 
-        // Preserve error decl IDs as module attribute before any conversion
+        // Preserve error decl metadata as module attributes before any conversion
         // erases ora::ErrorDeclOp (sir::ErrorDeclOp lacks SymbolOpInterface).
         {
             SmallVector<NamedAttribute> errEntries;
+            SmallVector<NamedAttribute> errSelectorEntries;
             module.walk([&](ora::ErrorDeclOp decl)
                         {
                 auto id = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
                 auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                auto selector = decl->getAttrOfType<mlir::StringAttr>("ora.error_selector");
                 if (sym && id)
-                    errEntries.push_back(NamedAttribute(sym, id)); });
+                    errEntries.push_back(NamedAttribute(sym, id));
+                if (sym && selector)
+                    errSelectorEntries.push_back(NamedAttribute(sym, selector)); });
             if (!errEntries.empty())
                 module->setAttr("sir.error_ids", DictionaryAttr::get(ctx, errEntries));
+            if (!errSelectorEntries.empty())
+                module->setAttr("sir.error_selectors", DictionaryAttr::get(ctx, errSelectorEntries));
         }
 
         // Phase 0 only: normalize error_union ops into explicit packing/unpacking.
