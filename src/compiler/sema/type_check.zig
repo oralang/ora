@@ -1197,7 +1197,7 @@ const TypeChecker = struct {
             },
             .ErrorReturn => |error_return| {
                 for (error_return.args) |arg| try self.visitExpr(arg);
-                self.expr_types[expr_id.index()] = .{ .named = .{ .name = error_return.name } };
+                self.expr_types[expr_id.index()] = try self.checkErrorReturn(expr_id, error_return);
             },
             .Name => {
                 const binding_type = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
@@ -3949,6 +3949,63 @@ const TypeChecker = struct {
             typeDisplayName(result_type),
         });
         return true;
+    }
+
+    fn checkErrorReturn(self: *TypeChecker, expr_id: ast.ExprId, error_return: ast.ErrorReturnExpr) !Type {
+        const item_id = self.item_index.lookup(error_return.name) orelse {
+            try self.emitExprError(expr_id, "unknown error '{s}'", .{error_return.name});
+            return .{ .unknown = {} };
+        };
+        if (self.file.item(item_id).* != .ErrorDecl) {
+            try self.emitExprError(expr_id, "'{s}' is not an error declaration", .{error_return.name});
+            return .{ .unknown = {} };
+        }
+
+        const error_decl = self.file.item(item_id).ErrorDecl;
+        if (error_decl.parameters.len != error_return.args.len) {
+            try self.emitExprError(expr_id, "error '{s}' expects {d} arguments, found {d}", .{
+                error_decl.name,
+                error_decl.parameters.len,
+                error_return.args.len,
+            });
+        }
+
+        const arg_count = @min(error_decl.parameters.len, error_return.args.len);
+        for (error_decl.parameters[0..arg_count], error_return.args[0..arg_count]) |parameter, arg_id| {
+            const expected_type = try self.resolveTypeExpr(parameter.type_expr);
+            const actual_type = self.expr_types[arg_id.index()];
+            if (try self.emitIntegerOverflowIfNeeded(error_return.range, arg_id, expected_type)) continue;
+            if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) continue;
+            if (!typesAssignable(expected_type, actual_type)) {
+                const parameter_name = self.patternName(parameter.pattern) orelse "<error payload>";
+                try self.emitExprError(expr_id, "error '{s}' argument '{s}' expects type '{s}', found '{s}'", .{
+                    error_decl.name,
+                    parameter_name,
+                    typeDisplayName(expected_type),
+                    typeDisplayName(actual_type),
+                });
+            }
+        }
+
+        if (self.current_return_type) |return_type| {
+            if (return_type.kind() == .error_union) {
+                const error_type: Type = .{ .named = .{ .name = error_decl.name } };
+                var allowed = false;
+                for (return_type.errorTypes()) |declared_error_type| {
+                    if (typeEql(declared_error_type, error_type)) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (!allowed) {
+                    try self.emitExprError(expr_id, "error '{s}' is not in function return error set", .{
+                        error_decl.name,
+                    });
+                }
+            }
+        }
+
+        return .{ .named = .{ .name = error_decl.name } };
     }
 
     fn integerValueText(self: *TypeChecker, value: BigInt) ![]const u8 {

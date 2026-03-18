@@ -694,6 +694,55 @@ test "compiler still rejects same-slot write before and after extern call withou
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot 'balance' after external call because it was written before the call"));
 }
 
+test "compiler rejects unknown error returns" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return error.Nonexistent(7);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown error 'Nonexistent'"));
+}
+
+test "compiler rejects error returns with wrong payload arity" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return error.Failure(1, 2, 3);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'Failure' expects 1 arguments, found 3"));
+}
+
+test "compiler rejects error returns outside function return error set" {
+    const source_text =
+        \\error ErrorA;
+        \\error ErrorB;
+        \\
+        \\pub fn run() -> !u256 | ErrorA {
+        \\    return error.ErrorB();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'ErrorB' is not in function return error set"));
+}
+
 test "compiler lowers extern trait calls to abi and external call ops" {
     const source_text =
         \\extern trait ERC20 {
