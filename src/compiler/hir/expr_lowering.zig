@@ -163,7 +163,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         args.items.len,
                         result_type,
                     );
-                    if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
+                    if (!mlir.oraOperationIsNull(op)) {
+                        if (args.items.len != 0 or (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()]))) {
+                            mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                        }
+                        break :blk appendValueOp(self.block, op);
+                    }
                     const placeholder = try self.createAggregatePlaceholder("ora.error.return", error_return.range, args.items, result_type);
                     break :blk appendValueOp(self.block, placeholder);
                 },

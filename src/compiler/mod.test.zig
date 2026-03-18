@@ -10852,6 +10852,30 @@ test "compiler preserves error selectors through OraToSIR" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"0xcf479181\""));
 }
 
+test "compiler lowers payload error return constructors through OraToSIR" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn run() -> !bool | Failure {
+        \\        return error Failure(7);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
+}
+
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);

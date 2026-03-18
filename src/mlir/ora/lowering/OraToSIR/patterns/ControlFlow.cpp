@@ -2425,14 +2425,47 @@ LogicalResult ConvertErrorDeclOp::matchAndRewrite(
     return success();
 }
 
+static Value materializeErrorPayloadAggregate(
+    PatternRewriter &rewriter,
+    Location loc,
+    mlir::IntegerAttr errorId,
+    ValueRange payloadOperands)
+{
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+
+    const uint64_t totalWords = 1 + payloadOperands.size();
+    const uint64_t totalBytes = totalWords * 32ULL;
+    Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, totalBytes));
+    Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
+
+    auto idVal = errorId.getValue().zextOrTrunc(256);
+    Value idConst = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, idVal));
+    idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
+    rewriter.create<sir::StoreOp>(loc, mem, idConst);
+
+    for (auto [index, operand] : llvm::enumerate(payloadOperands))
+    {
+        Value value = ensureU256(rewriter, loc, operand);
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>((index + 1) * 32ULL)));
+        Value slot = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
+        rewriter.create<sir::StoreOp>(loc, slot, value);
+    }
+
+    return mem;
+}
+
 LogicalResult ConvertErrorReturnOp::matchAndRewrite(
     ora::ErrorReturnOp op,
     typename ora::ErrorReturnOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    if (op.getNumOperands() != 0)
-        return rewriter.notifyMatchFailure(op, "only zero-payload error.return is supported");
-
     auto *typeConverter = getTypeConverter();
     if (!typeConverter)
         return rewriter.notifyMatchFailure(op, "missing type converter");
@@ -2471,6 +2504,10 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
     Value idConst = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, idAttr);
     idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
 
+    Value aggregatePayload;
+    if (op.getNumOperands() != 0)
+        aggregatePayload = materializeErrorPayloadAggregate(rewriter, op.getLoc(), errorId, adaptor.getOperands());
+
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
     {
         SmallVector<Type> resultTypes;
@@ -2480,7 +2517,7 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
         auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
         Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, oneAttr);
 
-        if (isNarrowErrorUnion(errType))
+        if (isNarrowErrorUnion(errType) && !hasForceWideErrorUnionAttr(op))
         {
             Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, one, idConst);
             Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, one);
@@ -2488,7 +2525,7 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
             return success();
         }
 
-        Value payload = idConst;
+        Value payload = aggregatePayload ? aggregatePayload : idConst;
         if (resultTypes.size() >= 2 && payload.getType() != resultTypes[1])
             payload = rewriter.create<sir::BitcastOp>(op.getLoc(), resultTypes[1], payload);
         rewriter.replaceOpWithMultiple(op, ArrayRef<ValueRange>{ValueRange{one, payload}});
@@ -2499,6 +2536,15 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
     Type convertedType = typeConverter->convertType(origType);
     if (!convertedType)
         return rewriter.notifyMatchFailure(op, "unable to convert error.return result type");
+
+    if (aggregatePayload)
+    {
+        Value result = aggregatePayload;
+        if (convertedType != result.getType())
+            result = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, result);
+        rewriter.replaceOp(op, result);
+        return success();
+    }
 
     if (convertedType == origType)
     {
