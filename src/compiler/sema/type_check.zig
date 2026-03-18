@@ -583,6 +583,11 @@ const TypeChecker = struct {
                     }
                 }
             },
+            .ErrorDecl => |error_decl| {
+                for (error_decl.parameters) |parameter| {
+                    self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
+                }
+            },
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},

@@ -463,9 +463,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             if (function.return_type) |_| {
-                const abi_return = try abi_support.canonicalAbiType(self.allocator, self.typecheck.body_types[function.body.index()]);
+                const body_type = self.typecheck.body_types[function.body.index()];
+                const abi_return_type = switch (body_type) {
+                    .error_union => |error_union| error_union.payload_type.*,
+                    else => body_type,
+                };
+                const abi_return = try abi_support.canonicalAbiType(self.allocator, abi_return_type);
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
+
+                if (function.return_type) |return_type_id| {
+                    if (self.file.typeExpr(return_type_id).* == .ErrorUnion) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                    }
+                }
             }
         }
 
@@ -713,9 +724,25 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", error_decl.name));
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
 
+            const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
+            defer self.allocator.free(param_types);
+            for (error_decl.parameters, 0..) |param, index| {
+                param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
+            }
+            const maybe_signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+                error.UnsupportedAbiType => null,
+                else => return err,
+            };
+            if (maybe_signature) |signature| {
+                defer self.allocator.free(signature);
+                const selector = try abi_support.keccakSelectorHex(self.allocator, signature);
+                defer self.allocator.free(selector);
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.error_selector", selector));
+            }
+
             if (error_decl.parameters.len > 0) {
                 const param_names = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
-                const param_types = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
+                const param_type_attrs = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
                 for (error_decl.parameters, 0..) |param, index| {
                     const pattern = self.file.pattern(param.pattern).*;
                     const param_name = switch (pattern) {
@@ -723,10 +750,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         else => "",
                     };
                     param_names[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
-                    param_types[index] = mlir.oraTypeAttrCreateFromType(self.lowerTypeExpr(param.type_expr));
+                    param_type_attrs[index] = mlir.oraTypeAttrCreateFromType(self.lowerTypeExpr(param.type_expr));
                 }
                 try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_names"), mlir.oraArrayAttrCreate(self.context, @intCast(param_names.len), param_names.ptr)));
-                try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_types"), mlir.oraArrayAttrCreate(self.context, @intCast(param_types.len), param_types.ptr)));
+                try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_types"), mlir.oraArrayAttrCreate(self.context, @intCast(param_type_attrs.len), param_type_attrs.ptr)));
             }
 
             const op = mlir.oraErrorDeclOpCreate(

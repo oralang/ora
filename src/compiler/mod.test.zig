@@ -10685,6 +10685,27 @@ test "compiler emits ABI attrs for public contract entries" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
 }
 
+test "compiler emits error selector and error-union ABI attrs" {
+    const source_text =
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance {
+        \\        return error InsufficientBalance(amount, amount);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.error_selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"0xcf479181\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.returns_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
+}
+
 test "ora dialect exposes external call ops through C API" {
     const ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(ctx);
