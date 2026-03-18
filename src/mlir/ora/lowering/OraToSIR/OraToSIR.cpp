@@ -48,47 +48,6 @@ using namespace ora;
 
 namespace
 {
-    static bool isResidualOraRuntimeOp(Operation *op)
-    {
-        StringRef name = op->getName().getStringRef();
-        return name == "ora.global" ||
-               name == "ora.sload" ||
-               name == "ora.sstore" ||
-               name == "ora.tload" ||
-               name == "ora.tstore" ||
-               name == "ora.map_get" ||
-               name == "ora.map_store" ||
-               name == "ora.return" ||
-               name == "ora.error.ok" ||
-               name == "ora.error.err" ||
-               name == "ora.error.is_error" ||
-               name == "ora.error.unwrap" ||
-               name == "ora.error.get_error" ||
-               name == "ora.error.return" ||
-               name == "ora.if" ||
-               name == "ora.try_stmt" ||
-               name == "ora.switch" ||
-               name == "ora.yield" ||
-               name == "ora.break" ||
-               name == "ora.continue" ||
-               name == "ora.conditional_return" ||
-               name == "ora.struct_instantiate" ||
-               name == "ora.struct_field_extract" ||
-               name == "ora.struct_field_update" ||
-               name == "ora.struct.decl" ||
-               name == "ora.tuple_create" ||
-               name == "ora.tuple_extract" ||
-               name == "ora.abi_encode" ||
-               name == "ora.external_call" ||
-               name == "ora.abi_decode" ||
-               name == "ora.assert" ||
-               name == "ora.log" ||
-               name == "ora.lock" ||
-               name == "ora.unlock" ||
-               name == "ora.refinement_to_base" ||
-               name == "ora.base_to_refinement";
-    }
-
     class RefinementErasureTypeConverter final : public TypeConverter
     {
     public:
@@ -1736,7 +1695,7 @@ public:
             }
         }
 
-        // Guard: fail if any ops remain that should have been lowered by this stage.
+        // Guard: fail if any Ora ops remain after all lowering phases.
         if (mlir::ora::isDebugEnabled())
         {
             llvm::errs() << "[OraToSIR] Post-Phase4: illegal-op scan start\n";
@@ -1748,23 +1707,21 @@ public:
             if (op->getDialect())
             {
                 StringRef ns = op->getDialect()->getNamespace();
-                // Control-flow and high-level ops are allowed to remain for later phases.
+                // Non-Ora dialects may still appear here; this guard is specifically for
+                // residual Ora ops that should all be gone by the end of OraToSIR.
                 if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
                     return;
 
                 if (ns == "ora")
                 {
-                    if (isResidualOraRuntimeOp(op))
-                    {
-                        llvm::errs() << "[OraToSIR] ERROR: Illegal op remains: " << op->getName()
-                                     << " at " << op->getLoc() << "\n";
-                        illegalFound = true;
-                    }
+                    llvm::errs() << "[OraToSIR] ERROR: Residual Ora op remains: " << op->getName()
+                                 << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
                 }
             } });
         if (illegalFound)
         {
-            module.emitError("[OraToSIR] post-conversion: illegal Ora ops remain after all phases");
+            module.emitError("[OraToSIR] post-conversion: residual Ora ops remain after all phases");
             signalPassFailure();
             return;
         }
