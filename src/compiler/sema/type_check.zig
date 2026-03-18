@@ -507,14 +507,6 @@ const TypeChecker = struct {
                                 method.name,
                                 error_name,
                             });
-                        } else {
-                            const error_decl = self.file.item(error_item_id.?).ErrorDecl;
-                            if (error_decl.parameters.len != 0) {
-                                try self.emitRangeError(method.range, "extern trait method '{s}' currently supports only zero-payload errors in errors(...); '{s}' has payload fields", .{
-                                    method.name,
-                                    error_name,
-                                });
-                            }
                         }
                     }
                     for (method.parameters) |parameter| {

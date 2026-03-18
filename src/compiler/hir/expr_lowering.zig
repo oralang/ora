@@ -613,11 +613,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             returndata: mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             if (method.errors.len == 0) {
-                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed");
+                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed", returndata);
             }
 
             const selector_word = try @This().decodeExternSelectorWord(self, block, loc, returndata);
-            return try @This().lowerExternErrorMatchChain(self, expr_id, method.errors, 0, selector_word, block, loc);
+            return try @This().lowerExternErrorMatchChain(self, expr_id, method.errors, 0, selector_word, block, loc, returndata);
         }
 
         fn decodeExternSelectorWord(
@@ -650,26 +650,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             selector_word: mlir.MlirValue,
             block: mlir.MlirBlock,
             loc: mlir.MlirLocation,
+            returndata: mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             if (index >= error_names.len) {
-                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed");
+                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed", returndata);
             }
 
             const error_name = error_names[index];
             const error_item_id = self.parent.item_index.lookup(error_name);
             if (error_item_id == null or self.parent.file.item(error_item_id.?).* != .ErrorDecl) {
-                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
-            }
-            const error_decl = self.parent.file.item(error_item_id.?).ErrorDecl;
-            if (error_decl.parameters.len != 0) {
-                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc, returndata);
             }
 
             const error_op = @This().findErrorDeclOp(self, error_item_id.?) orelse
-                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc, returndata);
             const selector_attr = mlir.oraOperationGetAttributeByName(error_op, strRef("ora.error_selector"));
             if (mlir.oraAttributeIsNull(selector_attr)) {
-                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc, returndata);
             }
 
             const selector_ref = mlir.oraStringAttrGetValue(selector_attr);
@@ -688,10 +685,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
             if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
 
-            const matched = try @This().lowerNamedExternErrorResult(self, expr_id, then_block, loc, error_name);
+            const matched = try @This().lowerNamedExternErrorResult(self, expr_id, then_block, loc, error_name, returndata);
             try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{matched});
 
-            const fallback = try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, else_block, loc);
+            const fallback = try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, else_block, loc, returndata);
             try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{fallback});
 
             return mlir.oraOperationGetResult(if_op, 0);
@@ -703,8 +700,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             block: mlir.MlirBlock,
             loc: mlir.MlirLocation,
             error_name: []const u8,
+            returndata: mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             const error_type = @This().externErrorTypeByName(self, expr_id, error_name) orelse self.parent.typecheck.exprType(expr_id).errorTypes()[0];
+            if (@This().errorTypeHasPayload(self, error_name)) {
+                return try @This().lowerPayloadExternErrorResult(self, expr_id, block, loc, error_type, returndata);
+            }
             const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, expr_id));
             var error_result_types: [1]mlir.MlirType = .{lowered_error_type};
             const error_call = mlir.oraFuncCallOpCreate(
@@ -725,6 +726,43 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             appendOp(block, err_op);
             return mlir.oraOperationGetResult(err_op, 0);
+        }
+
+        fn lowerPayloadExternErrorResult(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+            error_type: sema.Type,
+            returndata: mlir.MlirValue,
+        ) anyerror!mlir.MlirValue {
+            const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, expr_id));
+            var return_type_attrs: [1]mlir.MlirAttribute = .{
+                mlir.oraStringAttrCreate(self.parent.context, strRef("tuple")),
+            };
+            const return_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &return_type_attrs);
+            const payload_offset = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 4));
+            const payload_ptr_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, returndata, payload_offset);
+            if (mlir.oraOperationIsNull(payload_ptr_op)) return error.MlirOperationCreationFailed;
+            appendOp(block, payload_ptr_op);
+            const payload_returndata = mlir.oraOperationGetResult(payload_ptr_op, 0);
+            const decode_op = mlir.oraAbiDecodeOpCreate(self.parent.context, loc, return_types_attr, payload_returndata, lowered_error_type);
+            if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
+            appendOp(block, decode_op);
+            const decoded = mlir.oraOperationGetResult(decode_op, 0);
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, decoded, self.parent.lowerExprType(expr_id));
+            if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+            if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
+            appendOp(block, err_op);
+            return mlir.oraOperationGetResult(err_op, 0);
+        }
+
+        fn errorTypeHasPayload(self: *FunctionLowerer, error_name: []const u8) bool {
+            const error_item_id = self.parent.item_index.lookup(error_name) orelse return false;
+            if (self.parent.file.item(error_item_id).* != .ErrorDecl) return false;
+            return self.parent.file.item(error_item_id).ErrorDecl.parameters.len != 0;
         }
 
         fn externErrorTypeByName(self: *FunctionLowerer, expr_id: ast.ExprId, error_name: []const u8) ?sema.Type {

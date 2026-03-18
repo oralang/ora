@@ -534,7 +534,7 @@ test "compiler rejects unknown extern trait errors clauses" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "extern trait method 'transfer' declares unknown error 'UnknownError'"));
 }
 
-test "compiler rejects payload-bearing extern trait errors clauses for now" {
+test "compiler accepts payload-bearing extern trait errors clauses" {
     const source_text =
         \\extern trait ERC20 {
         \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance);
@@ -547,7 +547,7 @@ test "compiler rejects payload-bearing extern trait errors clauses for now" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "extern trait method 'transfer' currently supports only zero-payload errors in errors(...); 'InsufficientBalance' has payload fields"));
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
 test "compiler reports external proxy misuse" {
@@ -957,6 +957,33 @@ test "compiler lowers zero-payload extern trait errors clauses into selector mat
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.if"));
 }
 
+test "compiler lowers payload-bearing extern trait errors into selector matching and decode" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) -> !bool | ExternalCallFailed | InsufficientBalance {
+        \\        return external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 3, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @ExternalCallFailed"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "call @InsufficientBalance"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+}
+
 test "compiler converts extern trait calls through SIR" {
     const source_text =
         \\extern trait ERC20 {
@@ -992,6 +1019,38 @@ test "compiler converts extern trait calls through SIR" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"balanceOf\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.selector"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
+test "compiler converts payload-bearing extern trait errors through SIR" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) -> !bool | ExternalCallFailed | InsufficientBalance {
+        \\        return external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.malloc"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
 }
 
 test "compiler converts call-kind extern traits with bool and address returns through SIR" {
