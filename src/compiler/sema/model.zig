@@ -42,6 +42,7 @@ pub const TraitMethodSignature = struct {
     has_self: bool,
     is_comptime: bool = false,
     extern_call_kind: ast.ExternCallKind = .none,
+    errors: []const []const u8 = &.{},
     param_types: []const Type = &.{},
     return_type: Type = .{ .void = {} },
 };

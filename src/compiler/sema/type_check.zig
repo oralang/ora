@@ -500,6 +500,15 @@ const TypeChecker = struct {
                             method.name,
                         });
                     }
+                    for (method.errors) |error_name| {
+                        const error_item_id = self.item_index.lookup(error_name);
+                        if (error_item_id == null or self.file.item(error_item_id.?).* != .ErrorDecl) {
+                            try self.emitRangeError(method.range, "extern trait method '{s}' declares unknown error '{s}'", .{
+                                method.name,
+                                error_name,
+                            });
+                        }
+                    }
                     for (method.parameters) |parameter| {
                         _ = try self.resolveTypeExpr(parameter.type_expr);
                     }
@@ -858,6 +867,7 @@ const TypeChecker = struct {
             .has_self = trait_method.has_self,
             .is_comptime = trait_method.is_comptime,
             .extern_call_kind = trait_method.extern_call_kind,
+            .errors = trait_method.errors,
             .param_types = param_types,
             .return_type = return_type,
         };
@@ -880,6 +890,7 @@ const TypeChecker = struct {
             .has_self = has_self,
             .is_comptime = function.is_comptime,
             .extern_call_kind = .none,
+            .errors = &.{},
             .param_types = param_types,
             .return_type = return_type,
         };
@@ -1412,8 +1423,11 @@ const TypeChecker = struct {
 
     fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
         const method = self.externProxyMethodSignature(call.callee) orelse return null;
-        const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        const error_types = self.arena.alloc(Type, method.errors.len + 1) catch return .{ .unknown = {} };
         error_types[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
+        for (method.errors, 0..) |error_name, index| {
+            error_types[index + 1] = .{ .named = .{ .name = error_name } };
+        }
         return .{ .error_union = .{
             .payload_type = self.storeType(method.return_type) catch return .{ .unknown = {} },
             .error_types = error_types,

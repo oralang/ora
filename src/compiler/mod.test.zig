@@ -482,6 +482,58 @@ test "compiler type checks external proxy method calls" {
     try testing.expectEqualStrings("ExternalCallFailed", result_type.errorTypes()[0].named.name);
 }
 
+test "compiler includes declared extern trait errors in call result types" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance, InvalidRecipient);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\error InvalidRecipient;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) {
+        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const contract = ast_file.item(ast_file.root_items[4]).Contract;
+    const function = ast_file.item(contract.members[1]).Function;
+    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "result").?;
+    const result_type = typecheck.pattern_types[result_pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.error_union, result_type.kind());
+    try testing.expectEqual(@as(usize, 3), result_type.errorTypes().len);
+    try testing.expectEqualStrings("ExternalCallFailed", result_type.errorTypes()[0].named.name);
+    try testing.expectEqualStrings("InsufficientBalance", result_type.errorTypes()[1].named.name);
+    try testing.expectEqualStrings("InvalidRecipient", result_type.errorTypes()[2].named.name);
+}
+
+test "compiler rejects unknown extern trait errors clauses" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(UnknownError);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "extern trait method 'transfer' declares unknown error 'UnknownError'"));
+}
+
 test "compiler reports external proxy misuse" {
     const source_text =
         \\trait Plain {
