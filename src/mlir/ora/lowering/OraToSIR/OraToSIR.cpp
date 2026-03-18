@@ -387,6 +387,7 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
 {
     mlir::IRRewriter rewriter(funcOp.getContext());
     bool hadMalformedBlock = false;
+    SmallVector<Block *, 4> blocksToErase;
     for (Block &block : funcOp.getBody())
     {
         Operation *terminator = nullptr;
@@ -400,16 +401,29 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
         }
         if (!terminator)
         {
-            hadMalformedBlock = true;
             llvm::errs() << "[OraToSIR] ERROR: Missing terminator in function "
                          << funcOp.getName() << " at " << block.getParent()->getLoc() << "\n";
+            if (&block != &funcOp.front() && block.empty() && block.hasNoPredecessors())
+            {
+                blocksToErase.push_back(&block);
+                continue;
+            }
+            if (Block *next = block.getNextNode())
+            {
+                if (next->getNumArguments() == 0)
+                {
+                    rewriter.setInsertionPointToEnd(&block);
+                    rewriter.create<sir::BrOp>(funcOp.getLoc(), ValueRange{}, next);
+                    continue;
+                }
+            }
+            hadMalformedBlock = true;
             rewriter.setInsertionPointToEnd(&block);
             rewriter.create<sir::InvalidOp>(funcOp.getLoc());
             continue;
         }
         if (terminator->getNextNode())
         {
-            hadMalformedBlock = true;
             llvm::errs() << "[OraToSIR] ERROR: Terminator has trailing ops in function "
                          << funcOp.getName() << " at " << terminator->getLoc() << "\n";
             // Keep IR valid for downstream passes by dropping unreachable ops
@@ -423,6 +437,8 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
             }
         }
     }
+    for (Block *block : blocksToErase)
+        rewriter.eraseBlock(block);
     return hadMalformedBlock;
 }
 

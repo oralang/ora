@@ -410,6 +410,38 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Return => |ret| {
                     const loc = self.parent.location(ret.range);
                     if (self.deferred_return_flag) |return_flag| {
+                        if (self.deferred_return_kind == .none) {
+                            if (ret.value) |expr_id| {
+                                const raw_value = try self.lowerExpr(expr_id, locals);
+                                const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                                self.current_return_value = value;
+                                defer self.current_return_value = null;
+                                if (self.function) |function| {
+                                    for (function.clauses) |clause| {
+                                        if (clause.kind != .ensures) continue;
+                                        const condition = try self.lowerExpr(clause.expr, locals);
+                                        const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                                        if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                        appendOp(self.block, ensure);
+                                    }
+                                }
+                                for (self.extra_verification_clauses) |clause| {
+                                    if (clause.kind != .ensures) continue;
+                                    const condition = try self.lowerExpr(clause.expr, locals);
+                                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                                    if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                    appendOp(self.block, ensure);
+                                }
+                                const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
+                                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                                appendOp(self.block, op);
+                            } else {
+                                const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
+                                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                                appendOp(self.block, op);
+                            }
+                            return true;
+                        }
                         if (ret.value) |expr_id| {
                             const raw_value = try self.lowerExpr(expr_id, locals);
                             const value = try @This().wrapValueForReturn(self, raw_value, ret.range);

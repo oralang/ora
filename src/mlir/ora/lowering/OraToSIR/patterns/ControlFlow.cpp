@@ -3023,23 +3023,55 @@ LogicalResult ConvertIfOp::matchAndRewrite(
     if (failed(lowerReturnsInBlocks(elseBlocks)))
         return failure();
 
-    SmallVector<ora::YieldOp, 1> elseYields;
-    for (Block *block : elseBlocks)
-    {
-        for (auto &blockOp : llvm::make_early_inc_range(*block))
+    auto collectYields = [&](ArrayRef<Block *> blocks, SmallVectorImpl<ora::YieldOp> &yields) {
+        for (Block *block : blocks)
         {
-            if (auto y = dyn_cast<ora::YieldOp>(&blockOp))
-                elseYields.push_back(y);
+            for (auto &blockOp : llvm::make_early_inc_range(*block))
+            {
+                if (auto y = dyn_cast<ora::YieldOp>(&blockOp))
+                    yields.push_back(y);
+            }
         }
-    }
-    for (auto y : elseYields)
+    };
+
+    auto replaceVoidYields = [&](ArrayRef<ora::YieldOp> yields, llvm::StringLiteral side) -> LogicalResult {
+        for (auto y : yields)
+        {
+            if (y.getNumOperands() != 0)
+                return rewriter.notifyMatchFailure(y, (side + " yield must not have operands").str());
+            if (hasOpsAfterTerminator(y.getOperation()))
+                return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+            if (auto *prev = y->getPrevNode())
+            {
+                if (prev->hasTrait<mlir::OpTrait::IsTerminator>())
+                {
+                    rewriter.eraseOp(y);
+                    continue;
+                }
+            }
+            rewriter.setInsertionPoint(y);
+            rewriter.replaceOpWithNewOp<sir::BrOp>(y, ValueRange{}, mergeBlock);
+        }
+        return success();
+    };
+
+    SmallVector<ora::YieldOp, 1> thenYields;
+    collectYields(thenBlocks, thenYields);
+    if (failed(replaceVoidYields(thenYields, "conditional_return then")))
+        return failure();
+
+    SmallVector<ora::YieldOp, 1> elseYields;
+    collectYields(elseBlocks, elseYields);
+    if (failed(replaceVoidYields(elseYields, "conditional_return else")))
+        return failure();
+
+    if (thenYields.empty())
     {
-        if (y.getNumOperands() != 0)
-            return rewriter.notifyMatchFailure(y, "conditional_return else yield must not have operands");
-        if (hasOpsAfterTerminator(y.getOperation()))
-            return rewriter.notifyMatchFailure(y, "yield has trailing ops");
-        rewriter.setInsertionPoint(y);
-        rewriter.replaceOpWithNewOp<sir::BrOp>(y, ValueRange{}, mergeBlock);
+        if (thenBlock->empty() || !thenBlock->back().hasTrait<mlir::OpTrait::IsTerminator>())
+        {
+            rewriter.setInsertionPointToEnd(thenBlock);
+            rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+        }
     }
     if (elseYields.empty())
     {

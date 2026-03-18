@@ -28,6 +28,48 @@ fn expectOraToSirConverts(path: []const u8) !void {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
 }
 
+fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
+    const forbidden = [_][]const u8{
+        "ora.global",
+        "ora.sload",
+        "ora.sstore",
+        "ora.tload",
+        "ora.tstore",
+        "ora.map_get",
+        "ora.map_store",
+        "ora.return",
+        "ora.error.ok",
+        "ora.error.err",
+        "ora.error.is_error",
+        "ora.error.unwrap",
+        "ora.error.get_error",
+        "ora.error.return",
+        "ora.if",
+        "ora.try_stmt",
+        "ora.switch",
+        "ora.struct_instantiate",
+        "ora.struct_field_extract",
+        "ora.struct_field_update",
+        "ora.struct.decl",
+        "ora.abi_encode",
+        "ora.external_call",
+        "ora.abi_decode",
+        "ora.refinement_to_base",
+        "ora.base_to_refinement",
+    };
+
+    for (forbidden) |needle| {
+        const as_result = try std.fmt.allocPrint(testing.allocator, "= {s}", .{needle});
+        defer testing.allocator.free(as_result);
+        const as_stmt = try std.fmt.allocPrint(testing.allocator, "\n    {s}", .{needle});
+        defer testing.allocator.free(as_stmt);
+        if (std.mem.containsAtLeast(u8, rendered, 1, as_result) or std.mem.containsAtLeast(u8, rendered, 1, as_stmt)) {
+            std.debug.print("residual Ora op found: {s}\n", .{needle});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
     var it = node.children();
     while (it.next()) |child| {
@@ -11670,4 +11712,28 @@ test "compiler converts contract storage through explicit slot metadata" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "slot_owner"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sload"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sstore"));
+}
+
+test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
+    const example_paths = [_][]const u8{
+        "ora-example/smoke.ora",
+        "ora-example/no_return_test.ora",
+        "ora-example/dce_test.ora",
+        "ora-example/statements/contract_declaration.ora",
+        "ora-example/apps/erc20.ora",
+    };
+
+    for (example_paths) |path| {
+        var compilation = try compilePackage(path);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+        const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+        defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+        const rendered = module_text_ref.data[0..module_text_ref.length];
+
+        try expectNoResidualOraRuntimeOps(rendered);
+    }
 }

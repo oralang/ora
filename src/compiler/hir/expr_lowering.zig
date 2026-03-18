@@ -1719,12 +1719,44 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            const result_type = self.parent.lowerExprType(expr_id);
+            if (try @This().lowerBuiltinFieldExpr(self, expr_id, field, result_type)) |value| {
+                return value;
+            }
+            if (self.parent.resolution.expr_bindings[expr_id.index()]) |binding| {
+                switch (binding) {
+                    .item => |item_id| switch (self.parent.file.item(item_id).*) {
+                        .Constant => |constant| return self.lowerExpr(constant.value, locals),
+                        .Function => |function| {
+                            const op = mlir.oraFunctionRefOpCreate(
+                                self.parent.context,
+                                self.parent.location(field.range),
+                                strRef(function.name),
+                                result_type,
+                            );
+                            if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        },
+                        else => {},
+                    },
+                    else => {},
+                }
+            }
             const base_type = self.parent.typecheck.exprType(field.base);
+            if (try @This().lowerNamespaceFieldExpr(self, expr_id, field, locals, result_type)) |value| {
+                return value;
+            }
+            if (self.parent.resolution.expr_bindings[field.base.index()]) |binding| {
+                switch (binding) {
+                    .item => |item_id| if (try @This().lowerNamespaceFieldForItem(self, field, item_id, locals, result_type)) |value| {
+                        return value;
+                    },
+                    else => {},
+                }
+            }
             if (base_type == .enum_) {
                 const enum_name = base_type.name() orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, self.parent.lowerExprType(expr_id)));
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
                 };
-                const result_type = self.parent.lowerExprType(expr_id);
                 const op = mlir.oraEnumConstantOpCreate(
                     self.parent.context,
                     self.parent.location(field.range),
@@ -1738,15 +1770,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const base = try self.lowerExpr(field.base, locals);
             if (base_type == .bitfield) {
-                const result_type = self.parent.lowerExprType(expr_id);
-                return try self.createBitfieldFieldExtract(base, base_type, field.name, result_type, field.range);
+                const extracted_type = self.parent.lowerExprType(expr_id);
+                return try self.createBitfieldFieldExtract(base, base_type, field.name, extracted_type, field.range);
             }
             if (base_type == .struct_ or (base_type == .named and blk: {
                 const name = base_type.name() orelse break :blk false;
                 const item_id = self.parent.item_index.lookup(name) orelse break :blk false;
                 break :blk self.parent.file.item(item_id).* == .ErrorDecl;
             })) {
-                const result_type = self.parent.lowerExprType(expr_id);
                 const op = mlir.oraStructFieldExtractOpCreate(
                     self.parent.context,
                     self.parent.location(field.range),
@@ -1757,6 +1788,132 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
             return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id)));
+        }
+
+        fn lowerBuiltinFieldExpr(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            field: ast.FieldExpr,
+            result_type: mlir.MlirType,
+        ) anyerror!?mlir.MlirValue {
+            const path = try @This().fieldExprPath(self, expr_id);
+            if (std.mem.startsWith(u8, path, "error.")) {
+                const error_name = path["error.".len..];
+                const item_id = self.parent.item_index.lookup(error_name) orelse return null;
+                if (self.parent.file.item(item_id).* != .ErrorDecl) return null;
+                const error_decl = self.parent.file.item(item_id).ErrorDecl;
+                if (error_decl.parameters.len != 0) return null;
+
+                var result_types: [1]mlir.MlirType = .{result_type};
+                const error_call = mlir.oraFuncCallOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    strRef(error_name),
+                    null,
+                    0,
+                    &result_types,
+                    1,
+                );
+                if (mlir.oraOperationIsNull(error_call)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, error_call);
+            }
+            if (std.mem.eql(u8, path, "std.constants.ZERO_ADDRESS")) {
+                const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+                const zero = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, self.parent.location(field.range), i160_type, 0),
+                );
+                const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, self.parent.location(field.range), zero);
+                if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, addr_op);
+            }
+
+            if (std.mem.startsWith(u8, path, "std.constants.") and
+                (std.mem.endsWith(u8, path, "_MIN") or std.mem.endsWith(u8, path, "_MAX")))
+            {
+                if (std.mem.startsWith(u8, path, "std.constants.U")) {
+                    const value: i64 = if (std.mem.endsWith(u8, path, "_MIN")) 0 else -1;
+                    return appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, self.parent.location(field.range), result_type, value),
+                    );
+                }
+            }
+
+            return null;
+        }
+
+        fn fieldExprPath(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror![]const u8 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Name => |name| self.parent.allocator.dupe(u8, name.name),
+                .Group => |group| @This().fieldExprPath(self, group.expr),
+                .Field => |field| blk: {
+                    const base = try @This().fieldExprPath(self, field.base);
+                    break :blk std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ base, field.name });
+                },
+                else => self.parent.allocator.dupe(u8, ""),
+            };
+        }
+
+        fn lowerNamespaceFieldExpr(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            field: ast.FieldExpr,
+            locals: *LocalEnv,
+            result_type: mlir.MlirType,
+        ) anyerror!?mlir.MlirValue {
+            _ = expr_id;
+            const base_type = self.parent.typecheck.exprType(field.base);
+            const base_name = base_type.name() orelse return null;
+            const item_id = self.parent.item_index.lookup(base_name) orelse return null;
+            return try @This().lowerNamespaceFieldForItem(self, field, item_id, locals, result_type);
+        }
+
+        fn lowerNamespaceFieldForItem(
+            self: *FunctionLowerer,
+            field: ast.FieldExpr,
+            item_id: ast.ItemId,
+            locals: *LocalEnv,
+            result_type: mlir.MlirType,
+        ) anyerror!?mlir.MlirValue {
+            switch (self.parent.file.item(item_id).*) {
+                .Contract => |contract| {
+                    for (contract.members) |member_id| {
+                        const member = self.parent.file.item(member_id).*;
+                        switch (member) {
+                            .Constant => |constant| {
+                                if (std.mem.eql(u8, constant.name, field.name)) {
+                                    return try self.lowerExpr(constant.value, locals);
+                                }
+                            },
+                            .Function => |function| {
+                                if (std.mem.eql(u8, function.name, field.name)) {
+                                    const op = mlir.oraFunctionRefOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(field.range),
+                                        strRef(function.name),
+                                        result_type,
+                                    );
+                                    if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                                }
+                            },
+                            .Struct => |struct_item| {
+                                if (std.mem.eql(u8, struct_item.name, field.name)) return null;
+                            },
+                            .Enum => |enum_item| {
+                                if (std.mem.eql(u8, enum_item.name, field.name)) return null;
+                            },
+                            .Bitfield => |bitfield_item| {
+                                if (std.mem.eql(u8, bitfield_item.name, field.name)) return null;
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+            return null;
         }
 
         fn lowerArrayLiteral(self: *FunctionLowerer, expr_id: ast.ExprId, array: ast.ArrayLiteralExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
