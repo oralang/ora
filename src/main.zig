@@ -1180,6 +1180,7 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .string => try writer.writeAll("string"),
         .address => try writer.writeAll("address"),
         .bytes => try writer.writeAll("bytes"),
+        .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
         .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
         .named => |named| try writer.writeAll(named.name),
         .contract => |named| try writer.writeAll(named.name),
