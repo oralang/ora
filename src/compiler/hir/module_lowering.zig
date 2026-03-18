@@ -377,6 +377,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             for (parameters, 0..) |parameter, index| {
                 try self.attachBitfieldParamMetadataForType(op, self.typecheck.pattern_types[parameter.pattern.index()].type, @intCast(index));
+                if (self.errorUnionRequiresWideCarrier(self.typecheck.pattern_types[parameter.pattern.index()].type)) {
+                    _ = mlir.oraFuncSetArgAttr(op, @intCast(index), strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
+                }
+            }
+
+            if (return_type != null and self.errorUnionRequiresWideCarrier(self.typecheck.body_types[function.body.index()])) {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
             }
 
             appendOp(parent_block, op);

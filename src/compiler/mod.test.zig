@@ -10877,6 +10877,36 @@ test "compiler lowers payload-bearing narrow success error unions through OraToS
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.err"));
 }
 
+test "compiler carries payload-bearing narrow error unions across function calls through OraToSIR" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\fn helper(flag: bool) -> !bool | Failure {
+        \\    return flag;
+        \\}
+        \\
+        \\contract Probe {
+        \\    pub fn run(flag: bool) -> !bool | Failure {
+        \\        return helper(flag);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.icall"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.ok"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.err"));
+}
+
 test "compiler lowers bare assert to runtime revert through OraToSIR" {
     const source_text =
         \\contract Check {

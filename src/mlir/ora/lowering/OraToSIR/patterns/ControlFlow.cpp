@@ -322,6 +322,26 @@ static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *
     return !isNarrowErrorUnion(type) || hasForceWideErrorUnionAttr(op);
 }
 
+static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index)
+{
+    if (!func || index >= func.getNumArguments())
+        return false;
+    if (auto attr = func.getArgAttrOfType<BoolAttr>(index, "ora.force_wide_error_union"))
+        return attr.getValue();
+    return false;
+}
+
+static bool funcResultForcesWideErrorUnion(func::FuncOp func, unsigned index)
+{
+    if (!func || index >= func.getNumResults())
+        return false;
+    if (auto attr = func.getResultAttrOfType<BoolAttr>(index, "ora.force_wide_error_union"))
+        return attr.getValue();
+    if (auto attr = func->getAttrOfType<BoolAttr>("ora.force_wide_error_union"))
+        return attr.getValue();
+    return false;
+}
+
 static bool hasOpsAfterTerminator(Operation *op)
 {
     return op && op->getNextNode();
@@ -399,7 +419,20 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
     for (auto [index, inputType] : llvm::enumerate(oldFuncType.getInputs()))
     {
         SmallVector<Type> convertedTypes;
-        if (failed(typeConverter->convertType(inputType, convertedTypes)) || convertedTypes.empty())
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(inputType))
+        {
+            auto *ctx = inputType.getContext();
+            if (funcArgForcesWideErrorUnion(op, index))
+            {
+                convertedTypes.push_back(sir::U256Type::get(ctx));
+                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+            }
+            else if (failed(typeConverter->convertType(inputType, convertedTypes)) || convertedTypes.empty())
+            {
+                return rewriter.notifyMatchFailure(op, "failed to convert function input type");
+            }
+        }
+        else if (failed(typeConverter->convertType(inputType, convertedTypes)) || convertedTypes.empty())
         {
             return rewriter.notifyMatchFailure(op, "failed to convert function input type");
         }
@@ -1900,28 +1933,43 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     };
 
     StringRef calleeName = op.getCallee();
+    func::FuncOp calleeFunc = nullptr;
     if (!calleeName.empty())
     {
         auto calleeAttr = mlir::StringAttr::get(op.getContext(), calleeName);
         if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, calleeAttr))
         {
+            calleeFunc = dyn_cast<func::FuncOp>(symbol);
             if (auto errId = findErrorId(symbol))
                 return lowerErrorIdCall(errId);
         }
         // Fallback: walk module for error decls (ora or sir) by sym_name.
-        if (auto module = op->getParentOfType<mlir::ModuleOp>())
+        if (!calleeFunc)
         {
-            mlir::IntegerAttr foundId;
-            module.walk([&](Operation *decl) {
-                if (!foundId && (isa<ora::ErrorDeclOp>(decl) || isa<sir::ErrorDeclOp>(decl)))
-                {
-                    auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
-                    if (sym && sym.getValue() == calleeName)
-                        foundId = findErrorId(decl);
-                }
-            });
-            if (foundId)
-                return lowerErrorIdCall(foundId);
+            if (auto module = op->getParentOfType<mlir::ModuleOp>())
+            {
+                mlir::IntegerAttr foundId;
+                module.walk([&](Operation *decl) {
+                    if (foundId || calleeFunc)
+                        return;
+                    if (auto func = dyn_cast<func::FuncOp>(decl))
+                    {
+                        if (func.getName() == calleeName)
+                        {
+                            calleeFunc = func;
+                            return;
+                        }
+                    }
+                    if (isa<ora::ErrorDeclOp>(decl) || isa<sir::ErrorDeclOp>(decl))
+                    {
+                        auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                        if (sym && sym.getValue() == calleeName)
+                            foundId = findErrorId(decl);
+                    }
+                });
+                if (foundId)
+                    return lowerErrorIdCall(foundId);
+            }
         }
     }
 
@@ -1939,6 +1987,18 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     {
         Value operand = it.value();
         Type origType = operand.getType();
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
+        {
+            if (calleeFunc && funcArgForcesWideErrorUnion(calleeFunc, it.index()))
+            {
+                SmallVector<Value> wideParts;
+                if (failed(materializeWideErrorUnion(rewriter, op.getLoc(), operand, wideParts)) || wideParts.size() != 2)
+                    return rewriter.notifyMatchFailure(op, "unable to materialize wide error-union call operand");
+                newOperands.push_back(ensureU256(rewriter, op.getLoc(), wideParts[0]));
+                newOperands.push_back(ensureU256(rewriter, op.getLoc(), wideParts[1]));
+                continue;
+            }
+        }
         if (Type converted = typeConverter->convertType(origType))
         {
             if (converted != origType)
@@ -1971,14 +2031,15 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     {
         auto ctx = op.getContext();
         auto u256Type = sir::U256Type::get(ctx);
-        if (isNarrowErrorUnion(errType))
+        const bool useWideCarrier = (calleeFunc && funcResultForcesWideErrorUnion(calleeFunc, 0)) || !isNarrowErrorUnion(errType);
+        if (!useWideCarrier)
         {
             convertedTypes.push_back(u256Type);
         }
         else
         {
             convertedTypes.push_back(u256Type);
-            convertedTypes.push_back(u256Type);
+            convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
         }
     }
     else if (failed(typeConverter->convertType(oldResultTypes.front(), convertedTypes)) || convertedTypes.empty())
