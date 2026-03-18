@@ -2307,6 +2307,21 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         return success();
     }
 
+    if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(origType))
+    {
+        Type convertedType = typeConverter->convertType(origType);
+        if (!convertedType)
+            convertedType = ptrType;
+
+        Value decodedPtr = returndataPtr;
+        if (convertedType != ptrType)
+            decodedPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, decodedPtr);
+
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(op.getLoc(), TypeRange{origType}, ValueRange{decodedPtr});
+        rewriter.replaceOp(op, cast.getResults());
+        return success();
+    }
+
     Value loaded = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
 
     Type convertedType = typeConverter->convertType(op.getResult().getType());
@@ -2605,6 +2620,7 @@ static LogicalResult convertOraReturn(
     else
         origType = retVal.getType();
     const bool is_bytes_return = llvm::isa<ora::StringType, ora::BytesType>(origType);
+    const bool is_slice_return = llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(origType);
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
         const bool useWideCarrier = !isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal);
@@ -2837,6 +2853,29 @@ static LogicalResult convertOraReturn(
         Value length = rewriter.create<sir::LoadOp>(loc, u256Type, retVal);
         Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
         Value sizeConst = rewriter.create<sir::AddOp>(loc, u256Type, length, wordSize);
+
+        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
+    if (is_slice_return)
+    {
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+        {
+            if (!tc)
+                return rewriter.notifyMatchFailure(op, "missing type converter");
+            Type convertedType = tc->convertType(retVal.getType());
+            if (convertedType && convertedType != retVal.getType())
+            {
+                retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+            }
+        }
+
+        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, retVal);
+        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+        Value lenBytes = rewriter.create<sir::MulOp>(loc, u256Type, length, wordSize);
+        Value sizeConst = rewriter.create<sir::AddOp>(loc, u256Type, lenBytes, wordSize);
 
         rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
         rewriter.eraseOp(op);

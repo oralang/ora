@@ -497,7 +497,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveExternProxyMethodCall(self, call.callee) orelse return null;
             switch (resolved.method.return_type.kind()) {
-                .bool, .address, .integer, .string, .bytes, .tuple, .struct_, .contract => {},
+                .bool, .address, .integer, .string, .bytes, .tuple, .struct_, .contract, .slice => {},
                 else => return error.UnsupportedExternTraitLowering,
             }
 

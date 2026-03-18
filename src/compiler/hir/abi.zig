@@ -23,6 +23,11 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
             if (array.len) |len| break :blk std.fmt.allocPrint(allocator, "{s}[{d}]", .{ element, len });
             break :blk std.fmt.allocPrint(allocator, "{s}[]", .{element});
         },
+        .slice => |slice| blk: {
+            const element = try canonicalAbiType(allocator, slice.element_type.*);
+            defer allocator.free(element);
+            break :blk std.fmt.allocPrint(allocator, "{s}[]", .{element});
+        },
         else => error.UnsupportedAbiType,
     };
 }
@@ -52,6 +57,7 @@ pub fn staticAbiWordCount(ty: sema.Type) ?usize {
             const element_words = staticAbiWordCount(array.element_type.*) orelse return null;
             break :blk element_words * len;
         },
+        .slice => null,
         else => null,
     };
 }

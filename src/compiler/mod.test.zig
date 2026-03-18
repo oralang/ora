@@ -11308,6 +11308,39 @@ test "dispatcher translates public string-success error unions" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.add"));
 }
 
+test "dispatcher translates public dynamic array success error unions" {
+    const source_text =
+        \\extern trait View {
+        \\    staticcall fn values(self) -> slice[u256];
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Check {
+        \\    storage var target: address;
+        \\
+        \\    pub fn run() -> !slice[u256] | ExternalCallFailed {
+        \\        return external<View>(target, gas: 50000).values();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256[]\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.add"));
+}
+
 test "dispatcher translates payload-bearing extern trait errors to ABI reverts" {
     const source_text =
         \\extern trait ERC20 {
