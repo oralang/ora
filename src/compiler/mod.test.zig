@@ -11369,6 +11369,79 @@ test "dispatcher translates public dynamic array success error unions" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.add"));
 }
 
+test "dispatcher translates public dynamic tuple success error unions" {
+    const source_text =
+        \\extern trait View {
+        \\    staticcall fn quote(self) -> (u256, string);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Check {
+        \\    storage var target: address;
+        \\
+        \\    pub fn run() -> !(u256, string) | ExternalCallFailed {
+        \\        return external<View>(target, gas: 50000).quote();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(uint256,string)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.addptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "public error-union dispatcher currently supports scalar, static tuple/struct, bytes/string, and static-base dynamic array ABI success payloads"));
+}
+
+test "dispatcher translates public dynamic struct success error unions" {
+    const source_text =
+        \\struct Snapshot {
+        \\    owner: address;
+        \\    note: string;
+        \\}
+        \\
+        \\extern trait View {
+        \\    staticcall fn snapshot(self) -> Snapshot;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Check {
+        \\    storage var target: address;
+        \\
+        \\    pub fn run() -> !Snapshot | ExternalCallFailed {
+        \\        return external<View>(target, gas: 50000).snapshot();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(address,string)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.addptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "public error-union dispatcher currently supports scalar, static tuple/struct, bytes/string, and static-base dynamic array ABI success payloads"));
+}
+
 test "dispatcher translates payload-bearing extern trait errors to ABI reverts" {
     const source_text =
         \\extern trait ERC20 {

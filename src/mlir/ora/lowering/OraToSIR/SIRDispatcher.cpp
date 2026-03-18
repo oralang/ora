@@ -15,7 +15,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <cctype>
 #include <string>
+#include <vector>
 
 using namespace mlir;
 
@@ -126,6 +128,172 @@ namespace mlir
                     pos = close + 1;
                 }
                 return out.base != AbiBase::Unknown;
+            }
+
+            struct AbiLayout
+            {
+                AbiType abi;
+                std::vector<AbiLayout> fields;
+
+                bool isTupleLike() const { return !fields.empty(); }
+                bool isDynamic() const
+                {
+                    if (isTupleLike())
+                    {
+                        return llvm::any_of(fields, [](const AbiLayout &field) { return field.isDynamic(); });
+                    }
+                    return abi.isDynamic();
+                }
+                int64_t headSlots() const
+                {
+                    if (isTupleLike())
+                    {
+                        int64_t total = 0;
+                        for (const AbiLayout &field : fields)
+                        {
+                            int64_t slots = field.isDynamic() ? 1 : field.headSlots();
+                            if (slots < 0)
+                                return -1;
+                            total += slots;
+                        }
+                        return total;
+                    }
+                    return abi.headSlots();
+                }
+            };
+
+            static bool parseAbiLayout(StringRef text, size_t &pos, AbiLayout &out)
+            {
+                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                    ++pos;
+                if (pos >= text.size())
+                    return false;
+
+                if (text[pos] == '(')
+                {
+                    ++pos;
+                    out = AbiLayout{};
+                    out.abi.base = AbiBase::Tuple;
+                    while (pos < text.size() && text[pos] != ')')
+                    {
+                        AbiLayout child;
+                        if (!parseAbiLayout(text, pos, child))
+                            return false;
+                        out.fields.push_back(std::move(child));
+                        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                            ++pos;
+                        if (pos < text.size() && text[pos] == ',')
+                            ++pos;
+                    }
+                    if (pos >= text.size() || text[pos] != ')')
+                        return false;
+                    ++pos;
+                }
+                else
+                {
+                    size_t start = pos;
+                    while (pos < text.size() && text[pos] != ',' && text[pos] != ')' && text[pos] != '[')
+                        ++pos;
+                    if (start == pos)
+                        return false;
+                    AbiType abi;
+                    if (!parseAbiType(text.substr(start, pos - start), abi))
+                        return false;
+                    out = AbiLayout{};
+                    out.abi = abi;
+                }
+
+                while (pos < text.size() && text[pos] == '[')
+                {
+                    size_t close = text.find(']', pos);
+                    if (close == StringRef::npos)
+                        return false;
+                    StringRef inner = text.slice(pos + 1, close);
+                    if (inner.empty())
+                    {
+                        out.abi.dims.push_back(-1);
+                    }
+                    else
+                    {
+                        int64_t val = 0;
+                        if (inner.getAsInteger(10, val))
+                            return false;
+                        out.abi.dims.push_back(val);
+                    }
+                    pos = close + 1;
+                }
+                return true;
+            }
+
+            static bool parseAbiLayout(StringRef text, AbiLayout &out)
+            {
+                size_t pos = 0;
+                if (!parseAbiLayout(text, pos, out))
+                    return false;
+                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                    ++pos;
+                return pos == text.size();
+            }
+
+            static Value computePaddedBytes(OpBuilder &builder, Location loc, MLIRContext *ctx, Value len)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                Value c31 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 31));
+                Value c5 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 5));
+                Value lenPlus = builder.create<sir::AddOp>(loc, u256Type, len, c31);
+                Value shifted = builder.create<sir::ShrOp>(loc, u256Type, c5, lenPlus);
+                return builder.create<sir::ShlOp>(loc, u256Type, c5, shifted);
+            }
+
+            static Value computeAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value basePtr,
+                const AbiLayout &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = IntegerType::get(ctx, 64, IntegerType::Unsigned);
+                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (!layout.isTupleLike())
+                {
+                    if (layout.abi.base == AbiBase::BytesDyn || layout.abi.base == AbiBase::String)
+                    {
+                        Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
+                        Value padded = computePaddedBytes(builder, loc, ctx, length);
+                        return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
+                    }
+                    if (layout.abi.supportsDynamicArray())
+                    {
+                        Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
+                        Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, c32);
+                        return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
+                    }
+                    return c32;
+                }
+
+                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.headSlots() * 32));
+                int64_t headOffset = 0;
+                for (const AbiLayout &field : layout.fields)
+                {
+                    if (field.isDynamic())
+                    {
+                        Value headOff = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, headOffset));
+                        Value offPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, headOff);
+                        Value relOff = builder.create<sir::LoadOp>(loc, u256Type, offPtr);
+                        Value childPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, relOff);
+                        Value childSize = computeAbiEncodedSize(builder, loc, ctx, childPtr, field);
+                        total = builder.create<sir::AddOp>(loc, u256Type, total, childSize);
+                        headOffset += 32;
+                    }
+                    else
+                    {
+                        headOffset += field.headSlots() * 32;
+                    }
+                }
+                return total;
             }
 
             struct PubFuncInfo
@@ -1027,12 +1195,25 @@ namespace mlir
                                 size = getConst(builder, loc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
                                 retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
                             }
+                            else if (!info.abiReturnLayout.empty())
+                            {
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiReturnLayout, layout))
+                                {
+                                    info.func.emitError("invalid ora.abi_return_layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                size = computeAbiEncodedSize(builder, loc, ctx, retPtr, layout);
+                            }
                             else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
                             {
                                 retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
                                 Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
+                                Value padded = computePaddedBytes(builder, loc, ctx, length);
                                 Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                size = builder.create<sir::AddOp>(loc, u256Type, length, wordSize);
+                                size = builder.create<sir::AddOp>(loc, u256Type, padded, wordSize);
                             }
                             else if (info.abiReturn.supportsDynamicArray())
                             {
