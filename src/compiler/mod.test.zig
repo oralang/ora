@@ -11638,3 +11638,36 @@ test "compiler v2 examples convert through SIR" {
         try expectOraToSirConverts(path);
     }
 }
+
+test "compiler converts contract storage through explicit slot metadata" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var balance: u256 = 1;
+        \\    storage var owner: address;
+        \\
+        \\    pub fn read() -> u256 {
+        \\        return balance;
+        \\    }
+        \\
+        \\    pub fn write(next: u256, who: address) {
+        \\        balance = next;
+        \\        owner = who;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "slot_balance"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "slot_owner"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sstore"));
+}
