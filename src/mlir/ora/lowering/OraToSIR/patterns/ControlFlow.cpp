@@ -299,6 +299,29 @@ static bool isNarrowErrorUnion(ora::ErrorUnionType type)
     return *widthOpt <= 255;
 }
 
+static bool hasForceWideErrorUnionAttr(Operation *op)
+{
+    if (!op)
+        return false;
+    if (auto attr = op->getAttrOfType<BoolAttr>("ora.force_wide_error_union"))
+        return attr.getValue();
+    return false;
+}
+
+static bool valueHasForceWideErrorUnion(Value value)
+{
+    if (!value)
+        return false;
+    if (Operation *def = value.getDefiningOp())
+        return hasForceWideErrorUnionAttr(def);
+    return false;
+}
+
+static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *op)
+{
+    return !isNarrowErrorUnion(type) || hasForceWideErrorUnionAttr(op);
+}
+
 static bool hasOpsAfterTerminator(Operation *op)
 {
     return op && op->getNextNode();
@@ -1130,7 +1153,7 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
     {
-        if (!isNarrowErrorUnion(errType) && resultTypes.size() == 1)
+        if (shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
         {
             resultTypes.clear();
             resultTypes.push_back(u256Type);
@@ -1139,7 +1162,7 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     }
 
     const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
-                        !isNarrowErrorUnion(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()));
+                        shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
     if (!isWide && resultTypes.size() == 1)
     {
         Value value = ensureU256(rewriter, loc, adaptor.getValue());
@@ -1182,7 +1205,7 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
     {
-        if (!isNarrowErrorUnion(errType) && resultTypes.size() == 1)
+        if (shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
         {
             resultTypes.clear();
             resultTypes.push_back(u256Type);
@@ -1191,7 +1214,7 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     }
 
     const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
-                        !isNarrowErrorUnion(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()));
+                        shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
     if (!isWide && resultTypes.size() == 1)
     {
         Value value = ensureU256(rewriter, loc, adaptor.getValue());
@@ -2477,7 +2500,8 @@ static LogicalResult convertOraReturn(
     const bool is_bytes_return = llvm::isa<ora::StringType, ora::BytesType>(origType);
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
-        if (isNarrowErrorUnion(errType))
+        const bool useWideCarrier = !isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal);
+        if (!useWideCarrier)
         {
             if (auto cast = retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>())
             {
@@ -2490,7 +2514,7 @@ static LogicalResult convertOraReturn(
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
-        if (!isNarrowErrorUnion(errType))
+        if (!isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal))
         {
             if (operands.size() == 1)
             {
