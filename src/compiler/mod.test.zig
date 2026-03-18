@@ -11788,6 +11788,11 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/tuples/tuple_basics.ora",
         "ora-example/bitfields/basic_bitfield_storage.ora",
         "ora-example/errors/try_catch.ora",
+        "ora-example/locks/lock_runtime_map_guard.ora",
+        "ora-example/regions/region_ok_storage_tstore_map_and_scalar_writes.ora",
+        "ora-example/regions/region_ok_storage_tstore_same_type_writes.ora",
+        "ora-example/refinements/guards_showcase.ora",
+        "ora-example/smt/verification/state_invariants.ora",
     };
 
     for (example_paths) |path| {
