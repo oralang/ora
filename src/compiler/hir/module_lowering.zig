@@ -475,9 +475,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .error_union => |error_union| error_union.payload_type.*,
                     else => body_type,
                 };
-                const abi_return = try abi_support.canonicalAbiType(self.allocator, abi_return_type);
+                const abi_return = try abi_support.externReturnAbiType(self.allocator, abi_return_type);
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
+                if (abi_support.staticAbiWordCount(abi_return_type)) |word_count| {
+                    try attrs.append(self.allocator, .{
+                        .name = identifier(self.context, "ora.abi_return_words"),
+                        .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
+                    });
+                }
 
                 if (function.return_type) |return_type_id| {
                     if (self.file.typeExpr(return_type_id).* == .ErrorUnion) {

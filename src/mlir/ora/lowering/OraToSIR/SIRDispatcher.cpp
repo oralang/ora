@@ -82,7 +82,7 @@ namespace mlir
                 out = AbiType();
                 if (s.empty())
                     return false;
-                if (s.front() == '(')
+                if (s.front() == '(' || s == "tuple")
                 {
                     out.base = AbiBase::Tuple;
                     return true;
@@ -138,6 +138,7 @@ namespace mlir
                 SmallVector<AbiType, 8> abiParams;
                 AbiType abiReturn;
                 bool hasAbiReturn = false;
+                int64_t abiReturnWords = -1;
                 int64_t minHeadBytes = 0;
                 SmallVector<Type, 8> inputTypes;
             };
@@ -396,6 +397,8 @@ namespace mlir
                             info.abiReturn = abiReturn;
                             info.hasAbiReturn = true;
                         }
+                        if (auto abiReturnWordsAttr = func->getAttrOfType<IntegerAttr>("ora.abi_return_words"))
+                            info.abiReturnWords = abiReturnWordsAttr.getInt();
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
@@ -983,9 +986,9 @@ namespace mlir
                                 signalPassFailure();
                                 return;
                             }
-                            if (!info.hasAbiReturn || !info.abiReturn.isStaticBase() || info.abiReturn.isArray() || info.abiReturn.baseIsDynamic())
+                            if (!info.hasAbiReturn)
                             {
-                                info.func.emitError("public error-union dispatcher currently supports only scalar ABI success payloads");
+                                info.func.emitError("public error-union dispatcher missing ABI return metadata");
                                 signalPassFailure();
                                 return;
                             }
@@ -1007,10 +1010,26 @@ namespace mlir
                             builder.create<sir::CondBrOp>(loc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
 
                             builder.setInsertionPointToEnd(successBlock);
-                            Value size = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                            Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
-                            setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                            builder.create<sir::StoreOp>(loc, retPtr, payload);
+                            Value retPtr = nullptr;
+                            Value size = nullptr;
+                            if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            {
+                                size = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                                setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
+                                builder.create<sir::StoreOp>(loc, retPtr, payload);
+                            }
+                            else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
+                            {
+                                size = getConst(builder, loc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                            }
+                            else
+                            {
+                                info.func.emitError("public error-union dispatcher currently supports only scalar and static tuple ABI success payloads");
+                                signalPassFailure();
+                                return;
+                            }
                             builder.create<sir::ReturnOp>(loc, retPtr, size);
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);

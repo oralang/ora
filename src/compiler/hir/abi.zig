@@ -35,6 +35,27 @@ pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const
     };
 }
 
+pub fn staticAbiWordCount(ty: sema.Type) ?usize {
+    return switch (ty) {
+        .bool, .address, .integer => 1,
+        .refinement => |refinement| staticAbiWordCount(refinement.base_type.*),
+        .tuple => |elements| blk: {
+            var total: usize = 0;
+            for (elements) |element| {
+                const words = staticAbiWordCount(element) orelse return null;
+                total += words;
+            }
+            break :blk total;
+        },
+        .array => |array| blk: {
+            const len = array.len orelse return null;
+            const element_words = staticAbiWordCount(array.element_type.*) orelse return null;
+            break :blk element_words * len;
+        },
+        else => null,
+    };
+}
+
 pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_self: bool, param_types: []const sema.Type) ![]const u8 {
     var signature_parts: std.ArrayList([]const u8) = .{};
     defer {

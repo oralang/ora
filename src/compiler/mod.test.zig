@@ -10886,6 +10886,26 @@ test "compiler emits error selector and error-union ABI attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
 }
 
+test "compiler emits tuple ABI return attrs for public error unions" {
+    const source_text =
+        \\error Failure();
+        \\
+        \\contract Vault {
+        \\    pub fn quote() -> !(u256, bool) | Failure {
+        \\        return (1, true);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.returns_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"tuple\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return_words"));
+}
+
 test "compiler preserves error selectors through OraToSIR" {
     const source_text =
         \\error InsufficientBalance(required: u256, available: u256);
@@ -11124,6 +11144,39 @@ test "dispatcher translates public payload error unions to ABI reverts" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sir.store"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.error_selectors"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
+}
+
+test "dispatcher translates public tuple-success error unions" {
+    const source_text =
+        \\extern trait View {
+        \\    staticcall fn quote(self) -> (u256, bool);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Check {
+        \\    storage var target: address;
+        \\
+        \\    pub fn run() -> !(u256, bool) | ExternalCallFailed {
+        \\        return external<View>(target, gas: 50000).quote();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @main"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "public error-union dispatcher currently supports only scalar ABI success payloads"));
 }
 
 test "dispatcher translates payload-bearing extern trait errors to ABI reverts" {
