@@ -1024,9 +1024,24 @@ namespace mlir
                                 size = getConst(builder, loc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
                                 retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
                             }
+                            else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
+                            {
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
+                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                size = builder.create<sir::AddOp>(loc, u256Type, length, wordSize);
+                            }
+                            else if (info.abiReturn.supportsDynamicArray())
+                            {
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
+                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, wordSize);
+                                size = builder.create<sir::AddOp>(loc, u256Type, lenBytes, wordSize);
+                            }
                             else
                             {
-                                info.func.emitError("public error-union dispatcher currently supports only scalar and static tuple ABI success payloads");
+                                info.func.emitError("public error-union dispatcher currently supports scalar, static tuple/struct, bytes/string, and static-base dynamic array ABI success payloads");
                                 signalPassFailure();
                                 return;
                             }
