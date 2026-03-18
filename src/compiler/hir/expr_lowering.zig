@@ -334,6 +334,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                         const error_union = mlir.oraErrorErrOpCreate(self.parent.context, loc, error_value, return_type);
                         if (mlir.oraOperationIsNull(error_union)) return operand;
+                        if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
+                            mlir.oraOperationSetAttributeByName(error_union, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                        }
                         appendOp(then_block, error_union);
                         const error_union_value = mlir.oraOperationGetResult(error_union, 0);
 
@@ -584,6 +587,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const decoded = mlir.oraOperationGetResult(decode_op, 0);
             const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
             if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+            if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
             appendOp(then_block, ok_op);
             try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
 
@@ -709,6 +715,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(block, error_call);
             const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_call, 0), self.parent.lowerExprType(expr_id));
             if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+            if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
             appendOp(block, err_op);
             return mlir.oraOperationGetResult(err_op, 0);
         }
@@ -1807,7 +1816,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const payload_type = mlir.oraErrorUnionTypeGetSuccessType(ty);
                 const payload = try self.defaultValue(payload_type, range);
                 const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, ty);
-                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                if (!mlir.oraOperationIsNull(op)) {
+                    if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                    }
+                    return appendValueOp(self.block, op);
+                }
                 return payload;
             }
 

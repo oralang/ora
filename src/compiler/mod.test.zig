@@ -3354,6 +3354,27 @@ test "compiler carries tuple-payload error unions through HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.error_union<!ora.tuple<i256, i1>>"));
 }
 
+test "compiler marks payload-bearing narrow error unions for wide lowering in HIR" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn helper(flag: bool) -> !bool | Failure {
+        \\    return flag;
+        \\}
+        \\
+        \\pub fn use(flag: bool) -> !bool | Failure {
+        \\    return try helper(flag);
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.force_wide_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+}
+
 test "compiler lowers struct field mutation through real field update op" {
     const source_text =
         \\struct Pair {

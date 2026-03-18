@@ -287,6 +287,27 @@ const Lowerer = struct {
         return self.lowerSemaType(self.typecheck.exprType(expr_id), support.exprRange(self.file, expr_id));
     }
 
+    pub fn errorTypeHasPayload(self: *const Lowerer, ty: sema.Type) bool {
+        const error_name = ty.name() orelse return false;
+        const item_id = self.item_index.lookup(error_name) orelse return false;
+        return switch (self.file.item(item_id).*) {
+            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
+            else => false,
+        };
+    }
+
+    pub fn errorUnionRequiresWideCarrier(self: *const Lowerer, ty: sema.Type) bool {
+        return switch (ty) {
+            .error_union => |error_union| blk: {
+                for (error_union.error_types) |error_type| {
+                    if (self.errorTypeHasPayload(error_type)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
     pub fn lowerSemaType(self: *Lowerer, ty: sema.Type, range: source.TextRange) mlir.MlirType {
         return switch (ty) {
             .bool => support.boolType(self.context),
