@@ -587,9 +587,114 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(then_block, ok_op);
             try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
 
-            const error_type = self.parent.typecheck.exprType(expr_id).errorTypes()[0];
-            const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, call.callee));
-            const error_name = error_type.name() orelse "ExternalCallFailed";
+            const error_result = try @This().lowerExternErrorResult(self, expr_id, resolved.method, else_block, loc, returndata);
+            try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{error_result});
+
+            return mlir.oraOperationGetResult(if_op, 0);
+        }
+
+        fn lowerExternErrorResult(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            method: sema.TraitMethodSignature,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+            returndata: mlir.MlirValue,
+        ) anyerror!mlir.MlirValue {
+            if (method.errors.len == 0) {
+                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed");
+            }
+
+            const selector_word = try @This().decodeExternSelectorWord(self, block, loc, returndata);
+            return try @This().lowerExternErrorMatchChain(self, expr_id, method.errors, 0, selector_word, block, loc);
+        }
+
+        fn decodeExternSelectorWord(
+            self: *FunctionLowerer,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+            returndata: mlir.MlirValue,
+        ) anyerror!mlir.MlirValue {
+            var selector_attrs: [1]mlir.MlirAttribute = .{
+                mlir.oraStringAttrCreate(self.parent.context, strRef("u256")),
+            };
+            const selector_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &selector_attrs);
+            const decode_op = mlir.oraAbiDecodeOpCreate(
+                self.parent.context,
+                loc,
+                selector_types_attr,
+                returndata,
+                defaultIntegerType(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
+            appendOp(block, decode_op);
+            return mlir.oraOperationGetResult(decode_op, 0);
+        }
+
+        fn lowerExternErrorMatchChain(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            error_names: []const []const u8,
+            index: usize,
+            selector_word: mlir.MlirValue,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+        ) anyerror!mlir.MlirValue {
+            if (index >= error_names.len) {
+                return @This().lowerNamedExternErrorResult(self, expr_id, block, loc, "ExternalCallFailed");
+            }
+
+            const error_name = error_names[index];
+            const error_item_id = self.parent.item_index.lookup(error_name);
+            if (error_item_id == null or self.parent.file.item(error_item_id.?).* != .ErrorDecl) {
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+            }
+            const error_decl = self.parent.file.item(error_item_id.?).ErrorDecl;
+            if (error_decl.parameters.len != 0) {
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+            }
+
+            const error_op = @This().findErrorDeclOp(self, error_item_id.?) orelse
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+            const selector_attr = mlir.oraOperationGetAttributeByName(error_op, strRef("ora.error_selector"));
+            if (mlir.oraAttributeIsNull(selector_attr)) {
+                return try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, block, loc);
+            }
+
+            const selector_ref = mlir.oraStringAttrGetValue(selector_attr);
+            const selector_text = selector_ref.data[0..selector_ref.length];
+            const shifted_selector = try @This().createShiftedSelectorWord(self, block, loc, selector_text);
+            const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, loc, cmpPredicate("eq"), selector_word, shifted_selector);
+            if (mlir.oraOperationIsNull(cmp_op)) return error.MlirOperationCreationFailed;
+            const condition = appendValueOp(block, cmp_op);
+
+            const result_type = self.parent.lowerExprType(expr_id);
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, condition, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            const matched = try @This().lowerNamedExternErrorResult(self, expr_id, then_block, loc, error_name);
+            try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{matched});
+
+            const fallback = try @This().lowerExternErrorMatchChain(self, expr_id, error_names, index + 1, selector_word, else_block, loc);
+            try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{fallback});
+
+            return mlir.oraOperationGetResult(if_op, 0);
+        }
+
+        fn lowerNamedExternErrorResult(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+            error_name: []const u8,
+        ) anyerror!mlir.MlirValue {
+            const error_type = @This().externErrorTypeByName(self, expr_id, error_name) orelse self.parent.typecheck.exprType(expr_id).errorTypes()[0];
+            const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, expr_id));
             var error_result_types: [1]mlir.MlirType = .{lowered_error_type};
             const error_call = mlir.oraFuncCallOpCreate(
                 self.parent.context,
@@ -601,13 +706,45 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 1,
             );
             if (mlir.oraOperationIsNull(error_call)) return error.MlirOperationCreationFailed;
-            appendOp(else_block, error_call);
-            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_call, 0), result_type);
+            appendOp(block, error_call);
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(error_call, 0), self.parent.lowerExprType(expr_id));
             if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
-            appendOp(else_block, err_op);
-            try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(err_op, 0)});
+            appendOp(block, err_op);
+            return mlir.oraOperationGetResult(err_op, 0);
+        }
 
-            return mlir.oraOperationGetResult(if_op, 0);
+        fn externErrorTypeByName(self: *FunctionLowerer, expr_id: ast.ExprId, error_name: []const u8) ?sema.Type {
+            const result_type = self.parent.typecheck.exprType(expr_id);
+            if (result_type.kind() != .error_union) return null;
+            for (result_type.errorTypes()) |error_type| {
+                if (std.mem.eql(u8, error_type.name() orelse "", error_name)) return error_type;
+            }
+            return null;
+        }
+
+        fn createShiftedSelectorWord(
+            self: *FunctionLowerer,
+            block: mlir.MlirBlock,
+            loc: mlir.MlirLocation,
+            selector_text: []const u8,
+        ) anyerror!mlir.MlirValue {
+            const selector_value = try std.fmt.parseUnsigned(u32, selector_text[2..], 16);
+            const selector_u32_type = mlir.oraIntegerTypeCreate(self.parent.context, 32);
+            const selector_const = appendValueOp(block, createIntegerConstant(self.parent.context, loc, selector_u32_type, selector_value));
+            const selector_u256_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, selector_const, defaultIntegerType(self.parent.context));
+            if (mlir.oraOperationIsNull(selector_u256_op)) return error.MlirOperationCreationFailed;
+            const selector_u256 = appendValueOp(block, selector_u256_op);
+            const shift = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 224));
+            const shifted = mlir.oraArithShlIOpCreate(self.parent.context, loc, selector_u256, shift);
+            if (mlir.oraOperationIsNull(shifted)) return error.MlirOperationCreationFailed;
+            return appendValueOp(block, shifted);
+        }
+
+        fn findErrorDeclOp(self: *FunctionLowerer, item_id: ast.ItemId) ?mlir.MlirOperation {
+            for (self.parent.items.items) |handle| {
+                if (handle.item_id.index() == item_id.index() and handle.kind == .error_decl) return handle.raw_operation;
+            }
+            return null;
         }
 
         fn resolveExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId) ?ResolvedExternProxyMethodCall {

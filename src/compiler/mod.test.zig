@@ -912,6 +912,35 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
 
+test "compiler lowers zero-payload extern trait errors clauses into selector matching" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance, InvalidRecipient);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\error InsufficientBalance;
+        \\error InvalidRecipient;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn send(to: address, amount: u256) -> !bool | ExternalCallFailed | InsufficientBalance | InvalidRecipient {
+        \\        return external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @InsufficientBalance"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @InvalidRecipient"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @ExternalCallFailed"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.if"));
+}
+
 test "compiler converts extern trait calls through SIR" {
     const source_text =
         \\extern trait ERC20 {
