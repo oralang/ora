@@ -489,7 +489,7 @@ test "compiler includes declared extern trait errors in call result types" {
         \\}
         \\
         \\error ExternalCallFailed;
-        \\error InsufficientBalance(required: u256, available: u256);
+        \\error InsufficientBalance;
         \\error InvalidRecipient;
         \\
         \\contract Vault {
@@ -532,6 +532,22 @@ test "compiler rejects unknown extern trait errors clauses" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "extern trait method 'transfer' declares unknown error 'UnknownError'"));
+}
+
+test "compiler rejects payload-bearing extern trait errors clauses for now" {
+    const source_text =
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance);
+        \\}
+        \\
+        \\error InsufficientBalance(required: u256, available: u256);
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "extern trait method 'transfer' currently supports only zero-payload errors in errors(...); 'InsufficientBalance' has payload fields"));
 }
 
 test "compiler reports external proxy misuse" {
