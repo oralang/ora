@@ -11779,9 +11779,15 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/dce_test.ora",
         "ora-example/statements/contract_declaration.ora",
         "ora-example/apps/erc20.ora",
+        "ora-example/apps/counter.ora",
         "ora-example/apps/erc20_verified.ora",
         "ora-example/apps/defi_lending_pool.ora",
         "ora-example/apps/erc20_bitfield_comptime_generics.ora",
+        "ora-example/array_operations.ora",
+        "ora-example/structs/basic_structs.ora",
+        "ora-example/tuples/tuple_basics.ora",
+        "ora-example/bitfields/basic_bitfield_storage.ora",
+        "ora-example/errors/try_catch.ora",
     };
 
     for (example_paths) |path| {
