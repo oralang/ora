@@ -1552,7 +1552,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const result_type = self.parent.lowerExprType(expr_id);
                 return try self.createBitfieldFieldExtract(base, base_type, field.name, result_type, field.range);
             }
-            if (base_type == .struct_) {
+            if (base_type == .struct_ or (base_type == .named and blk: {
+                const name = base_type.name() orelse break :blk false;
+                const item_id = self.parent.item_index.lookup(name) orelse break :blk false;
+                break :blk self.parent.file.item(item_id).* == .ErrorDecl;
+            })) {
                 const result_type = self.parent.lowerExprType(expr_id);
                 const op = mlir.oraStructFieldExtractOpCreate(
                     self.parent.context,

@@ -280,6 +280,7 @@ pub fn typeCheck(
     const expr_effects = try arena.alloc(Effect, file.expressions.len);
     var body_types = try arena.alloc(Type, file.bodies.len);
     const effect_states = try arena.alloc(EffectSummaryState, file.items.len);
+    const catch_error_tag_patterns = try arena.alloc(bool, file.patterns.len);
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
@@ -288,6 +289,7 @@ pub fn typeCheck(
     @memset(expr_effects, .pure);
     @memset(body_types, .{ .void = {} });
     @memset(effect_states, .unvisited);
+    @memset(catch_error_tag_patterns, false);
 
     for (file.items, 0..) |item, index| {
         item_types[index] = try inferItemType(arena, file, item_index, item);
@@ -338,6 +340,7 @@ pub fn typeCheck(
         .instantiated_bitfields = .{},
         .trait_interfaces = .{},
         .impl_interfaces = .{},
+        .catch_error_tag_patterns = catch_error_tag_patterns,
         .diagnostics = &result.diagnostics,
     };
 
@@ -449,6 +452,7 @@ const TypeChecker = struct {
     instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
     trait_interfaces: std.ArrayList(TraitInterface),
     impl_interfaces: std.ArrayList(ImplInterface),
+    catch_error_tag_patterns: []bool = &.{},
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
@@ -1020,7 +1024,14 @@ const TypeChecker = struct {
             },
             .Try => |try_stmt| {
                 try self.visitBody(try_stmt.try_body);
-                if (try_stmt.catch_clause) |catch_clause| try self.visitBody(catch_clause.body);
+                if (try_stmt.catch_clause) |catch_clause| {
+                    if (catch_clause.error_pattern) |pattern_id| {
+                        const catch_type = try self.inferCatchPatternType(try_stmt.try_body);
+                        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(catch_type);
+                        self.catch_error_tag_patterns[pattern_id.index()] = catch_type.kind() == .integer;
+                    }
+                    try self.visitBody(catch_clause.body);
+                }
             },
             .Log => |log_stmt| {
                 for (log_stmt.args) |arg| try self.visitExpr(arg);
@@ -3560,6 +3571,18 @@ const TypeChecker = struct {
                 }
                 break :blk .{ .unknown = {} };
             },
+            .ErrorDecl => |error_decl| blk: {
+                for (error_decl.parameters) |parameter| {
+                    const pattern = self.file.pattern(parameter.pattern).*;
+                    switch (pattern) {
+                        .Name => |name| if (std.mem.eql(u8, name.name, field_name)) {
+                            break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, parameter.type_expr);
+                        },
+                        else => {},
+                    }
+                }
+                break :blk .{ .unknown = {} };
+            },
             else => .{ .unknown = {} },
         };
     }
@@ -3590,9 +3613,25 @@ const TypeChecker = struct {
     }
 
     fn emitTraitMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
+        if (try self.emitCatchErrorTagFieldError(expr_id, field)) return true;
         if (try self.emitTraitBoundMethodFieldError(expr_id, field, base_type)) return true;
         if (try self.emitConcreteImplMethodFieldError(expr_id, field)) return true;
         return false;
+    }
+
+    fn emitCatchErrorTagFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr) !bool {
+        const binding = switch (self.file.expression(field.base).*) {
+            .Name => self.resolution.expr_bindings[field.base.index()],
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Name => self.resolution.expr_bindings[group.expr.index()],
+                else => null,
+            },
+            else => null,
+        } orelse return false;
+        if (binding != .pattern) return false;
+        if (!self.catch_error_tag_patterns[binding.pattern.index()]) return false;
+        try self.emitExprError(expr_id, "catch binding represents multiple possible error types; field access is not supported", .{});
+        return true;
     }
 
     fn emitTraitBoundMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
@@ -3892,6 +3931,131 @@ const TypeChecker = struct {
         if (self.instantiatedEnumByName(name) != null) return null;
         if (self.instantiatedBitfieldByName(name) != null) return null;
         return self.item_index.lookup(name);
+    }
+
+    fn inferCatchPatternType(self: *TypeChecker, body_id: ast.BodyId) anyerror!Type {
+        var error_types: std.ArrayList(Type) = .{};
+        try self.collectBodyErrorTypes(body_id, &error_types);
+        if (error_types.items.len == 1) return error_types.items[0];
+        return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    }
+
+    fn collectBodyErrorTypes(self: *TypeChecker, body_id: ast.BodyId, error_types: *std.ArrayList(Type)) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| {
+            try self.collectStmtErrorTypes(statement_id, error_types);
+        }
+    }
+
+    fn collectStmtErrorTypes(self: *TypeChecker, statement_id: ast.StmtId, error_types: *std.ArrayList(Type)) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
+            .Return => |ret| if (ret.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
+            .If => |if_stmt| {
+                try self.collectExprErrorTypes(if_stmt.condition, error_types);
+                try self.collectBodyErrorTypes(if_stmt.then_body, error_types);
+                if (if_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
+            },
+            .While => |while_stmt| {
+                try self.collectExprErrorTypes(while_stmt.condition, error_types);
+                for (while_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
+                try self.collectBodyErrorTypes(while_stmt.body, error_types);
+            },
+            .For => |for_stmt| {
+                try self.collectExprErrorTypes(for_stmt.iterable, error_types);
+                for (for_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
+                try self.collectBodyErrorTypes(for_stmt.body, error_types);
+            },
+            .Switch => |switch_stmt| {
+                try self.collectExprErrorTypes(switch_stmt.condition, error_types);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
+                        .Range => |range_pattern| {
+                            try self.collectExprErrorTypes(range_pattern.start, error_types);
+                            try self.collectExprErrorTypes(range_pattern.end, error_types);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectBodyErrorTypes(arm.body, error_types);
+                }
+                if (switch_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
+            },
+            .Try => |try_stmt| {
+                try self.collectBodyErrorTypes(try_stmt.try_body, error_types);
+                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyErrorTypes(catch_clause.body, error_types);
+            },
+            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprErrorTypes(arg, error_types),
+            .Lock => |lock_stmt| try self.collectExprErrorTypes(lock_stmt.path, error_types),
+            .Unlock => |unlock_stmt| try self.collectExprErrorTypes(unlock_stmt.path, error_types),
+            .Assert => |assert_stmt| try self.collectExprErrorTypes(assert_stmt.condition, error_types),
+            .Assume => |assume_stmt| try self.collectExprErrorTypes(assume_stmt.condition, error_types),
+            .Assign => |assign| try self.collectExprErrorTypes(assign.value, error_types),
+            .Expr => |expr_stmt| try self.collectExprErrorTypes(expr_stmt.expr, error_types),
+            .Block => |block| try self.collectBodyErrorTypes(block.body, error_types),
+            .LabeledBlock => |block| try self.collectBodyErrorTypes(block.body, error_types),
+            else => {},
+        }
+    }
+
+    fn collectExprErrorTypes(self: *TypeChecker, expr_id: ast.ExprId, error_types: *std.ArrayList(Type)) anyerror!void {
+        const expr_type = self.expr_types[expr_id.index()];
+        if (expr_type.kind() == .error_union) {
+            for (expr_type.errorTypes()) |error_type| try self.appendUniqueErrorType(error_types, error_type);
+        }
+
+        switch (self.file.expression(expr_id).*) {
+            .Unary => |unary| try self.collectExprErrorTypes(unary.operand, error_types),
+            .Binary => |binary| {
+                try self.collectExprErrorTypes(binary.lhs, error_types);
+                try self.collectExprErrorTypes(binary.rhs, error_types);
+            },
+            .Call => |call| {
+                try self.collectExprErrorTypes(call.callee, error_types);
+                for (call.args) |arg| try self.collectExprErrorTypes(arg, error_types);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprErrorTypes(arg, error_types),
+            .Field => |field| try self.collectExprErrorTypes(field.base, error_types),
+            .Index => |index| {
+                try self.collectExprErrorTypes(index.base, error_types);
+                try self.collectExprErrorTypes(index.index, error_types);
+            },
+            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprErrorTypes(element, error_types),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprErrorTypes(element, error_types),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprErrorTypes(field.value, error_types),
+            .Switch => |switch_expr| {
+                try self.collectExprErrorTypes(switch_expr.condition, error_types);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.collectExprErrorTypes(pattern_expr, error_types),
+                        .Range => |range_pattern| {
+                            try self.collectExprErrorTypes(range_pattern.start, error_types);
+                            try self.collectExprErrorTypes(range_pattern.end, error_types);
+                        },
+                        .Else => {},
+                    }
+                    try self.collectExprErrorTypes(arm.value, error_types);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.collectExprErrorTypes(else_expr, error_types);
+            },
+            .Comptime => |comptime_expr| {
+                try self.collectBodyErrorTypes(comptime_expr.body, error_types);
+            },
+            .Group => |group| try self.collectExprErrorTypes(group.expr, error_types),
+            .Quantified => |quantified| {
+                if (quantified.condition) |condition| try self.collectExprErrorTypes(condition, error_types);
+                try self.collectExprErrorTypes(quantified.body, error_types);
+            },
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprErrorTypes(arg, error_types),
+            else => {},
+        }
+    }
+
+    fn appendUniqueErrorType(self: *TypeChecker, error_types: *std.ArrayList(Type), error_type: Type) anyerror!void {
+        for (error_types.items) |existing| {
+            if (typeEql(existing, error_type)) return;
+        }
+        try error_types.append(self.arena, error_type);
     }
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {

@@ -224,7 +224,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     catch_lowerer.deferred_return_carried_locals = carried_locals.items;
                 }
                 if (catch_clause.error_pattern) |pattern_id| {
-                    const error_arg = mlir.mlirBlockAddArgument(catch_block, defaultIntegerType(self.parent.context), self.parent.location(catch_clause.range));
+                    const catch_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                    const lowered_type = if (catch_type.kind() == .unknown)
+                        defaultIntegerType(self.parent.context)
+                    else
+                        self.parent.lowerSemaType(catch_type, catch_clause.range);
+                    const error_arg = mlir.mlirBlockAddArgument(catch_block, lowered_type, self.parent.location(catch_clause.range));
                     try catch_lowerer.bindPatternValue(pattern_id, error_arg, &catch_locals);
                 }
                 _ = try catch_lowerer.lowerBody(catch_clause.body, &catch_locals);

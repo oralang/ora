@@ -764,6 +764,68 @@ test "compiler widens narrower error unions into wider return sets" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
+test "compiler types single-error catch bindings as concrete error payloads" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn handle(maybe: !u256 | Failure) -> u256 {
+        \\    try {
+        \\        maybe;
+        \\    } catch (e) {
+        \\        return e.code;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const try_stmt = ast_file.statement(body.statements[0]).Try;
+    const catch_clause = try_stmt.catch_clause.?;
+    const catch_pattern = catch_clause.error_pattern.?;
+    const catch_body = ast_file.body(catch_clause.body);
+    const ret = ast_file.statement(catch_body.statements[0]).Return;
+    const field_expr = ret.value.?;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+    try testing.expectEqual(compiler.sema.TypeKind.named, typecheck.pattern_types[catch_pattern.index()].kind());
+    try testing.expectEqualStrings("Failure", typecheck.pattern_types[catch_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(field_expr).kind());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_field_extract"));
+}
+
+test "compiler rejects field access on multi-error catch bindings" {
+    const source_text =
+        \\error ErrorA(code: u256);
+        \\error ErrorB(required: u256);
+        \\
+        \\pub fn handle(maybe: !u256 | ErrorA | ErrorB) -> u256 {
+        \\    try {
+        \\        maybe;
+        \\    } catch (e) {
+        \\        return e.code;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "catch binding represents multiple possible error types; field access is not supported"));
+}
+
 test "compiler lowers extern trait calls to abi and external call ops" {
     const source_text =
         \\extern trait ERC20 {
