@@ -743,6 +743,27 @@ test "compiler rejects error returns outside function return error set" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'ErrorB' is not in function return error set"));
 }
 
+test "compiler widens narrower error unions into wider return sets" {
+    const source_text =
+        \\error ErrorA;
+        \\error ErrorB;
+        \\
+        \\fn narrow(maybe: !u256 | ErrorA) -> !u256 | ErrorA {
+        \\    return maybe;
+        \\}
+        \\
+        \\pub fn wide(maybe: !u256 | ErrorA) -> !u256 | ErrorA | ErrorB {
+        \\    return narrow(maybe);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
 test "compiler lowers extern trait calls to abi and external call ops" {
     const source_text =
         \\extern trait ERC20 {

@@ -4340,3 +4340,33 @@ test "typesAssignable accepts structurally equal compound types" {
     try testing.expect(typesAssignable(tuple_type, same_tuple));
     try testing.expect(typesAssignable(array_type, same_array));
 }
+
+test "typesAssignable widens error unions by error-set inclusion" {
+    const testing = std.testing;
+
+    const payload_a = try testing.allocator.create(Type);
+    defer testing.allocator.destroy(payload_a);
+    payload_a.* = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const payload_b = try testing.allocator.create(Type);
+    defer testing.allocator.destroy(payload_b);
+    payload_b.* = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const narrow_union: Type = .{ .error_union = .{
+        .payload_type = payload_a,
+        .error_types = &.{
+            .{ .named = .{ .name = "ErrorA" } },
+        },
+    } };
+    const wide_union: Type = .{ .error_union = .{
+        .payload_type = payload_b,
+        .error_types = &.{
+            .{ .named = .{ .name = "ErrorA" } },
+            .{ .named = .{ .name = "ErrorB" } },
+        },
+    } };
+
+    try testing.expect(typesAssignable(wide_union, narrow_union));
+    try testing.expect(!typesAssignable(narrow_union, wide_union));
+    try testing.expect(typesAssignable(wide_union, .{ .named = .{ .name = "ErrorA" } }));
+}

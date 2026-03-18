@@ -185,6 +185,16 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
     if (isIntegerType(expected_type) and isIntegerType(actual_type)) return true;
+    if (expected_type.kind() == .error_union) {
+        const expected = expected_type.error_union;
+        if (typesAssignable(expected.payload_type.*, actual_type)) return true;
+        if (errorSetContains(expected.error_types, actual_type)) return true;
+        if (actual_type.kind() == .error_union) {
+            const actual = actual_type.error_union;
+            return typesAssignable(expected.payload_type.*, actual.payload_type.*) and
+                errorSetContainsAll(expected.error_types, actual.error_types);
+        }
+    }
     return typeEql(expected_type, actual_type);
 }
 
@@ -201,6 +211,20 @@ fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
         if (!typeEql(left, right)) return false;
+    }
+    return true;
+}
+
+fn errorSetContains(errors: []const Type, needle: Type) bool {
+    for (errors) |error_type| {
+        if (typeEql(error_type, needle)) return true;
+    }
+    return false;
+}
+
+fn errorSetContainsAll(expected_errors: []const Type, actual_errors: []const Type) bool {
+    for (actual_errors) |actual_error| {
+        if (!errorSetContains(expected_errors, actual_error)) return false;
     }
     return true;
 }
