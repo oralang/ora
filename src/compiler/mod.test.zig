@@ -10731,6 +10731,54 @@ test "compiler preserves error selectors through OraToSIR" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"0xcf479181\""));
 }
 
+test "compiler lowers bare assert to runtime revert through OraToSIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(flag: bool) {
+        \\        assert(flag);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
+}
+
+test "compiler lowers message assert to runtime revert payload through OraToSIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(flag: bool) {
+        \\        assert(flag, "bad");
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.store8"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.assert"));
+}
+
 test "ora dialect exposes external call ops through C API" {
     const ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(ctx);

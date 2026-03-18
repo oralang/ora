@@ -113,6 +113,66 @@ static Value ensureU256(ConversionPatternRewriter &rewriter, Location loc, Value
     return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
 }
 
+static Value constU256(ConversionPatternRewriter &rewriter, Location loc, uint64_t value)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
+}
+
+static Value constShiftedSelector(ConversionPatternRewriter &rewriter, Location loc, uint32_t selector)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), evm::kWordBits, mlir::IntegerType::Unsigned);
+    llvm::APInt selectorWord(256, selector);
+    selectorWord = selectorWord.shl(224);
+    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, selectorWord));
+}
+
+static void emitPanicRevert(ConversionPatternRewriter &rewriter, Location loc, unsigned code)
+{
+    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+    Value totalSize = constU256(rewriter, loc, 4 + evm::kWordBytes);
+    Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+    rewriter.create<sir::StoreOp>(loc, basePtr, constShiftedSelector(rewriter, loc, 0x4e487b71));
+
+    Value codePtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, constU256(rewriter, loc, 4));
+    rewriter.create<sir::StoreOp>(loc, codePtr, constU256(rewriter, loc, code));
+
+    rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
+}
+
+static void emitErrorStringRevert(ConversionPatternRewriter &rewriter, Location loc, StringRef message)
+{
+    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+    const uint64_t msgLen = message.size();
+    const uint64_t paddedLen = ((msgLen + 31) / 32) * 32;
+    const uint64_t totalBytes = 4 + evm::kWordBytes + evm::kWordBytes + paddedLen;
+
+    Value totalSize = constU256(rewriter, loc, totalBytes);
+    Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+    rewriter.create<sir::StoreOp>(loc, basePtr, constShiftedSelector(rewriter, loc, 0x08c379a0));
+
+    Value offsetPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, constU256(rewriter, loc, 4));
+    rewriter.create<sir::StoreOp>(loc, offsetPtr, constU256(rewriter, loc, evm::kWordBytes));
+
+    Value lenPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, constU256(rewriter, loc, 4 + evm::kWordBytes));
+    rewriter.create<sir::StoreOp>(loc, lenPtr, constU256(rewriter, loc, msgLen));
+
+    for (uint64_t index = 0; index < paddedLen; index += 1)
+    {
+        const uint8_t byte = (index < msgLen) ? static_cast<uint8_t>(message[index]) : static_cast<uint8_t>(0);
+        rewriter.create<sir::Store8Op>(
+            loc,
+            basePtr,
+            constU256(rewriter, loc, 4 + evm::kWordBytes + evm::kWordBytes + index),
+            constU256(rewriter, loc, byte)
+        );
+    }
+
+    rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
+}
+
 static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc, Value value)
 {
     auto ctx = rewriter.getContext();
@@ -593,6 +653,29 @@ LogicalResult ConvertAssertOp::matchAndRewrite(
     typename ora::AssertOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    auto loc = op.getLoc();
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+
+    auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    if (auto messageAttr = op->getAttrOfType<mlir::StringAttr>("message"))
+        emitErrorStringRevert(rewriter, loc, messageAttr.getValue());
+    else
+        emitPanicRevert(rewriter, loc, 1);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value cond = ensureU256(rewriter, loc, adaptor.getCondition());
+    Value isZero = rewriter.create<sir::IsZeroOp>(loc, sir::U256Type::get(rewriter.getContext()), cond);
+    rewriter.create<sir::CondBrOp>(
+        loc,
+        isZero,
+        ValueRange{},
+        ValueRange{},
+        revertBlock,
+        afterBlock);
     rewriter.eraseOp(op);
     return success();
 }
