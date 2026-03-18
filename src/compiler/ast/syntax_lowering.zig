@@ -900,7 +900,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerVariableDeclStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
-            const name_token = lastDirectIdentifierLikeToken(node) orelse return Lowering.malformedStmt(self, node, "missing variable name");
+            const name_token = bindingIdentifierLikeToken(node) orelse return Lowering.malformedStmt(self, node, "missing variable name");
             const pattern = try Support.pushPattern(self, .{ .Name = .{
                 .range = name_token.range(),
                 .name = tokenText(name_token),
@@ -1599,9 +1599,9 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerFieldItemNode(self: *Builder, node: SyntaxNode) !ItemId {
-            const name_token = lastDirectIdentifierLikeToken(node) orelse return Lowering.malformedItem(self, node, "missing field name");
+            const name_token = bindingIdentifierLikeToken(node) orelse return Lowering.malformedItem(self, node, "missing field name");
             const type_node = firstDirectTypeChild(node);
-            const value_node = firstDirectExprChild(node);
+            const value_node = lastDirectExprChild(node);
             return Support.pushItem(self, .{ .Field = .{
                 .range = node.range(),
                 .name = tokenText(name_token),
@@ -2005,6 +2005,30 @@ fn lastDirectIdentifierLikeToken(node: SyntaxNode) ?SyntaxToken {
         }
     }
     return result;
+}
+
+fn bindingIdentifierLikeToken(node: SyntaxNode) ?SyntaxToken {
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .node => |child_node| {
+                if (child_node.kind() == .NameExpr) {
+                    var child_it = child_node.children();
+                    while (child_it.next()) |name_child| {
+                        switch (name_child) {
+                            .node => {},
+                            .token => |token| if (isIdentifierLike(token.kind())) return token,
+                        }
+                    }
+                }
+            },
+            .token => |token| switch (token.kind()) {
+                .Colon, .Equal, .Semicolon => return null,
+                else => if (isIdentifierLike(token.kind())) return token,
+            },
+        }
+    }
+    return null;
 }
 
 fn firstDirectIntegerToken(node: SyntaxNode) ?SyntaxToken {

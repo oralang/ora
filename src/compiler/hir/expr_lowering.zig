@@ -1864,7 +1864,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
             path: []const u8,
         ) anyerror!?mlir.MlirValue {
-            const opcode_name = if (std.mem.eql(u8, path, "std.transaction.sender"))
+            const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender") or
+                std.mem.eql(u8, path, "std.transaction.sender"))
+                "ora.evm.origin"
+            else if (std.mem.eql(u8, path, "std.tx.origin"))
                 "ora.evm.origin"
             else if (std.mem.eql(u8, path, "std.transaction.gasprice"))
                 "ora.evm.gasprice"

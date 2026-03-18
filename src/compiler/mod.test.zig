@@ -3502,6 +3502,49 @@ test "compiler lowers generic named struct field access without placeholder" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers shorthand storage field assignments" {
+    const source_text =
+        \\contract Wallet {
+        \\    storage owner: address;
+        \\
+        \\    pub fn setOwner(next: address) {
+        \\        owner = next;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
+}
+
+test "compiler preserves typed local names in assignments" {
+    const source_text =
+        \\contract Wallet {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn deposit(amount: u256) {
+        \\        const sender: address = std.msg.sender;
+        \\        balances[sender] = amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.map_store"));
+}
+
 test "compiler wraps payload returns into real error ok op" {
     const source_text =
         \\error Failure(code: u256);
@@ -11791,6 +11834,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/locks/lock_runtime_map_guard.ora",
         "ora-example/regions/region_ok_storage_tstore_map_and_scalar_writes.ora",
         "ora-example/regions/region_ok_storage_tstore_same_type_writes.ora",
+        "ora-example/refinements/dispatcher_refinement_e2e.ora",
         "ora-example/refinements/guards_showcase.ora",
         "ora-example/smt/verification/state_invariants.ora",
     };

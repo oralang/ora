@@ -1138,7 +1138,7 @@ const Parser = struct {
             .Havoc => self.parseDelimitedStatementNode(SyntaxKind.HavocStmt),
             .Break => self.parseDelimitedStatementNode(SyntaxKind.BreakStmt),
             .Continue => self.parseDelimitedStatementNode(SyntaxKind.ContinueStmt),
-            .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => self.parseVariableDeclStmtNode(),
+            .Storage, .Memory, .Tstore, .Let, .Var, .Const, .Immutable => self.parseVariableDeclStmtNode(),
             else => self.parseExprOrAssignStmtNode(),
         };
     }
