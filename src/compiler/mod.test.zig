@@ -815,6 +815,22 @@ test "compiler rejects error returns outside function return error set" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'ErrorB' is not in function return error set"));
 }
 
+test "compiler rejects error returns with wrong payload types" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return error.Failure(true, 7);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.items.items.len != 0);
+}
+
 test "compiler widens narrower error unions into wider return sets" {
     const source_text =
         \\error ErrorA;
@@ -826,6 +842,27 @@ test "compiler widens narrower error unions into wider return sets" {
         \\
         \\pub fn wide(maybe: !u256 | ErrorA) -> !u256 | ErrorA | ErrorB {
         \\    return narrow(maybe);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+}
+
+test "compiler widens narrower error unions through try expressions" {
+    const source_text =
+        \\error ErrorA;
+        \\error ErrorB;
+        \\
+        \\fn narrow(maybe: !u256 | ErrorA) -> !u256 | ErrorA {
+        \\    return maybe;
+        \\}
+        \\
+        \\pub fn wide(maybe: !u256 | ErrorA) -> !u256 | ErrorA | ErrorB {
+        \\    return try narrow(maybe);
         \\}
     ;
 
@@ -896,6 +933,41 @@ test "compiler rejects field access on multi-error catch bindings" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "catch binding represents multiple possible error types; field access is not supported"));
+}
+
+test "compiler types multi-field single-error catch bindings" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\
+        \\pub fn handle(maybe: !u256 | Failure) -> address {
+        \\    try {
+        \\        maybe;
+        \\    } catch (e) {
+        \\        return e.owner;
+        \\    }
+        \\    return 0x0000000000000000000000000000000000000000;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const try_stmt = ast_file.statement(body.statements[0]).Try;
+    const catch_clause = try_stmt.catch_clause.?;
+    const catch_pattern = catch_clause.error_pattern.?;
+    const catch_body = ast_file.body(catch_clause.body);
+    const ret = ast_file.statement(catch_body.statements[0]).Return;
+    const field_expr = ret.value.?;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+    try testing.expectEqual(compiler.sema.TypeKind.named, typecheck.pattern_types[catch_pattern.index()].kind());
+    try testing.expectEqualStrings("Failure", typecheck.pattern_types[catch_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.address, typecheck.exprType(field_expr).kind());
 }
 
 test "compiler lowers extern trait calls to abi and external call ops" {
