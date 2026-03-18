@@ -2939,10 +2939,14 @@ LogicalResult ConvertIfOp::matchAndRewrite(
         return failure();
 
     SmallVector<ora::YieldOp, 1> elseYields;
-    op.getElseRegion().walk([&](ora::YieldOp y) {
-        if (y->getParentOfType<ora::IfOp>() == op)
-            elseYields.push_back(y);
-    });
+    for (Block *block : elseBlocks)
+    {
+        for (auto &blockOp : llvm::make_early_inc_range(*block))
+        {
+            if (auto y = dyn_cast<ora::YieldOp>(&blockOp))
+                elseYields.push_back(y);
+        }
+    }
     for (auto y : elseYields)
     {
         if (y.getNumOperands() != 0)
