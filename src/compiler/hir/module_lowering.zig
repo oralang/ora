@@ -478,7 +478,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const abi_return = try abi_support.externReturnAbiType(self.allocator, abi_return_type);
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
-                if (abi_support.staticAbiWordCount(abi_return_type)) |word_count| {
+                if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
                     try attrs.append(self.allocator, .{
                         .name = identifier(self.context, "ora.abi_return_words"),
                         .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
@@ -869,6 +869,98 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 next_offset = offset + width;
             }
             return buffer.toOwnedSlice(self.allocator);
+        }
+
+        fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
+            return switch (ty) {
+                .bool, .address, .integer => 1,
+                .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
+                .tuple => |elements| blk: {
+                    var total: usize = 0;
+                    for (elements) |element| {
+                        const words = @This().staticAbiWordCountForType(self, element) orelse return null;
+                        total += words;
+                    }
+                    break :blk total;
+                },
+                .array => |array| blk: {
+                    const len = array.len orelse return null;
+                    const element_words = @This().staticAbiWordCountForType(self, array.element_type.*) orelse return null;
+                    break :blk element_words * len;
+                },
+                .struct_ => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
+                .contract => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
+                .named => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
+                else => null,
+            };
+        }
+
+        fn staticAbiWordCountForNamedStruct(self: *Lowerer, name: []const u8) ?usize {
+            if (self.typecheck.instantiatedStructByName(name)) |instantiated| {
+                var total: usize = 0;
+                for (instantiated.fields) |field| {
+                    const words = @This().staticAbiWordCountForType(self, field.ty) orelse return null;
+                    total += words;
+                }
+                return total;
+            }
+
+            const item_id = self.item_index.lookup(name) orelse return null;
+            return switch (self.file.item(item_id).*) {
+                .Struct => |struct_item| blk: {
+                    var total: usize = 0;
+                    for (struct_item.fields) |field| {
+                        const words = @This().staticAbiWordCountForTypeExpr(self, field.type_expr) orelse return null;
+                        total += words;
+                    }
+                    break :blk total;
+                },
+                else => null,
+            };
+        }
+
+        fn staticAbiWordCountForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) ?usize {
+            return switch (self.file.typeExpr(type_expr_id).*) {
+                .Path => |path| blk: {
+                    const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                    if (std.mem.eql(u8, trimmed, "bool") or std.mem.eql(u8, trimmed, "address")) break :blk 1;
+                    if (support.parseSignedIntegerType(trimmed) != null) break :blk 1;
+                    break :blk @This().staticAbiWordCountForNamedStruct(self, trimmed);
+                },
+                .Generic => |generic| blk: {
+                    if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
+                        break :blk switch (generic.args[0]) {
+                            .Type => |type_expr| @This().staticAbiWordCountForTypeExpr(self, type_expr),
+                            else => null,
+                        };
+                    }
+                    if (std.mem.eql(u8, generic.name, "map")) break :blk null;
+                    if (generic.args.len > 0) {
+                        break :blk switch (generic.args[0]) {
+                            .Type => |type_expr| @This().staticAbiWordCountForTypeExpr(self, type_expr),
+                            else => null,
+                        };
+                    }
+                    break :blk @This().staticAbiWordCountForNamedStruct(self, generic.name);
+                },
+                .Tuple => |tuple| blk: {
+                    var total: usize = 0;
+                    for (tuple.elements) |element| {
+                        const words = @This().staticAbiWordCountForTypeExpr(self, element) orelse return null;
+                        total += words;
+                    }
+                    break :blk total;
+                },
+                .Array => |array| blk: {
+                    const len = switch (array.size) {
+                        .Integer => |literal| std.fmt.parseInt(usize, std.mem.trim(u8, literal.text, " \t\n\r"), 10) catch return null,
+                        else => return null,
+                    };
+                    const element_words = @This().staticAbiWordCountForTypeExpr(self, array.element) orelse return null;
+                    break :blk element_words * len;
+                },
+                else => null,
+            };
         }
 
         pub fn bitfieldFieldSign(self: *const Lowerer, type_expr_id: ast.TypeExprId) u8 {
