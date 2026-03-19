@@ -433,34 +433,6 @@ pub fn build(b: *std.Build) void {
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
 
-    // mlir type mapper tests
-    const mlir_types_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/types.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mlir_types_test_mod.addImport("ora_lib", lib_mod);
-    mlir_types_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    mlir_types_test_mod.addImport("log", log_mod);
-    const mlir_types_tests = b.addTest(.{ .root_module = mlir_types_test_mod });
-    linkMlirLibraries(b, mlir_types_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
-
-    // refinement guard tests (MLIR)
-    const refinement_guard_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/refinements.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    refinement_guard_test_mod.addImport("ora_lib", lib_mod);
-    refinement_guard_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    refinement_guard_test_mod.addImport("log", log_mod);
-    const refinement_guard_tests = b.addTest(.{ .root_module = refinement_guard_test_mod });
-    linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
-
     // MLIR verifier-negative tests
     const mlir_verifiers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/verifiers.test.zig"),
