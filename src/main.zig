@@ -1454,6 +1454,9 @@ fn runCompilerMlirEmit(
     try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    if (mlir_options.validate_mlir) {
+        try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
+    }
     if (mlir_options.emit_mlir_sir) {
         if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module)) {
             try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
