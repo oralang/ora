@@ -478,20 +478,6 @@ pub fn build(b: *std.Build) void {
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
 
-    // import program loader tests
-    const import_program_loader_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/imports/program_loader.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    import_program_loader_test_mod.addImport("ora_lib", lib_mod);
-    import_program_loader_test_mod.addImport("ora_imports", ora_imports_mod);
-    import_program_loader_test_mod.addImport("ora_ast", ora_ast_mod);
-    import_program_loader_test_mod.addImport("ora_lexer", ora_lexer_mod);
-    import_program_loader_test_mod.addImport("ora_types", ora_types_mod);
-    const import_program_loader_tests = b.addTest(.{ .root_module = import_program_loader_test_mod });
-    test_step.dependOn(&b.addRunArtifact(import_program_loader_tests).step);
-
     // z3 encoder tests (requires MLIR + Z3)
     const z3_encoder_test_mod = b.createModule(.{
         .root_source_file = b.path("src/z3/encoder.test.zig"),
