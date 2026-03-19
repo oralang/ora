@@ -525,8 +525,8 @@ pub fn main() !void {
 
     const file_path = input_file.?;
 
-    const v2_resolver = try discoverResolverOptionsForFile(allocator, file_path);
-    defer if (v2_resolver.include_roots) |include_roots| {
+    const resolver = try discoverResolverOptionsForFile(allocator, file_path);
+    defer if (resolver.include_roots) |include_roots| {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
@@ -536,17 +536,17 @@ pub fn main() !void {
     }
 
     if (emit_tokens) {
-        try runCompilerV2TokenEmit(allocator, file_path);
+        try runCompilerTokenEmit(allocator, file_path);
     } else if (emit_ast or emit_typed_ast) {
         const format = if (emit_typed_ast)
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, v2_resolver.options, &metrics);
+        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, resolver.options, &metrics);
     } else if (emit_cfg or emit_sir_text or emit_bytecode) {
-        try runMlirEmitAdvancedV2(allocator, file_path, mlir_options, v2_resolver.options);
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options, resolver.options);
     } else {
-        try runCompilerV2MlirEmit(allocator, file_path, mlir_options, v2_resolver.options);
+        try runCompilerMlirEmit(allocator, file_path, mlir_options, resolver.options);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -641,7 +641,7 @@ fn runBuildArtifacts(
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
-    const build_emit_result = runMlirEmitAdvancedV2(allocator, file_path, build_mlir_options, resolver_options);
+    const build_emit_result = runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options);
     build_emit_result catch |err| switch (err) {
         error.VerificationFailed => verification_failed = true,
         else => return err,
@@ -1078,6 +1078,34 @@ fn compilerDiagnosticSeverityName(severity: compiler.diagnostics.Severity) []con
     };
 }
 
+fn compilerDiagnosticsHasErrors(diagnostics_list: *const compiler.diagnostics.DiagnosticList) bool {
+    for (diagnostics_list.items.items) |diag| {
+        if (diag.severity == .Error) return true;
+    }
+    return false;
+}
+
+fn writeCompilerDiagnosticsText(
+    writer: anytype,
+    diagnostics_list: *const compiler.diagnostics.DiagnosticList,
+) !void {
+    if (diagnostics_list.items.items.len == 0) return;
+    try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
+    for (diagnostics_list.items.items) |diag| {
+        try writer.print("  [{s}] {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
+    }
+}
+
+fn exitOnCompilerErrors(
+    writer: anytype,
+    diagnostics_list: *const compiler.diagnostics.DiagnosticList,
+) !void {
+    if (!compilerDiagnosticsHasErrors(diagnostics_list)) return;
+    try writeCompilerDiagnosticsText(writer, diagnostics_list);
+    try writer.flush();
+    std.process.exit(1);
+}
+
 fn writeJsonString(writer: anytype, text: []const u8) !void {
     try std.json.Stringify.value(text, .{}, writer);
 }
@@ -1220,7 +1248,7 @@ fn compilerItemName(item: compiler.ast.Item) ?[]const u8 {
     };
 }
 
-fn writeCompilerV2Ast(
+fn writeCompilerAst(
     allocator: std.mem.Allocator,
     writer: anytype,
     ast_file: *const compiler.ast.AstFile,
@@ -1265,14 +1293,9 @@ fn writeCompilerV2Ast(
         return;
     }
 
-    try writer.print("Compiler V2 {s}AST\n", .{if (typecheck != null) "typed " else ""});
+    try writer.print("Compiler {s}AST\n", .{if (typecheck != null) "typed " else ""});
     try writer.print("Root items: {d}\n", .{ast_file.root_items.len});
-    if (diagnostics_list.items.items.len != 0) {
-        try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
-        for (diagnostics_list.items.items) |diag| {
-            try writer.print("  [{s}] {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
-        }
-    }
+    try writeCompilerDiagnosticsText(writer, diagnostics_list);
     for (ast_file.root_items, 0..) |item_id, index| {
         const item = ast_file.item(item_id).*;
         try writer.print("[{d}] {s}", .{ index, compilerItemKindName(item) });
@@ -1287,7 +1310,7 @@ fn writeCompilerV2Ast(
     }
 }
 
-fn runCompilerV2AstEmit(
+fn runCompilerAstEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     format: []const u8,
@@ -1299,10 +1322,10 @@ fn runCompilerV2AstEmit(
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    m.begin("compiler v2");
+    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
         m.end();
-        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
@@ -1314,8 +1337,9 @@ fn runCompilerV2AstEmit(
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     const typecheck = if (include_types) module_typecheck else null;
     const diagnostics_list = &module_typecheck.diagnostics;
+    try exitOnCompilerErrors(stdout, diagnostics_list);
 
-    writeCompilerV2Ast(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
+    writeCompilerAst(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
         error.InvalidArgument => {
             try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
             try stdout.flush();
@@ -1326,7 +1350,7 @@ fn runCompilerV2AstEmit(
     try stdout.flush();
 }
 
-fn runCompilerV2MlirEmit(
+fn runCompilerMlirEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     mlir_options: MlirOptions,
@@ -1339,20 +1363,23 @@ fn runCompilerV2MlirEmit(
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
-    m.begin("compiler v2");
+    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
         m.end();
-        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
     m.end();
     defer compilation.deinit();
 
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
+
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     if (mlir_options.emit_mlir_sir) {
         if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module)) {
-            try stdout.print("Compiler V2 error: Ora to SIR conversion failed\n", .{});
+            try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             std.process.exit(1);
         }
@@ -1366,7 +1393,7 @@ fn runCompilerV2MlirEmit(
     };
 
     if (text_ref.data == null or text_ref.length == 0) {
-        try stdout.print("Compiler V2 error: failed to print MLIR module\n", .{});
+        try stdout.print("Compiler error: failed to print MLIR module\n", .{});
         try stdout.flush();
         std.process.exit(1);
     }
@@ -1374,7 +1401,7 @@ fn runCompilerV2MlirEmit(
     try stdout.flush();
 }
 
-fn runCompilerV2TokenEmit(
+fn runCompilerTokenEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
 ) !void {
@@ -1397,7 +1424,7 @@ fn runCompilerV2TokenEmit(
     try stdout.flush();
 }
 
-fn runMlirEmitAdvancedV2(
+fn runMlirEmitAdvanced(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     mlir_options: MlirOptions,
@@ -1414,15 +1441,18 @@ fn runMlirEmitAdvancedV2(
     defer mlir_arena.deinit();
     const mlir_allocator = mlir_arena.allocator();
 
-    m.begin("compiler v2");
+    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
         m.end();
-        try stdout.print("Compiler V2 error: {s}\n", .{@errorName(err)});
+        try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
     m.end();
     defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
@@ -1890,6 +1920,9 @@ fn runAbiEmit(
     };
     defer compilation.deinit();
 
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
+
     var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
     defer contract_abi.deinit();
 
@@ -2289,7 +2322,7 @@ test "init command: rejects non-empty target directory" {
     try std.testing.expectError(error.InitTargetNotEmpty, initProjectLayout(target_path));
 }
 
-test "compiler v2 typed AST writer prints root item types" {
+test "compiler typed AST writer prints root item types" {
     const allocator = std.testing.allocator;
     const source_text =
         \\fn id(x: u256) -> u256 {
@@ -2306,13 +2339,13 @@ test "compiler v2 typed AST writer prints root item types" {
 
     var buffer: std.ArrayList(u8) = .{};
     defer buffer.deinit(allocator);
-    try writeCompilerV2Ast(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree");
+    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree");
 
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler V2 typed AST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler typed AST") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Function id : fn(u256) -> u256") != null);
 }
 
-test "compiler v2 JSON AST writer includes diagnostics array" {
+test "compiler JSON AST writer includes diagnostics array" {
     const allocator = std.testing.allocator;
     const source_text =
         \\fn bad() -> u256 {
@@ -2329,7 +2362,7 @@ test "compiler v2 JSON AST writer includes diagnostics array" {
 
     var buffer: std.ArrayList(u8) = .{};
     defer buffer.deinit(allocator);
-    try writeCompilerV2Ast(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json");
+    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json");
 
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);

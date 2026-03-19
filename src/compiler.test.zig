@@ -11858,7 +11858,7 @@ test "ora dialect exposes external call ops through C API" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"transfer\""));
 }
 
-test "compiler v2 examples convert through SIR" {
+test "compiler examples convert through SIR" {
     const example_paths = [_][]const u8{
         "ora-example/smoke.ora",
         "ora-example/no_return_test.ora",
