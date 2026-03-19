@@ -82,14 +82,6 @@ const CommandKind = enum {
     Fmt,
 };
 
-fn shouldUseCompilerV2(command_kind: CommandKind, parsed: cli_args.CliOptions) bool {
-    if (parsed.use_v2) return true;
-    if (command_kind == .Build) return true;
-    if (command_kind != .Emit) return false;
-
-    return true;
-}
-
 const Subcommand = enum {
     None,
     Build,
@@ -340,8 +332,6 @@ pub fn main() !void {
         .Emit => .Emit,
         .None => if (emit_flags_requested) .Emit else .Build,
     };
-    const use_v2: bool = shouldUseCompilerV2(command_kind, parsed);
-
     // handle state analysis (also a special analysis mode)
     if (analyze_state) {
         if (input_file == null) {
@@ -527,12 +517,11 @@ pub fn main() !void {
                 build_file_path,
                 build_output_dir,
                 mlir_options,
-                use_v2,
                 build_resolver_options,
                 if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
             )
         else
-            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, use_v2);
+            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options);
 
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
@@ -554,70 +543,28 @@ pub fn main() !void {
 
     const file_path = input_file.?;
 
-    if (use_v2) {
-        const v2_resolver = try discoverResolverOptionsForFile(allocator, file_path);
-        defer if (v2_resolver.include_roots) |include_roots| {
-            freeResolvedIncludeRoots(allocator, include_roots);
-        };
+    const v2_resolver = try discoverResolverOptionsForFile(allocator, file_path);
+    defer if (v2_resolver.include_roots) |include_roots| {
+        freeResolvedIncludeRoots(allocator, include_roots);
+    };
 
-        if (emit_cfg or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
-            std.debug.print("error: --v2 currently supports only AST, typed-AST, and MLIR emission.\n", .{});
-            std.process.exit(2);
-        }
-        if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
-            std.debug.print("error: --v2 currently requires --emit-ast, --emit-typed-ast, or --emit-mlir.\n", .{});
-            std.process.exit(2);
-        }
-
-        if (emit_ast or emit_typed_ast) {
-            const format = if (emit_typed_ast)
-                (emit_typed_ast_format orelse "tree")
-            else
-                (emit_ast_format orelse "tree");
-            try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, v2_resolver.options, &metrics);
-        } else {
-            try runCompilerV2MlirEmit(allocator, file_path, mlir_options, v2_resolver.options);
-        }
-
-        var stderr_buffer_v2: [1024]u8 = undefined;
-        var stderr_writer_v2 = std.fs.File.stderr().writer(&stderr_buffer_v2);
-        const stderr_v2 = &stderr_writer_v2.interface;
-        try metrics.report(stderr_v2);
-        try stderr_v2.flush();
-        return;
+    if (emit_cfg or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
+        std.debug.print("error: this emit flow is not supported by the current compiler path.\n", .{});
+        std.process.exit(2);
+    }
+    if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
+        std.debug.print("error: emit requires --emit-ast, --emit-typed-ast, or --emit-mlir.\n", .{});
+        std.process.exit(2);
     }
 
-    // handle CFG generation (uses MLIR's built-in view-op-graph pass)
-    if (emit_cfg) {
-        try runCFGGeneration(allocator, file_path, mlir_options);
-        return;
-    }
-
-    // modern compiler-style behavior: process --emit-X flags
-    // stop at the earliest stage specified
-
-    if (emit_abi or emit_abi_solidity or emit_abi_extras) {
-        try runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, .{});
-        const only_abi = !(emit_tokens or emit_ast or emit_typed_ast or emit_mlir or emit_mlir_sir or emit_sir_text or emit_bytecode or emit_cfg);
-        if (only_abi) return;
-    }
-
-    if (emit_tokens) {
-        // stop after lexer
-        try runLexer(allocator, file_path, &metrics);
-    } else if (emit_ast or emit_typed_ast) {
-        // stop after parser
+    if (emit_ast or emit_typed_ast) {
         const format = if (emit_typed_ast)
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runParser(allocator, file_path, format, emit_typed_ast, &metrics);
-    } else if (emit_mlir) {
-        // run full MLIR pipeline (Ora MLIR)
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, .{});
+        try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, v2_resolver.options, &metrics);
     } else {
-        // default: emit MLIR
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, .{});
+        try runCompilerV2MlirEmit(allocator, file_path, mlir_options, v2_resolver.options);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -646,7 +593,6 @@ fn runBuildArtifacts(
     file_path: []const u8,
     output_dir: ?[]const u8,
     base_options: MlirOptions,
-    use_v2: bool,
     resolver_options: import_program.ResolverOptions,
     configured_init_args: []const project_config.InitArg,
 ) !void {
@@ -713,10 +659,7 @@ fn runBuildArtifacts(
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
-    const build_emit_result = if (use_v2)
-        runMlirEmitAdvancedV2(allocator, file_path, build_mlir_options, resolver_options)
-    else
-        runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options);
+    const build_emit_result = runMlirEmitAdvancedV2(allocator, file_path, build_mlir_options, resolver_options);
     build_emit_result catch |err| switch (err) {
         error.VerificationFailed => verification_failed = true,
         else => return err,
@@ -966,7 +909,6 @@ fn runBuildFromDiscoveredConfig(
     allocator: std.mem.Allocator,
     cli_output_dir: ?[]const u8,
     base_options: MlirOptions,
-    use_v2: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -1030,7 +972,6 @@ fn runBuildFromDiscoveredConfig(
             root_path,
             target_output,
             base_options,
-            use_v2,
             .{
                 .include_roots = include_roots,
             },
@@ -1110,7 +1051,7 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --v2                   - Force the new compiler for build/emit modes\n", .{});
+    try stdout.print("  --v2                   - Accepted for compatibility; build/emit already use the current compiler\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
@@ -1126,7 +1067,7 @@ fn printUsage() !void {
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
-    try stdout.print("  -o <file|dir>          - Emit mode: output file/dir (legacy behavior)\n", .{});
+    try stdout.print("  -o <file|dir>          - Emit mode: output file/dir\n", .{});
     try stdout.print("\nOptimization Options:\n", .{});
     try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
@@ -3746,21 +3687,6 @@ test "compiler v2 JSON AST writer includes diagnostics array" {
 
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);
-}
-
-test "v2 routing defaults emit MLIR to compiler v2" {
-    const parsed = cli_args.CliOptions{ .emit_mlir = true };
-    try std.testing.expect(shouldUseCompilerV2(.Emit, parsed));
-}
-
-test "v2 routing defaults build to compiler v2" {
-    const parsed = cli_args.CliOptions{};
-    try std.testing.expect(shouldUseCompilerV2(.Build, parsed));
-}
-
-test "unsupported emit flows still route to compiler v2" {
-    const parsed = cli_args.CliOptions{ .emit_sir_text = true };
-    try std.testing.expect(shouldUseCompilerV2(.Emit, parsed));
 }
 
 test "m3 parity corpus lowers through legacy and v2" {
