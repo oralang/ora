@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const c = @import("mlir_c_api").c;
-const lib = @import("ora_lib");
+const SourceSpan = @import("ora_types").source_span.SourceSpan;
 
 /// Create MLIR string reference from Zig slice
 /// Replaces the verbose: c.oraStringRefCreate(str.ptr, str.len)
@@ -114,7 +114,7 @@ pub inline fn unknownLoc(ctx: c.MlirContext) c.MlirLocation {
 }
 
 /// Create file location from SourceSpan
-pub inline fn fileLoc(ctx: c.MlirContext, span: ?lib.ast.SourceSpan) c.MlirLocation {
+pub inline fn fileLoc(ctx: c.MlirContext, span: ?SourceSpan) c.MlirLocation {
     if (span) |s| {
         const filename_ref = strRefLit("source.ora");
         return c.oraLocationFileLineColGet(ctx, filename_ref, s.line, s.column);

@@ -15,63 +15,20 @@
 const std = @import("std");
 const z3 = @import("c.zig");
 const mlir = @import("mlir_c_api").c;
-const ast = @import("ora_ast");
 const Context = @import("context.zig").Context;
 const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const ManagedArrayList = std.array_list.Managed;
 
-/// Verification annotation extracted from AST
-pub const VerificationAnnotation = struct {
-    kind: AnnotationKind,
-    condition: *ast.Expressions.ExprNode,
-    source_location: ast.SourceSpan,
-
-    pub const AnnotationKind = enum {
-        Requires, // Function precondition
-        Ensures, // Function postcondition
-        LoopInvariant, // Loop invariant
-        ContractInvariant, // Contract-level invariant (future)
-        RefinementGuard, // Runtime refinement guard
-        Assume, // Verification-only assumption
-        PathAssume, // Compiler-injected path-local assumption
-    };
-};
-
-/// Collection of verification annotations for a function
-pub const FunctionAnnotations = struct {
-    function_name: []const u8,
-    requires: []*ast.Expressions.ExprNode,
-    ensures: []*ast.Expressions.ExprNode,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, function_name: []const u8) FunctionAnnotations {
-        return .{
-            .function_name = function_name,
-            .requires = &[_]*ast.Expressions.ExprNode{},
-            .ensures = &[_]*ast.Expressions.ExprNode{},
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *FunctionAnnotations) void {
-        // note: We don't own the ExprNode pointers, they're from AST arena
-        _ = self;
-    }
-};
-
-/// Collection of loop invariants
-pub const LoopInvariants = struct {
-    invariants: []*ast.Expressions.ExprNode,
-    source_location: ast.SourceSpan,
-
-    pub fn init(invariants: []*ast.Expressions.ExprNode, span: ast.SourceSpan) LoopInvariants {
-        return .{
-            .invariants = invariants,
-            .source_location = span,
-        };
-    }
+pub const AnnotationKind = enum {
+    Requires, // Function precondition
+    Ensures, // Function postcondition
+    LoopInvariant, // Loop invariant
+    ContractInvariant, // Contract-level invariant (future)
+    RefinementGuard, // Runtime refinement guard
+    Assume, // Verification-only assumption
+    PathAssume, // Compiler-injected path-local assumption
 };
 
 pub const SmtReportArtifacts = struct {
@@ -106,12 +63,6 @@ pub const VerificationPass = struct {
     verify_calls: bool = true,
     verify_state: bool = true,
     verify_stats: bool = false,
-
-    /// Map from function name to its annotations
-    function_annotations: std.StringHashMap(FunctionAnnotations),
-
-    /// List of loop invariants (with their locations)
-    loop_invariants: ManagedArrayList(LoopInvariants),
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -222,8 +173,6 @@ pub const VerificationPass = struct {
             .verify_calls = verify_calls,
             .verify_state = verify_state,
             .verify_stats = verify_stats,
-            .function_annotations = std.StringHashMap(FunctionAnnotations).init(allocator),
-            .loop_invariants = ManagedArrayList(LoopInvariants).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
@@ -252,12 +201,6 @@ pub const VerificationPass = struct {
     }
 
     pub fn deinit(self: *VerificationPass) void {
-        var iter = self.function_annotations.iterator();
-        while (iter.next()) |entry| {
-            entry.value_ptr.deinit();
-        }
-        self.function_annotations.deinit();
-        self.loop_invariants.deinit();
         for (self.function_name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -293,94 +236,6 @@ pub const VerificationPass = struct {
         self.solver.deinit();
         self.context.deinit();
         self.allocator.destroy(self.context);
-    }
-
-    //===----------------------------------------------------------------------===//
-    // annotation Extraction from AST
-    //===----------------------------------------------------------------------===//
-
-    /// Extract verification annotations from AST module
-    pub fn extractAnnotationsFromAST(self: *VerificationPass, module: *ast.AstNode) !void {
-        switch (module.*) {
-            .Module => |*mod| {
-                // walk all top-level declarations
-                for (mod.declarations) |*decl| {
-                    try self.extractAnnotationsFromDeclaration(decl);
-                }
-            },
-            else => {
-                // not a module, try to extract from the node directly
-                try self.extractAnnotationsFromDeclaration(module);
-            },
-        }
-    }
-
-    /// Extract annotations from a declaration (contract, function, etc.)
-    fn extractAnnotationsFromDeclaration(self: *VerificationPass, decl: *ast.AstNode) !void {
-        switch (decl.*) {
-            .Contract => |*contract| {
-                // extract annotations from contract members
-                for (contract.body) |*member| {
-                    try self.extractAnnotationsFromDeclaration(member);
-                }
-            },
-            .Function => |*function| {
-                // include ghost functions in verification (they're specification-only)
-                // ghost functions are used for verification but not compiled to bytecode
-                try self.extractFunctionAnnotations(function);
-            },
-            else => {
-                // other declaration types don't have verification annotations
-            },
-        }
-    }
-
-    /// Extract requires/ensures clauses from a function node
-    fn extractFunctionAnnotations(self: *VerificationPass, function: *ast.FunctionNode) !void {
-        const function_name = function.name;
-
-        // create function annotations entry
-        var annotations = FunctionAnnotations.init(self.allocator, function_name);
-
-        // extract requires clauses
-        if (function.requires_clauses.len > 0) {
-            annotations.requires = try self.allocator.dupe(*ast.Expressions.ExprNode, function.requires_clauses);
-        }
-
-        // extract ensures clauses
-        if (function.ensures_clauses.len > 0) {
-            annotations.ensures = try self.allocator.dupe(*ast.Expressions.ExprNode, function.ensures_clauses);
-        }
-
-        // store in map
-        const name_copy = try self.allocator.dupe(u8, function_name);
-        try self.function_annotations.put(name_copy, annotations);
-    }
-
-    /// Extract loop invariants from a while statement
-    pub fn extractLoopInvariantsFromWhile(self: *VerificationPass, while_stmt: *ast.Statements.WhileNode) !void {
-        if (while_stmt.invariants.len > 0) {
-            const invariants_copy = try self.allocator.dupe(*ast.Expressions.ExprNode, while_stmt.invariants);
-            const loop_invariants = LoopInvariants.init(invariants_copy, while_stmt.span);
-            try self.loop_invariants.append(loop_invariants);
-        }
-    }
-
-    /// Extract loop invariants from a for loop statement
-    pub fn extractLoopInvariantsFromFor(self: *VerificationPass, for_stmt: *ast.Statements.ForLoopNode) !void {
-        if (for_stmt.invariants.len > 0) {
-            const invariants_copy = try self.allocator.dupe(*ast.Expressions.ExprNode, for_stmt.invariants);
-            const loop_invariants = LoopInvariants.init(invariants_copy, for_stmt.span);
-            try self.loop_invariants.append(loop_invariants);
-        }
-    }
-
-    /// Get annotations for a specific function
-    pub fn getFunctionAnnotations(self: *VerificationPass, function_name: []const u8) ?*FunctionAnnotations {
-        if (self.function_annotations.getPtr(function_name)) |annotations| {
-            return annotations;
-        }
-        return null;
     }
 
     //===----------------------------------------------------------------------===//
@@ -836,7 +691,7 @@ pub const VerificationPass = struct {
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
                 const origin_attr = try self.getStringAttr(op, "ora.assume_origin");
-                const assume_kind: VerificationAnnotation.AnnotationKind = if (origin_attr) |origin| blk: {
+                const assume_kind: AnnotationKind = if (origin_attr) |origin| blk: {
                     if (std.mem.eql(u8, origin, "path")) break :blk .PathAssume;
                     break :blk .Assume;
                 } else blk: {
@@ -977,7 +832,7 @@ pub const VerificationPass = struct {
     fn recordEncodedAnnotation(
         self: *VerificationPass,
         op: mlir.MlirOperation,
-        kind: VerificationAnnotation.AnnotationKind,
+        kind: AnnotationKind,
         condition_value: mlir.MlirValue,
         guard_id: ?[]const u8,
     ) !usize {
@@ -3141,7 +2996,7 @@ const ActivePathAssume = struct {
 
 const EncodedAnnotation = struct {
     function_name: []const u8,
-    kind: VerificationAnnotation.AnnotationKind,
+    kind: AnnotationKind,
     condition: z3.Z3_ast,
     extra_constraints: []const z3.Z3_ast,
     path_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
@@ -3157,21 +3012,21 @@ const EncodedAnnotation = struct {
     guard_id: ?[]const u8 = null,
 };
 
-fn isAssumptionKind(kind: VerificationAnnotation.AnnotationKind) bool {
+fn isAssumptionKind(kind: AnnotationKind) bool {
     return switch (kind) {
         .Requires, .Assume => true,
         else => false,
     };
 }
 
-fn isObligationKind(kind: VerificationAnnotation.AnnotationKind) bool {
+fn isObligationKind(kind: AnnotationKind) bool {
     return switch (kind) {
         .Ensures, .LoopInvariant, .ContractInvariant => true,
         else => false,
     };
 }
 
-fn obligationErrorType(kind: VerificationAnnotation.AnnotationKind) errors.VerificationErrorType {
+fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
     return switch (kind) {
         .Ensures => .PostconditionViolation,
         .LoopInvariant, .ContractInvariant => .InvariantViolation,
@@ -3179,7 +3034,7 @@ fn obligationErrorType(kind: VerificationAnnotation.AnnotationKind) errors.Verif
     };
 }
 
-fn obligationKindLabel(kind: VerificationAnnotation.AnnotationKind) []const u8 {
+fn obligationKindLabel(kind: AnnotationKind) []const u8 {
     return switch (kind) {
         .Ensures => "ensures",
         .LoopInvariant => "invariant",
@@ -3528,7 +3383,7 @@ const PreparedQuery = struct {
     kind: QueryKind,
     function_name: []const u8,
     guard_id: ?[]const u8 = null,
-    obligation_kind: ?VerificationAnnotation.AnnotationKind = null,
+    obligation_kind: ?AnnotationKind = null,
     file: []const u8,
     line: u32,
     column: u32,

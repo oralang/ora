@@ -73,13 +73,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const ora_ast_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ora_ast_mod.addImport("ora_types", ora_types_mod);
-
     const ora_imports_mod = b.createModule(.{
         .root_source_file = b.path("src/imports/mod.zig"),
         .target = target,
@@ -110,13 +103,11 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_imports", ora_imports_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
     exe_mod.addImport("log", log_mod);
-    exe_mod.addImport("ora_ast", ora_ast_mod);
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
     exe_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("log", log_mod);
     lib_mod.addImport("ora_types", ora_types_mod);
-    lib_mod.addImport("ora_ast", ora_ast_mod);
     lib_mod.addImport("ora_lexer", ora_lexer_mod);
     lib_mod.addImport("ora_imports", ora_imports_mod);
 
@@ -429,7 +420,6 @@ pub fn build(b: *std.Build) void {
     });
     z3_verification_test_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_test_mod.addImport("ora_lib", lib_mod);
-    z3_verification_test_mod.addImport("ora_ast", ora_ast_mod);
     const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
     linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
@@ -562,7 +552,6 @@ pub fn build(b: *std.Build) void {
     });
     z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_mod.addImport("ora_lib", lib_mod);
-    z3_verification_mod.addImport("ora_ast", ora_ast_mod);
     compiler_test_mod.addImport("ora_root", lib_mod);
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
