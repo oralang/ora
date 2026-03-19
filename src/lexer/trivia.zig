@@ -89,7 +89,7 @@ pub const StringPool = struct {
 /// Simplified for smart contract language usage:
 /// - Only ASCII characters are supported
 /// - Limited escape sequences (\n, \t, \", \\)
-/// This simplification improves security, reduces gas costs, and simplifies the implementation
+/// This simplification improves security and keeps the implementation small.
 pub const StringProcessor = struct {
     allocator: Allocator,
 
