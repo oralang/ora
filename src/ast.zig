@@ -16,9 +16,6 @@ pub const type_info = @import("ast/type_info.zig");
 pub const slot_key = @import("ast/slot_key.zig");
 pub const verification = @import("ast/verification.zig");
 
-// Note: TypeResolver is exported from ast/type_resolver/mod.zig directly
-// to avoid circular dependency (ast.zig imports type_resolver, type_resolver imports ast.zig)
-
 // Re-export SourceSpan from separate module to break circular dependencies
 pub const SourceSpan = @import("ast/source_span.zig").SourceSpan;
 
