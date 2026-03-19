@@ -1441,7 +1441,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (map_value_type.ptr != null) break :blk2 map_value_type;
                         break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                     };
-                    const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base_value, key_value, result_type);
+                    const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base_value));
+                    const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
+                        try @This().convertValueForFlow(self, key_value, map_key_type, index.range)
+                    else
+                        key_value;
+                    const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base_value, converted_key, result_type);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },

@@ -1844,6 +1844,10 @@ pub const Encoder = struct {
             return try self.encodeFuncCall(mlir_op, operands, mode);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.error.return")) {
+            return try self.encodeErrorReturnOp(operands, mlir_op);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.error.unwrap") or
             std.mem.eql(u8, op_name, "ora.error.ok") or
             std.mem.eql(u8, op_name, "ora.error.err") or
@@ -2131,6 +2135,84 @@ pub const Encoder = struct {
         }
 
         return error.UnsupportedOperation;
+    }
+
+    fn encodeErrorReturnOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const success_type = mlir.oraErrorUnionTypeGetSuccessType(result_type);
+        const op_id = @intFromPtr(mlir_op.ptr);
+
+        if (!mlir.oraTypeIsNull(success_type)) {
+            const eu = try self.getErrorUnionSort(result_type, success_type);
+            const is_err = self.encodeBoolConstant(true);
+            const ok_val = try self.mkUndefValue(eu.ok_sort, "ok", op_id);
+            const err_val = if (operands.len >= 1)
+                try self.coerceAstToSortOrUndef(operands[0], eu.err_sort, "error_return", op_id)
+            else
+                try self.encodeErrorIdValue(mlir_op, eu.err_sort, op_id);
+            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, err_val });
+        }
+
+        const result_sort = try self.encodeMLIRType(result_type);
+        if (operands.len >= 1) {
+            return try self.coerceAstToSortOrUndef(operands[0], result_sort, "error_return", op_id);
+        }
+        return try self.encodeErrorIdValue(mlir_op, result_sort, op_id);
+    }
+
+    fn coerceAstToSortOrUndef(self: *Encoder, value: z3.Z3_ast, target_sort: z3.Z3_sort, prefix: []const u8, op_id: usize) EncodeError!z3.Z3_ast {
+        const value_sort = z3.Z3_get_sort(self.context.ctx, value);
+        if (value_sort == target_sort) return value;
+        return try self.mkUndefValue(target_sort, prefix, op_id);
+    }
+
+    fn encodeErrorIdValue(self: *Encoder, mlir_op: mlir.MlirOperation, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
+        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
+        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
+        if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) == z3.Z3_BV_SORT) {
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
+            return try self.encodeIntegerConstant(error_id, width);
+        }
+        return try self.mkUndefValue(target_sort, "error_id", op_id);
+    }
+
+    fn lookupErrorDeclId(self: *Encoder, op: mlir.MlirOperation, sym_name: []const u8) ?u256 {
+        var current_block = mlir.mlirOperationGetBlock(op);
+        while (!mlir.oraBlockIsNull(current_block)) {
+            const parent_op = mlir.mlirBlockGetParentOperation(current_block);
+            if (mlir.oraOperationIsNull(parent_op)) break;
+            const parent_block = mlir.mlirOperationGetBlock(parent_op);
+            if (mlir.oraBlockIsNull(parent_block)) {
+                current_block = current_block;
+                break;
+            }
+            current_block = parent_block;
+        }
+
+        var current = mlir.oraBlockGetFirstOperation(current_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const op_name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "ora.error.decl")) {
+                const candidate_name = self.getStringAttr(current, "sym_name") orelse "";
+                if (std.mem.eql(u8, candidate_name, sym_name)) {
+                    const attr = mlir.oraOperationGetAttributeByName(current, mlir.oraStringRefCreate("ora.error_id".ptr, "ora.error_id".len));
+                    if (!mlir.oraAttributeIsNull(attr)) {
+                        return @intCast(mlir.oraIntegerAttrGetValueSInt(attr));
+                    }
+                }
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
     }
 
     fn encodeFuncCall(self: *Encoder, mlir_op: mlir.MlirOperation, operands: []const z3.Z3_ast, mode: EncodeMode) EncodeError!z3.Z3_ast {

@@ -509,6 +509,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
+            if (try @This().lowerErrorDeclCall(self, expr_id, call, locals)) |value| return value;
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
@@ -556,6 +557,38 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+            }
+            return appendValueOp(self.block, op);
+        }
+
+        fn lowerErrorDeclCall(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            call: ast.CallExpr,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            const callee_name = @This().calleeName(self, call.callee) orelse return null;
+            const item_id = self.parent.item_index.lookup(callee_name) orelse return null;
+            if (self.parent.file.item(item_id).* != .ErrorDecl) return null;
+            const error_decl = self.parent.file.item(item_id).ErrorDecl;
+
+            var args: std.ArrayList(mlir.MlirValue) = .{};
+            for (call.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
+
+            const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
+            const op = mlir.oraErrorReturnOpCreate(
+                self.parent.context,
+                self.parent.location(call.range),
+                strRef(error_decl.name),
+                if (args.items.len == 0) null else args.items.ptr,
+                args.items.len,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            if (args.items.len != 0 or
+                (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])))
+            {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             return appendValueOp(self.block, op);
         }
@@ -1914,19 +1947,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.parent.file.item(item_id).* != .ErrorDecl) return null;
                 const error_decl = self.parent.file.item(item_id).ErrorDecl;
                 if (error_decl.parameters.len != 0) return null;
-
-                var result_types: [1]mlir.MlirType = .{result_type};
-                const error_call = mlir.oraFuncCallOpCreate(
+                const lowered_result_type = self.return_type orelse result_type;
+                const op = mlir.oraErrorReturnOpCreate(
                     self.parent.context,
                     self.parent.location(field.range),
                     strRef(error_name),
                     null,
                     0,
-                    &result_types,
-                    1,
+                    lowered_result_type,
                 );
-                if (mlir.oraOperationIsNull(error_call)) return error.MlirOperationCreationFailed;
-                return appendValueOp(self.block, error_call);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
             }
             if (try @This().lowerBuiltinFieldCall(self, field, result_type, path)) |value| {
                 return value;
