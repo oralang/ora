@@ -1085,19 +1085,6 @@ fn compilerDiagnosticsHasErrors(diagnostics_list: *const compiler.diagnostics.Di
     return false;
 }
 
-fn writeCompilerDiagnosticLocation(
-    writer: anytype,
-    sources: ?*const compiler.source.SourceStore,
-    labels: []const compiler.diagnostics.Label,
-) !void {
-    if (sources == null or labels.len == 0) return;
-
-    const primary = labels[0];
-    const line_column = sources.?.lineColumn(primary.location);
-    const file = sources.?.file(primary.location.file_id);
-    try writer.print("{s}:{d}:{d}: ", .{ file.path, line_column.line, line_column.column });
-}
-
 fn sourceLineBounds(text: []const u8, line_starts: []const u32, line_index: usize) struct { start: usize, end: usize } {
     const start: usize = line_starts[line_index];
     const next_start: usize = if (line_index + 1 < line_starts.len) line_starts[line_index + 1] else text.len;
@@ -1141,6 +1128,24 @@ fn writeCompilerDiagnosticSnippet(
     try writer.writeByte('\n');
 }
 
+fn writeCompilerDiagnosticSecondaryLabels(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    labels: []const compiler.diagnostics.Label,
+) !void {
+    if (sources == null or labels.len <= 1) return;
+
+    for (labels[1..]) |label| {
+        const line_column = sources.?.lineColumn(label.location);
+        const file = sources.?.file(label.location.file_id);
+        try writer.print("  = note: {s}:{d}:{d}", .{ file.path, line_column.line, line_column.column });
+        if (label.message.len != 0) {
+            try writer.print(": {s}", .{label.message});
+        }
+        try writer.writeByte('\n');
+    }
+}
+
 fn writeCompilerDiagnosticsText(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
@@ -1149,14 +1154,9 @@ fn writeCompilerDiagnosticsText(
     if (diagnostics_list.items.items.len == 0) return;
     try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
     for (diagnostics_list.items.items) |diag| {
-        try writer.writeAll("  ");
-        try writeCompilerDiagnosticLocation(writer, sources, diag.labels);
-        try writer.print("[{s}] {s}", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
-        if (diag.labels.len != 0 and diag.labels[0].message.len != 0) {
-            try writer.print(" ({s})", .{diag.labels[0].message});
-        }
-        try writer.writeByte('\n');
+        try writer.print("{s}: {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
         try writeCompilerDiagnosticSnippet(writer, sources, diag.labels);
+        try writeCompilerDiagnosticSecondaryLabels(writer, sources, diag.labels);
     }
 }
 
