@@ -5,6 +5,9 @@
 const std = @import("std");
 const crypto = std.crypto;
 const lib = @import("root.zig");
+const compiler = @import("compiler/mod.zig");
+const compiler_abi = @import("compiler/hir/abi.zig");
+const compiler_type_descriptors = @import("compiler/sema/type_descriptors.zig");
 const state_tracker = @import("analysis/state_tracker.zig");
 
 const ProfileId = "evm-default";
@@ -1446,6 +1449,772 @@ pub const AbiGenerator = struct {
     }
 };
 
+const CompilerNamedTypeRef = struct {
+    module_id: compiler.ModuleId,
+    item_id: compiler.ItemId,
+};
+
+const CompilerModuleContext = struct {
+    module_id: compiler.ModuleId,
+    file: *const compiler.AstFile,
+    item_index: *const compiler.sema.ItemIndexResult,
+    typecheck: *const compiler.sema.TypeCheckResult,
+};
+
+pub fn generateCompilerAbi(
+    allocator: std.mem.Allocator,
+    compilation: *compiler.driver.Compilation,
+) anyerror!ContractAbi {
+    var generator = try CompilerAbiGenerator.init(allocator, compilation);
+    defer generator.deinit();
+    return try generator.generate();
+}
+
+const CompilerAbiGenerator = struct {
+    allocator: std.mem.Allocator,
+    compilation: *compiler.driver.Compilation,
+
+    callables: std.ArrayList(AbiCallable),
+    types: std.ArrayList(AbiTypeNode),
+    type_lookup: std.StringHashMap(usize),
+    callable_ids: std.StringHashMap(void),
+
+    global_structs: std.StringHashMap(CompilerNamedTypeRef),
+    global_enums: std.StringHashMap(CompilerNamedTypeRef),
+
+    contract_count: usize,
+    primary_contract_name: ?[]const u8,
+
+    fn init(allocator: std.mem.Allocator, compilation: *compiler.driver.Compilation) !CompilerAbiGenerator {
+        return .{
+            .allocator = allocator,
+            .compilation = compilation,
+            .callables = .{},
+            .types = .{},
+            .type_lookup = std.StringHashMap(usize).init(allocator),
+            .callable_ids = std.StringHashMap(void).init(allocator),
+            .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
+            .global_enums = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
+            .contract_count = 0,
+            .primary_contract_name = null,
+        };
+    }
+
+    fn deinit(self: *CompilerAbiGenerator) void {
+        for (self.callables.items) |*callable| {
+            callable.deinit();
+        }
+        self.callables.deinit(self.allocator);
+
+        for (self.types.items) |*typ| {
+            typ.deinit();
+        }
+        self.types.deinit(self.allocator);
+
+        self.type_lookup.deinit();
+        self.callable_ids.deinit();
+        self.global_structs.deinit();
+        self.global_enums.deinit();
+    }
+
+    fn generate(self: *CompilerAbiGenerator) anyerror!ContractAbi {
+        try self.collectGlobals();
+
+        const package = self.compilation.db.sources.package(self.compilation.package_id);
+        for (package.modules.items) |module_id| {
+            const ctx = try self.moduleContext(module_id);
+            for (ctx.file.root_items) |item_id| {
+                switch (ctx.file.item(item_id).*) {
+                    .Contract => |contract| {
+                        self.contract_count += 1;
+                        if (self.primary_contract_name == null) self.primary_contract_name = contract.name;
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        if (self.contract_count == 0) return error.MissingContract;
+
+        for (package.modules.items) |module_id| {
+            const ctx = try self.moduleContext(module_id);
+            for (ctx.file.root_items) |item_id| {
+                switch (ctx.file.item(item_id).*) {
+                    .Contract => |contract| try self.processContract(ctx, item_id, contract),
+                    else => {},
+                }
+            }
+        }
+
+        const callables = try self.callables.toOwnedSlice(self.allocator);
+        self.callables = .{};
+
+        const types = try self.types.toOwnedSlice(self.allocator);
+        self.types = .{};
+
+        const lookup = self.type_lookup;
+        self.type_lookup = std.StringHashMap(usize).init(self.allocator);
+
+        self.callable_ids.deinit();
+        self.callable_ids = std.StringHashMap(void).init(self.allocator);
+
+        return .{
+            .allocator = self.allocator,
+            .contract_name = if (self.contract_count == 1) self.primary_contract_name.? else "bundle",
+            .contract_count = self.contract_count,
+            .callables = callables,
+            .types = types,
+            .type_lookup = lookup,
+        };
+    }
+
+    fn collectGlobals(self: *CompilerAbiGenerator) anyerror!void {
+        const package = self.compilation.db.sources.package(self.compilation.package_id);
+        for (package.modules.items) |module_id| {
+            const ctx = try self.moduleContext(module_id);
+            for (ctx.file.root_items) |item_id| {
+                switch (ctx.file.item(item_id).*) {
+                    .Struct => |struct_item| {
+                        if (!self.global_structs.contains(struct_item.name)) {
+                            try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = item_id });
+                        }
+                    },
+                    .Enum => |enum_item| {
+                        if (!self.global_enums.contains(enum_item.name)) {
+                            try self.global_enums.put(enum_item.name, .{ .module_id = module_id, .item_id = item_id });
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    fn moduleContext(self: *CompilerAbiGenerator, module_id: compiler.ModuleId) anyerror!CompilerModuleContext {
+        const module = self.compilation.db.sources.module(module_id);
+        return .{
+            .module_id = module_id,
+            .file = try self.compilation.db.astFile(module.file_id),
+            .item_index = try self.compilation.db.itemIndex(module_id),
+            .typecheck = try self.compilation.db.moduleTypeCheck(module_id),
+        };
+    }
+
+    fn processContract(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_item_id: compiler.ItemId,
+        contract: compiler.ast.ContractItem,
+    ) anyerror!void {
+        _ = contract_item_id;
+        for (contract.members) |member_id| {
+            switch (ctx.file.item(member_id).*) {
+                .Function => |function| {
+                    if (function.visibility == .public) {
+                        try self.addFunctionCallable(ctx, contract.name, member_id, function);
+                    }
+                },
+                .ErrorDecl => |error_decl| try self.addErrorCallable(ctx, contract.name, error_decl),
+                .LogDecl => |log_decl| try self.addEventCallable(ctx, contract.name, log_decl),
+                else => {},
+            }
+        }
+    }
+
+    fn addFunctionCallable(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        function_item_id: compiler.ItemId,
+        function: compiler.ast.FunctionItem,
+    ) anyerror!void {
+        const function_type = switch (ctx.typecheck.item_types[function_item_id.index()]) {
+            .function => |fn_type| fn_type,
+            else => return error.UnresolvedType,
+        };
+        const has_self = functionHasBareSelf(ctx.file, function);
+        const offset: usize = if (has_self) 1 else 0;
+
+        var signature_types: std.ArrayList([]const u8) = .{};
+        defer {
+            for (signature_types.items) |item| self.allocator.free(item);
+            signature_types.deinit(self.allocator);
+        }
+        var inputs: std.ArrayList(AbiInput) = .{};
+        defer inputs.deinit(self.allocator);
+
+        for (function.parameters[offset..], 0..) |parameter, index| {
+            const param_type = function_type.param_types[index + offset];
+            const resolved = try self.resolveSemaType(ctx, param_type, &.{});
+            try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+            try inputs.append(self.allocator, .{
+                .name = patternName(ctx.file, parameter.pattern),
+                .type_id = resolved.type_id,
+                .indexed = null,
+            });
+        }
+
+        var outputs: std.ArrayList(AbiInput) = .{};
+        defer outputs.deinit(self.allocator);
+        if (function_type.return_types.len != 0) {
+            const raw_return = function_type.return_types[0];
+            const payload_type = switch (raw_return) {
+                .error_union => |error_union| error_union.payload_type.*,
+                else => raw_return,
+            };
+            if (payload_type.kind() != .void) {
+                const resolved_return = try self.resolveSemaType(ctx, payload_type, &.{});
+                try outputs.append(self.allocator, .{
+                    .name = "result",
+                    .type_id = resolved_return.type_id,
+                    .indexed = null,
+                });
+            }
+        }
+
+        const signature = try self.buildSignature(function.name, signature_types.items);
+        const selector = try compiler_abi.keccakSelectorHex(self.allocator, signature);
+        const id = try self.buildCallableId(contract_name, signature);
+        try self.ensureCallableIdUnique(id);
+
+        var effects: std.ArrayList(AbiEffect) = .{};
+        defer effects.deinit(self.allocator);
+        try self.buildEffects(ctx.typecheck.itemEffect(function_item_id), &effects);
+
+        try self.callables.append(self.allocator, .{
+            .id = id,
+            .kind = .function,
+            .name = function.name,
+            .signature = signature,
+            .selector = selector,
+            .inputs = try inputs.toOwnedSlice(self.allocator),
+            .outputs = try outputs.toOwnedSlice(self.allocator),
+            .effects = try effects.toOwnedSlice(self.allocator),
+            .allocator = self.allocator,
+        });
+    }
+
+    fn addErrorCallable(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        err: compiler.ast.ErrorDeclItem,
+    ) anyerror!void {
+        var signature_types: std.ArrayList([]const u8) = .{};
+        defer {
+            for (signature_types.items) |item| self.allocator.free(item);
+            signature_types.deinit(self.allocator);
+        }
+        var inputs: std.ArrayList(AbiInput) = .{};
+        defer inputs.deinit(self.allocator);
+
+        for (err.parameters) |parameter| {
+            const resolved = try self.resolveSemaType(ctx, ctx.typecheck.pattern_types[parameter.pattern.index()].type, &.{});
+            try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+            try inputs.append(self.allocator, .{
+                .name = patternName(ctx.file, parameter.pattern),
+                .type_id = resolved.type_id,
+                .indexed = null,
+            });
+        }
+
+        const signature = try self.buildSignature(err.name, signature_types.items);
+        const selector = try compiler_abi.keccakSelectorHex(self.allocator, signature);
+        const id = try self.buildCallableId(contract_name, signature);
+        try self.ensureCallableIdUnique(id);
+
+        try self.callables.append(self.allocator, .{
+            .id = id,
+            .kind = .@"error",
+            .name = err.name,
+            .signature = signature,
+            .selector = selector,
+            .inputs = try inputs.toOwnedSlice(self.allocator),
+            .outputs = &.{},
+            .effects = &.{},
+            .allocator = self.allocator,
+        });
+    }
+
+    fn addEventCallable(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        log_decl: compiler.ast.LogDeclItem,
+    ) anyerror!void {
+        var signature_types: std.ArrayList([]const u8) = .{};
+        defer {
+            for (signature_types.items) |item| self.allocator.free(item);
+            signature_types.deinit(self.allocator);
+        }
+        var inputs: std.ArrayList(AbiInput) = .{};
+        defer inputs.deinit(self.allocator);
+
+        for (log_decl.fields) |field| {
+            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr);
+            const resolved = try self.resolveSemaType(ctx, field_type, &.{});
+            try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+            try inputs.append(self.allocator, .{
+                .name = field.name,
+                .type_id = resolved.type_id,
+                .indexed = field.indexed,
+            });
+        }
+
+        const signature = try self.buildSignature(log_decl.name, signature_types.items);
+        const id = try self.buildCallableId(contract_name, signature);
+        try self.ensureCallableIdUnique(id);
+
+        try self.callables.append(self.allocator, .{
+            .id = id,
+            .kind = .event,
+            .name = log_decl.name,
+            .signature = signature,
+            .selector = null,
+            .inputs = try inputs.toOwnedSlice(self.allocator),
+            .outputs = &.{},
+            .effects = &.{},
+            .allocator = self.allocator,
+        });
+    }
+
+    fn buildEffects(self: *CompilerAbiGenerator, effect: compiler.sema.Effect, effects: *std.ArrayList(AbiEffect)) anyerror!void {
+        switch (effect) {
+            .pure => {},
+            .external => try effects.append(self.allocator, .{ .kind = .calls }),
+            .side_effects => |side_effects| {
+                try self.appendEffectFlags(side_effects.has_external, side_effects.has_log, effects);
+            },
+            .reads => |reads| {
+                try self.appendEffectSlots(.reads, reads.slots, effects);
+                try self.appendEffectFlags(reads.has_external, reads.has_log, effects);
+            },
+            .writes => |writes| {
+                try self.appendEffectSlots(.writes, writes.slots, effects);
+                try self.appendEffectFlags(writes.has_external, writes.has_log, effects);
+            },
+            .reads_writes => |rw| {
+                try self.appendEffectSlots(.reads, rw.reads, effects);
+                try self.appendEffectSlots(.writes, rw.writes, effects);
+                try self.appendEffectFlags(rw.has_external, rw.has_log, effects);
+            },
+        }
+    }
+
+    fn appendEffectFlags(
+        self: *CompilerAbiGenerator,
+        has_external: bool,
+        has_log: bool,
+        effects: *std.ArrayList(AbiEffect),
+    ) !void {
+        if (has_external) try effects.append(self.allocator, .{ .kind = .calls });
+        if (has_log) try effects.append(self.allocator, .{ .kind = .emits });
+    }
+
+    fn appendEffectSlots(
+        self: *CompilerAbiGenerator,
+        kind: AbiEffectKind,
+        slots: []const compiler.sema.EffectSlot,
+        effects: *std.ArrayList(AbiEffect),
+    ) !void {
+        var paths: std.ArrayList([]const u8) = .{};
+        defer {
+            for (paths.items) |path| self.allocator.free(path);
+            paths.deinit(self.allocator);
+        }
+        for (slots) |slot| {
+            try paths.append(self.allocator, try self.allocator.dupe(u8, slot.name));
+        }
+        sortStringArrayList(&paths);
+        for (paths.items) |path| {
+            try effects.append(self.allocator, .{
+                .kind = kind,
+                .path = try self.allocator.dupe(u8, path),
+                .event_id = null,
+            });
+        }
+    }
+
+    fn resolveSemaType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        ty: compiler.sema.Type,
+        stack: []const []const u8,
+    ) anyerror!ResolvedType {
+        _ = stack;
+        switch (ty) {
+            .bool, .address, .string, .bytes, .integer => {
+                const wire = try compiler_abi.canonicalAbiType(self.allocator, ty);
+                errdefer self.allocator.free(wire);
+                var node = AbiTypeNode{
+                    .kind = .primitive,
+                    .allocator = self.allocator,
+                    .name = switch (ty) {
+                        .bool => "bool",
+                        .address => "address",
+                        .string => "string",
+                        .bytes => "bytes",
+                        .integer => |integer| integer.spelling orelse "u256",
+                        else => unreachable,
+                    },
+                    .wire_type = wire,
+                    .ui_widget = defaultWidgetForWireType(wire),
+                };
+                const type_id = try self.ensureTypeNode(&node);
+                const idx = self.type_lookup.get(type_id).?;
+                return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+            },
+            .refinement => |refinement| return self.resolveRefinementType(ctx, refinement),
+            .array => |array| return self.resolveArrayType(ctx, array),
+            .slice => |slice| return self.resolveSliceType(ctx, slice),
+            .tuple => |elements| return self.resolveTupleType(ctx, elements),
+            .struct_ => |named| return self.resolveNamedStructType(ctx, named.name),
+            .enum_ => |named| return self.resolveNamedEnumType(ctx, named.name),
+            .error_union => |error_union| return self.resolveSemaType(ctx, error_union.payload_type.*, &.{}),
+            .named => |named| {
+                if (self.global_structs.contains(named.name)) return self.resolveNamedStructType(ctx, named.name);
+                if (self.global_enums.contains(named.name)) return self.resolveNamedEnumType(ctx, named.name);
+                return error.UnsupportedAbiType;
+            },
+            else => return error.UnsupportedAbiType,
+        }
+    }
+
+    fn resolveArrayType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        array: compiler.sema.ArrayType,
+    ) anyerror!ResolvedType {
+        const elem = try self.resolveSemaType(ctx, array.element_type.*, &.{});
+        const len = array.len orelse return error.UnsupportedAbiType;
+        const wire = try std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ elem.wire_type, len });
+        var node = AbiTypeNode{
+            .kind = .array,
+            .allocator = self.allocator,
+            .element_type = elem.type_id,
+            .size = len,
+            .wire_type = wire,
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveSliceType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        slice: compiler.sema.SliceType,
+    ) anyerror!ResolvedType {
+        const elem = try self.resolveSemaType(ctx, slice.element_type.*, &.{});
+        const wire = try std.fmt.allocPrint(self.allocator, "{s}[]", .{elem.wire_type});
+        var node = AbiTypeNode{
+            .kind = .slice,
+            .allocator = self.allocator,
+            .element_type = elem.type_id,
+            .wire_type = wire,
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveTupleType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        elements: []const compiler.sema.Type,
+    ) anyerror!ResolvedType {
+        var component_ids = try self.allocator.alloc([]const u8, elements.len);
+        errdefer self.allocator.free(component_ids);
+        var wire_parts: std.ArrayList([]const u8) = .{};
+        defer {
+            for (wire_parts.items) |part| self.allocator.free(part);
+            wire_parts.deinit(self.allocator);
+        }
+        for (elements, 0..) |element, index| {
+            const resolved = try self.resolveSemaType(ctx, element, &.{});
+            component_ids[index] = resolved.type_id;
+            try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+        }
+        const joined = try std.mem.join(self.allocator, ",", wire_parts.items);
+        defer self.allocator.free(joined);
+        const wire = try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+        var node = AbiTypeNode{
+            .kind = .tuple,
+            .allocator = self.allocator,
+            .components = component_ids,
+            .wire_type = wire,
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveNamedStructType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        name: []const u8,
+    ) anyerror!ResolvedType {
+        if (ctx.typecheck.instantiatedStructByName(name)) |instantiated| {
+            var fields = try self.allocator.alloc(AbiFieldRef, instantiated.fields.len);
+            errdefer self.allocator.free(fields);
+            var wire_parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (wire_parts.items) |part| self.allocator.free(part);
+                wire_parts.deinit(self.allocator);
+            }
+            for (instantiated.fields, 0..) |field, index| {
+                const resolved = try self.resolveSemaType(ctx, field.ty, &.{});
+                fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
+                try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+            }
+            const joined = try std.mem.join(self.allocator, ",", wire_parts.items);
+            defer self.allocator.free(joined);
+            const wire = try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+            const template_name = switch (ctx.file.item(instantiated.template_item_id).*) {
+                .Struct => |struct_item| struct_item.name,
+                else => name,
+            };
+            var node = AbiTypeNode{
+                .kind = .struct_,
+                .allocator = self.allocator,
+                .name = name,
+                .wire_type = wire,
+                .fields = fields,
+                .ui_label = template_name,
+                .ui_widget = "json",
+            };
+            const type_id = try self.ensureTypeNode(&node);
+            const idx = self.type_lookup.get(type_id).?;
+            return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        }
+
+        const ref = self.global_structs.get(name) orelse return error.UnknownStructType;
+        const owner_ctx = try self.moduleContext(ref.module_id);
+        const struct_item = owner_ctx.file.item(ref.item_id).Struct;
+        var fields = try self.allocator.alloc(AbiFieldRef, struct_item.fields.len);
+        errdefer self.allocator.free(fields);
+        var wire_parts: std.ArrayList([]const u8) = .{};
+        defer {
+            for (wire_parts.items) |part| self.allocator.free(part);
+            wire_parts.deinit(self.allocator);
+        }
+        for (struct_item.fields, 0..) |field, index| {
+            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, field.type_expr);
+            const resolved = try self.resolveSemaType(owner_ctx, field_type, &.{});
+            fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
+            try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+        }
+        const joined = try std.mem.join(self.allocator, ",", wire_parts.items);
+        defer self.allocator.free(joined);
+        const wire = try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+        var node = AbiTypeNode{
+            .kind = .struct_,
+            .allocator = self.allocator,
+            .name = name,
+            .wire_type = wire,
+            .fields = fields,
+            .ui_label = name,
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveNamedEnumType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        name: []const u8,
+    ) anyerror!ResolvedType {
+        if (ctx.typecheck.instantiatedEnumByName(name) != null) {
+            const repr = try self.resolveSemaType(ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+            var node = AbiTypeNode{
+                .kind = .enum_,
+                .allocator = self.allocator,
+                .name = name,
+                .wire_type = try self.allocator.dupe(u8, repr.wire_type),
+                .repr_type = repr.type_id,
+                .variants = &.{},
+                .ui_label = name,
+                .ui_widget = "select",
+            };
+            const type_id = try self.ensureTypeNode(&node);
+            const idx = self.type_lookup.get(type_id).?;
+            return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        }
+
+        const ref = self.global_enums.get(name) orelse return error.UnknownEnumType;
+        const owner_ctx = try self.moduleContext(ref.module_id);
+        const enum_item = owner_ctx.file.item(ref.item_id).Enum;
+        const repr = try self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+        var variants = try self.allocator.alloc(AbiEnumVariant, enum_item.variants.len);
+        errdefer self.allocator.free(variants);
+        for (enum_item.variants, 0..) |variant, index| {
+            variants[index] = .{ .name = variant.name, .value = @intCast(index) };
+        }
+        var node = AbiTypeNode{
+            .kind = .enum_,
+            .allocator = self.allocator,
+            .name = name,
+            .wire_type = try self.allocator.dupe(u8, repr.wire_type),
+            .repr_type = repr.type_id,
+            .variants = variants,
+            .ui_label = name,
+            .ui_widget = "select",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveRefinementType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        refinement: compiler.sema.RefinementType,
+    ) anyerror!ResolvedType {
+        const base = try self.resolveSemaType(ctx, refinement.base_type.*, &.{});
+
+        var predicate_json: []const u8 = try self.buildExactPredicate();
+        var ui_hints = UiHints{};
+
+        if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) {
+            self.allocator.free(predicate_json);
+            predicate_json = try self.buildNonZeroAddressPredicate();
+            ui_hints.widget = "address";
+        } else if (std.mem.eql(u8, refinement.name, "Scaled")) {
+            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
+                const decimals = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
+                self.allocator.free(predicate_json);
+                predicate_json = try self.buildScaledPredicate(@intCast(decimals));
+                ui_hints.widget = "number";
+                ui_hints.decimals = @intCast(decimals);
+            }
+        } else if (std.mem.eql(u8, refinement.name, "MinValue")) {
+            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
+                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
+                self.allocator.free(predicate_json);
+                predicate_json = try self.buildMinPredicate(min_value);
+                ui_hints.widget = "number";
+                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
+            }
+        } else if (std.mem.eql(u8, refinement.name, "MaxValue")) {
+            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
+                const max_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
+                self.allocator.free(predicate_json);
+                predicate_json = try self.buildMaxPredicate(max_value);
+                ui_hints.widget = "number";
+                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
+            }
+        } else if (std.mem.eql(u8, refinement.name, "InRange")) {
+            if (refinement.args.len >= 3 and refinement.args[1] == .Integer and refinement.args[2] == .Integer) {
+                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
+                const max_value = parseUnsignedIntLiteral(refinement.args[2].Integer.text) orelse 0;
+                self.allocator.free(predicate_json);
+                predicate_json = try self.buildRangePredicate(min_value, max_value);
+                ui_hints.widget = "number";
+                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
+                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
+            }
+        } else if (std.mem.eql(u8, refinement.name, "Exact")) {
+            ui_hints.widget = "number";
+        }
+
+        var node = AbiTypeNode{
+            .kind = .refinement,
+            .allocator = self.allocator,
+            .base = base.type_id,
+            .wire_type = try self.allocator.dupe(u8, base.wire_type),
+            .predicate_json = predicate_json,
+            .ui_widget = ui_hints.widget orelse defaultWidgetForWireType(base.wire_type),
+            .ui_min = ui_hints.min,
+            .ui_max = ui_hints.max,
+            .ui_decimals = ui_hints.decimals,
+            .ui_unit = ui_hints.unit,
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn buildSignature(self: *CompilerAbiGenerator, name: []const u8, types: []const []const u8) anyerror![]const u8 {
+        const joined = try std.mem.join(self.allocator, ",", types);
+        defer self.allocator.free(joined);
+        return std.fmt.allocPrint(self.allocator, "{s}({s})", .{ name, joined });
+    }
+
+    fn buildCallableId(self: *CompilerAbiGenerator, contract_name: []const u8, signature: []const u8) anyerror![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "c:{s}.{s}", .{ contract_name, signature });
+    }
+
+    fn ensureCallableIdUnique(self: *CompilerAbiGenerator, callable_id: []const u8) anyerror!void {
+        if (self.callable_ids.contains(callable_id)) return error.DuplicateCallableId;
+        try self.callable_ids.put(callable_id, {});
+    }
+
+    fn ensureTypeNode(self: *CompilerAbiGenerator, node: *AbiTypeNode) anyerror![]const u8 {
+        const payload = try buildCanonicalTypePayload(self.allocator, node);
+        errdefer self.allocator.free(payload);
+        const type_id = try hashedTypeId(self.allocator, payload);
+        errdefer self.allocator.free(type_id);
+        if (self.type_lookup.get(type_id)) |idx| {
+            const existing = &self.types.items[idx];
+            if (!std.mem.eql(u8, existing.canonical_payload.?, payload)) {
+                node.deinit();
+                return error.TypeHashCollision;
+            }
+            self.allocator.free(payload);
+            self.allocator.free(type_id);
+            node.deinit();
+            return existing.type_id.?;
+        }
+        node.canonical_payload = payload;
+        node.type_id = type_id;
+        try self.types.append(self.allocator, node.*);
+        const new_index = self.types.items.len - 1;
+        try self.type_lookup.put(self.types.items[new_index].type_id.?, new_index);
+        return self.types.items[new_index].type_id.?;
+    }
+
+    fn buildMinPredicate(self: *CompilerAbiGenerator, min_value: u256) anyerror![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"min\",\"value\":\"{d}\"}}", .{min_value});
+    }
+
+    fn buildMaxPredicate(self: *CompilerAbiGenerator, max_value: u256) anyerror![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"max\",\"value\":\"{d}\"}}", .{max_value});
+    }
+
+    fn buildRangePredicate(self: *CompilerAbiGenerator, min_value: u256, max_value: u256) anyerror![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"range\",\"min\":\"{d}\",\"max\":\"{d}\"}}", .{ min_value, max_value });
+    }
+
+    fn buildScaledPredicate(self: *CompilerAbiGenerator, decimals: u32) anyerror![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"scaled\",\"decimals\":{d}}}", .{decimals});
+    }
+
+    fn buildExactPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
+        return self.allocator.dupe(u8, "{\"kind\":\"exact\"}");
+    }
+
+    fn buildNonZeroAddressPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
+        return self.allocator.dupe(u8, "{\"kind\":\"nonZeroAddress\"}");
+    }
+};
+
+fn functionHasBareSelf(file: *const compiler.AstFile, function: compiler.ast.FunctionItem) bool {
+    if (function.parameters.len == 0) return false;
+    return std.mem.eql(u8, patternName(file, function.parameters[0].pattern), "self");
+}
+
+fn patternName(file: *const compiler.AstFile, pattern_id: compiler.PatternId) []const u8 {
+    return switch (file.pattern(pattern_id).*) {
+        .Name => |name| name.name,
+        else => "_",
+    };
+}
+
 fn primitiveInfo(ora_type: lib.ast.type_info.OraType) ?struct { name: []const u8, wire_type: []const u8 } {
     return switch (ora_type) {
         .u8 => .{ .name = "u8", .wire_type = "uint8" },
@@ -1551,6 +2320,20 @@ fn parseSignedIntLiteral(raw: []const u8) ?i64 {
 
     const cleaned = cleaned_storage.items;
     return std.fmt.parseInt(i64, cleaned, 0) catch null;
+}
+
+fn parseUnsignedIntLiteral(raw: []const u8) ?u256 {
+    var cleaned_storage = std.ArrayList(u8){};
+    defer cleaned_storage.deinit(std.heap.page_allocator);
+
+    for (raw) |ch| {
+        if (ch != '_') {
+            cleaned_storage.append(std.heap.page_allocator, ch) catch return null;
+        }
+    }
+
+    const cleaned = cleaned_storage.items;
+    return std.fmt.parseInt(u256, cleaned, 0) catch null;
 }
 
 fn pow10String(allocator: std.mem.Allocator, decimals: u32) ![]const u8 {

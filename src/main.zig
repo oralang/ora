@@ -1884,16 +1884,13 @@ fn runAbiEmit(
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var program = import_program.loadProgramWithImportsTypedWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
-        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
+    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+        try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         return;
     };
-    defer program.deinit();
-    const ast_nodes = program.nodes;
+    defer compilation.deinit();
 
-    var generator = try lib.abi.AbiGenerator.init(allocator);
-    defer generator.deinit();
-    var contract_abi = try generator.generate(ast_nodes);
+    var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
     defer contract_abi.deinit();
 
     const base_name = std.fs.path.stem(file_path);
