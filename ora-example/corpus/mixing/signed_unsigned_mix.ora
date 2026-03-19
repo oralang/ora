@@ -1,0 +1,62 @@
+// Level 3: Signed and unsigned in same contract
+// i256 and u256 used in separate operations (not mixed in same expression).
+contract SignedUnsignedMix {
+    storage var unsigned_val: u256;
+    storage var signed_val: i256;
+
+    pub fn set_unsigned(x: u256) {
+        unsigned_val = x;
+    }
+
+    pub fn set_signed(x: i256) {
+        signed_val = x;
+    }
+
+    pub fn unsigned_arithmetic(a: u256, b: u256) -> u256 {
+        let sum: u256 = a + b;
+        let diff: u256 = a - b;
+        let prod: u256 = a * b;
+        return sum;
+    }
+
+    pub fn signed_arithmetic(a: i256, b: i256) -> i256 {
+        let sum: i256 = a + b;
+        let diff: i256 = a - b;
+        let prod: i256 = a * b;
+        return sum;
+    }
+
+    pub fn signed_comparison(a: i256, b: i256) -> bool {
+        let lt: bool = a < b;
+        let gt: bool = a > b;
+        let eq: bool = a == b;
+        return lt;
+    }
+
+    pub fn unsigned_comparison(a: u256, b: u256) -> bool {
+        let lt: bool = a < b;
+        let gt: bool = a > b;
+        let eq: bool = a == b;
+        return lt;
+    }
+
+    pub fn mixed_i8_i256(a: i8, b: i256) -> i256 {
+        let wa: i256 = a;
+        let sum: i256 = wa + b;
+        return sum;
+    }
+
+    pub fn signed_negation(x: i256) -> i256 {
+        let neg: i256 = 0 - x;
+        return neg;
+    }
+
+    pub fn both_storages() {
+        unsigned_val = 100;
+        signed_val = 50;
+        let u_val: u256 = unsigned_val + 1;
+        let s_val: i256 = signed_val - 1;
+        unsigned_val = u_val;
+        signed_val = s_val;
+    }
+}

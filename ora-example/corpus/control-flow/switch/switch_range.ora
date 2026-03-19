@@ -1,0 +1,68 @@
+// ==========================================
+// SWITCH RANGE — switch with range patterns
+// ==========================================
+
+contract SwitchRange {
+    // Basic range patterns
+    pub fn test_basic_ranges(x: u256) -> u256 {
+        switch (x) {
+            0...9 => { return 1; }    // single digit
+            10...99 => { return 2; }  // two digits
+            100...999 => { return 3; } // three digits
+            else => { return 4; }      // four+ digits
+        }
+    }
+
+    // Range as expression
+    pub fn test_range_expression(score: u256) -> u256 {
+        return switch (score) {
+            0...59 => 0,    // fail
+            60...69 => 1,   // D
+            70...79 => 2,   // C
+            80...89 => 3,   // B
+            90...100 => 4,  // A
+            else => 99
+        };
+    }
+
+    // Mix of literal and range
+    pub fn test_mixed_literal_range(x: u256) -> u256 {
+        switch (x) {
+            0 => { return 100; }       // exact match
+            1...10 => { return 200; }  // range match
+            11 => { return 300; }      // exact match
+            12...20 => { return 400; } // range match
+            else => { return 0; }
+        }
+    }
+
+    // Small ranges
+    pub fn test_small_ranges(x: u256) -> u256 {
+        switch (x) {
+            0...1 => { return 1; }
+            2...3 => { return 2; }
+            4...5 => { return 3; }
+            else => { return 0; }
+        }
+    }
+
+    // Range with computation in body
+    pub fn test_range_with_compute(temp: u256) -> u256 {
+        switch (temp) {
+            0...32 => {
+                var severity: u256 = 32 - temp;
+                return severity;
+            }
+            33...100 => {
+                return 0;
+            }
+            101...200 => {
+                var severity: u256 = temp - 100;
+                return severity;
+            }
+            else => {
+                return 999;
+            }
+        }
+    }
+}

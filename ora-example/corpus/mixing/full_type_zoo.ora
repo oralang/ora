@@ -1,0 +1,211 @@
+// Level 4: Complex mixing — every scalar + compound type in one contract
+// Comprehensive type zoo exercising all combinations.
+contract FullTypeZoo {
+    enum Status {
+        Inactive,
+        Active,
+        Suspended,
+    }
+
+    struct Record {
+        id: u64;
+        value: u256;
+        active: bool;
+    }
+
+    struct ComplexEntry {
+        owner: address;
+        amounts: [u256; 4];
+        flags: [bool; 3];
+        nonce: u64;
+        status: Status;
+    }
+
+    // Scalar storage
+    storage var val_u8: u8;
+    storage var val_u16: u16;
+    storage var val_u32: u32;
+    storage var val_u64: u64;
+    storage var val_u128: u128;
+    storage var val_u256: u256;
+    storage var val_i8: i8;
+    storage var val_i256: i256;
+    storage var val_bool: bool;
+    storage var val_address: address;
+
+    // Compound storage
+    storage var arr_u256: [u256; 4];
+    storage var arr_bool: [bool; 8];
+    storage var record: Record;
+    storage var entry: ComplexEntry;
+
+    // Map storage
+    storage var map_addr_u256: map<address, u256>;
+    storage var map_addr_bool: map<address, bool>;
+    storage var map_u256_record: map<u256, Record>;
+    storage var map_addr_entry: map<address, ComplexEntry>;
+    storage var nested_map: map<address, map<u256, u256>>;
+
+    // --- Scalar operations ---
+
+    pub fn set_all_scalars(
+        a: u8, b: u16, c: u32, d: u64, e: u128, f: u256,
+        g: i8, h: i256, i: bool, j: address
+    ) {
+        val_u8 = a;
+        val_u16 = b;
+        val_u32 = c;
+        val_u64 = d;
+        val_u128 = e;
+        val_u256 = f;
+        val_i8 = g;
+        val_i256 = h;
+        val_bool = i;
+        val_address = j;
+    }
+
+    pub fn widen_all_to_u256() -> u256 {
+        let a: u256 = val_u8;
+        let b: u256 = val_u16;
+        let c: u256 = val_u32;
+        let d: u256 = val_u64;
+        let e: u256 = val_u128;
+        let f: u256 = val_u256;
+        let total: u256 = a + b + c + d + e + f;
+        return total;
+    }
+
+    // --- Array operations ---
+
+    pub fn set_array_slot(index: u256, value: u256) {
+        arr_u256[index] = value;
+    }
+
+    pub fn get_array_slot(index: u256) -> u256 {
+        return arr_u256[index];
+    }
+
+    pub fn set_bool_flags(idx: u256, val: bool) {
+        arr_bool[idx] = val;
+    }
+
+    pub fn sum_array() -> u256 {
+        let sum: u256 = arr_u256[0] + arr_u256[1] + arr_u256[2] + arr_u256[3];
+        return sum;
+    }
+
+    // --- Struct operations ---
+
+    pub fn set_record(id: u64, value: u256, active: bool) {
+        record = Record { id: id, value: value, active: active };
+    }
+
+    pub fn get_record_value() -> u256 {
+        let r: Record = record;
+        return r.value;
+    }
+
+    // --- Complex entry operations ---
+
+    pub fn create_entry(owner_addr: address, nonce_val: u64) {
+        let amounts: [u256; 4] = [0, 0, 0, 0];
+        let flags: [bool; 3] = [true, false, false];
+        entry = ComplexEntry {
+            owner: owner_addr,
+            amounts: amounts,
+            flags: flags,
+            nonce: nonce_val,
+            status: Status.Active
+        };
+    }
+
+    pub fn get_entry_amount(index: u256) -> u256 {
+        let e: ComplexEntry = entry;
+        let a: [u256; 4] = e.amounts;
+        return a[index];
+    }
+
+    pub fn set_entry_amount(index: u256, value: u256) {
+        let e: ComplexEntry = entry;
+        let a: [u256; 4] = e.amounts;
+        a[index] = value;
+        entry = ComplexEntry {
+            owner: e.owner,
+            amounts: a,
+            flags: e.flags,
+            nonce: e.nonce,
+            status: e.status
+        };
+    }
+
+    // --- Map operations ---
+
+    pub fn map_set(account: address, value: u256) {
+        map_addr_u256[account] = value;
+    }
+
+    pub fn map_get(account: address) -> u256 {
+        return map_addr_u256[account];
+    }
+
+    pub fn map_set_record(key: u256, id: u64, value: u256) {
+        map_u256_record[key] = Record { id: id, value: value, active: true };
+    }
+
+    pub fn map_get_record_value(key: u256) -> u256 {
+        let r: Record = map_u256_record[key];
+        return r.value;
+    }
+
+    pub fn map_set_entry(account: address, nonce_val: u64) {
+        let amounts: [u256; 4] = [0, 0, 0, 0];
+        let flags: [bool; 3] = [false, false, false];
+        let e: ComplexEntry = ComplexEntry {
+            owner: account,
+            amounts: amounts,
+            flags: flags,
+            nonce: nonce_val,
+            status: Status.Inactive
+        };
+        map_addr_entry[account] = e;
+    }
+
+    pub fn nested_map_set(account: address, key: u256, value: u256) {
+        nested_map[account][key] = value;
+    }
+
+    pub fn nested_map_get(account: address, key: u256) -> u256 {
+        return nested_map[account][key];
+    }
+
+    // --- Cross-type operations ---
+
+    pub fn cross_type_workflow(account: address, amount: u256, slot: u8) {
+        // Widen u8 to u256 for indexing
+        let idx: u256 = slot;
+
+        // Store in map
+        map_addr_u256[account] = amount;
+        map_addr_bool[account] = true;
+
+        // Store in array
+        arr_u256[idx] = amount;
+
+        // Store in struct and map
+        let r: Record = Record { id: 1, value: amount, active: true };
+        record = r;
+        map_u256_record[idx] = r;
+
+        // Update nested map
+        nested_map[account][idx] = amount;
+    }
+
+    pub fn aggregate_check(account: address, key: u256) -> u256 {
+        let bal: u256 = map_addr_u256[account];
+        let r: Record = map_u256_record[key];
+        let arr_val: u256 = arr_u256[0];
+        let nested_val: u256 = nested_map[account][key];
+        let total: u256 = bal + r.value + arr_val + nested_val;
+        return total;
+    }
+}

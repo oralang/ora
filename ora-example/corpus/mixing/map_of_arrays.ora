@@ -1,0 +1,27 @@
+// Level 2: Compound + scalar mixing — map<address, [u256; 4]>
+// Tests map with fixed-size array values.
+contract MapOfArrays {
+    storage var slots: map<address, [u256; 4]>;
+
+    pub fn set_slot(account: address, index: u256, val: u256) {
+        let arr: [u256; 4] = slots[account];
+        arr[index] = val;
+        slots[account] = arr;
+    }
+
+    pub fn get_slot(account: address, index: u256) -> u256 {
+        let arr: [u256; 4] = slots[account];
+        return arr[index];
+    }
+
+    pub fn set_all(account: address, a: u256, b: u256, c: u256, d: u256) {
+        let arr: [u256; 4] = [a, b, c, d];
+        slots[account] = arr;
+    }
+
+    pub fn sum_slots(account: address) -> u256 {
+        let arr: [u256; 4] = slots[account];
+        let total: u256 = arr[0] + arr[1] + arr[2] + arr[3];
+        return total;
+    }
+}

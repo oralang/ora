@@ -1,0 +1,69 @@
+// ==========================================
+// WHILE NESTED — nested while loops
+// ==========================================
+
+contract WhileNested {
+    // Simple nested while
+    pub fn test_nested_basic() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 5) {
+            var j: u256 = 0;
+            while (j < 5) {
+                total += 1;
+                j += 1;
+            }
+            i += 1;
+        }
+        return total; // 25
+    }
+
+    // Triple nesting
+    pub fn test_triple_nested() -> u256 {
+        var count: u256 = 0;
+        var i: u256 = 0;
+        while (i < 3) {
+            var j: u256 = 0;
+            while (j < 3) {
+                var k: u256 = 0;
+                while (k < 3) {
+                    count += 1;
+                    k += 1;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        return count; // 27
+    }
+
+    // Nested with outer-dependent inner bound
+    pub fn test_dependent_bound() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 1;
+        while (i <= 5) {
+            var j: u256 = 0;
+            while (j < i) {
+                total += 1;
+                j += 1;
+            }
+            i += 1;
+        }
+        return total; // 1+2+3+4+5 = 15
+    }
+
+    // Inner loop modifying outer variable
+    pub fn test_inner_modifies_outer() -> u256 {
+        var result: u256 = 0;
+        var i: u256 = 0;
+        while (i < 3) {
+            var j: u256 = 0;
+            while (j < 3) {
+                result = result + i + j;
+                j += 1;
+            }
+            i += 1;
+        }
+        return result;
+    }
+}

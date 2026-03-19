@@ -1,0 +1,20 @@
+contract BytesBasic {
+    storage var data: bytes;
+
+    pub fn setData(d: bytes) {
+        data = d;
+    }
+
+    pub fn getData() -> bytes {
+        return data;
+    }
+
+    pub fn passthrough(b: bytes) -> bytes {
+        return b;
+    }
+
+    pub fn localBinding(b: bytes) -> bytes {
+        let local: bytes = b;
+        return local;
+    }
+}

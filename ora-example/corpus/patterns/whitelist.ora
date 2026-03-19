@@ -1,0 +1,29 @@
+// Level 2: Address whitelist
+// Tests: map<address, bool>, add/remove/check pattern
+
+contract Whitelist {
+    storage var owner: address;
+    storage var whitelist: map<address, bool>;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn addToWhitelist(account: address) {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            whitelist[account] = true;
+        }
+    }
+
+    pub fn removeFromWhitelist(account: address) {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            whitelist[account] = false;
+        }
+    }
+
+    pub fn isWhitelisted(account: address) -> bool {
+        return whitelist[account];
+    }
+}

@@ -1,0 +1,121 @@
+// Level 6: ERC20 with comprehensive event logging
+// Tests: log declarations with indexed parameters, emit on every state change
+
+contract TokenWithEvents {
+    storage var totalSupply: u256;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+    storage var paused: bool = false;
+    storage var owner: address;
+
+    log Transfer(indexed from: address, indexed to: address, amount: u256);
+    log Approval(indexed owner: address, indexed spender: address, amount: u256);
+    log Paused(account: address);
+    log Unpaused(account: address);
+    log OwnershipTransferred(indexed previousOwner: address, indexed newOwner: address);
+
+    pub fn init(initialSupply: u256) {
+        let deployer: NonZeroAddress = std.msg.sender();
+        owner = deployer;
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
+        log OwnershipTransferred(std.constants.ZERO_ADDRESS, deployer);
+    }
+
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(to: NonZeroAddress, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        if (paused) {
+            return false;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[sender] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: NonZeroAddress, amount: u256) -> bool {
+        if (paused) {
+            return false;
+        }
+
+        let caller: NonZeroAddress = std.msg.sender();
+        allowances[caller][spender] = amount;
+        log Approval(caller, spender, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: address, to: NonZeroAddress, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        if (paused) {
+            return false;
+        }
+
+        let spender: NonZeroAddress = std.msg.sender();
+
+        let currentAllowance: u256 = allowances[from][spender];
+        if (currentAllowance < amount) {
+            return false;
+        }
+
+        let senderBalance: u256 = balances[from];
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        allowances[from][spender] = currentAllowance - amount;
+        balances[from] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn allowance(ownerAddr: address, spender: address) -> u256 {
+        return allowances[ownerAddr][spender];
+    }
+
+    pub fn pause() {
+        let caller: address = std.msg.sender();
+        if (caller == owner && !paused) {
+            paused = true;
+            log Paused(caller);
+        }
+    }
+
+    pub fn unpause() {
+        let caller: address = std.msg.sender();
+        if (caller == owner && paused) {
+            paused = false;
+            log Unpaused(caller);
+        }
+    }
+
+    pub fn transferOwnership(newOwner: NonZeroAddress) {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            let previousOwner: address = owner;
+            owner = newOwner;
+            log OwnershipTransferred(previousOwner, newOwner);
+        }
+    }
+}

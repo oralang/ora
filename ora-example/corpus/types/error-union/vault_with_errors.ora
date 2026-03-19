@@ -1,0 +1,107 @@
+// Vault contract using errors for all failure paths.
+// Tests: realistic contract with multiple error types covering
+// insufficient balance, unauthorized access, zero amount, and reentrancy guard.
+
+error Unauthorized;
+error InsufficientBalance(required: u256, available: u256);
+error ZeroAmount;
+error ReentrancyGuard;
+
+contract VaultWithErrors {
+    storage var owner: address;
+    storage var balances: map<address, u256>;
+    storage var total_deposited: u256 = 0;
+    storage var locked: bool = false;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    fn require_not_locked() -> !void | ReentrancyGuard {
+        if (locked) {
+            return error ReentrancyGuard;
+        }
+    }
+
+    fn require_owner() -> !void | Unauthorized {
+        if (std.msg.sender() != owner) {
+            return error Unauthorized;
+        }
+    }
+
+    pub fn deposit(amount: u256) -> !u256 | ZeroAmount | ReentrancyGuard {
+        try require_not_locked();
+        if (amount == 0) {
+            return error ZeroAmount;
+        }
+
+        locked = true;
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        total_deposited += amount;
+        locked = false;
+
+        return balances[sender];
+    }
+
+    pub fn withdraw(amount: u256) -> !u256 | ZeroAmount | InsufficientBalance | ReentrancyGuard {
+        try require_not_locked();
+        if (amount == 0) {
+            return error ZeroAmount;
+        }
+
+        locked = true;
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (amount > current) {
+            locked = false;
+            return error InsufficientBalance(amount, current);
+        }
+
+        balances[sender] = current - amount;
+        total_deposited -= amount;
+        locked = false;
+
+        return balances[sender];
+    }
+
+    pub fn emergency_withdraw_all() -> !u256 | Unauthorized | ReentrancyGuard {
+        try require_owner();
+        try require_not_locked();
+
+        locked = true;
+        let sender: address = std.msg.sender();
+        let amount: u256 = balances[sender];
+        balances[sender] = 0;
+        total_deposited -= amount;
+        locked = false;
+
+        return amount;
+    }
+
+    pub fn balance_of(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn get_total_deposited() -> u256 {
+        return total_deposited;
+    }
+
+    pub fn safe_deposit(amount: u256) -> u256 {
+        try {
+            let new_balance: u256 = deposit(amount);
+            return new_balance;
+        } catch |e| {
+            return balances[std.msg.sender()];
+        }
+    }
+
+    pub fn safe_withdraw(amount: u256) -> u256 {
+        try {
+            let new_balance: u256 = withdraw(amount);
+            return new_balance;
+        } catch |e| {
+            return balances[std.msg.sender()];
+        }
+    }
+}

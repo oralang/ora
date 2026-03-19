@@ -1,0 +1,156 @@
+// Level 5: Simple AMM pool (x*y=k constant product)
+// Tests: deposit liquidity, swap, price calculation
+
+contract AmmPool {
+    storage var reserveA: u256 = 0;
+    storage var reserveB: u256 = 0;
+    storage var totalShares: u256 = 0;
+    storage var shares: map<address, u256>;
+    storage var feeNumerator: u256 = 3;      // 0.3% fee
+    storage var feeDenominator: u256 = 1000;
+
+    log LiquidityAdded(provider: address, amountA: u256, amountB: u256, sharesMinted: u256);
+    log LiquidityRemoved(provider: address, amountA: u256, amountB: u256, sharesBurned: u256);
+    log Swap(user: address, tokenIn: u256, amountIn: u256, amountOut: u256);
+
+    pub fn addLiquidity(amountA: u256, amountB: u256) -> u256
+        requires(amountA > 0)
+        requires(amountB > 0)
+        requires(reserveA <= std.constants.U256_MAX - amountA)
+        requires(reserveB <= std.constants.U256_MAX - amountB)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        var sharesToMint: u256 = 0;
+
+        if (totalShares == 0) {
+            // First deposit: shares = sqrt approximation (amountA for simplicity)
+            sharesToMint = amountA;
+        } else {
+            // Proportional shares: min(amountA/reserveA, amountB/reserveB) * totalShares
+            let sharesByA: u256 = (amountA * totalShares) / reserveA;
+            let sharesByB: u256 = (amountB * totalShares) / reserveB;
+            if (sharesByA < sharesByB) {
+                sharesToMint = sharesByA;
+            } else {
+                sharesToMint = sharesByB;
+            }
+        }
+
+        if (sharesToMint == 0) {
+            return 0;
+        }
+
+        reserveA += amountA;
+        reserveB += amountB;
+        shares[sender] += sharesToMint;
+        totalShares += sharesToMint;
+
+        log LiquidityAdded(sender, amountA, amountB, sharesToMint);
+        return sharesToMint;
+    }
+
+    pub fn removeLiquidity(shareAmount: u256) -> bool
+        requires(shareAmount > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let userShares: u256 = shares[sender];
+
+        if (userShares < shareAmount) {
+            return false;
+        }
+
+        if (totalShares == 0) {
+            return false;
+        }
+
+        let amountA: u256 = (shareAmount * reserveA) / totalShares;
+        let amountB: u256 = (shareAmount * reserveB) / totalShares;
+
+        shares[sender] = userShares - shareAmount;
+        totalShares -= shareAmount;
+        reserveA -= amountA;
+        reserveB -= amountB;
+
+        log LiquidityRemoved(sender, amountA, amountB, shareAmount);
+        return true;
+    }
+
+    // swapAForB: swap token A for token B using constant product formula
+    pub fn swapAForB(amountIn: u256) -> u256
+        requires(amountIn > 0)
+        requires(reserveA > 0)
+        requires(reserveB > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+
+        // Apply fee: amountInWithFee = amountIn * (1000 - 3) / 1000
+        let amountInWithFee: u256 = amountIn * (feeDenominator - feeNumerator);
+        let numerator: u256 = amountInWithFee * reserveB;
+        let denominator: u256 = (reserveA * feeDenominator) + amountInWithFee;
+
+        if (denominator == 0) {
+            return 0;
+        }
+
+        let amountOut: u256 = numerator / denominator;
+
+        if (amountOut == 0) {
+            return 0;
+        }
+
+        if (amountOut >= reserveB) {
+            return 0;
+        }
+
+        reserveA += amountIn;
+        reserveB -= amountOut;
+
+        log Swap(sender, 0, amountIn, amountOut);
+        return amountOut;
+    }
+
+    // swapBForA: swap token B for token A
+    pub fn swapBForA(amountIn: u256) -> u256
+        requires(amountIn > 0)
+        requires(reserveA > 0)
+        requires(reserveB > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+
+        let amountInWithFee: u256 = amountIn * (feeDenominator - feeNumerator);
+        let numerator: u256 = amountInWithFee * reserveA;
+        let denominator: u256 = (reserveB * feeDenominator) + amountInWithFee;
+
+        if (denominator == 0) {
+            return 0;
+        }
+
+        let amountOut: u256 = numerator / denominator;
+
+        if (amountOut == 0) {
+            return 0;
+        }
+
+        if (amountOut >= reserveA) {
+            return 0;
+        }
+
+        reserveB += amountIn;
+        reserveA -= amountOut;
+
+        log Swap(sender, 1, amountIn, amountOut);
+        return amountOut;
+    }
+
+    pub fn getReserves() -> u256 {
+        return reserveA;
+    }
+
+    pub fn getReserveB() -> u256 {
+        return reserveB;
+    }
+
+    pub fn getShares(account: address) -> u256 {
+        return shares[account];
+    }
+}

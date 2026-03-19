@@ -1,0 +1,64 @@
+// ==========================================
+// WHILE CONTINUE — while with continue
+// ==========================================
+
+contract WhileContinue {
+    // Skip even numbers
+    pub fn test_skip_evens() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            i += 1;
+            if (i % 2 == 0) {
+                continue;
+            }
+            sum += i; // only odd numbers
+        }
+        return sum;
+    }
+
+    // Skip specific value
+    pub fn test_skip_value() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            i += 1;
+            if (i == 5) {
+                continue;
+            }
+            sum += i;
+        }
+        return sum; // 1+2+3+4+6+7+8+9+10 = 50
+    }
+
+    // Continue with multiple conditions
+    pub fn test_continue_multi_condition() -> u256 {
+        var count: u256 = 0;
+        var i: u256 = 0;
+        while (i < 20) {
+            i += 1;
+            if (i % 2 == 0) {
+                continue;
+            }
+            if (i % 3 == 0) {
+                continue;
+            }
+            count += 1; // neither divisible by 2 nor 3
+        }
+        return count;
+    }
+
+    // Continue does not skip increment (careful pattern)
+    pub fn test_continue_with_pre_increment() -> u256 {
+        var result: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            i += 1; // increment before continue to avoid infinite loop
+            if (i < 5) {
+                continue;
+            }
+            result += i;
+        }
+        return result; // 5+6+7+8+9+10 = 45
+    }
+}

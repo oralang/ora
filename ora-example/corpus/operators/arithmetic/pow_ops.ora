@@ -1,0 +1,26 @@
+contract PowOps {
+    pub fn pow_u256(base: u256, exp: u256) -> u256 {
+        let result: u256 = base ** exp;
+        return result;
+    }
+
+    pub fn pow_u128(base: u128, exp: u128) -> u128 {
+        let result: u128 = base ** exp;
+        return result;
+    }
+
+    pub fn pow_u64(base: u64, exp: u64) -> u64 {
+        let result: u64 = base ** exp;
+        return result;
+    }
+
+    pub fn pow_square_u256(x: u256) -> u256 {
+        let result: u256 = x ** 2;
+        return result;
+    }
+
+    pub fn pow_cube_u256(x: u256) -> u256 {
+        let result: u256 = x ** 3;
+        return result;
+    }
+}

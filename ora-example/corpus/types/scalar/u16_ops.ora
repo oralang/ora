@@ -1,0 +1,62 @@
+contract U16Ops {
+    storage var a: u16;
+    storage var b: u16;
+
+    pub fn arithmetic(x: u16, y: u16) -> u16 {
+        let add: u16 = x + y;
+        let sub: u16 = x - y;
+        let mul: u16 = x * y;
+        let div: u16 = x / y;
+        let mod_: u16 = x % y;
+        let compound: u16 = (x + y) * x;
+        return add;
+    }
+
+    pub fn wrapping(x: u16, y: u16) -> u16 {
+        let add: u16 = x +% y;
+        let sub: u16 = x -% y;
+        let mul: u16 = x *% y;
+        return add;
+    }
+
+    pub fn comparison(x: u16, y: u16) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        let lt: bool = x < y;
+        let le: bool = x <= y;
+        let gt: bool = x > y;
+        let ge: bool = x >= y;
+        return eq;
+    }
+
+    pub fn bitwise(x: u16, y: u16) -> u16 {
+        let and_: u16 = x & y;
+        let or_: u16 = x | y;
+        let xor_: u16 = x ^ y;
+        let shl: u16 = x << y;
+        let shr: u16 = x >> y;
+        let not_: u16 = ~x;
+        return and_;
+    }
+
+    pub fn assignment() {
+        a = 1;
+        a += 1;
+        a -= 1;
+        a *= 2;
+        a /= 2;
+        a %= 3;
+        a &= 0xFFFF;
+        a |= 0x01;
+        a ^= 0x0F;
+        a <<= 1;
+        a >>= 1;
+    }
+
+    pub fn storage_ops() -> u16 {
+        a = 1000;
+        b = a;
+        let val: u16 = a + b;
+        return val;
+    }
+}

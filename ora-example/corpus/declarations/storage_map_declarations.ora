@@ -1,0 +1,101 @@
+// ==========================================
+// STORAGE MAP DECLARATIONS — maps with various key/value types
+// ==========================================
+
+contract StorageMapDeclarations {
+    // Basic maps with different key/value combos
+    storage var balances: map<address, u256>;
+    storage var approved: map<address, bool>;
+    storage var ids: map<u256, address>;
+    storage var flags: map<u256, bool>;
+    storage var scores: map<address, u64>;
+
+    // Nested map: allowances pattern
+    storage var allowances: map<address, map<address, u256>>;
+
+    // Nested map: permissions
+    storage var permissions: map<address, map<u256, bool>>;
+
+    // address -> u256 operations
+    pub fn set_balance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn add_balance(account: address, amount: u256) {
+        balances[account] += amount;
+    }
+
+    // address -> bool operations
+    pub fn set_approved(account: address, status: bool) {
+        approved[account] = status;
+    }
+
+    pub fn is_approved(account: address) -> bool {
+        return approved[account];
+    }
+
+    // u256 -> address operations
+    pub fn set_owner(tokenId: u256, owner: address) {
+        ids[tokenId] = owner;
+    }
+
+    pub fn get_owner(tokenId: u256) -> address {
+        return ids[tokenId];
+    }
+
+    // u256 -> bool operations
+    pub fn set_flag(key: u256, value: bool) {
+        flags[key] = value;
+    }
+
+    pub fn get_flag(key: u256) -> bool {
+        return flags[key];
+    }
+
+    // Nested map operations: allowance pattern
+    pub fn approve(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] = amount;
+    }
+
+    pub fn get_allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+
+    pub fn increase_allowance(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] += amount;
+    }
+
+    pub fn decrease_allowance(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] -= amount;
+    }
+
+    // Nested map operations: permission pattern
+    pub fn grant_permission(account: address, permId: u256) {
+        permissions[account][permId] = true;
+    }
+
+    pub fn revoke_permission(account: address, permId: u256) {
+        permissions[account][permId] = false;
+    }
+
+    pub fn has_permission(account: address, permId: u256) -> bool {
+        return permissions[account][permId];
+    }
+
+    // Transfer using multiple maps
+    pub fn transfer(from: address, to: address, amount: u256) {
+        balances[from] -= amount;
+        balances[to] += amount;
+    }
+
+    // Transfer from with allowance
+    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256) {
+        allowances[owner][spender] -= amount;
+        balances[owner] -= amount;
+        balances[to] += amount;
+    }
+}

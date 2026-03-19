@@ -1,0 +1,33 @@
+// Level 1: Simple mixing — address keys with u256 values
+// Classic balance map pattern seen in every token contract.
+contract AddressU256 {
+    storage var balances: map<address, u256>;
+    storage var total_supply: u256;
+
+    pub fn set_balance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(from: address, to: address, amount: u256) {
+        let from_bal: u256 = balances[from];
+        let to_bal: u256 = balances[to];
+        balances[from] = from_bal - amount;
+        balances[to] = to_bal + amount;
+    }
+
+    pub fn mint(account: address, amount: u256) {
+        let bal: u256 = balances[account];
+        balances[account] = bal + amount;
+        total_supply = total_supply + amount;
+    }
+
+    pub fn burn(account: address, amount: u256) {
+        let bal: u256 = balances[account];
+        balances[account] = bal - amount;
+        total_supply = total_supply - amount;
+    }
+}

@@ -1,0 +1,45 @@
+// Error chain: function A calls B calls C, errors propagate through the chain.
+// Tests: multi-level error propagation using try.
+
+error InputTooLarge;
+error ComputationFailed;
+error ResultOutOfRange;
+
+contract ErrorChain {
+    // Level C: lowest-level validation
+    pub fn validate_input(x: u256) -> !u256 | InputTooLarge {
+        if (x > 1000) {
+            return error InputTooLarge;
+        }
+        return x;
+    }
+
+    // Level B: intermediate computation, calls C
+    pub fn compute(x: u256) -> !u256 | InputTooLarge | ComputationFailed {
+        let valid: u256 = try validate_input(x);
+        let result: u256 = valid * valid;
+        if (result == 0) {
+            return error ComputationFailed;
+        }
+        return result;
+    }
+
+    // Level A: top-level, calls B which calls C
+    pub fn process(x: u256) -> !u256 | InputTooLarge | ComputationFailed | ResultOutOfRange {
+        let computed: u256 = try compute(x);
+        if (computed > 500000) {
+            return error ResultOutOfRange;
+        }
+        return computed;
+    }
+
+    // Entry point: catches everything at the top
+    pub fn safe_process(x: u256) -> u256 {
+        try {
+            let result: u256 = process(x);
+            return result;
+        } catch |e| {
+            return 0;
+        }
+    }
+}

@@ -1,0 +1,62 @@
+// ==========================================
+// SWITCH ELSE — switch with else (default) arm
+// ==========================================
+
+contract SwitchElse {
+    // Simple switch with else
+    pub fn test_basic_else(x: u256) -> u256 {
+        switch (x) {
+            0 => { return 100; }
+            1 => { return 200; }
+            else => { return 0; }
+        }
+    }
+
+    // Else catches everything not matched
+    pub fn test_else_catch_all(x: u256) -> u256 {
+        switch (x) {
+            1 => { return 10; }
+            2 => { return 20; }
+            3 => { return 30; }
+            else => {
+                // Everything else gets default processing
+                return x * 100;
+            }
+        }
+    }
+
+    // Else with complex body
+    pub fn test_else_complex_body(code: u256) -> u256 {
+        switch (code) {
+            200 => { return 1; } // OK
+            404 => { return 2; } // Not found
+            500 => { return 3; } // Server error
+            else => {
+                var category: u256 = code / 100;
+                if (category == 2) {
+                    return 10;
+                } else if (category == 4) {
+                    return 20;
+                } else {
+                    return 30;
+                }
+            }
+        }
+    }
+
+    // Else as expression
+    pub fn test_else_expression(x: u256) -> u256 {
+        var result: u256 = switch (x) {
+            0 => 999,
+            else => x
+        };
+        return result;
+    }
+
+    // Only else arm (matches everything)
+    pub fn test_only_else(x: u256) -> u256 {
+        switch (x) {
+            else => { return 42; }
+        }
+    }
+}

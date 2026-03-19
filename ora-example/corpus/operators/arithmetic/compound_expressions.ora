@@ -1,0 +1,34 @@
+contract CompoundExpressions {
+    pub fn chain_add_mul_sub_div(a: u256, b: u256, c: u256, d: u256, e: u256) -> u256 {
+        let result: u256 = (a + b) * c - d / e;
+        return result;
+    }
+
+    pub fn nested_parens(a: u256, b: u256, c: u256) -> u256 {
+        let result: u256 = ((a + b) * (c - a)) / (b + c);
+        return result;
+    }
+
+    pub fn left_associative(a: u256, b: u256, c: u256, d: u256) -> u256 {
+        let result: u256 = a + b + c + d;
+        return result;
+    }
+
+    pub fn mixed_precedence(a: u256, b: u256, c: u256, d: u256) -> u256 {
+        let result: u256 = a + b * c - d;
+        return result;
+    }
+
+    pub fn mod_in_chain(a: u256, b: u256, c: u256) -> u256 {
+        let result: u256 = (a * b + c) % b;
+        return result;
+    }
+
+    pub fn multi_step(a: u256, b: u256, c: u256) -> u256 {
+        let x: u256 = a + b;
+        let y: u256 = x * c;
+        let z: u256 = y - a;
+        let result: u256 = z / b;
+        return result;
+    }
+}

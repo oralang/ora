@@ -1,0 +1,97 @@
+bitfield PackedConfig : u256 {
+    enabled: bool;
+    locked: bool;
+    mode: u8;
+    threshold: u16;
+    counter: u8;
+    priority: u8;
+}
+
+bitfield AccessControl : u256 {
+    is_admin: bool;
+    is_minter: bool;
+    is_pauser: bool;
+    role_id: u8;
+    permissions: u16;
+}
+
+contract BitfieldComplex {
+    storage var config: PackedConfig;
+    storage var access: AccessControl;
+    storage var user_access: map<address, AccessControl>;
+
+    pub fn configure(m: u8, t: u16, p: u8) {
+        let c: PackedConfig = config;
+        c.enabled = true;
+        c.locked = false;
+        c.mode = m;
+        c.threshold = t;
+        c.counter = 0;
+        c.priority = p;
+        config = c;
+    }
+
+    pub fn increment_counter() {
+        let c: PackedConfig = config;
+        c.counter = c.counter + 1;
+        config = c;
+    }
+
+    pub fn lock() {
+        let c: PackedConfig = config;
+        c.locked = true;
+        config = c;
+    }
+
+    pub fn is_locked() -> bool {
+        let c: PackedConfig = config;
+        return c.locked;
+    }
+
+    pub fn get_mode() -> u8 {
+        let c: PackedConfig = config;
+        return c.mode;
+    }
+
+    pub fn get_threshold() -> u16 {
+        let c: PackedConfig = config;
+        return c.threshold;
+    }
+
+    pub fn grant_admin(user: address) {
+        let a: AccessControl = user_access[user];
+        a.is_admin = true;
+        a.role_id = 1;
+        user_access[user] = a;
+    }
+
+    pub fn grant_minter(user: address) {
+        let a: AccessControl = user_access[user];
+        a.is_minter = true;
+        user_access[user] = a;
+    }
+
+    pub fn set_permissions(user: address, perms: u16) {
+        let a: AccessControl = user_access[user];
+        a.permissions = perms;
+        user_access[user] = a;
+    }
+
+    pub fn check_admin(user: address) -> bool {
+        let a: AccessControl = user_access[user];
+        return a.is_admin;
+    }
+
+    pub fn get_role(user: address) -> u8 {
+        let a: AccessControl = user_access[user];
+        return a.role_id;
+    }
+
+    pub fn multi_field_read() -> u8 {
+        let c: PackedConfig = config;
+        let mode: u8 = c.mode;
+        let counter: u8 = c.counter;
+        let priority: u8 = c.priority;
+        return mode + counter + priority;
+    }
+}

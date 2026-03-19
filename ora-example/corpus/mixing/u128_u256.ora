@@ -1,0 +1,33 @@
+// Level 1: Simple mixing — u128 and u256 operations
+// Tests widening between two large integer types.
+contract U128U256 {
+    storage var balance128: u128;
+    storage var balance256: u256;
+
+    pub fn widen_u128(x: u128) -> u256 {
+        let w: u256 = x;
+        return w;
+    }
+
+    pub fn separate_arithmetic(a: u128, b: u128, c: u256, d: u256) -> u256 {
+        let sum128: u128 = a + b;
+        let sum256: u256 = c + d;
+        let widened: u256 = sum128;
+        let total: u256 = widened + sum256;
+        return total;
+    }
+
+    pub fn store_and_widen(x: u128) -> u256 {
+        balance128 = x;
+        let w: u256 = balance128;
+        balance256 = w;
+        return balance256;
+    }
+
+    pub fn mul_widened(a: u128, b: u128) -> u256 {
+        let wa: u256 = a;
+        let wb: u256 = b;
+        let product: u256 = wa * wb;
+        return product;
+    }
+}

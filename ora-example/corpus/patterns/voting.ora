@@ -1,0 +1,48 @@
+// Level 2: Simple voting contract
+// Tests: map<address, bool> for voted tracking, u256 vote count
+
+contract Voting {
+    storage var hasVoted: map<address, bool>;
+    storage var yesVotes: u256 = 0;
+    storage var noVotes: u256 = 0;
+    storage var votingOpen: bool = true;
+    storage var owner: address;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn vote(inFavor: bool)
+        requires(yesVotes < std.constants.U256_MAX)
+        requires(noVotes < std.constants.U256_MAX)
+    {
+        let sender: address = std.msg.sender();
+        if (votingOpen && !hasVoted[sender]) {
+            hasVoted[sender] = true;
+            if (inFavor) {
+                yesVotes += 1;
+            } else {
+                noVotes += 1;
+            }
+        }
+    }
+
+    pub fn closeVoting() {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            votingOpen = false;
+        }
+    }
+
+    pub fn getYesVotes() -> u256 {
+        return yesVotes;
+    }
+
+    pub fn getNoVotes() -> u256 {
+        return noVotes;
+    }
+
+    pub fn hasAccountVoted(account: address) -> bool {
+        return hasVoted[account];
+    }
+}

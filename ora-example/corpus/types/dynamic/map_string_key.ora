@@ -1,0 +1,15 @@
+// Test: string as map key.
+// Dynamic types as map keys require hashing for storage slot derivation.
+// This may produce a compile error if string keys are not supported.
+
+contract MapStringKey {
+    storage var values: map<string, u256>;
+
+    pub fn set(key: string, val: u256) {
+        values[key] = val;
+    }
+
+    pub fn get(key: string) -> u256 {
+        return values[key];
+    }
+}

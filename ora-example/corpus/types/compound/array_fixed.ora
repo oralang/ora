@@ -1,0 +1,23 @@
+contract ArrayFixed {
+    storage var data: [u256; 4];
+
+    pub fn create() -> [u256; 4] {
+        let arr: [u256; 4] = [1, 2, 3, 4];
+        return arr;
+    }
+
+    pub fn access(arr: [u256; 4]) -> u256 {
+        return arr[0];
+    }
+
+    pub fn modify() {
+        data[0] = 42;
+        data[1] = data[0] + 1;
+    }
+
+    pub fn nested() -> [[u256; 2]; 2] {
+        let inner1: [u256; 2] = [1, 2];
+        let inner2: [u256; 2] = [3, 4];
+        return [inner1, inner2];
+    }
+}

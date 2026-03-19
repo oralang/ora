@@ -1,0 +1,26 @@
+// MinValue<u8, 1> — refinement on smaller width type
+
+contract MinValueU8 {
+    storage var minByte: MinValue<u8, 1>;
+
+    pub fn setMin(val: MinValue<u8, 1>) {
+        minByte = val;
+    }
+
+    pub fn getMin() -> MinValue<u8, 1> {
+        return minByte;
+    }
+
+    pub fn add(a: MinValue<u8, 1>, b: MinValue<u8, 1>) -> u8 {
+        return a + b;
+    }
+
+    pub fn isGreater(a: MinValue<u8, 1>, b: MinValue<u8, 1>) -> bool {
+        return a > b;
+    }
+
+    pub fn passToPlain(val: MinValue<u8, 1>) -> u8 {
+        let plain: u8 = val;
+        return plain;
+    }
+}

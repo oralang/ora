@@ -1,0 +1,41 @@
+// MinValue<u256, 1> — parameter, storage, arithmetic, comparisons
+
+contract MinValueU256 {
+    storage var threshold: MinValue<u256, 1>;
+    storage var counter: u256 = 0;
+
+    pub fn setThreshold(val: MinValue<u256, 1>) {
+        threshold = val;
+    }
+
+    pub fn getThreshold() -> MinValue<u256, 1> {
+        return threshold;
+    }
+
+    pub fn addToCounter(amount: MinValue<u256, 1>) {
+        counter = counter + amount;
+    }
+
+    pub fn subtractFromCounter(amount: MinValue<u256, 1>) {
+        if (counter >= amount) {
+            counter = counter - amount;
+        }
+    }
+
+    pub fn multiply(a: MinValue<u256, 1>, b: MinValue<u256, 1>) -> u256 {
+        return a * b;
+    }
+
+    pub fn compare(a: MinValue<u256, 1>, b: MinValue<u256, 1>) -> bool {
+        let eq: bool = a == b;
+        let lt: bool = a < b;
+        let gt: bool = a > b;
+        let le: bool = a <= b;
+        let ge: bool = a >= b;
+        return lt;
+    }
+
+    pub fn aboveThreshold(val: MinValue<u256, 1>) -> bool {
+        return val >= threshold;
+    }
+}

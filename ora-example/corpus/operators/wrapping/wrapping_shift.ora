@@ -1,0 +1,11 @@
+contract WrappingShift {
+    pub fn wrapping_shl_u256(a: u256, b: u256) -> u256 {
+        let result: u256 = a <<% b;
+        return result;
+    }
+
+    pub fn wrapping_shr_u256(a: u256, b: u256) -> u256 {
+        let result: u256 = a >>% b;
+        return result;
+    }
+}

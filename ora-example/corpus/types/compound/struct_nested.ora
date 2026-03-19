@@ -1,0 +1,63 @@
+struct Coordinate {
+    x: u256;
+    y: u256;
+}
+
+struct Bounds {
+    min: Coordinate;
+    max: Coordinate;
+}
+
+struct Region {
+    id: u256;
+    bounds: Bounds;
+    active: bool;
+}
+
+contract StructNested {
+    storage var area: Bounds;
+    storage var zone: Region;
+
+    pub fn create_bounds() -> u256 {
+        let lo: Coordinate = Coordinate { x: 0, y: 0 };
+        let hi: Coordinate = Coordinate { x: 100, y: 100 };
+        let b: Bounds = Bounds { min: lo, max: hi };
+        return b.max.x - b.min.x;
+    }
+
+    pub fn deep_access() -> u256 {
+        let c: Coordinate = Coordinate { x: 5, y: 10 };
+        let b: Bounds = Bounds {
+            min: Coordinate { x: 0, y: 0 },
+            max: c
+        };
+        let r: Region = Region { id: 1, bounds: b, active: true };
+        return r.bounds.max.x + r.bounds.max.y;
+    }
+
+    pub fn storage_nested_write() {
+        area = Bounds {
+            min: Coordinate { x: 10, y: 20 },
+            max: Coordinate { x: 30, y: 40 }
+        };
+    }
+
+    pub fn storage_nested_read() -> u256 {
+        return area.max.x + area.min.y;
+    }
+
+    pub fn three_deep_write() {
+        zone = Region {
+            id: 42,
+            bounds: Bounds {
+                min: Coordinate { x: 0, y: 0 },
+                max: Coordinate { x: 255, y: 255 }
+            },
+            active: true
+        };
+    }
+
+    pub fn three_deep_read() -> u256 {
+        return zone.bounds.max.x;
+    }
+}

@@ -1,0 +1,62 @@
+contract U64Ops {
+    storage var a: u64;
+    storage var b: u64;
+
+    pub fn arithmetic(x: u64, y: u64) -> u64 {
+        let add: u64 = x + y;
+        let sub: u64 = x - y;
+        let mul: u64 = x * y;
+        let div: u64 = x / y;
+        let mod_: u64 = x % y;
+        let compound: u64 = (x + y) * x;
+        return add;
+    }
+
+    pub fn wrapping(x: u64, y: u64) -> u64 {
+        let add: u64 = x +% y;
+        let sub: u64 = x -% y;
+        let mul: u64 = x *% y;
+        return add;
+    }
+
+    pub fn comparison(x: u64, y: u64) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        let lt: bool = x < y;
+        let le: bool = x <= y;
+        let gt: bool = x > y;
+        let ge: bool = x >= y;
+        return eq;
+    }
+
+    pub fn bitwise(x: u64, y: u64) -> u64 {
+        let and_: u64 = x & y;
+        let or_: u64 = x | y;
+        let xor_: u64 = x ^ y;
+        let shl: u64 = x << y;
+        let shr: u64 = x >> y;
+        let not_: u64 = ~x;
+        return and_;
+    }
+
+    pub fn assignment() {
+        a = 1;
+        a += 1;
+        a -= 1;
+        a *= 2;
+        a /= 2;
+        a %= 3;
+        a &= 0xFF;
+        a |= 0x01;
+        a ^= 0x0F;
+        a <<= 1;
+        a >>= 1;
+    }
+
+    pub fn storage_ops() -> u64 {
+        a = 1000000;
+        b = a;
+        let val: u64 = a + b;
+        return val;
+    }
+}

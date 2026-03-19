@@ -1,0 +1,105 @@
+// Level 4: Complex mixing — token with metadata
+// Struct with string name, u8 decimals, u256 supply, map balances.
+contract TokenWithMetadata {
+    struct TokenInfo {
+        decimals: u8;
+        total_supply: u256;
+        paused: bool;
+    }
+
+    storage var info: TokenInfo;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+    storage var owner: address;
+
+    pub fn initialize(initial_supply: u256, dec: u8, deployer: address) {
+        info = TokenInfo {
+            decimals: dec,
+            total_supply: initial_supply,
+            paused: false
+        };
+        owner = deployer;
+        balances[deployer] = initial_supply;
+    }
+
+    pub fn decimals() -> u8 {
+        let i: TokenInfo = info;
+        return i.decimals;
+    }
+
+    pub fn total_supply() -> u256 {
+        let i: TokenInfo = info;
+        return i.total_supply;
+    }
+
+    pub fn balance_of(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(from: address, to: address, amount: u256) -> bool {
+        let i: TokenInfo = info;
+        if i.paused {
+            return false;
+        }
+        let from_bal: u256 = balances[from];
+        let enough: bool = from_bal >= amount;
+        if enough {
+            balances[from] = from_bal - amount;
+            let to_bal: u256 = balances[to];
+            balances[to] = to_bal + amount;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn approve(owner_addr: address, spender: address, amount: u256) {
+        allowances[owner_addr][spender] = amount;
+    }
+
+    pub fn allowance(owner_addr: address, spender: address) -> u256 {
+        return allowances[owner_addr][spender];
+    }
+
+    pub fn transfer_from(spender: address, from: address, to: address, amount: u256) -> bool {
+        let allowed: u256 = allowances[from][spender];
+        let enough_allowance: bool = allowed >= amount;
+        if enough_allowance {
+            let success: bool = transfer(from, to, amount);
+            if success {
+                allowances[from][spender] = allowed - amount;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn mint(to: address, amount: u256) {
+        let i: TokenInfo = info;
+        let new_supply: u256 = i.total_supply + amount;
+        info = TokenInfo {
+            decimals: i.decimals,
+            total_supply: new_supply,
+            paused: i.paused
+        };
+        let bal: u256 = balances[to];
+        balances[to] = bal + amount;
+    }
+
+    pub fn pause() {
+        let i: TokenInfo = info;
+        info = TokenInfo {
+            decimals: i.decimals,
+            total_supply: i.total_supply,
+            paused: true
+        };
+    }
+
+    pub fn unpause() {
+        let i: TokenInfo = info;
+        info = TokenInfo {
+            decimals: i.decimals,
+            total_supply: i.total_supply,
+            paused: false
+        };
+    }
+}

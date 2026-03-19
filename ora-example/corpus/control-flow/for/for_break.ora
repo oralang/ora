@@ -1,0 +1,70 @@
+// ==========================================
+// FOR BREAK — for with break
+// ==========================================
+
+contract ForBreak {
+    // Break on condition
+    pub fn test_break_on_condition() -> u256 {
+        var last: u256 = 0;
+        for (0..100) |i, _| {
+            if (i >= 10) {
+                break;
+            }
+            last = i;
+        }
+        return last; // 9
+    }
+
+    // Break with accumulator
+    pub fn test_break_accumulate() -> u256 {
+        var sum: u256 = 0;
+        for (1..1000) |i, _| {
+            sum += i;
+            if (sum > 100) {
+                break;
+            }
+        }
+        return sum;
+    }
+
+    // Break from labeled outer loop
+    pub fn test_labeled_break() -> u256 {
+        var count: u256 = 0;
+        outer: for (0..10) |i, _| {
+            for (0..10) |j, _| {
+                count += 1;
+                if (count >= 25) {
+                    break :outer;
+                }
+            }
+        }
+        return count; // 25
+    }
+
+    // Break only inner loop
+    pub fn test_break_inner() -> u256 {
+        var total: u256 = 0;
+        for (0..5) |i, _| {
+            for (0..100) |j, _| {
+                if (j >= 3) {
+                    break;
+                }
+                total += 1;
+            }
+        }
+        return total; // 5 * 3 = 15
+    }
+
+    // Early exit search pattern
+    pub fn test_search_pattern() -> u256 {
+        var found: u256 = 0;
+        var arr: [5]u256 = [10, 20, 42, 50, 60];
+        for (arr) |val, _| {
+            if (val == 42) {
+                found = 1;
+                break;
+            }
+        }
+        return found;
+    }
+}

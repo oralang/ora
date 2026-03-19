@@ -1,0 +1,35 @@
+// Level 1: Simple mixing — address keys with bool values
+// Whitelist / permission pattern.
+contract AddressBool {
+    storage var whitelist: map<address, bool>;
+    storage var admin: address;
+
+    pub fn set_whitelisted(account: address, status: bool) {
+        whitelist[account] = status;
+    }
+
+    pub fn is_whitelisted(account: address) -> bool {
+        return whitelist[account];
+    }
+
+    pub fn add_to_whitelist(account: address) {
+        whitelist[account] = true;
+    }
+
+    pub fn remove_from_whitelist(account: address) {
+        whitelist[account] = false;
+    }
+
+    pub fn check_and_update(account: address) -> bool {
+        let allowed: bool = whitelist[account];
+        if allowed {
+            whitelist[account] = false;
+        }
+        return allowed;
+    }
+
+    pub fn set_admin(new_admin: address) {
+        admin = new_admin;
+        whitelist[new_admin] = true;
+    }
+}

@@ -1,0 +1,41 @@
+contract TupleBasic {
+    storage var result: u256;
+
+    pub fn create() -> u256 {
+        let t: (u256, u256) = (10, 20);
+        return t.0 + t.1;
+    }
+
+    pub fn destructure() -> u256 {
+        let (a, b): (u256, u256) = (3, 7);
+        return a + b;
+    }
+
+    pub fn nested() -> u256 {
+        let t: (u256, (u256, u256)) = (1, (2, 3));
+        return t.0;
+    }
+
+    pub fn runtime_values(x: u256, y: u256) -> u256 {
+        let t: (u256, u256) = (x, y);
+        if (t.0 > t.1) {
+            return t.0;
+        }
+        return t.1;
+    }
+
+    pub fn three_elements() -> u256 {
+        let t: (u256, u256, u256) = (10, 20, 30);
+        return t.0 + t.1 + t.2;
+    }
+
+    pub fn store_from_tuple() {
+        let (a, b): (u256, u256) = (42, 58);
+        result = a + b;
+    }
+
+    pub fn swap(x: u256, y: u256) -> u256 {
+        let (a, b): (u256, u256) = (y, x);
+        return a;
+    }
+}

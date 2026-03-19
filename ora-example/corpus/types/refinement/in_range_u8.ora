@@ -1,0 +1,30 @@
+// InRange<u8, 0, 100> — range on small width
+
+contract InRangeU8 {
+    storage var score: InRange<u8, 0, 100>;
+
+    pub fn setScore(val: InRange<u8, 0, 100>) {
+        score = val;
+    }
+
+    pub fn getScore() -> InRange<u8, 0, 100> {
+        return score;
+    }
+
+    pub fn isPassing(val: InRange<u8, 0, 100>) -> bool {
+        return val >= 60;
+    }
+
+    pub fn add(a: InRange<u8, 0, 100>, b: InRange<u8, 0, 100>) -> u8 {
+        return a + b;
+    }
+
+    pub fn toPlain(val: InRange<u8, 0, 100>) -> u8 {
+        let plain: u8 = val;
+        return plain;
+    }
+
+    pub fn compare(a: InRange<u8, 0, 100>, b: InRange<u8, 0, 100>) -> bool {
+        return a > b;
+    }
+}

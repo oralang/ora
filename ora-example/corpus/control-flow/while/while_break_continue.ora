@@ -1,0 +1,80 @@
+// ==========================================
+// WHILE BREAK + CONTINUE — both in same loop
+// ==========================================
+
+contract WhileBreakContinue {
+    // Skip odds, break at threshold
+    pub fn test_skip_and_stop() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 100) {
+            i += 1;
+            if (i % 2 != 0) {
+                continue; // skip odd numbers
+            }
+            if (sum > 50) {
+                break; // stop accumulating
+            }
+            sum += i;
+        }
+        return sum;
+    }
+
+    // Process only valid items, stop on sentinel
+    pub fn test_filter_and_sentinel() -> u256 {
+        var count: u256 = 0;
+        var i: u256 = 0;
+        while (true) {
+            i += 1;
+            if (i == 50) {
+                break; // sentinel: stop
+            }
+            if (i % 7 != 0) {
+                continue; // skip non-multiples of 7
+            }
+            count += 1;
+        }
+        return count;
+    }
+
+    // Continue in outer, break in inner
+    pub fn test_mixed_nested() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            i += 1;
+            if (i % 2 == 0) {
+                continue; // skip even outer iterations
+            }
+            var j: u256 = 0;
+            while (j < 10) {
+                j += 1;
+                if (j > 3) {
+                    break; // only process first 3 inner
+                }
+                total += 1;
+            }
+        }
+        return total; // 5 odd iterations * 3 = 15
+    }
+
+    // Multiple continues and a single break
+    pub fn test_multi_continue_single_break() -> u256 {
+        var result: u256 = 0;
+        var i: u256 = 0;
+        while (i < 100) {
+            i += 1;
+            if (i % 2 == 0) {
+                continue;
+            }
+            if (i % 5 == 0) {
+                continue;
+            }
+            if (i > 30) {
+                break;
+            }
+            result += i;
+        }
+        return result;
+    }
+}

@@ -1,0 +1,47 @@
+// Catching different error types.
+// Tests: try/catch where the try body can produce multiple distinct errors.
+
+error NotFound;
+error AccessDenied;
+error Expired;
+
+contract TryCatchMultiple {
+    storage var items: map<u256, u256>;
+    storage var owners: map<u256, address>;
+    storage var expiry: map<u256, u256>;
+
+    pub fn get_item(id: u256) -> !u256 | NotFound | AccessDenied | Expired {
+        let value: u256 = items[id];
+        if (value == 0) {
+            return error NotFound;
+        }
+
+        let item_owner: address = owners[id];
+        if (item_owner != std.msg.sender()) {
+            return error AccessDenied;
+        }
+
+        let exp: u256 = expiry[id];
+        if (exp > 0 and exp < std.block.timestamp()) {
+            return error Expired;
+        }
+
+        return value;
+    }
+
+    pub fn safe_get_item(id: u256) -> u256 {
+        try {
+            let value: u256 = get_item(id);
+            return value;
+        } catch |e| {
+            // All errors handled uniformly here
+            return 0;
+        }
+    }
+
+    pub fn store_item(id: u256, value: u256, exp: u256) {
+        items[id] = value;
+        owners[id] = std.msg.sender();
+        expiry[id] = exp;
+    }
+}

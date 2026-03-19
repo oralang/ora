@@ -1,0 +1,41 @@
+// Error union with bool payload.
+// Tests: !bool | Error return type.
+
+error PermissionDenied;
+error AlreadyExists;
+
+contract ErrorUnionBool {
+    storage var owner: address;
+    storage var registered: map<address, bool>;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn register(account: address) -> !bool | PermissionDenied | AlreadyExists {
+        if (std.msg.sender() != owner) {
+            return error PermissionDenied;
+        }
+        if (registered[account]) {
+            return error AlreadyExists;
+        }
+        registered[account] = true;
+        return true;
+    }
+
+    pub fn is_registered(account: address) -> !bool | PermissionDenied {
+        if (std.msg.sender() != owner) {
+            return error PermissionDenied;
+        }
+        return registered[account];
+    }
+
+    pub fn safe_register(account: address) -> bool {
+        try {
+            let result: bool = register(account);
+            return result;
+        } catch |e| {
+            return false;
+        }
+    }
+}

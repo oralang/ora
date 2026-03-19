@@ -1,0 +1,66 @@
+// ==========================================
+// LET ALL TYPES — let bindings for every scalar type
+// ==========================================
+
+contract LetAllTypes {
+    pub fn unsigned_integers() -> u256 {
+        let a: u8 = 255;
+        let b: u16 = 65535;
+        let c: u32 = 1000000;
+        let d: u64 = 1000000000;
+        let e: u128 = 340282366920938463463374607431768211455;
+        let f: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        return f;
+    }
+
+    pub fn signed_integers() -> i256 {
+        let a: i8 = -128;
+        let b: i16 = -32768;
+        let c: i32 = -2147483648;
+        let d: i64 = -1000000000;
+        let e: i128 = 0;
+        let f: i256 = -1;
+        return f;
+    }
+
+    pub fn boolean_type() -> bool {
+        let t: bool = true;
+        let f: bool = false;
+        return t;
+    }
+
+    pub fn address_type() -> address {
+        let addr: address = std.constants.ZERO_ADDRESS;
+        return addr;
+    }
+
+    pub fn string_type() -> string {
+        let s: string = "hello world";
+        return s;
+    }
+
+    pub fn bytes_type() -> bytes {
+        let b: bytes = "raw bytes";
+        return b;
+    }
+
+    pub fn all_together() -> u256 {
+        let v_u8: u8 = 1;
+        let v_u16: u16 = 2;
+        let v_u32: u32 = 3;
+        let v_u64: u64 = 4;
+        let v_u128: u128 = 5;
+        let v_u256: u256 = 6;
+        let v_i8: i8 = -1;
+        let v_i16: i16 = -2;
+        let v_i32: i32 = -3;
+        let v_i64: i64 = -4;
+        let v_i128: i128 = -5;
+        let v_i256: i256 = -6;
+        let v_bool: bool = true;
+        let v_addr: address = std.constants.ZERO_ADDRESS;
+        let v_str: string = "test";
+        let v_bytes: bytes = "data";
+        return v_u256;
+    }
+}

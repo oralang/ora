@@ -1,0 +1,179 @@
+// Contract with 5+ different error types, multiple functions,
+// and cross-function error propagation.
+// Tests: comprehensive error handling across a realistic multi-function contract.
+
+error NotOwner;
+error NotOperator;
+error Paused;
+error InvalidId;
+error AlreadyExists;
+error NotFound;
+error Expired(deadline: u256, current: u256);
+
+struct Item {
+    value: u256;
+    creator: address;
+    deadline: u256;
+}
+
+contract MultiErrorContract {
+    storage var owner: address;
+    storage var operators: map<address, bool>;
+    storage var is_paused: bool = false;
+    storage var items: map<u256, u256>;
+    storage var item_creators: map<u256, address>;
+    storage var item_deadlines: map<u256, u256>;
+    storage var item_count: u256 = 0;
+
+    pub fn init() {
+        owner = std.msg.sender();
+        operators[std.msg.sender()] = true;
+    }
+
+    // --- Access control helpers ---
+
+    fn require_owner() -> !void | NotOwner {
+        if (std.msg.sender() != owner) {
+            return error NotOwner;
+        }
+    }
+
+    fn require_operator() -> !void | NotOperator {
+        if (!operators[std.msg.sender()]) {
+            return error NotOperator;
+        }
+    }
+
+    fn require_not_paused() -> !void | Paused {
+        if (is_paused) {
+            return error Paused;
+        }
+    }
+
+    // --- Admin functions ---
+
+    pub fn set_paused(p: bool) -> !void | NotOwner {
+        try require_owner();
+        is_paused = p;
+    }
+
+    pub fn add_operator(op: address) -> !void | NotOwner {
+        try require_owner();
+        operators[op] = true;
+    }
+
+    pub fn remove_operator(op: address) -> !void | NotOwner {
+        try require_owner();
+        operators[op] = false;
+    }
+
+    // --- Item management ---
+
+    pub fn create_item(id: u256, value: u256, deadline: u256) -> !u256 | NotOperator | Paused | InvalidId | AlreadyExists {
+        try require_operator();
+        try require_not_paused();
+
+        if (id == 0) {
+            return error InvalidId;
+        }
+        if (items[id] != 0) {
+            return error AlreadyExists;
+        }
+
+        items[id] = value;
+        item_creators[id] = std.msg.sender();
+        item_deadlines[id] = deadline;
+        item_count += 1;
+
+        return item_count;
+    }
+
+    pub fn get_item(id: u256) -> !u256 | NotFound | Expired {
+        let value: u256 = items[id];
+        if (value == 0) {
+            return error NotFound;
+        }
+
+        let dl: u256 = item_deadlines[id];
+        let now: u256 = std.block.timestamp();
+        if (dl > 0 and now > dl) {
+            return error Expired(dl, now);
+        }
+
+        return value;
+    }
+
+    pub fn update_item(id: u256, new_value: u256) -> !void | NotOperator | Paused | NotFound | Expired {
+        try require_operator();
+        try require_not_paused();
+
+        // get_item checks NotFound and Expired
+        let _current: u256 = try get_item(id);
+        items[id] = new_value;
+    }
+
+    pub fn delete_item(id: u256) -> !void | NotOperator | Paused | NotFound {
+        try require_operator();
+        try require_not_paused();
+
+        let value: u256 = items[id];
+        if (value == 0) {
+            return error NotFound;
+        }
+
+        items[id] = 0;
+        item_count -= 1;
+    }
+
+    // --- Cross-function propagation ---
+
+    pub fn transfer_item(from_id: u256, to_id: u256) -> !void | NotOperator | Paused | NotFound | Expired | InvalidId | AlreadyExists {
+        try require_operator();
+        try require_not_paused();
+
+        // Read from source (may fail with NotFound or Expired)
+        let value: u256 = try get_item(from_id);
+
+        // Create destination (may fail with InvalidId or AlreadyExists)
+        let deadline: u256 = item_deadlines[from_id];
+        let _count: u256 = try create_item(to_id, value, deadline);
+
+        // Remove source
+        items[from_id] = 0;
+        item_count -= 1;
+    }
+
+    // --- Safe wrappers ---
+
+    pub fn safe_get_item(id: u256) -> u256 {
+        try {
+            let value: u256 = get_item(id);
+            return value;
+        } catch |e| {
+            return 0;
+        }
+    }
+
+    pub fn safe_create_item(id: u256, value: u256, deadline: u256) -> bool {
+        try {
+            let _count: u256 = create_item(id, value, deadline);
+            return true;
+        } catch |e| {
+            return false;
+        }
+    }
+
+    // --- Getters ---
+
+    pub fn get_item_count() -> u256 {
+        return item_count;
+    }
+
+    pub fn is_operator(addr: address) -> bool {
+        return operators[addr];
+    }
+
+    pub fn get_paused() -> bool {
+        return is_paused;
+    }
+}

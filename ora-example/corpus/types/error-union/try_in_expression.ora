@@ -1,0 +1,42 @@
+// Try in expression position.
+// Tests: `let result = try someCall();` — try used as an expression
+// that either yields the payload or propagates the error.
+
+error ParseError;
+error ValidationError;
+
+contract TryInExpression {
+    pub fn parse_amount(raw: u256) -> !u256 | ParseError {
+        if (raw > 1000000) {
+            return error ParseError;
+        }
+        return raw;
+    }
+
+    pub fn validate_amount(amount: u256) -> !u256 | ValidationError {
+        if (amount == 0) {
+            return error ValidationError;
+        }
+        return amount;
+    }
+
+    // try used directly in let binding
+    pub fn process(raw: u256) -> !u256 | ParseError | ValidationError {
+        let parsed: u256 = try parse_amount(raw);
+        let valid: u256 = try validate_amount(parsed);
+        return valid * 2;
+    }
+
+    // try used in arithmetic expression
+    pub fn add_parsed(a: u256, b: u256) -> !u256 | ParseError {
+        let sum: u256 = try parse_amount(a) + try parse_amount(b);
+        return sum;
+    }
+
+    // try result assigned then used
+    pub fn check_and_return(raw: u256) -> !u256 | ParseError {
+        let amount: u256 = try parse_amount(raw);
+        let doubled: u256 = amount * 2;
+        return doubled;
+    }
+}

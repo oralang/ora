@@ -1,0 +1,88 @@
+// ==========================================
+// INIT DEFAULT VALUES — storage vars with default initializers
+// ==========================================
+
+struct Config {
+    threshold: u256;
+    active: bool;
+}
+
+contract InitDefaultValues {
+    // Scalar defaults
+    storage var count: u256 = 0;
+    storage var total: u256 = 1000;
+    storage var flag: bool = false;
+    storage var enabled: bool = true;
+    storage var small: u8 = 42;
+    storage var medium: u64 = 1_000_000;
+    storage var signed_val: i256 = -1;
+
+    // Struct with default
+    storage var config: Config = Config { threshold: 100, active: true };
+
+    // Multiple defaults with interactions
+    storage var max_supply: u256 = 1_000_000;
+    storage var minted: u256 = 0;
+
+    // Read defaults
+    pub fn get_count() -> u256 {
+        return count;
+    }
+
+    pub fn get_flag() -> bool {
+        return flag;
+    }
+
+    pub fn get_enabled() -> bool {
+        return enabled;
+    }
+
+    pub fn get_small() -> u8 {
+        return small;
+    }
+
+    // Verify default was set, then modify
+    pub fn increment_count() -> u256 {
+        count += 1;
+        return count;
+    }
+
+    // Toggle default bool
+    pub fn toggle_flag() {
+        flag = !flag;
+    }
+
+    // Use default in computation
+    pub fn remaining_supply() -> u256 {
+        return max_supply - minted;
+    }
+
+    // Modify struct default
+    pub fn update_threshold(new_threshold: u256) {
+        let c: Config = config;
+        config = Config {
+            threshold: new_threshold,
+            active: c.active,
+        };
+    }
+
+    // Read struct default field
+    pub fn get_threshold() -> u256 {
+        return config.threshold;
+    }
+
+    pub fn is_active() -> bool {
+        return config.active;
+    }
+
+    // Mint using defaults
+    pub fn mint(amount: u256) -> bool {
+        let projected: u256 = minted + amount;
+        if (projected > max_supply) {
+            return false;
+        }
+        minted = projected;
+        total += amount;
+        return true;
+    }
+}

@@ -1,0 +1,91 @@
+// ==========================================
+// INIT FROM EXPRESSION — declarations initialized from complex expressions
+// ==========================================
+
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+contract InitFromExpression {
+    storage var counter: u256 = 0;
+    storage var data: map<address, u256>;
+    storage var point: Point = Point { x: 10, y: 20 };
+    storage var arr: [u256; 4];
+
+    // Arithmetic expressions
+    pub fn arithmetic_init() -> u256 {
+        let a: u256 = 2 + 3;
+        let b: u256 = a * 4;
+        let c: u256 = (a + b) * 2;
+        let d: u256 = c / 3 + a % 2;
+        let e: u256 = a + b + c + d;
+        return e;
+    }
+
+    // Init from function call
+    fn helper(x: u256) -> u256 {
+        return x * 2 + 1;
+    }
+
+    pub fn function_call_init() -> u256 {
+        let result: u256 = helper(21);
+        let chained: u256 = helper(helper(5));
+        return result + chained;
+    }
+
+    // Init from field access
+    pub fn field_access_init() -> u256 {
+        let p: Point = point;
+        let x_val: u256 = p.x;
+        let y_val: u256 = p.y;
+        let sum: u256 = x_val + y_val;
+        return sum;
+    }
+
+    // Init from index access
+    pub fn index_access_init() -> u256 {
+        arr[0] = 100;
+        arr[1] = 200;
+        let first: u256 = arr[0];
+        let second: u256 = arr[1];
+        let total: u256 = first + second;
+        return total;
+    }
+
+    // Init from map access
+    pub fn map_access_init(account: address) -> u256 {
+        data[account] = 500;
+        let bal: u256 = data[account];
+        let doubled: u256 = bal * 2;
+        return doubled;
+    }
+
+    // Init from comparison
+    pub fn comparison_init(x: u256, y: u256) -> bool {
+        let gt: bool = x > y;
+        let eq: bool = x == y;
+        let combined: bool = gt || eq;
+        return combined;
+    }
+
+    // Init from nested expressions
+    pub fn nested_expression_init(a: u256, b: u256) -> u256 {
+        let result: u256 = ((a + b) * (a - b)) / (a + 1);
+        return result;
+    }
+
+    // Init from struct constructor
+    pub fn struct_init() -> u256 {
+        let p: Point = Point { x: 42, y: 58 };
+        let sum: u256 = p.x + p.y;
+        return sum;
+    }
+
+    // Var from complex expression, then mutate
+    pub fn var_from_expression(x: u256) -> u256 {
+        var result: u256 = x * x + x + 1;
+        result += helper(x);
+        return result;
+    }
+}

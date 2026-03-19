@@ -1,0 +1,30 @@
+contract BoolOps {
+    storage var a: bool;
+    storage var b: bool;
+
+    pub fn logical(x: bool, y: bool) -> bool {
+        let and_: bool = x && y;
+        let or_: bool = x || y;
+        let not_: bool = !x;
+        let compound: bool = (x && y) || (!x);
+        return and_;
+    }
+
+    pub fn comparison(x: bool, y: bool) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        return eq;
+    }
+
+    pub fn assignment() {
+        a = true;
+        b = false;
+    }
+
+    pub fn storage_ops() -> bool {
+        a = true;
+        b = a;
+        let val: bool = a && b;
+        return val;
+    }
+}

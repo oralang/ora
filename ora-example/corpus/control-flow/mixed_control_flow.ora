@@ -1,0 +1,125 @@
+// ==========================================
+// MIXED CONTROL FLOW — if inside while inside switch
+// ==========================================
+
+contract MixedControlFlow {
+    // If inside while
+    pub fn test_if_in_while() -> u256 {
+        var evens: u256 = 0;
+        var i: u256 = 0;
+        while (i < 20) {
+            if (i % 2 == 0) {
+                evens += 1;
+            }
+            i += 1;
+        }
+        return evens; // 10
+    }
+
+    // While inside if
+    pub fn test_while_in_if(should_loop: bool) -> u256 {
+        var result: u256 = 0;
+        if (should_loop) {
+            var i: u256 = 0;
+            while (i < 5) {
+                result += i;
+                i += 1;
+            }
+        } else {
+            result = 99;
+        }
+        return result;
+    }
+
+    // Switch inside while
+    pub fn test_switch_in_while() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            switch (i % 3) {
+                0 => { sum += 1; }
+                1 => { sum += 10; }
+                2 => { sum += 100; }
+                else => {}
+            }
+            i += 1;
+        }
+        return sum;
+    }
+
+    // While inside switch
+    pub fn test_while_in_switch(mode: u256) -> u256 {
+        var result: u256 = 0;
+        switch (mode) {
+            0 => {
+                var i: u256 = 0;
+                while (i < 5) {
+                    result += 1;
+                    i += 1;
+                }
+            }
+            1 => {
+                var i: u256 = 0;
+                while (i < 10) {
+                    result += 2;
+                    i += 1;
+                }
+            }
+            else => {
+                result = 42;
+            }
+        }
+        return result;
+    }
+
+    // If inside switch inside while
+    pub fn test_triple_mix() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 15) {
+            switch (i % 4) {
+                0 => {
+                    if (i > 5) {
+                        total += 100;
+                    } else {
+                        total += 1;
+                    }
+                }
+                1 => { total += 10; }
+                2 => {
+                    if (total > 50) {
+                        total += 1000;
+                    }
+                }
+                else => { total += 0; }
+            }
+            i += 1;
+        }
+        return total;
+    }
+
+    // For inside if inside switch
+    pub fn test_for_in_if_in_switch(category: u256) -> u256 {
+        var result: u256 = 0;
+        switch (category) {
+            0 => {
+                if (true) {
+                    for (0..5) |i, _| {
+                        result += i;
+                    }
+                }
+            }
+            1 => {
+                for (0..10) |i, _| {
+                    if (i % 2 == 0) {
+                        result += i;
+                    }
+                }
+            }
+            else => {
+                result = 999;
+            }
+        }
+        return result;
+    }
+}

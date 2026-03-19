@@ -1,0 +1,73 @@
+// Level 4: Complex mixing — map<address, TokenFlags> bitfield pattern
+// Uses a struct to simulate bitfield flags stored per address.
+contract BitfieldInMap {
+    struct TokenFlags {
+        transferable: bool;
+        burnable: bool;
+        mintable: bool;
+        pausable: bool;
+        frozen: bool;
+    }
+
+    storage var flags: map<address, TokenFlags>;
+
+    pub fn set_flags(account: address, t: bool, b: bool, m: bool, p: bool, f: bool) {
+        let tf: TokenFlags = TokenFlags {
+            transferable: t,
+            burnable: b,
+            mintable: m,
+            pausable: p,
+            frozen: f
+        };
+        flags[account] = tf;
+    }
+
+    pub fn is_transferable(account: address) -> bool {
+        let tf: TokenFlags = flags[account];
+        return tf.transferable;
+    }
+
+    pub fn is_frozen(account: address) -> bool {
+        let tf: TokenFlags = flags[account];
+        return tf.frozen;
+    }
+
+    pub fn freeze(account: address) {
+        let tf: TokenFlags = flags[account];
+        flags[account] = TokenFlags {
+            transferable: tf.transferable,
+            burnable: tf.burnable,
+            mintable: tf.mintable,
+            pausable: tf.pausable,
+            frozen: true
+        };
+    }
+
+    pub fn unfreeze(account: address) {
+        let tf: TokenFlags = flags[account];
+        flags[account] = TokenFlags {
+            transferable: tf.transferable,
+            burnable: tf.burnable,
+            mintable: tf.mintable,
+            pausable: tf.pausable,
+            frozen: false
+        };
+    }
+
+    pub fn can_transfer(account: address) -> bool {
+        let tf: TokenFlags = flags[account];
+        let ok: bool = tf.transferable & !tf.frozen;
+        return ok;
+    }
+
+    pub fn default_flags(account: address) {
+        let tf: TokenFlags = TokenFlags {
+            transferable: true,
+            burnable: true,
+            mintable: false,
+            pausable: false,
+            frozen: false
+        };
+        flags[account] = tf;
+    }
+}

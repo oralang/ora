@@ -1,0 +1,33 @@
+// InRange<u256, 1, 100> — basic range-bounded parameter
+
+contract InRangeBasic {
+    storage var level: InRange<u256, 1, 100>;
+
+    pub fn setLevel(val: InRange<u256, 1, 100>) {
+        level = val;
+    }
+
+    pub fn getLevel() -> InRange<u256, 1, 100> {
+        return level;
+    }
+
+    pub fn compare(a: InRange<u256, 1, 100>, b: InRange<u256, 1, 100>) -> bool {
+        let eq: bool = a == b;
+        let lt: bool = a < b;
+        let gt: bool = a > b;
+        return lt;
+    }
+
+    pub fn addRanged(a: InRange<u256, 1, 100>, b: InRange<u256, 1, 100>) -> u256 {
+        return a + b;
+    }
+
+    pub fn toPlain(val: InRange<u256, 1, 100>) -> u256 {
+        let plain: u256 = val;
+        return plain;
+    }
+
+    pub fn isHigh(val: InRange<u256, 1, 100>) -> bool {
+        return val > 50;
+    }
+}

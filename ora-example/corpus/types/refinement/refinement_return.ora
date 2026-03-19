@@ -1,0 +1,44 @@
+// Function returning refinement types
+
+contract RefinementReturn {
+    storage var minVal: MinValue<u256, 1>;
+    storage var maxVal: MaxValue<u256, 500>;
+    storage var rangeVal: InRange<u256, 10, 200>;
+    storage var addr: NonZeroAddress;
+
+    pub fn returnMinValue() -> MinValue<u256, 1> {
+        return minVal;
+    }
+
+    pub fn returnMaxValue() -> MaxValue<u256, 500> {
+        return maxVal;
+    }
+
+    pub fn returnInRange() -> InRange<u256, 10, 200> {
+        return rangeVal;
+    }
+
+    pub fn returnNonZero() -> NonZeroAddress {
+        return addr;
+    }
+
+    pub fn setAndReturnMin(val: MinValue<u256, 1>) -> MinValue<u256, 1> {
+        minVal = val;
+        return minVal;
+    }
+
+    pub fn setAndReturnMax(val: MaxValue<u256, 500>) -> MaxValue<u256, 500> {
+        maxVal = val;
+        return maxVal;
+    }
+
+    pub fn setAndReturnRange(val: InRange<u256, 10, 200>) -> InRange<u256, 10, 200> {
+        rangeVal = val;
+        return rangeVal;
+    }
+
+    pub fn setAndReturnAddr(val: NonZeroAddress) -> NonZeroAddress {
+        addr = val;
+        return addr;
+    }
+}

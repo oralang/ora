@@ -1,0 +1,22 @@
+contract AddressOps {
+    storage var a: address;
+    storage var b: address;
+
+    pub fn comparison(x: address, y: address) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        return eq;
+    }
+
+    pub fn assignment(x: address) {
+        a = x;
+        b = a;
+    }
+
+    pub fn storage_ops(x: address) -> bool {
+        a = x;
+        b = a;
+        let eq: bool = a == b;
+        return eq;
+    }
+}

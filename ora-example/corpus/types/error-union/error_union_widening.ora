@@ -1,0 +1,49 @@
+// Error set widening: !T | E1 assignable to !T | E1 | E2.
+// Tests: a function with fewer errors can be used where more errors are expected.
+
+error ErrorA;
+error ErrorB;
+error ErrorC;
+
+contract ErrorUnionWidening {
+    pub fn may_fail_a(x: u256) -> !u256 | ErrorA {
+        if (x == 0) {
+            return error ErrorA;
+        }
+        return x;
+    }
+
+    pub fn may_fail_b(x: u256) -> !u256 | ErrorB {
+        if (x > 1000) {
+            return error ErrorB;
+        }
+        return x;
+    }
+
+    // Calls a function that returns !u256 | ErrorA,
+    // but this function's return type includes ErrorA | ErrorB | ErrorC.
+    // The narrower error set widens into the broader one.
+    pub fn combined(x: u256) -> !u256 | ErrorA | ErrorB | ErrorC {
+        let a: u256 = try may_fail_a(x);
+        let b: u256 = try may_fail_b(a);
+        if (b > 500) {
+            return error ErrorC;
+        }
+        return b;
+    }
+
+    // Widening through assignment: narrow result stored in wider-typed context
+    pub fn widen_assignment(x: u256) -> !u256 | ErrorA | ErrorB {
+        let result: u256 = try may_fail_a(x);
+        return result;
+    }
+
+    pub fn safe_combined(x: u256) -> u256 {
+        try {
+            let result: u256 = combined(x);
+            return result;
+        } catch |e| {
+            return 0;
+        }
+    }
+}

@@ -1,0 +1,76 @@
+// ==========================================
+// IF COMPLEX CONDITIONS — compound boolean logic
+// ==========================================
+
+contract IfComplexConditions {
+    // Logical AND
+    pub fn test_and(a: u256, b: u256) -> u256 {
+        if (a > 0 && b > 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Logical OR
+    pub fn test_or(a: u256, b: u256) -> u256 {
+        if (a == 0 || b == 0) {
+            return 0;
+        }
+        return 1;
+    }
+
+    // Combined AND/OR
+    pub fn test_and_or(a: u256, b: u256, c: bool) -> u256 {
+        if (a > 0 && b < 100 || !c) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Parenthesized grouping for precedence
+    pub fn test_grouped(a: u256, b: u256, c: u256) -> u256 {
+        if ((a > 0 || b > 0) && c > 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Negated compound condition
+    pub fn test_negated_compound(active: bool, paused: bool) -> u256 {
+        if (!(active && paused)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Multiple comparisons chained
+    pub fn test_range_check(x: u256) -> u256 {
+        if (x >= 10 && x <= 100) {
+            return 1; // in range
+        }
+        return 0; // out of range
+    }
+
+    // Complex nested conditions
+    pub fn test_complex_nested(a: u256, b: u256, c: u256) -> u256 {
+        if (a > 0) {
+            if (b > 0 && c > 0) {
+                return a + b + c;
+            } else if (b > 0 || c > 0) {
+                return a + b;
+            }
+        }
+        return 0;
+    }
+
+    // Equality combined with boolean
+    pub fn test_equality_and_bool(x: u256, flag: bool) -> u256 {
+        if (x != 0 && flag) {
+            return x;
+        }
+        if (x == 0 || !flag) {
+            return 0;
+        }
+        return x;
+    }
+}

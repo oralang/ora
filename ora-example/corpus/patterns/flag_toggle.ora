@@ -1,0 +1,22 @@
+// Level 1: Boolean flag toggle
+// Tests: bool storage, negation, conditional return
+
+contract FlagToggle {
+    storage var enabled: bool = false;
+
+    pub fn toggle() {
+        enabled = !enabled;
+    }
+
+    pub fn turnOn() {
+        enabled = true;
+    }
+
+    pub fn turnOff() {
+        enabled = false;
+    }
+
+    pub fn isEnabled() -> bool {
+        return enabled;
+    }
+}

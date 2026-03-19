@@ -1,0 +1,62 @@
+contract U256Ops {
+    storage var a: u256;
+    storage var b: u256;
+
+    pub fn arithmetic(x: u256, y: u256) -> u256 {
+        let add: u256 = x + y;
+        let sub: u256 = x - y;
+        let mul: u256 = x * y;
+        let div: u256 = x / y;
+        let mod_: u256 = x % y;
+        let compound: u256 = (x + y) * x;
+        return add;
+    }
+
+    pub fn wrapping(x: u256, y: u256) -> u256 {
+        let add: u256 = x +% y;
+        let sub: u256 = x -% y;
+        let mul: u256 = x *% y;
+        return add;
+    }
+
+    pub fn comparison(x: u256, y: u256) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        let lt: bool = x < y;
+        let le: bool = x <= y;
+        let gt: bool = x > y;
+        let ge: bool = x >= y;
+        return eq;
+    }
+
+    pub fn bitwise(x: u256, y: u256) -> u256 {
+        let and_: u256 = x & y;
+        let or_: u256 = x | y;
+        let xor_: u256 = x ^ y;
+        let shl: u256 = x << y;
+        let shr: u256 = x >> y;
+        let not_: u256 = ~x;
+        return and_;
+    }
+
+    pub fn assignment() {
+        a = 1;
+        a += 1;
+        a -= 1;
+        a *= 2;
+        a /= 2;
+        a %= 3;
+        a &= 0xFF;
+        a |= 0x01;
+        a ^= 0x0F;
+        a <<= 1;
+        a >>= 1;
+    }
+
+    pub fn storage_ops() -> u256 {
+        a = 1000000;
+        b = a;
+        let val: u256 = a + b;
+        return val;
+    }
+}

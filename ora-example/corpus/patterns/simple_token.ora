@@ -1,0 +1,41 @@
+// Level 3: Simple token (transfer only, no approvals)
+// Tests: totalSupply, balanceOf, transfer with balance checks
+
+contract SimpleToken {
+    storage var totalSupply: u256;
+    storage var balances: map<address, u256>;
+
+    log Transfer(from: address, to: address, amount: u256);
+
+    pub fn init(initialSupply: u256) {
+        let deployer: address = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
+    }
+
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(to: address, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let sender: address = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[sender] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+}

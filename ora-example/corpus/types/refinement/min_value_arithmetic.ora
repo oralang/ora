@@ -1,0 +1,41 @@
+// MinValue<u256, 1> used in +, -, *, comparisons with plain u256
+
+contract MinValueArithmetic {
+    storage var balance: u256 = 0;
+
+    pub fn addMixed(refined: MinValue<u256, 1>, plain: u256) -> u256 {
+        return refined + plain;
+    }
+
+    pub fn subMixed(refined: MinValue<u256, 1>, plain: u256) -> u256 {
+        if (refined >= plain) {
+            return refined - plain;
+        }
+        return 0;
+    }
+
+    pub fn mulMixed(refined: MinValue<u256, 1>, plain: u256) -> u256 {
+        return refined * plain;
+    }
+
+    pub fn compareMixed(refined: MinValue<u256, 1>, plain: u256) -> bool {
+        let gt: bool = refined > plain;
+        let lt: bool = refined < plain;
+        let eq: bool = refined == plain;
+        return gt;
+    }
+
+    pub fn deposit(amount: MinValue<u256, 1>) {
+        balance = balance + amount;
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) {
+        if (balance >= amount) {
+            balance = balance - amount;
+        }
+    }
+
+    pub fn getBalance() -> u256 {
+        return balance;
+    }
+}

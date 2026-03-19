@@ -1,0 +1,57 @@
+// Level 3: Type widening — mixed-width comparisons
+// Tests comparing values of different widths after widening.
+contract MixedWidthComparison {
+    storage var small: u8;
+    storage var big: u256;
+
+    pub fn u8_lt_u256(a: u8, b: u256) -> bool {
+        let wa: u256 = a;
+        let result: bool = wa < b;
+        return result;
+    }
+
+    pub fn u32_eq_u128(a: u32, b: u128) -> bool {
+        let wa: u128 = a;
+        let result: bool = wa == b;
+        return result;
+    }
+
+    pub fn u8_ge_u64(a: u8, b: u64) -> bool {
+        let wa: u64 = a;
+        let result: bool = wa >= b;
+        return result;
+    }
+
+    pub fn u16_le_u256(a: u16, b: u256) -> bool {
+        let wa: u256 = a;
+        let result: bool = wa <= b;
+        return result;
+    }
+
+    pub fn u32_ne_u256(a: u32, b: u256) -> bool {
+        let wa: u256 = a;
+        let result: bool = wa != b;
+        return result;
+    }
+
+    pub fn u64_gt_u128(a: u64, b: u128) -> bool {
+        let wa: u128 = a;
+        let result: bool = wa > b;
+        return result;
+    }
+
+    pub fn multi_compare(x: u8, y: u32, z: u256) -> bool {
+        let wx: u256 = x;
+        let wy: u256 = y;
+        let c1: bool = wx < wy;
+        let c2: bool = wy < z;
+        let result: bool = c1 & c2;
+        return result;
+    }
+
+    pub fn storage_compare(threshold: u8) -> bool {
+        let wt: u256 = threshold;
+        let result: bool = big > wt;
+        return result;
+    }
+}

@@ -1,0 +1,60 @@
+bitfield StatusFlags : u256 {
+    initialized: bool;
+    paused: bool;
+    version: u8;
+    epoch: u16;
+}
+
+contract BitfieldBasicTest {
+    storage var flags: StatusFlags;
+
+    pub fn set_flags(next: StatusFlags) {
+        flags = next;
+    }
+
+    pub fn get_flags() -> StatusFlags {
+        return flags;
+    }
+
+    pub fn read_version() -> u8 {
+        let f: StatusFlags = flags;
+        return f.version;
+    }
+
+    pub fn read_epoch() -> u16 {
+        let f: StatusFlags = flags;
+        return f.epoch;
+    }
+
+    pub fn read_initialized() -> bool {
+        let f: StatusFlags = flags;
+        return f.initialized;
+    }
+
+    pub fn write_version(v: u8) {
+        let f: StatusFlags = flags;
+        f.version = v;
+        flags = f;
+    }
+
+    pub fn write_paused(p: bool) {
+        let f: StatusFlags = flags;
+        f.paused = p;
+        flags = f;
+    }
+
+    pub fn initialize(v: u8, e: u16) {
+        let f: StatusFlags = flags;
+        f.initialized = true;
+        f.paused = false;
+        f.version = v;
+        f.epoch = e;
+        flags = f;
+    }
+
+    pub fn roundtrip() {
+        let snapshot: StatusFlags = flags;
+        let _v: u8 = snapshot.version;
+        flags = snapshot;
+    }
+}

@@ -1,0 +1,151 @@
+contract SignedArithmetic {
+    pub fn add_i8(a: i8, b: i8) -> i8 {
+        let result: i8 = a + b;
+        return result;
+    }
+
+    pub fn sub_i8(a: i8, b: i8) -> i8 {
+        let result: i8 = a - b;
+        return result;
+    }
+
+    pub fn mul_i8(a: i8, b: i8) -> i8 {
+        let result: i8 = a * b;
+        return result;
+    }
+
+    pub fn div_i8(a: i8, b: i8) -> i8 {
+        let result: i8 = a / b;
+        return result;
+    }
+
+    pub fn mod_i8(a: i8, b: i8) -> i8 {
+        let result: i8 = a % b;
+        return result;
+    }
+
+    pub fn add_i16(a: i16, b: i16) -> i16 {
+        let result: i16 = a + b;
+        return result;
+    }
+
+    pub fn sub_i16(a: i16, b: i16) -> i16 {
+        let result: i16 = a - b;
+        return result;
+    }
+
+    pub fn mul_i16(a: i16, b: i16) -> i16 {
+        let result: i16 = a * b;
+        return result;
+    }
+
+    pub fn div_i16(a: i16, b: i16) -> i16 {
+        let result: i16 = a / b;
+        return result;
+    }
+
+    pub fn mod_i16(a: i16, b: i16) -> i16 {
+        let result: i16 = a % b;
+        return result;
+    }
+
+    pub fn add_i32(a: i32, b: i32) -> i32 {
+        let result: i32 = a + b;
+        return result;
+    }
+
+    pub fn sub_i32(a: i32, b: i32) -> i32 {
+        let result: i32 = a - b;
+        return result;
+    }
+
+    pub fn mul_i32(a: i32, b: i32) -> i32 {
+        let result: i32 = a * b;
+        return result;
+    }
+
+    pub fn div_i32(a: i32, b: i32) -> i32 {
+        let result: i32 = a / b;
+        return result;
+    }
+
+    pub fn mod_i32(a: i32, b: i32) -> i32 {
+        let result: i32 = a % b;
+        return result;
+    }
+
+    pub fn add_i64(a: i64, b: i64) -> i64 {
+        let result: i64 = a + b;
+        return result;
+    }
+
+    pub fn sub_i64(a: i64, b: i64) -> i64 {
+        let result: i64 = a - b;
+        return result;
+    }
+
+    pub fn mul_i64(a: i64, b: i64) -> i64 {
+        let result: i64 = a * b;
+        return result;
+    }
+
+    pub fn div_i64(a: i64, b: i64) -> i64 {
+        let result: i64 = a / b;
+        return result;
+    }
+
+    pub fn mod_i64(a: i64, b: i64) -> i64 {
+        let result: i64 = a % b;
+        return result;
+    }
+
+    pub fn add_i128(a: i128, b: i128) -> i128 {
+        let result: i128 = a + b;
+        return result;
+    }
+
+    pub fn sub_i128(a: i128, b: i128) -> i128 {
+        let result: i128 = a - b;
+        return result;
+    }
+
+    pub fn mul_i128(a: i128, b: i128) -> i128 {
+        let result: i128 = a * b;
+        return result;
+    }
+
+    pub fn div_i128(a: i128, b: i128) -> i128 {
+        let result: i128 = a / b;
+        return result;
+    }
+
+    pub fn mod_i128(a: i128, b: i128) -> i128 {
+        let result: i128 = a % b;
+        return result;
+    }
+
+    pub fn add_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a + b;
+        return result;
+    }
+
+    pub fn sub_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a - b;
+        return result;
+    }
+
+    pub fn mul_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a * b;
+        return result;
+    }
+
+    pub fn div_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a / b;
+        return result;
+    }
+
+    pub fn mod_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a % b;
+        return result;
+    }
+}

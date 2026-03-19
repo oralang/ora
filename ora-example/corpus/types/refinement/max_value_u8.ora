@@ -1,0 +1,26 @@
+// MaxValue<u8, 100> — max on small width
+
+contract MaxValueU8 {
+    storage var percentage: MaxValue<u8, 100>;
+
+    pub fn setPercentage(val: MaxValue<u8, 100>) {
+        percentage = val;
+    }
+
+    pub fn getPercentage() -> MaxValue<u8, 100> {
+        return percentage;
+    }
+
+    pub fn add(a: MaxValue<u8, 100>, b: MaxValue<u8, 100>) -> u8 {
+        return a + b;
+    }
+
+    pub fn isHalf(val: MaxValue<u8, 100>) -> bool {
+        return val <= 50;
+    }
+
+    pub fn passToPlain(val: MaxValue<u8, 100>) -> u8 {
+        let plain: u8 = val;
+        return plain;
+    }
+}

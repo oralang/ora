@@ -1,0 +1,106 @@
+// Level 4: User profiles with structs
+// Tests: struct with multiple fields, CRUD operations, map<address, struct>
+
+struct Profile {
+    username: string;
+    reputation: u256;
+    joinedAt: u256;
+    active: bool;
+}
+
+contract UserProfiles {
+    storage var profiles: map<address, Profile>;
+    storage var exists: map<address, bool>;
+    storage var userCount: u256 = 0;
+
+    log ProfileCreated(user: address, username: string);
+    log ProfileUpdated(user: address);
+    log ProfileDeactivated(user: address);
+
+    pub fn createProfile(username: string) -> bool
+        requires(userCount < std.constants.U256_MAX)
+    {
+        let sender: address = std.msg.sender();
+
+        if (exists[sender]) {
+            return false;
+        }
+
+        let profile: Profile = Profile {
+            username: username,
+            reputation: 0,
+            joinedAt: std.block.timestamp,
+            active: true,
+        };
+        profiles[sender] = profile;
+        exists[sender] = true;
+        userCount += 1;
+
+        log ProfileCreated(sender, username);
+        return true;
+    }
+
+    pub fn updateUsername(newUsername: string) -> bool {
+        let sender: address = std.msg.sender();
+
+        if (!exists[sender]) {
+            return false;
+        }
+
+        let current: Profile = profiles[sender];
+        let updated: Profile = Profile {
+            username: newUsername,
+            reputation: current.reputation,
+            joinedAt: current.joinedAt,
+            active: current.active,
+        };
+        profiles[sender] = updated;
+
+        log ProfileUpdated(sender);
+        return true;
+    }
+
+    pub fn addReputation(user: address, points: u256) -> bool {
+        if (!exists[user]) {
+            return false;
+        }
+
+        let current: Profile = profiles[user];
+        let updated: Profile = Profile {
+            username: current.username,
+            reputation: current.reputation + points,
+            joinedAt: current.joinedAt,
+            active: current.active,
+        };
+        profiles[user] = updated;
+        return true;
+    }
+
+    pub fn deactivate() -> bool {
+        let sender: address = std.msg.sender();
+
+        if (!exists[sender]) {
+            return false;
+        }
+
+        let current: Profile = profiles[sender];
+        let deactivated: Profile = Profile {
+            username: current.username,
+            reputation: current.reputation,
+            joinedAt: current.joinedAt,
+            active: false,
+        };
+        profiles[sender] = deactivated;
+
+        log ProfileDeactivated(sender);
+        return true;
+    }
+
+    pub fn getProfile(user: address) -> Profile {
+        return profiles[user];
+    }
+
+    pub fn getUserCount() -> u256 {
+        return userCount;
+    }
+}

@@ -1,0 +1,31 @@
+// Error with payload fields.
+// Tests: error declaration with typed fields, constructing error with values,
+// accessing error fields in catch.
+
+error InsufficientBalance(required: u256, available: u256);
+
+contract ErrorWithFields {
+    storage var balance: u256 = 1000;
+
+    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance {
+        let current: u256 = balance;
+        if (amount > current) {
+            return error InsufficientBalance(amount, current);
+        }
+        balance = current - amount;
+        return balance;
+    }
+
+    pub fn safe_withdraw(amount: u256) -> u256 {
+        try {
+            let remaining: u256 = withdraw(amount);
+            return remaining;
+        } catch |e| {
+            return balance;
+        }
+    }
+
+    pub fn get_balance() -> u256 {
+        return balance;
+    }
+}

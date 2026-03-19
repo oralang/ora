@@ -1,0 +1,36 @@
+// Level 2: Address-to-string registry
+// Tests: map<address, string>, register/lookup/update pattern
+
+contract Registry {
+    storage var names: map<address, string>;
+    storage var registered: map<address, bool>;
+    storage var count: u256 = 0;
+
+    pub fn register(name: string) {
+        let sender: address = std.msg.sender();
+        if (!registered[sender]) {
+            names[sender] = name;
+            registered[sender] = true;
+            count += 1;
+        }
+    }
+
+    pub fn update(name: string) {
+        let sender: address = std.msg.sender();
+        if (registered[sender]) {
+            names[sender] = name;
+        }
+    }
+
+    pub fn lookup(account: address) -> string {
+        return names[account];
+    }
+
+    pub fn isRegistered(account: address) -> bool {
+        return registered[account];
+    }
+
+    pub fn getCount() -> u256 {
+        return count;
+    }
+}

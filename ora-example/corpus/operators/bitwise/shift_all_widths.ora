@@ -1,0 +1,61 @@
+contract ShiftAllWidths {
+    pub fn shl_u8(a: u8, b: u8) -> u8 {
+        let result: u8 = a << b;
+        return result;
+    }
+
+    pub fn shr_u8(a: u8, b: u8) -> u8 {
+        let result: u8 = a >> b;
+        return result;
+    }
+
+    pub fn shl_u16(a: u16, b: u16) -> u16 {
+        let result: u16 = a << b;
+        return result;
+    }
+
+    pub fn shr_u16(a: u16, b: u16) -> u16 {
+        let result: u16 = a >> b;
+        return result;
+    }
+
+    pub fn shl_u32(a: u32, b: u32) -> u32 {
+        let result: u32 = a << b;
+        return result;
+    }
+
+    pub fn shr_u32(a: u32, b: u32) -> u32 {
+        let result: u32 = a >> b;
+        return result;
+    }
+
+    pub fn shl_u64(a: u64, b: u64) -> u64 {
+        let result: u64 = a << b;
+        return result;
+    }
+
+    pub fn shr_u64(a: u64, b: u64) -> u64 {
+        let result: u64 = a >> b;
+        return result;
+    }
+
+    pub fn shl_u128(a: u128, b: u128) -> u128 {
+        let result: u128 = a << b;
+        return result;
+    }
+
+    pub fn shr_u128(a: u128, b: u128) -> u128 {
+        let result: u128 = a >> b;
+        return result;
+    }
+
+    pub fn shl_u256(a: u256, b: u256) -> u256 {
+        let result: u256 = a << b;
+        return result;
+    }
+
+    pub fn shr_u256(a: u256, b: u256) -> u256 {
+        let result: u256 = a >> b;
+        return result;
+    }
+}

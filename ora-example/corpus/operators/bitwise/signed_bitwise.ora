@@ -1,0 +1,26 @@
+contract SignedBitwise {
+    pub fn and_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a & b;
+        return result;
+    }
+
+    pub fn or_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a | b;
+        return result;
+    }
+
+    pub fn xor_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a ^ b;
+        return result;
+    }
+
+    pub fn shl_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a << b;
+        return result;
+    }
+
+    pub fn shr_i256(a: i256, b: i256) -> i256 {
+        let result: i256 = a >> b;
+        return result;
+    }
+}

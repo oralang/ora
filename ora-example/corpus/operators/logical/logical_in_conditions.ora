@@ -1,0 +1,50 @@
+contract LogicalInConditions {
+    pub fn if_and(a: bool, b: bool) -> u256 {
+        if (a && b) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_or(a: bool, b: bool) -> u256 {
+        if (a || b) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_not(a: bool) -> u256 {
+        if (!a) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_complex(a: bool, b: bool, c: bool) -> u256 {
+        if (a && b || !c) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_nested_logic(a: bool, b: bool, c: bool, d: bool) -> u256 {
+        if ((a && b) || (c && d)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_comparison_and_logic(x: u256, y: u256, flag: bool) -> u256 {
+        if (x > y && flag) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn if_comparison_chain(x: u256, y: u256, z: u256) -> u256 {
+        if (x < y && y < z) {
+            return 1;
+        }
+        return 0;
+    }
+}

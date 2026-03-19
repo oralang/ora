@@ -1,0 +1,231 @@
+// Level 5: Lending pool with collateral
+// Tests: deposit/borrow/repay, collateral tracking, health factor
+
+contract LendingPool {
+    storage var totalDeposits: u256 = 0;
+    storage var totalBorrows: u256 = 0;
+    storage var deposits: map<address, u256>;
+    storage var borrows: map<address, u256>;
+    storage var collateral: map<address, u256>;
+    storage var lastUpdate: map<address, u256>;
+    storage var interestRate: u256 = 500;  // 5% annual in basis points
+    storage var collateralFactor: u256 = 7500;  // 75% LTV
+    storage var liquidationThreshold: u256 = 8500;  // 85%
+    storage var owner: address;
+
+    log Deposit(user: address, amount: u256);
+    log Withdraw(user: address, amount: u256);
+    log Borrow(user: address, amount: u256);
+    log Repay(user: address, amount: u256);
+    log Liquidation(liquidator: address, borrower: address, amount: u256);
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    fn accrueInterest(user: address) -> u256 {
+        let userBorrow: u256 = borrows[user];
+        if (userBorrow == 0) {
+            lastUpdate[user] = std.block.timestamp;
+            return 0;
+        }
+
+        let lastTime: u256 = lastUpdate[user];
+        let currentTime: u256 = std.block.timestamp;
+
+        if (currentTime <= lastTime) {
+            return 0;
+        }
+
+        let elapsed: u256 = currentTime - lastTime;
+        let interest: u256 = (userBorrow * interestRate * elapsed) / (10000 * 365 * 86400);
+
+        borrows[user] += interest;
+        totalBorrows += interest;
+        lastUpdate[user] = currentTime;
+
+        return interest;
+    }
+
+    pub fn getHealthFactor(user: address) -> u256 {
+        let userBorrow: u256 = borrows[user];
+
+        if (userBorrow == 0) {
+            return std.constants.U256_MAX;
+        }
+
+        let userCollateral: u256 = collateral[user];
+        if (userCollateral == 0) {
+            return 0;
+        }
+
+        let adjustedCollateral: u256 = (userCollateral * liquidationThreshold) / 10000;
+        let healthFactor: u256 = (adjustedCollateral * 10000) / userBorrow;
+
+        return healthFactor;
+    }
+
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(collateral[std.msg.sender()] <= std.constants.U256_MAX - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        accrueInterest(sender);
+
+        deposits[sender] += amount;
+        collateral[sender] += amount;
+        totalDeposits += amount;
+
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: u256) -> bool
+        requires(amount > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        accrueInterest(sender);
+
+        let userDeposit: u256 = deposits[sender];
+        if (userDeposit < amount) {
+            return false;
+        }
+
+        // Check that withdrawal does not make position unhealthy
+        let newCollateral: u256 = collateral[sender] - amount;
+        let userBorrow: u256 = borrows[sender];
+
+        if (userBorrow > 0) {
+            let maxBorrow: u256 = (newCollateral * collateralFactor) / 10000;
+            if (userBorrow > maxBorrow) {
+                return false;
+            }
+        }
+
+        deposits[sender] = userDeposit - amount;
+        collateral[sender] = newCollateral;
+        totalDeposits -= amount;
+
+        log Withdraw(sender, amount);
+        return true;
+    }
+
+    pub fn borrow(amount: u256) -> bool
+        requires(amount > 0)
+        requires(totalBorrows <= std.constants.U256_MAX - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        accrueInterest(sender);
+
+        // Check available liquidity
+        if (totalDeposits < totalBorrows + amount) {
+            return false;
+        }
+
+        // Check collateral allows this borrow
+        let userCollateral: u256 = collateral[sender];
+        let maxBorrow: u256 = (userCollateral * collateralFactor) / 10000;
+        let currentBorrow: u256 = borrows[sender];
+
+        if (currentBorrow + amount > maxBorrow) {
+            return false;
+        }
+
+        borrows[sender] = currentBorrow + amount;
+        totalBorrows += amount;
+        lastUpdate[sender] = std.block.timestamp;
+
+        log Borrow(sender, amount);
+        return true;
+    }
+
+    pub fn repay(amount: u256) -> bool
+        requires(amount > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        accrueInterest(sender);
+
+        let userBorrow: u256 = borrows[sender];
+        if (userBorrow == 0) {
+            return false;
+        }
+
+        var repayAmount: u256 = amount;
+        if (repayAmount > userBorrow) {
+            repayAmount = userBorrow;
+        }
+
+        borrows[sender] = userBorrow - repayAmount;
+        totalBorrows -= repayAmount;
+
+        log Repay(sender, repayAmount);
+        return true;
+    }
+
+    pub fn liquidate(borrower: address, repayAmount: u256) -> bool
+        requires(repayAmount > 0)
+        requires(borrower != std.constants.ZERO_ADDRESS)
+    {
+        let liquidator: NonZeroAddress = std.msg.sender();
+        accrueInterest(borrower);
+
+        // Check borrower is undercollateralized
+        let healthFactor: u256 = getHealthFactor(borrower);
+        if (healthFactor >= 10000) {
+            return false;
+        }
+
+        let borrowerDebt: u256 = borrows[borrower];
+        if (borrowerDebt == 0) {
+            return false;
+        }
+
+        // Cap repayment at 50% of debt
+        let maxRepay: u256 = borrowerDebt / 2;
+        var actualRepay: u256 = repayAmount;
+        if (actualRepay > maxRepay) {
+            actualRepay = maxRepay;
+        }
+
+        // Seize collateral (1:1 for simplicity)
+        let borrowerCollateral: u256 = collateral[borrower];
+        var seized: u256 = actualRepay;
+        if (seized > borrowerCollateral) {
+            seized = borrowerCollateral;
+        }
+
+        // Update borrower state
+        borrows[borrower] -= actualRepay;
+        totalBorrows -= actualRepay;
+        collateral[borrower] -= seized;
+        deposits[borrower] -= seized;
+
+        // Credit liquidator
+        deposits[liquidator] += seized;
+        collateral[liquidator] += seized;
+
+        log Liquidation(liquidator, borrower, actualRepay);
+        return true;
+    }
+
+    pub fn getDeposit(user: address) -> u256 {
+        return deposits[user];
+    }
+
+    pub fn getBorrow(user: address) -> u256 {
+        return borrows[user];
+    }
+
+    pub fn getCollateral(user: address) -> u256 {
+        return collateral[user];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+
+    pub fn getTotalBorrows() -> u256 {
+        return totalBorrows;
+    }
+}

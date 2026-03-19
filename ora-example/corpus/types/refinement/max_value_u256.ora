@@ -1,0 +1,33 @@
+// MaxValue<u256, 1000> — as parameter, storage, comparisons
+
+contract MaxValueU256 {
+    storage var cap: MaxValue<u256, 1000>;
+    storage var current: u256 = 0;
+
+    pub fn setCap(val: MaxValue<u256, 1000>) {
+        cap = val;
+    }
+
+    pub fn getCap() -> MaxValue<u256, 1000> {
+        return cap;
+    }
+
+    pub fn addWithCap(amount: MaxValue<u256, 1000>) {
+        current = current + amount;
+    }
+
+    pub fn compare(a: MaxValue<u256, 1000>, b: MaxValue<u256, 1000>) -> bool {
+        let eq: bool = a == b;
+        let lt: bool = a < b;
+        let gt: bool = a > b;
+        return lt;
+    }
+
+    pub fn isUnderCap(val: MaxValue<u256, 1000>) -> bool {
+        return val <= cap;
+    }
+
+    pub fn getCurrent() -> u256 {
+        return current;
+    }
+}

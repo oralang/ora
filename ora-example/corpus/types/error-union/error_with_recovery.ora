@@ -1,0 +1,57 @@
+// Error recovery: catch error and provide a fallback value.
+// Tests: try/catch used to supply defaults on failure.
+
+error LookupFailed;
+error StaleData;
+
+contract ErrorWithRecovery {
+    storage var cache: map<u256, u256>;
+    storage var timestamps: map<u256, u256>;
+    storage var default_value: u256 = 42;
+
+    pub fn lookup(key: u256) -> !u256 | LookupFailed {
+        let val: u256 = cache[key];
+        if (val == 0) {
+            return error LookupFailed;
+        }
+        return val;
+    }
+
+    pub fn fresh_lookup(key: u256) -> !u256 | LookupFailed | StaleData {
+        let val: u256 = try lookup(key);
+        let ts: u256 = timestamps[key];
+        if (ts > 0 and std.block.timestamp() - ts > 3600) {
+            return error StaleData;
+        }
+        return val;
+    }
+
+    // Recovery: fallback to default_value on any error
+    pub fn lookup_or_default(key: u256) -> u256 {
+        try {
+            let val: u256 = lookup(key);
+            return val;
+        } catch |e| {
+            return default_value;
+        }
+    }
+
+    // Recovery: fallback to a computed value
+    pub fn lookup_or_compute(key: u256) -> u256 {
+        try {
+            let val: u256 = fresh_lookup(key);
+            return val;
+        } catch |e| {
+            return key * 2 + 1;
+        }
+    }
+
+    pub fn store(key: u256, value: u256) {
+        cache[key] = value;
+        timestamps[key] = std.block.timestamp();
+    }
+
+    pub fn set_default(val: u256) {
+        default_value = val;
+    }
+}

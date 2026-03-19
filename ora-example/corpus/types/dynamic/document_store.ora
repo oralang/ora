@@ -1,0 +1,51 @@
+contract DocumentStore {
+    struct Document {
+        title: string,
+        content: bytes,
+        author: address,
+        timestamp: u256,
+    }
+
+    storage var documents: map<u256, Document>;
+    storage var doc_count: u256;
+
+    pub fn create(title: string, content: bytes) -> u256 {
+        let id: u256 = doc_count;
+        documents[id] = Document {
+            title: title,
+            content: content,
+            author: msg.sender,
+            timestamp: block.timestamp,
+        };
+        doc_count = id + 1;
+        return id;
+    }
+
+    pub fn getTitle(id: u256) -> string {
+        return documents[id].title;
+    }
+
+    pub fn getContent(id: u256) -> bytes {
+        return documents[id].content;
+    }
+
+    pub fn getAuthor(id: u256) -> address {
+        return documents[id].author;
+    }
+
+    pub fn getTimestamp(id: u256) -> u256 {
+        return documents[id].timestamp;
+    }
+
+    pub fn updateTitle(id: u256, title: string) {
+        documents[id].title = title;
+    }
+
+    pub fn updateContent(id: u256, content: bytes) {
+        documents[id].content = content;
+    }
+
+    pub fn getDocCount() -> u256 {
+        return doc_count;
+    }
+}

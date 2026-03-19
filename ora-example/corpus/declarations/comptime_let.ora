@@ -1,0 +1,60 @@
+// ==========================================
+// COMPTIME LET — comptime blocks with declarations inside
+// ==========================================
+
+contract ComptimeLet {
+    // Basic comptime block with let
+    pub fn basic_comptime() -> u256 {
+        const result: u256 = comptime {
+            let x: u256 = 42;
+            return x;
+        };
+        return result;
+    }
+
+    // Comptime with arithmetic
+    pub fn comptime_arithmetic() -> u256 {
+        const sum: u256 = comptime {
+            let a: u256 = 10;
+            let b: u256 = 20;
+            let c: u256 = a + b;
+            return c;
+        };
+        return sum;
+    }
+
+    // Comptime with multiple declarations
+    pub fn comptime_multi_decl() -> u256 {
+        const result: u256 = comptime {
+            let base: u256 = 100;
+            let factor: u256 = 3;
+            let offset: u256 = 7;
+            let computed: u256 = base * factor + offset;
+            return computed;
+        };
+        return result;
+    }
+
+    // Multiple comptime blocks in one function
+    pub fn multiple_comptime_blocks() -> u256 {
+        const a: u256 = comptime {
+            let x: u256 = 5;
+            return x * x;
+        };
+        const b: u256 = comptime {
+            let y: u256 = 3;
+            return y * y;
+        };
+        return a + b;
+    }
+
+    // Comptime bool
+    pub fn comptime_bool() -> bool {
+        const flag: bool = comptime {
+            let x: u256 = 10;
+            let y: u256 = 20;
+            return x < y;
+        };
+        return flag;
+    }
+}

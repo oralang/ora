@@ -1,0 +1,56 @@
+// ==========================================
+// DECLARATIONS STORAGE — storage var, memory var
+// ==========================================
+
+contract DeclarationsStorage {
+    // Storage variables (persistent on-chain state)
+    storage var counter: u256;
+    storage var owner: address;
+    storage var active: bool;
+    storage var name: string;
+
+    // Initialize storage
+    pub fn init() {
+        counter = 0;
+        owner = 0x1234567890123456789012345678901234567890;
+        active = true;
+        name = "TestContract";
+    }
+
+    // Read storage
+    pub fn get_counter() -> u256 {
+        return counter;
+    }
+
+    // Write storage
+    pub fn increment() {
+        counter += 1;
+    }
+
+    // Storage and local interaction
+    pub fn add_to_counter(amount: u256) -> u256 {
+        let old: u256 = counter;
+        counter += amount;
+        return counter;
+    }
+
+    // Multiple storage reads and writes
+    pub fn reset() {
+        counter = 0;
+        active = false;
+    }
+
+    // Conditional storage write
+    pub fn set_active(value: bool) {
+        if (value != active) {
+            active = value;
+        }
+    }
+
+    // Memory variable (function-local, not persisted)
+    pub fn compute_locally(x: u256) -> u256 {
+        var local_result: u256 = x * 2;
+        var temp: u256 = local_result + counter;
+        return temp;
+    }
+}

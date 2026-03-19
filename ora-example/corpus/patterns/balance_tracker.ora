@@ -1,0 +1,35 @@
+// Level 2: Per-address balance tracker
+// Tests: map<address, u256>, deposit/withdraw with underflow guard
+
+contract BalanceTracker {
+    storage var balances: map<address, u256>;
+    storage var totalBalance: u256 = 0;
+
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(totalBalance <= std.constants.U256_MAX - amount)
+    {
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        totalBalance += amount;
+    }
+
+    pub fn withdraw(amount: u256)
+        requires(amount > 0)
+    {
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current >= amount) {
+            balances[sender] = current - amount;
+            totalBalance -= amount;
+        }
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalBalance() -> u256 {
+        return totalBalance;
+    }
+}

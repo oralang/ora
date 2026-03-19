@@ -1,0 +1,117 @@
+// ==========================================
+// STORAGE STRUCT DECLARATIONS — struct storage read/modify/write
+// ==========================================
+
+struct TokenConfig {
+    decimals: u8;
+    maxSupply: u256;
+    paused: bool;
+}
+
+struct UserInfo {
+    balance: u256;
+    lastAction: u256;
+    active: bool;
+}
+
+struct Pair {
+    x: u256;
+    y: u256;
+}
+
+contract StorageStructDeclarations {
+    storage var config: TokenConfig;
+    storage var owner_info: UserInfo;
+    storage var origin: Pair = Pair { x: 0, y: 0 };
+
+    // Write entire struct
+    pub fn set_config() {
+        config = TokenConfig {
+            decimals: 18,
+            maxSupply: 1_000_000,
+            paused: false,
+        };
+    }
+
+    // Read entire struct
+    pub fn get_config() -> TokenConfig {
+        return config;
+    }
+
+    // Read individual fields
+    pub fn get_decimals() -> u8 {
+        return config.decimals;
+    }
+
+    pub fn is_paused() -> bool {
+        return config.paused;
+    }
+
+    // Write individual fields
+    pub fn set_paused(p: bool) {
+        config.paused = p;
+    }
+
+    // Read-modify-write pattern
+    pub fn update_max_supply(newMax: u256) {
+        let c: TokenConfig = config;
+        let updated: TokenConfig = TokenConfig {
+            decimals: c.decimals,
+            maxSupply: newMax,
+            paused: c.paused,
+        };
+        config = updated;
+    }
+
+    // Set user info
+    pub fn set_user(balance: u256) {
+        owner_info = UserInfo {
+            balance: balance,
+            lastAction: std.block.timestamp,
+            active: true,
+        };
+    }
+
+    // Modify user balance
+    pub fn add_user_balance(amount: u256) {
+        let u: UserInfo = owner_info;
+        let updated: UserInfo = UserInfo {
+            balance: u.balance + amount,
+            lastAction: std.block.timestamp,
+            active: u.active,
+        };
+        owner_info = updated;
+    }
+
+    // Read user balance
+    pub fn get_user_balance() -> u256 {
+        return owner_info.balance;
+    }
+
+    // Struct field write
+    pub fn update_pair(new_x: u256, new_y: u256) {
+        origin.x = new_x;
+        origin.y = new_y;
+    }
+
+    // Struct field read
+    pub fn get_pair_sum() -> u256 {
+        return origin.x + origin.y;
+    }
+
+    // Create local struct from storage
+    pub fn snapshot_pair() -> Pair {
+        let p: Pair = origin;
+        return p;
+    }
+
+    // Pass struct to helper
+    fn distance_sq(p: Pair) -> u256 {
+        return p.x * p.x + p.y * p.y;
+    }
+
+    pub fn get_origin_distance_sq() -> u256 {
+        let p: Pair = origin;
+        return distance_sq(p);
+    }
+}

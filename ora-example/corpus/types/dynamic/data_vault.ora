@@ -1,0 +1,25 @@
+contract DataVault {
+    storage var entries: map<u256, bytes>;
+    storage var owners: map<u256, address>;
+    storage var next_id: u256;
+
+    pub fn store(data: bytes) -> u256 {
+        let id: u256 = next_id;
+        entries[id] = data;
+        owners[id] = msg.sender;
+        next_id = id + 1;
+        return id;
+    }
+
+    pub fn retrieve(id: u256) -> bytes {
+        return entries[id];
+    }
+
+    pub fn getOwner(id: u256) -> address {
+        return owners[id];
+    }
+
+    pub fn overwrite(id: u256, data: bytes) {
+        entries[id] = data;
+    }
+}

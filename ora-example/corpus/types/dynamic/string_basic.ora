@@ -1,0 +1,20 @@
+contract StringBasic {
+    storage var name: string;
+
+    pub fn setName(n: string) {
+        name = n;
+    }
+
+    pub fn getName() -> string {
+        return name;
+    }
+
+    pub fn passthrough(s: string) -> string {
+        return s;
+    }
+
+    pub fn localBinding(s: string) -> string {
+        let local: string = s;
+        return local;
+    }
+}

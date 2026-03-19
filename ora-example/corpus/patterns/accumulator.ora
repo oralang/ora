@@ -1,0 +1,20 @@
+// Level 1: Running sum accumulator
+// Tests: storage var, addition, reset pattern
+
+contract Accumulator {
+    storage var total: u256 = 0;
+
+    pub fn add(value: u256)
+        requires(total <= std.constants.U256_MAX - value)
+    {
+        total += value;
+    }
+
+    pub fn reset() {
+        total = 0;
+    }
+
+    pub fn get() -> u256 {
+        return total;
+    }
+}

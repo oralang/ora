@@ -1,0 +1,41 @@
+contract EqNeAllTypes {
+    pub fn eq_u256(a: u256, b: u256) -> bool {
+        let result: bool = a == b;
+        return result;
+    }
+
+    pub fn ne_u256(a: u256, b: u256) -> bool {
+        let result: bool = a != b;
+        return result;
+    }
+
+    pub fn eq_u8(a: u8, b: u8) -> bool {
+        let result: bool = a == b;
+        return result;
+    }
+
+    pub fn ne_u8(a: u8, b: u8) -> bool {
+        let result: bool = a != b;
+        return result;
+    }
+
+    pub fn eq_bool(a: bool, b: bool) -> bool {
+        let result: bool = a == b;
+        return result;
+    }
+
+    pub fn ne_bool(a: bool, b: bool) -> bool {
+        let result: bool = a != b;
+        return result;
+    }
+
+    pub fn eq_address(a: address, b: address) -> bool {
+        let result: bool = a == b;
+        return result;
+    }
+
+    pub fn ne_address(a: address, b: address) -> bool {
+        let result: bool = a != b;
+        return result;
+    }
+}

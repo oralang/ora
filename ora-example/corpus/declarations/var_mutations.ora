@@ -1,0 +1,87 @@
+// ==========================================
+// VAR MUTATIONS — mutable declarations with reassignment
+// ==========================================
+
+contract VarMutations {
+    // Increment and decrement u256
+    pub fn increment_decrement() -> u256 {
+        var x: u256 = 100;
+        x += 1;
+        x += 10;
+        x -= 5;
+        return x;
+    }
+
+    // Reassign to new value
+    pub fn reassign() -> u256 {
+        var x: u256 = 0;
+        x = 42;
+        x = 100;
+        x = 999;
+        return x;
+    }
+
+    // Compound assignment operators
+    pub fn compound_assign() -> u256 {
+        var x: u256 = 100;
+        x += 50;
+        x -= 25;
+        x *= 2;
+        x /= 5;
+        x %= 7;
+        return x;
+    }
+
+    // Bitwise compound assignment
+    pub fn bitwise_compound() -> u256 {
+        var mask: u256 = 0xFF;
+        mask &= 0x0F;
+        mask |= 0xF0;
+        mask ^= 0xAA;
+        mask <<= 4;
+        mask >>= 2;
+        return mask;
+    }
+
+    // Bool mutation
+    pub fn bool_mutation() -> bool {
+        var flag: bool = false;
+        flag = true;
+        flag = !flag;
+        flag = true;
+        return flag;
+    }
+
+    // Address mutation
+    pub fn address_mutation() -> address {
+        var addr: address = std.constants.ZERO_ADDRESS;
+        addr = std.msg.sender();
+        return addr;
+    }
+
+    // Multiple vars mutated together
+    pub fn multi_var_mutation() -> u256 {
+        var a: u256 = 0;
+        var b: u256 = 0;
+        var c: u256 = 0;
+
+        a = 10;
+        b = a + 5;
+        c = a + b;
+        a = c * 2;
+        b += a;
+
+        return a + b + c;
+    }
+
+    // Var in a loop
+    pub fn var_in_loop() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            total += i;
+            i += 1;
+        }
+        return total;
+    }
+}

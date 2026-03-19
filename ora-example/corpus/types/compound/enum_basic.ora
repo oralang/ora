@@ -1,0 +1,67 @@
+enum OrderStatus : u8 {
+    Pending = 0,
+    Filled = 1,
+    Cancelled = 2,
+    Expired = 3
+}
+
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+contract EnumBasic {
+    storage var status: OrderStatus;
+    storage var heading: Direction;
+
+    pub fn set_status(s: OrderStatus) {
+        status = s;
+    }
+
+    pub fn get_status() -> OrderStatus {
+        return status;
+    }
+
+    pub fn is_pending() -> bool {
+        return status == OrderStatus.Pending;
+    }
+
+    pub fn is_filled() -> bool {
+        return status == OrderStatus.Filled;
+    }
+
+    pub fn process_order() -> u256 {
+        switch (status) {
+            OrderStatus.Pending => { return 0; }
+            OrderStatus.Filled => { return 1; }
+            OrderStatus.Cancelled => { return 2; }
+            OrderStatus.Expired => { return 3; }
+            else => { return 255; }
+        }
+    }
+
+    pub fn set_heading(d: Direction) {
+        heading = d;
+    }
+
+    pub fn describe_heading() -> u256 {
+        switch (heading) {
+            Direction.North => { return 0; }
+            Direction.South => { return 180; }
+            Direction.East => { return 90; }
+            Direction.West => { return 270; }
+            else => { return 999; }
+        }
+    }
+
+    pub fn compare_enums(a: OrderStatus, b: OrderStatus) -> bool {
+        return a == b;
+    }
+
+    pub fn assign_literal() {
+        status = OrderStatus.Expired;
+        heading = Direction.West;
+    }
+}

@@ -1,0 +1,132 @@
+// ==========================================
+// STATE MACHINE — labeled switch implementing a state machine
+// ==========================================
+
+enum MachineState : u8 {
+    Init = 0,
+    Running = 1,
+    Paused = 2,
+    Done = 3
+}
+
+contract StateMachine {
+    storage var current_state: u256;
+    storage var accumulated: u256;
+
+    // Simple state machine using labeled switch
+    pub fn run_machine(input: u256) -> u256 {
+        var state: u256 = 0;
+        var result: u256 = 0;
+        var fuel: u256 = input;
+
+        machine: switch (state) {
+            0 => {
+                // INIT: set up
+                result = 0;
+                continue :machine (1);
+            }
+            1 => {
+                // RUNNING: process
+                if (fuel == 0) {
+                    continue :machine (3); // done
+                }
+                result += fuel;
+                fuel -= 1;
+                continue :machine (1); // keep running
+            }
+            2 => {
+                // PAUSED: skip and resume
+                continue :machine (1);
+            }
+            3 => {
+                // DONE: finalize
+                result = result * 2;
+            }
+            else => {
+                result = 999; // error state
+            }
+        }
+        return result;
+    }
+
+    // Two-phase processor
+    pub fn two_phase(x: u256) -> u256 {
+        var phase: u256 = 0;
+        var data: u256 = x;
+        var output: u256 = 0;
+
+        processor: switch (phase) {
+            0 => {
+                // Phase 0: validate
+                if (data > 1000) {
+                    data = 1000; // clamp
+                }
+                continue :processor (1);
+            }
+            1 => {
+                // Phase 1: transform
+                output = data * data;
+            }
+            else => {
+                output = 0;
+            }
+        }
+        return output;
+    }
+
+    // Counter state machine: counts down by different steps
+    pub fn stepping_counter(start: u256) -> u256 {
+        var val: u256 = start;
+        var steps: u256 = 0;
+
+        counter: switch (val) {
+            0 => {
+                // Terminal state
+            }
+            1...10 => {
+                steps += 1;
+                continue :counter (val - 1);
+            }
+            11...50 => {
+                steps += 1;
+                continue :counter (val - 5);
+            }
+            51...100 => {
+                steps += 1;
+                continue :counter (val - 10);
+            }
+            else => {
+                // Clamp to 100
+                continue :counter (100);
+            }
+        }
+        return steps;
+    }
+
+    // Accumulator state machine
+    pub fn accumulate(n: u256) -> u256 {
+        var state: u256 = 0;
+        var i: u256 = n;
+        var acc: u256 = 0;
+
+        fsm: switch (state) {
+            0 => {
+                // Check if done
+                if (i == 0) {
+                    continue :fsm (1); // go to finalize
+                }
+                acc += i;
+                i -= 1;
+                continue :fsm (0); // loop back
+            }
+            1 => {
+                // Finalize: double the result
+                acc = acc * 2;
+            }
+            else => {
+                acc = 0;
+            }
+        }
+        return acc;
+    }
+}

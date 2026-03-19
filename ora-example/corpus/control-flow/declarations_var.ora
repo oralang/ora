@@ -1,0 +1,74 @@
+// ==========================================
+// DECLARATIONS VAR — var (mutable) with modifications
+// ==========================================
+
+contract DeclarationsVar {
+    // Basic mutable variable
+    pub fn test_basic_var() -> u256 {
+        var x: u256 = 0;
+        x = 10;
+        return x;
+    }
+
+    // Reassignment
+    pub fn test_reassignment() -> u256 {
+        var x: u256 = 1;
+        x = 2;
+        x = 3;
+        x = 4;
+        return x; // 4
+    }
+
+    // Compound assignment operators
+    pub fn test_compound_assignments() -> u256 {
+        var x: u256 = 100;
+        x += 10;  // 110
+        x -= 5;   // 105
+        x *= 2;   // 210
+        x /= 3;   // 70
+        x %= 9;   // 7
+        return x;
+    }
+
+    // Var with boolean
+    pub fn test_var_bool() -> bool {
+        var flag: bool = false;
+        flag = true;
+        flag = !flag;
+        return flag; // false
+    }
+
+    // Multiple vars interacting
+    pub fn test_multiple_vars() -> u256 {
+        var a: u256 = 10;
+        var b: u256 = 20;
+        var temp: u256 = a;
+        a = b;
+        b = temp;
+        return a + b; // 30 (swapped but sum same)
+    }
+
+    // Var modified in loop
+    pub fn test_var_in_loop() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            sum += i;
+            i += 1;
+        }
+        return sum;
+    }
+
+    // Var modified in branches
+    pub fn test_var_in_branches(x: u256) -> u256 {
+        var result: u256 = 0;
+        if (x > 100) {
+            result = 3;
+        } else if (x > 50) {
+            result = 2;
+        } else {
+            result = 1;
+        }
+        return result;
+    }
+}

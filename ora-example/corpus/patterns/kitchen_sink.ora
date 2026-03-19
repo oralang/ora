@@ -1,0 +1,494 @@
+// Level 7: Kitchen sink — every Ora feature in one contract
+// Tests: structs, enums, bitfields, maps, arrays, refinement types,
+//        error unions, try/catch, traits, comptime, ghost state,
+//        requires/ensures, logs, locks, switch, loops, labeled blocks
+
+// --- File-level declarations ---
+
+struct Position {
+    tokenId: u256;
+    amount: u256;
+    entryPrice: u256;
+    owner: address;
+}
+
+struct RewardSnapshot {
+    accumulated: u256;
+    lastUpdate: u256;
+}
+
+enum PositionState : u8 {
+    Open = 0,
+    Closed = 1,
+    Liquidated = 2
+}
+
+enum RiskTier : u8 {
+    Safe = 0,
+    Warning = 1,
+    Danger = 2,
+    Critical = 3
+}
+
+bitfield VaultFlags : u256 {
+    paused: bool;
+    allowDeposits: bool;
+    allowWithdrawals: bool;
+    emergencyMode: bool;
+    version: u8;
+    maxPositions: u8;
+}
+
+bitfield AccountStatus : u256 {
+    active: bool;
+    whitelisted: bool;
+    tier: u8;
+    nonce: u16;
+}
+
+error InsufficientBalance(required: u256, available: u256);
+error InsufficientCollateral(required: u256, available: u256);
+error VaultPaused;
+error PositionNotFound;
+error Unauthorized;
+error ZeroAmount;
+error InvalidPosition;
+
+log Deposit(indexed account: address, amount: u256);
+log Withdrawal(indexed account: address, amount: u256);
+log PositionOpened(indexed account: address, positionId: u256, amount: u256);
+log PositionClosed(indexed account: address, positionId: u256);
+log PositionLiquidated(indexed liquidator: address, indexed account: address, positionId: u256);
+log RewardClaimed(indexed account: address, reward: u256);
+log ConfigUpdated(field: u256, newValue: u256);
+
+// --- Trait declaration ---
+
+trait Describable {
+    fn describe(self) -> u256;
+}
+
+impl Describable for Position {
+    fn describe(self) -> u256 {
+        return self.amount;
+    }
+}
+
+// --- Main contract ---
+
+contract KitchenSink {
+    // --- Storage: primitives ---
+    storage var owner: address;
+    storage var totalDeposits: u256 = 0;
+    storage var totalPositions: u256 = 0;
+    storage var nextPositionId: u256 = 1;
+    storage var flags: VaultFlags;
+
+    // --- Storage: maps ---
+    storage var balances: map<address, u256>;
+    storage var accountStatus: map<address, AccountStatus>;
+    storage var positions: map<u256, Position>;
+    storage var positionStates: map<u256, u8>;
+    storage var rewards: map<address, RewardSnapshot>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    // --- Storage: arrays ---
+    storage var recentDeposits: [u256; 4];
+
+    // --- Constants ---
+    const MAX_DEPOSIT: u256 = 1_000_000;
+    const REWARD_RATE: u256 = 100;  // basis points per day
+    const LIQUIDATION_THRESHOLD: u256 = 8000;  // 80%
+
+    // --- Ghost state ---
+    ghost storage specTotalBalance: u256 = 0;
+    ghost storage specDepositCount: u256 = 0;
+    ghost storage specWithdrawCount: u256 = 0;
+
+    ghost fn netDeposits() -> u256 {
+        if (specWithdrawCount > specDepositCount) {
+            return 0;
+        }
+        return specDepositCount - specWithdrawCount;
+    }
+
+    // --- Comptime helper ---
+    fn identity(comptime T: type, value: T) -> T {
+        return value;
+    }
+
+    // --- Init ---
+    pub fn init() {
+        owner = std.msg.sender();
+
+        let f: VaultFlags = .{
+            .paused = false,
+            .allowDeposits = true,
+            .allowWithdrawals = true,
+            .emergencyMode = false,
+            .version = identity(u8, 1),
+            .maxPositions = identity(u8, 10),
+        };
+        flags = f;
+    }
+
+    // --- Internal helpers ---
+
+    fn onlyOwner() -> bool {
+        return std.msg.sender() == owner;
+    }
+
+    fn whenNotPaused() -> bool {
+        let f: VaultFlags = flags;
+        return !f.paused;
+    }
+
+    fn getRiskTier(healthFactor: u256) -> u8 {
+        if (healthFactor >= 15000) {
+            return 0;  // Safe
+        } else {
+            if (healthFactor >= 12000) {
+                return 1;  // Warning
+            } else {
+                if (healthFactor >= 10000) {
+                    return 2;  // Danger
+                } else {
+                    return 3;  // Critical
+                }
+            }
+        }
+    }
+
+    fn calculateReward(user: address) -> u256 {
+        let snap: RewardSnapshot = rewards[user];
+        let userBalance: u256 = balances[user];
+
+        if (userBalance == 0) {
+            return 0;
+        }
+
+        let lastTime: u256 = snap.lastUpdate;
+        let currentTime: u256 = std.block.timestamp;
+
+        if (currentTime <= lastTime) {
+            return 0;
+        }
+
+        let elapsed: u256 = currentTime - lastTime;
+        let reward: u256 = (userBalance * REWARD_RATE * elapsed) / (10000 * 86400);
+        return reward;
+    }
+
+    // --- Core operations ---
+
+    pub fn deposit(amount: MinValue<u256, 1>) -> !bool | VaultPaused | ZeroAmount
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(specTotalBalance <= std.constants.U256_MAX - amount)
+        requires(specDepositCount <= std.constants.U256_MAX - amount)
+        ensures(totalDeposits == old(totalDeposits) + amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
+        ensures(specTotalBalance == old(specTotalBalance) + amount)
+    {
+        let f: VaultFlags = flags;
+        if (f.paused) {
+            return error.VaultPaused;
+        }
+        if (!f.allowDeposits) {
+            return error.VaultPaused;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+
+        // Accrue pending rewards
+        let pendingReward: u256 = calculateReward(sender);
+        let snap: RewardSnapshot = rewards[sender];
+        let newSnap: RewardSnapshot = RewardSnapshot {
+            accumulated: snap.accumulated + pendingReward,
+            lastUpdate: std.block.timestamp,
+        };
+        rewards[sender] = newSnap;
+
+        // Update balances
+        @lock(totalDeposits);
+        balances[sender] += amount;
+        totalDeposits += amount;
+        specTotalBalance += amount;
+        specDepositCount += amount;
+        @unlock(totalDeposits);
+
+        // Track recent deposits in fixed array
+        recentDeposits[3] = recentDeposits[2];
+        recentDeposits[2] = recentDeposits[1];
+        recentDeposits[1] = recentDeposits[0];
+        recentDeposits[0] = amount;
+
+        // Update account status nonce
+        let status: AccountStatus = accountStatus[sender];
+        status.nonce = status.nonce +% 1;
+        status.active = true;
+        accountStatus[sender] = status;
+
+        log Deposit(sender, amount);
+        return true;
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | VaultPaused | InsufficientBalance
+        requires(amount > 0)
+        requires(balances[std.msg.sender()] >= amount)
+        requires(specWithdrawCount <= std.constants.U256_MAX - amount)
+        ensures(totalDeposits == old(totalDeposits) - amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        ensures(specTotalBalance == old(specTotalBalance) - amount)
+    {
+        let f: VaultFlags = flags;
+        if (f.paused || !f.allowWithdrawals) {
+            return error.VaultPaused;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+        @lock(totalDeposits);
+
+        let current: u256 = balances[sender];
+        if (current < amount) {
+            @unlock(totalDeposits);
+            return error InsufficientBalance(amount, current);
+        }
+
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        specTotalBalance -= amount;
+        specWithdrawCount += amount;
+
+        @unlock(totalDeposits);
+        log Withdrawal(sender, amount);
+        return true;
+    }
+
+    // --- Position management ---
+
+    pub fn openPosition(tokenId: u256, amount: u256, entryPrice: u256) -> !u256 | VaultPaused | InsufficientBalance | ZeroAmount
+        requires(amount > 0)
+        requires(entryPrice > 0)
+        requires(nextPositionId < std.constants.U256_MAX)
+    {
+        if (amount == 0) {
+            return error.ZeroAmount;
+        }
+
+        let f: VaultFlags = flags;
+        if (f.paused) {
+            return error.VaultPaused;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return error InsufficientBalance(amount, senderBalance);
+        }
+
+        let posId: u256 = nextPositionId;
+        let pos: Position = Position {
+            tokenId: tokenId,
+            amount: amount,
+            entryPrice: entryPrice,
+            owner: sender,
+        };
+
+        positions[posId] = pos;
+        positionStates[posId] = 0;  // Open
+        balances[sender] = senderBalance - amount;
+        nextPositionId += 1;
+        totalPositions += 1;
+
+        log PositionOpened(sender, posId, amount);
+        return posId;
+    }
+
+    pub fn closePosition(positionId: u256) -> !bool | PositionNotFound | Unauthorized
+    {
+        let state: u8 = positionStates[positionId];
+        if (state != 0) {
+            return error.PositionNotFound;
+        }
+
+        let pos: Position = positions[positionId];
+        let sender: address = std.msg.sender();
+
+        if (pos.owner != sender) {
+            return error.Unauthorized;
+        }
+
+        positionStates[positionId] = 1;  // Closed
+        balances[sender] += pos.amount;
+        totalPositions -= 1;
+
+        log PositionClosed(sender, positionId);
+        return true;
+    }
+
+    // --- Reward claiming ---
+
+    pub fn claimRewards() -> u256 {
+        let sender: NonZeroAddress = std.msg.sender();
+        let newReward: u256 = calculateReward(sender);
+
+        let snap: RewardSnapshot = rewards[sender];
+        let totalReward: u256 = snap.accumulated + newReward;
+
+        let newSnap: RewardSnapshot = RewardSnapshot {
+            accumulated: 0,
+            lastUpdate: std.block.timestamp,
+        };
+        rewards[sender] = newSnap;
+
+        log RewardClaimed(sender, totalReward);
+        return totalReward;
+    }
+
+    // --- Try/catch pattern ---
+
+    pub fn safeDeposit(amount: u256) -> bool {
+        try {
+            let result: !bool = deposit(amount);
+            return result;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // --- Allowance ---
+
+    pub fn approve(spender: NonZeroAddress, amount: u256) {
+        let sender: NonZeroAddress = std.msg.sender();
+        allowances[sender][spender] = amount;
+    }
+
+    pub fn spendAllowance(from: address, amount: u256) -> !bool | InsufficientBalance {
+        let spender: NonZeroAddress = std.msg.sender();
+        let currentAllowance: u256 = allowances[from][spender];
+
+        if (currentAllowance < amount) {
+            return error InsufficientBalance(amount, currentAllowance);
+        }
+
+        allowances[from][spender] = currentAllowance - amount;
+        return true;
+    }
+
+    // --- Admin with switch ---
+
+    pub fn setConfig(field: u256, value: u256) {
+        let caller: address = std.msg.sender();
+        if (caller != owner) {
+            return;
+        }
+
+        let f: VaultFlags = flags;
+        switch (field) {
+            0 => {
+                if (value == 0) {
+                    f.paused = false;
+                } else {
+                    f.paused = true;
+                }
+            }
+            1 => {
+                if (value == 0) {
+                    f.allowDeposits = false;
+                } else {
+                    f.allowDeposits = true;
+                }
+            }
+            2 => {
+                if (value == 0) {
+                    f.allowWithdrawals = false;
+                } else {
+                    f.allowWithdrawals = true;
+                }
+            }
+            3 => {
+                if (value == 0) {
+                    f.emergencyMode = false;
+                } else {
+                    f.emergencyMode = true;
+                }
+            }
+            else => {
+                return;
+            }
+        }
+        flags = f;
+        log ConfigUpdated(field, value);
+    }
+
+    // --- Loop: batch processing ---
+
+    pub fn batchCheckRisk(count: u256) -> u256
+        requires(count <= 4)
+    {
+        var criticalCount: u256 = 0;
+        var i: u256 = 0;
+
+        while (i < count) {
+            let deposit_val: u256 = recentDeposits[i];
+            if (deposit_val > MAX_DEPOSIT) {
+                criticalCount += 1;
+            }
+            i += 1;
+        }
+
+        return criticalCount;
+    }
+
+    // --- Labeled block ---
+
+    pub fn findFirstLargeDeposit() -> u256 {
+        var result: u256 = 0;
+
+        search: {
+            if (recentDeposits[0] > MAX_DEPOSIT) {
+                result = recentDeposits[0];
+                break :search;
+            }
+            if (recentDeposits[1] > MAX_DEPOSIT) {
+                result = recentDeposits[1];
+                break :search;
+            }
+            if (recentDeposits[2] > MAX_DEPOSIT) {
+                result = recentDeposits[2];
+                break :search;
+            }
+            if (recentDeposits[3] > MAX_DEPOSIT) {
+                result = recentDeposits[3];
+                break :search;
+            }
+        }
+
+        return result;
+    }
+
+    // --- View functions ---
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+
+    pub fn getPosition(positionId: u256) -> Position {
+        return positions[positionId];
+    }
+
+    pub fn getAccountStatus(account: address) -> AccountStatus {
+        return accountStatus[account];
+    }
+
+    pub fn getOwner() -> address {
+        return owner;
+    }
+}

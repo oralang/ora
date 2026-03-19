@@ -1,0 +1,63 @@
+contract I256Ops {
+    storage var a: i256;
+    storage var b: i256;
+
+    pub fn arithmetic(x: i256, y: i256) -> i256 {
+        let add: i256 = x + y;
+        let sub: i256 = x - y;
+        let mul: i256 = x * y;
+        let div: i256 = x / y;
+        let mod_: i256 = x % y;
+        let neg: i256 = -x;
+        let compound: i256 = (x + y) * x;
+        return add;
+    }
+
+    pub fn wrapping(x: i256, y: i256) -> i256 {
+        let add: i256 = x +% y;
+        let sub: i256 = x -% y;
+        let mul: i256 = x *% y;
+        return add;
+    }
+
+    pub fn comparison(x: i256, y: i256) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        let lt: bool = x < y;
+        let le: bool = x <= y;
+        let gt: bool = x > y;
+        let ge: bool = x >= y;
+        return eq;
+    }
+
+    pub fn bitwise(x: i256, y: i256) -> i256 {
+        let and_: i256 = x & y;
+        let or_: i256 = x | y;
+        let xor_: i256 = x ^ y;
+        let shl: i256 = x << y;
+        let shr: i256 = x >> y;
+        let not_: i256 = ~x;
+        return and_;
+    }
+
+    pub fn assignment() {
+        a = 1;
+        a += 1;
+        a -= 1;
+        a *= 2;
+        a /= 2;
+        a %= 3;
+        a &= 0xFF;
+        a |= 0x01;
+        a ^= 0x0F;
+        a <<= 1;
+        a >>= 1;
+    }
+
+    pub fn storage_ops() -> i256 {
+        a = -1000000;
+        b = a;
+        let val: i256 = a + b;
+        return val;
+    }
+}

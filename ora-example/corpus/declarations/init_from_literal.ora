@@ -1,0 +1,77 @@
+// ==========================================
+// INIT FROM LITERAL — every literal form
+// ==========================================
+
+contract InitFromLiteral {
+    // Integer literals
+    pub fn integer_literals() -> u256 {
+        let zero: u256 = 0;
+        let one: u256 = 1;
+        let small: u256 = 42;
+        let large: u256 = 1_000_000;
+        let very_large: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        return small;
+    }
+
+    // Hex literals
+    pub fn hex_literals() -> u256 {
+        let byte_val: u256 = 0xFF;
+        let word_val: u256 = 0xFFFF;
+        let selector: u32 = 0xA9059CBB;
+        let mask: u256 = 0xFFFFFFFFFFFFFFFF;
+        let addr_sized: u256 = 0x0000000000000000000000000000000000000001;
+        return byte_val;
+    }
+
+    // Bool literals
+    pub fn bool_literals() -> bool {
+        let t: bool = true;
+        let f: bool = false;
+        return t;
+    }
+
+    // Address literal via std
+    pub fn address_literals() -> address {
+        let zero_addr: address = std.constants.ZERO_ADDRESS;
+        let sender: address = std.msg.sender();
+        return zero_addr;
+    }
+
+    // String literals
+    pub fn string_literals() -> string {
+        let empty: string = "";
+        let hello: string = "hello";
+        let with_spaces: string = "hello world";
+        return hello;
+    }
+
+    // Small integer types with literals
+    pub fn small_type_literals() -> u8 {
+        let a: u8 = 0;
+        let b: u8 = 127;
+        let c: u8 = 255;
+        let d: u16 = 0;
+        let e: u16 = 65535;
+        let f: u32 = 0;
+        let g: u32 = 4294967295;
+        return c;
+    }
+
+    // Signed integer literals
+    pub fn signed_literals() -> i256 {
+        let pos: i256 = 42;
+        let neg: i256 = -42;
+        let zero: i256 = 0;
+        let min_i8: i8 = -128;
+        let max_i8: i8 = 127;
+        return neg;
+    }
+
+    // Underscore separators in numeric literals
+    pub fn underscore_literals() -> u256 {
+        let million: u256 = 1_000_000;
+        let billion: u256 = 1_000_000_000;
+        let wei: u256 = 1_000_000_000_000_000_000;
+        return wei;
+    }
+}
