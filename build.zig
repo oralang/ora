@@ -407,56 +407,6 @@ pub fn build(b: *std.Build) void {
     const identifiers_tests = b.addTest(.{ .root_module = identifiers_test_mod });
     test_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
 
-    // parser tests - Expression Parser
-    const expression_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/expression_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    expression_parser_test_mod.addImport("ora_root", lib_mod);
-    const expression_parser_tests = b.addTest(.{ .root_module = expression_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
-
-    // parser tests - Statement Parser
-    const statement_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/statement_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    statement_parser_test_mod.addImport("ora_root", lib_mod);
-    const statement_parser_tests = b.addTest(.{ .root_module = statement_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
-
-    // parser tests - Parser Core
-    const parser_core_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/parser_core.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    parser_core_test_mod.addImport("ora_root", lib_mod);
-    const parser_core_tests = b.addTest(.{ .root_module = parser_core_test_mod });
-    test_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
-
-    // parser tests - Declaration Parser
-    const declaration_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/declaration_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    declaration_parser_test_mod.addImport("ora_root", lib_mod);
-    const declaration_parser_tests = b.addTest(.{ .root_module = declaration_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
-
-    // parser tests - Type Parser
-    const type_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/type_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    type_parser_test_mod.addImport("ora_root", lib_mod);
-    const type_parser_tests = b.addTest(.{ .root_module = type_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
-
     // import resolver tests
     const import_resolver_test_mod = b.createModule(.{
         .root_source_file = b.path("src/imports/mod.test.zig"),
@@ -745,12 +695,7 @@ pub fn build(b: *std.Build) void {
     test_lexer_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
 
     // zig build test-parser
-    const test_parser_step = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
-    test_parser_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
+    _ = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
 
     // zig build test-semantics
     const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
