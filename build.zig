@@ -417,16 +417,6 @@ pub fn build(b: *std.Build) void {
     const expression_parser_tests = b.addTest(.{ .root_module = expression_parser_test_mod });
     test_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
 
-    // ast tests - AST Builder
-    const ast_builder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/ast_builder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_builder_test_mod.addImport("ora_root", lib_mod);
-    const ast_builder_tests = b.addTest(.{ .root_module = ast_builder_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
-
     // parser tests - Statement Parser
     const statement_parser_test_mod = b.createModule(.{
         .root_source_file = b.path("src/parser/statement_parser.test.zig"),
@@ -572,26 +562,6 @@ pub fn build(b: *std.Build) void {
     linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
-
-    // ast tests - Expressions
-    const ast_expressions_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/expressions.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_expressions_test_mod.addImport("ora_root", lib_mod);
-    const ast_expressions_tests = b.addTest(.{ .root_module = ast_expressions_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
-
-    // ast tests - Statements
-    const ast_statements_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/statements.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_statements_test_mod.addImport("ora_root", lib_mod);
-    const ast_statements_tests = b.addTest(.{ .root_module = ast_statements_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
 
     // ast tests - Type Resolver (logs)
     const type_resolver_logs_test_mod = b.createModule(.{
@@ -791,9 +761,6 @@ pub fn build(b: *std.Build) void {
     test_parser_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
     test_parser_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
     test_parser_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
     test_parser_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
 
     // zig build test-semantics

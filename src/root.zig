@@ -16,7 +16,6 @@ pub const parser = @import("parser.zig");
 pub const ast = @import("ora_ast");
 pub const ast_visitor = @import("ora_ast").ast_visitor;
 pub const ast_arena = @import("ora_types").ast_arena;
-pub const ast_builder = @import("ast/ast_builder.zig");
 pub const ast_serializer = @import("ora_ast").ast_serializer;
 pub const type_resolver = @import("ast/type_resolver/mod.zig");
 pub const semantics = @import("semantics.zig");
