@@ -20,6 +20,7 @@ pub const CliOptions = struct {
     emit_cfg_mode: ?[]const u8 = null,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
+    validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
@@ -215,6 +216,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             opts.mlir_opt_level = "aggressive";
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-validate-mlir")) {
+            opts.validate_mlir = false;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-canonicalize")) {
             opts.canonicalize_mlir = false;

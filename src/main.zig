@@ -33,6 +33,7 @@ const MlirOptions = struct {
     output_dir: ?[]const u8,
     debug_enabled: bool = false,
     canonicalize: bool = true,
+    validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
@@ -272,6 +273,7 @@ pub fn main() !void {
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
+    const validate_mlir: bool = parsed.validate_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
     const verify_calls: ?bool = parsed.verify_calls;
@@ -366,6 +368,7 @@ pub fn main() !void {
         .output_dir = output_dir,
         .debug_enabled = debug_enabled,
         .canonicalize = canonicalize_mlir,
+        .validate_mlir = validate_mlir,
         .verify_z3 = verify_z3,
         .verify_mode = verify_mode,
         .verify_calls = verify_calls,
@@ -1128,6 +1131,15 @@ fn writeCompilerDiagnosticSnippet(
     try writer.writeByte('\n');
 }
 
+fn verifyMlirModule(stdout: anytype, module: @import("mlir_c_api").c.MlirModule, stage: []const u8) !void {
+    const mlir_c = @import("mlir_c_api").c;
+    const module_op = mlir_c.oraModuleGetOperation(module);
+    if (mlir_c.mlirOperationVerify(module_op)) return;
+    try stdout.print("error: internal compiler error: generated {s} is invalid\n", .{stage});
+    try stdout.flush();
+    std.process.exit(2);
+}
+
 fn writeCompilerDiagnosticSecondaryLabels(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
@@ -1522,6 +1534,10 @@ fn runMlirEmitAdvanced(
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
+
+    if (mlir_options.validate_mlir) {
+        try verifyMlirModule(stdout, final_module, "Ora MLIR");
+    }
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
     var verification_failed = false;
