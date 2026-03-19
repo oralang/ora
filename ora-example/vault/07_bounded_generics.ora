@@ -1,0 +1,26 @@
+// Vault — Tier 7: Bounded generics with where clauses
+// Generic function constrained by a trait bound.
+
+trait Describable {
+    fn describe(self) -> u256;
+}
+
+struct Token {
+    value: u256,
+}
+
+impl Describable for Token {
+    fn describe(self) -> u256 {
+        return self.value;
+    }
+}
+
+contract Registry {
+    fn inspect(comptime T: type, item: T) -> u256 where T: Describable {
+        return item.describe();
+    }
+
+    pub fn run(t: Token) -> u256 {
+        return inspect(Token, t);
+    }
+}

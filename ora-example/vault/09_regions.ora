@@ -1,0 +1,35 @@
+// Vault — Tier 9: Explicit region annotations
+// Same core logic with explicit storage/memory annotations on locals.
+
+error InsufficientBalance(required: u256, available: u256);
+
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    pub fn deposit(amount: u256) {
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        let updated: u256 = current + amount;
+        balances[sender] = updated;
+        totalDeposits += amount;
+    }
+
+    pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) return error InsufficientBalance(amount, current);
+        let remaining: u256 = current - amount;
+        balances[sender] = remaining;
+        totalDeposits -= amount;
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

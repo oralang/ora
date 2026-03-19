@@ -1,0 +1,31 @@
+// Vault — Tier 6: Traits and impl
+// Extracts a Vault trait interface and implements it.
+
+error InsufficientBalance(required: u256, available: u256);
+
+trait VaultInterface {
+    fn deposit(self, amount: u256);
+    fn withdraw(self, amount: u256) -> !bool | InsufficientBalance;
+    fn balanceOf(self, account: address) -> u256;
+    fn getTotalDeposits(self) -> u256;
+}
+
+contract SimpleVault {}
+
+impl VaultInterface for SimpleVault {
+    fn deposit(self, amount: u256) {
+        // impl method body — exercises self typing
+    }
+
+    fn withdraw(self, amount: u256) -> !bool | InsufficientBalance {
+        return true;
+    }
+
+    fn balanceOf(self, account: address) -> u256 {
+        return 0;
+    }
+
+    fn getTotalDeposits(self) -> u256 {
+        return 0;
+    }
+}

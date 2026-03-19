@@ -1,0 +1,54 @@
+// Vault — Tier 4: Formal verification
+// Same core logic, adds requires/ensures and ghost state for conservation proof.
+
+error InsufficientBalance(required: u256, available: u256);
+
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    ghost storage spec_sum: u256 = 0;
+
+    log Deposit(account: address, amount: u256);
+    log Withdrawal(account: address, amount: u256);
+
+    pub fn deposit(amount: MinValue<u256, 1>)
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        ensures(totalDeposits == old(totalDeposits) + amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
+        ensures(spec_sum == old(spec_sum) + amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+        spec_sum += amount;
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
+        requires(amount > 0)
+        requires(balances[std.msg.sender()] >= amount)
+        ensures(totalDeposits == old(totalDeposits) - amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        ensures(spec_sum == old(spec_sum) - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) return error InsufficientBalance(amount, current);
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        spec_sum -= amount;
+        log Withdrawal(sender, amount);
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

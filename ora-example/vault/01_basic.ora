@@ -1,0 +1,27 @@
+// Vault — Tier 1: Basic storage and functions
+// Core deposit/withdraw logic with explicit storage variables.
+
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    pub fn deposit(amount: u256) {
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+    }
+
+    pub fn withdraw(amount: u256) {
+        let sender: address = std.msg.sender();
+        balances[sender] -= amount;
+        totalDeposits -= amount;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}
