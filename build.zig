@@ -373,6 +373,8 @@ pub fn build(b: *std.Build) void {
     });
     abi_test_mod.addImport("ora_root", lib_mod);
     const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
+    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, abi_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
 
     // scanner tests - Numbers

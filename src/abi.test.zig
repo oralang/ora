@@ -5,29 +5,27 @@
 const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
-const lexer = ora_root.lexer;
-const parser = ora_root.parser;
-const ast_arena = ora_root.ast_arena;
 const abi = ora_root.abi;
+const compiler = ora_root.compiler;
 
-fn generateAbiForSource(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    arena: *ast_arena.AstArena,
-) !abi.ContractAbi {
-    var lex = lexer.Lexer.init(allocator, source);
-    defer lex.deinit();
-    const tokens = try lex.scanTokens();
-    defer allocator.free(tokens);
+const AbiFixture = struct {
+    compilation: compiler.driver.Compilation,
+    contract_abi: abi.ContractAbi,
 
-    var parser_instance = parser.Parser.init(tokens, arena);
-    const nodes = try parser_instance.parse();
-    defer arena.allocator().free(nodes);
+    fn deinit(self: *AbiFixture) void {
+        self.contract_abi.deinit();
+        self.compilation.deinit();
+    }
+};
 
-    var generator = try abi.AbiGenerator.init(allocator);
-    defer generator.deinit();
-
-    return try generator.generate(nodes);
+fn generateAbiForSource(allocator: std.mem.Allocator, source: []const u8) !AbiFixture {
+    var compilation = try compiler.compileSource(allocator, "abi-test.ora", source);
+    errdefer compilation.deinit();
+    const contract_abi = try abi.generateCompilerAbi(allocator, &compilation);
+    return .{
+        .compilation = compilation,
+        .contract_abi = contract_abi,
+    };
 }
 
 fn findCallable(contract_abi: *const abi.ContractAbi, kind: abi.CallableKind, name: []const u8) ?*const abi.AbiCallable {
@@ -70,20 +68,18 @@ test "abi manifest includes functions errors events effects and hashed type ids"
         \\}
     ;
 
-    var arena = ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-
-    var contract_abi = try generateAbiForSource(allocator, source, &arena);
-    defer contract_abi.deinit();
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
 
     try testing.expectEqual(@as(usize, 1), contract_abi.contract_count);
     try testing.expectEqualStrings("Test", contract_abi.contract_name);
 
-    const pure_fn = findCallable(&contract_abi, .function, "pureFn") orelse return error.TestUnexpectedResult;
-    const view_fn = findCallable(&contract_abi, .function, "viewFn") orelse return error.TestUnexpectedResult;
-    const write_fn = findCallable(&contract_abi, .function, "writeFn") orelse return error.TestUnexpectedResult;
-    const invalid_amount = findCallable(&contract_abi, .@"error", "InvalidAmount") orelse return error.TestUnexpectedResult;
-    const transfer = findCallable(&contract_abi, .event, "Transfer") orelse return error.TestUnexpectedResult;
+    const pure_fn = findCallable(contract_abi, .function, "pureFn") orelse return error.TestUnexpectedResult;
+    const view_fn = findCallable(contract_abi, .function, "viewFn") orelse return error.TestUnexpectedResult;
+    const write_fn = findCallable(contract_abi, .function, "writeFn") orelse return error.TestUnexpectedResult;
+    const invalid_amount = findCallable(contract_abi, .@"error", "InvalidAmount") orelse return error.TestUnexpectedResult;
+    const transfer = findCallable(contract_abi, .event, "Transfer") orelse return error.TestUnexpectedResult;
 
     try testing.expect(pure_fn.selector != null);
     try testing.expectEqual(@as(usize, 1), pure_fn.outputs.len);
@@ -165,17 +161,15 @@ test "abi emits one bundle for multiple contracts and disambiguates callable ids
         \\}
     ;
 
-    var arena = ast_arena.AstArena.init(allocator);
-    defer arena.deinit();
-
-    var contract_abi = try generateAbiForSource(allocator, source, &arena);
-    defer contract_abi.deinit();
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
 
     try testing.expectEqual(@as(usize, 2), contract_abi.contract_count);
     try testing.expectEqualStrings("bundle", contract_abi.contract_name);
 
-    try testing.expectEqual(@as(usize, 2), countCallables(&contract_abi, .function, "ping"));
-    try testing.expectEqual(@as(usize, 2), countCallables(&contract_abi, .@"error", "Boom"));
+    try testing.expectEqual(@as(usize, 2), countCallables(contract_abi, .function, "ping"));
+    try testing.expectEqual(@as(usize, 2), countCallables(contract_abi, .@"error", "Boom"));
 
     var found_a_fn = false;
     var found_b_fn = false;
@@ -203,15 +197,13 @@ test "abi type ids are stable across repeated generation for same source" {
         \\}
     ;
 
-    var arena_a = ast_arena.AstArena.init(allocator);
-    defer arena_a.deinit();
-    var abi_a = try generateAbiForSource(allocator, source, &arena_a);
-    defer abi_a.deinit();
+    var fixture_a = try generateAbiForSource(allocator, source);
+    defer fixture_a.deinit();
+    const abi_a = &fixture_a.contract_abi;
 
-    var arena_b = ast_arena.AstArena.init(allocator);
-    defer arena_b.deinit();
-    var abi_b = try generateAbiForSource(allocator, source, &arena_b);
-    defer abi_b.deinit();
+    var fixture_b = try generateAbiForSource(allocator, source);
+    defer fixture_b.deinit();
+    const abi_b = &fixture_b.contract_abi;
 
     try testing.expectEqual(abi_a.types.len, abi_b.types.len);
 
