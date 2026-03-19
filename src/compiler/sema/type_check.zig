@@ -1046,6 +1046,8 @@ const TypeChecker = struct {
                 }
                 if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
             },
+            .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
+            .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Try => |try_stmt| {
                 try self.visitBody(try_stmt.try_body);
                 if (try_stmt.catch_clause) |catch_clause| {
@@ -2705,6 +2707,8 @@ const TypeChecker = struct {
             .Assert => |assert_stmt| assert_stmt.condition,
             .Assume => |assume_stmt| assume_stmt.condition,
             .Expr => |expr_stmt| expr_stmt.expr,
+            .Break => |jump| jump.value,
+            .Continue => |jump| jump.value,
             else => null,
         };
     }
@@ -2990,7 +2994,8 @@ const TypeChecker = struct {
             .Havoc => state.has_havoc = true,
             .Lock => state.has_lock = true,
             .Unlock => state.has_unlock = true,
-            .Break, .Continue => {},
+            .Break => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
+            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
             .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, state),
             .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, state),
             .Assign => |assign| {
@@ -3368,7 +3373,9 @@ const TypeChecker = struct {
             .Expr => |expr_stmt| try self.collectExprDirectCallees(expr_stmt.expr, callees),
             .Block => |block| try self.collectBodyDirectCallees(block.body, callees),
             .LabeledBlock => |block| try self.collectBodyDirectCallees(block.body, callees),
-            .Havoc, .Break, .Continue, .Error => {},
+            .Havoc, .Error => {},
+            .Break => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
         }
     }
 

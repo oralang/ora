@@ -3,15 +3,22 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
+const hir_locals = @import("locals.zig");
 
 pub const LoopContext = struct {
     parent: ?*const LoopContext,
+    label: ?[]const u8 = null,
     break_flag: mlir.MlirValue,
     carried_locals: []const ast.PatternId,
 };
 
 pub const SwitchContext = struct {
     parent: ?*const SwitchContext,
+    label: ?[]const u8 = null,
+    continue_flag: ?mlir.MlirValue = null,
+    value_slot: ?mlir.MlirValue = null,
+    value_type: ?mlir.MlirType = null,
+    carried_locals: []const hir_locals.LocalId = &.{},
 };
 
 pub const SwitchPatternData = struct {

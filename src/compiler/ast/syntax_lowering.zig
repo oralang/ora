@@ -605,8 +605,8 @@ pub fn mixin(Builder: type) type {
                 .AssertStmt => Lowering.lowerAssertStmtNode(self, node),
                 .AssumeStmt => Lowering.lowerAssumeStmtNode(self, node),
                 .HavocStmt => Lowering.lowerHavocStmtNode(self, node),
-                .BreakStmt => Support.pushStmt(self, .{ .Break = .{ .range = node.range() } }),
-                .ContinueStmt => Support.pushStmt(self, .{ .Continue = .{ .range = node.range() } }),
+                .BreakStmt => Lowering.lowerJumpStmtNode(self, node, .Break),
+                .ContinueStmt => Lowering.lowerJumpStmtNode(self, node, .Continue),
                 .VariableDeclStmt => Lowering.lowerVariableDeclStmtNode(self, node),
                 .DestructuringAssignStmt => Lowering.lowerDestructuringAssignStmtNode(self, node),
                 .AssignStmt => Lowering.lowerAssignStmtNode(self, node),
@@ -711,6 +711,10 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerSwitchStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            return Lowering.lowerSwitchStmtNodeWithLabel(self, node, null);
+        }
+
+        fn lowerSwitchStmtNodeWithLabel(self: *Builder, node: SyntaxNode, label: ?[]const u8) !StmtId {
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing switch condition");
             var arms: std.ArrayList(nodes.SwitchArm) = .{};
             var else_body: ?BodyId = null;
@@ -732,10 +736,35 @@ pub fn mixin(Builder: type) type {
 
             return Support.pushStmt(self, .{ .Switch = .{
                 .range = node.range(),
+                .label = label,
                 .condition = try Lowering.lowerExpressionNode(self, condition_node),
                 .arms = try arms.toOwnedSlice(self.allocator),
                 .else_body = else_body,
             } });
+        }
+
+        fn lowerJumpStmtNode(self: *Builder, node: SyntaxNode, comptime kind: enum { Break, Continue }) !StmtId {
+            const label = if (nthDirectToken(node, 2)) |label_token|
+                if (label_token.kind() == .Identifier) tokenText(label_token) else null
+            else
+                null;
+            const value = if (firstDirectNode(node)) |value_node|
+                try Lowering.lowerExpressionNode(self, value_node)
+            else
+                null;
+
+            return switch (kind) {
+                .Break => Support.pushStmt(self, .{ .Break = .{
+                    .range = node.range(),
+                    .label = label,
+                    .value = value,
+                } }),
+                .Continue => Support.pushStmt(self, .{ .Continue = .{
+                    .range = node.range(),
+                    .label = label,
+                    .value = value,
+                } }),
+            };
         }
 
         fn lowerSwitchArmNode(self: *Builder, node: SyntaxNode) !nodes.SwitchArm {
@@ -1018,6 +1047,9 @@ pub fn mixin(Builder: type) type {
 
         fn lowerLabeledBlockStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
             const label_token = firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedStmt(self, node, "missing label name");
+            if (firstDirectChildOfKind(node, .SwitchStmt)) |switch_node| {
+                return Lowering.lowerSwitchStmtNodeWithLabel(self, switch_node, tokenText(label_token));
+            }
             const body_node = firstDirectChildOfKind(node, .Body) orelse return Lowering.malformedStmt(self, node, "missing labeled block body");
             return Support.pushStmt(self, .{ .LabeledBlock = .{
                 .range = node.range(),

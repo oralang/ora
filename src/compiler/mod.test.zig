@@ -6765,6 +6765,38 @@ test "compiler lowers labeled block statements through syntax AST path" {
     try testing.expectEqual(@as(usize, 1), ast_file.body(labeled.body).statements.len);
 }
 
+test "compiler lowers labeled switch statements and jump values through syntax AST path" {
+    const source_text =
+        \\pub fn run(flag: u256) -> u256 {
+        \\    again: switch (flag) {
+        \\        0 => {
+        \\            continue :again 1;
+        \\        },
+        \\        else => {
+        \\            break :again;
+        \\        }
+        \\    }
+        \\    return flag;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const switch_stmt = ast_file.statement(body.statements[0]).Switch;
+    const continue_stmt = ast_file.statement(ast_file.body(switch_stmt.arms[0].body).statements[0]).Continue;
+    const break_stmt = ast_file.statement(ast_file.body(switch_stmt.else_body.?).statements[0]).Break;
+
+    try testing.expectEqualStrings("again", switch_stmt.label.?);
+    try testing.expectEqualStrings("again", continue_stmt.label.?);
+    try testing.expect(continue_stmt.value != null);
+    try testing.expectEqualStrings("again", break_stmt.label.?);
+}
+
 test "compiler lowers lock and unlock statements through syntax AST and HIR paths" {
     const source_text =
         \\contract Vault {
@@ -10285,6 +10317,39 @@ test "compiler lowers switch statements with early return without placeholders" 
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
+test "compiler lowers labeled switch continue through a real loop" {
+    const source_text =
+        \\pub fn run(initial: u256) -> u256 {
+        \\    var tag = initial;
+        \\    again: switch (tag) {
+        \\        0 => {
+        \\            tag = 1;
+        \\            continue :again tag;
+        \\        },
+        \\        1 => {
+        \\            break :again;
+        \\        },
+        \\        else => {
+        \\            break :again;
+        \\        }
+        \\    }
+        \\    return tag;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
 }
 

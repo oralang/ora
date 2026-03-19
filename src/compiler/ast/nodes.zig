@@ -400,6 +400,7 @@ pub const SwitchArm = struct {
 
 pub const SwitchStmt = struct {
     range: source.TextRange,
+    label: ?[]const u8,
     condition: ExprId,
     arms: []SwitchArm,
     else_body: ?BodyId,
@@ -451,6 +452,8 @@ pub const HavocStmt = struct {
 
 pub const JumpStmt = struct {
     range: source.TextRange,
+    label: ?[]const u8,
+    value: ?ExprId,
 };
 
 pub const AssignStmt = struct {

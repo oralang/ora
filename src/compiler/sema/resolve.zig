@@ -209,6 +209,8 @@ const Resolver = struct {
                     try self.resolveBody(catch_clause.body, &catch_env);
                 }
             },
+            .Break => |jump| if (jump.value) |expr_id| try self.resolveExpr(expr_id, env),
+            .Continue => |jump| if (jump.value) |expr_id| try self.resolveExpr(expr_id, env),
             .Log => |log_stmt| {
                 for (log_stmt.args) |arg| try self.resolveExpr(arg, env);
             },

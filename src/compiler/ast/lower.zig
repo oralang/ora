@@ -237,6 +237,9 @@ const Validator = struct {
                 }
                 if (switch_stmt.else_body) |body_id| _ = try self.expectBody(body_id, stmt_range, "switch statement references invalid else body id");
             },
+            .Break, .Continue => |jump| {
+                if (jump.value) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "jump statement references invalid expression id");
+            },
             .Try => |try_stmt| {
                 _ = try self.expectBody(try_stmt.try_body, stmt_range, "try statement references invalid try body id");
                 if (try_stmt.catch_clause) |catch_clause| {
@@ -258,7 +261,7 @@ const Validator = struct {
             .Expr => |expr_stmt| _ = try self.expectExpr(expr_stmt.expr, stmt_range, "expression statement references invalid expression id"),
             .Block => |block| _ = try self.expectBody(block.body, stmt_range, "block statement references invalid body id"),
             .LabeledBlock => |block| _ = try self.expectBody(block.body, stmt_range, "labeled block references invalid body id"),
-            .Havoc, .Break, .Continue, .Error => {},
+            .Havoc, .Error => {},
         }
     }
 

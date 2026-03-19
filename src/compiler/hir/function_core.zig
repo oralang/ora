@@ -27,6 +27,7 @@ const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
 const LoopContext = support.LoopContext;
+const SwitchContext = support.SwitchContext;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
@@ -685,8 +686,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Switch => |switch_stmt| return self.lowerSwitchStmt(switch_stmt, locals),
                 .Try => |try_stmt| return self.lowerTryStmt(try_stmt, locals),
                 .Break => |jump| {
-                    if (self.switch_context != null) {
-                        try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
+                    if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
+                        if (switch_context.carried_locals.len == 0) {
+                            try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
+                        } else {
+                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, switch_context.carried_locals);
+                        }
                         return true;
                     }
                     if (self.loop_context) |loop_context| {
@@ -704,7 +709,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Continue => |jump| {
-                    if (self.switch_context != null) {
+                    if (@This().findContinuableSwitchContext(self, jump.label)) |switch_context| {
+                        const loc = self.parent.location(jump.range);
+                        if (jump.value) |expr_id| {
+                            const raw_value = try self.lowerExpr(expr_id, locals);
+                            const target_type = switch_context.value_type orelse mlir.oraValueGetType(raw_value);
+                            const value = try @This().convertValueForFlow(self, raw_value, target_type, jump.range);
+                            const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
+                            if (mlir.oraOperationIsNull(store)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, store);
+                        }
+                        const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                        const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
+                        if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
+                        appendOp(self.block, set_continue);
+                        if (switch_context.carried_locals.len == 0) {
+                            try appendEmptyYield(self.parent.context, self.block, loc);
+                        } else {
+                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, switch_context.carried_locals);
+                        }
+                        return true;
+                    }
+                    if (self.switch_context != null and jump.label == null) {
                         const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, op);
@@ -721,6 +747,35 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Error => return false,
             }
+        }
+
+        fn findTargetSwitchContext(self: *FunctionLowerer, label: ?[]const u8) ?*const SwitchContext {
+            var current = self.switch_context;
+            while (current) |switch_context| : (current = switch_context.parent) {
+                if (label) |target| {
+                    if (switch_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return switch_context;
+                    }
+                } else {
+                    return switch_context;
+                }
+            }
+            return null;
+        }
+
+        fn findContinuableSwitchContext(self: *FunctionLowerer, label: ?[]const u8) ?*const SwitchContext {
+            var current = self.switch_context;
+            while (current) |switch_context| : (current = switch_context.parent) {
+                if (switch_context.continue_flag == null or switch_context.value_slot == null) continue;
+                if (label) |target| {
+                    if (switch_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return switch_context;
+                    }
+                } else {
+                    return switch_context;
+                }
+            }
+            return null;
         }
 
         pub fn bindPatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {

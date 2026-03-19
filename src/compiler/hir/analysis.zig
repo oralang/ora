@@ -111,8 +111,6 @@ fn collectSwitchCarriedLocalsFromEnv(
     carried_seen: *LocalIdSet,
 ) anyerror!bool {
     for (switch_stmt.arms) |arm| {
-        if (bodyContainsSwitchBreak(file, arm.body)) return false;
-
         var arm_env = try current_env.clone();
         if (!try collectCarriedLocalsInEnv(allocator, file, arm.body, outer_env, &arm_env, carried_locals, carried_seen)) {
             return false;
@@ -120,8 +118,6 @@ fn collectSwitchCarriedLocalsFromEnv(
     }
 
     if (switch_stmt.else_body) |else_body| {
-        if (bodyContainsSwitchBreak(file, else_body)) return false;
-
         var else_env = try current_env.clone();
         if (!try collectCarriedLocalsInEnv(allocator, file, else_body, outer_env, &else_env, carried_locals, carried_seen)) {
             return false;

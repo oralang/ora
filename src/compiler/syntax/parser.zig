@@ -1136,8 +1136,8 @@ const Parser = struct {
             .Assert => self.parseAssertStmtNode(),
             .Assume => self.parseAssumeStmtNode(),
             .Havoc => self.parseDelimitedStatementNode(SyntaxKind.HavocStmt),
-            .Break => self.parseDelimitedStatementNode(SyntaxKind.BreakStmt),
-            .Continue => self.parseDelimitedStatementNode(SyntaxKind.ContinueStmt),
+            .Break => self.parseJumpStmtNode(SyntaxKind.BreakStmt),
+            .Continue => self.parseJumpStmtNode(SyntaxKind.ContinueStmt),
             .Storage, .Memory, .Tstore, .Let, .Var, .Const, .Immutable => self.parseVariableDeclStmtNode(),
             else => self.parseExprOrAssignStmtNode(),
         };
@@ -1163,11 +1163,43 @@ const Parser = struct {
 
         if (self.at(.LeftBrace)) {
             try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        } else if (self.at(.Switch)) {
+            try children.append(self.allocator, .{ .node = try self.parseSwitchStmtNode() });
         } else {
-            try self.reportHere("expected block after label");
+            try self.reportHere("expected block or switch after label");
         }
 
         return self.finishNode(SyntaxKind.LabeledBlockStmt, children.items);
+    }
+
+    fn parseJumpStmtNode(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+
+        if (self.at(.Colon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (self.at(.Identifier)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected label name after ':'");
+            }
+        }
+
+        if (!self.at(.Semicolon) and !self.at(.RightBrace) and !self.at(.Eof)) {
+            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
+        }
+
+        if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else if (self.at(.RightBrace)) {
+            try self.reportHere("expected ';' before '}'");
+        } else {
+            try self.reportUnterminated("unterminated statement", children.items);
+        }
+
+        return self.finishNode(kind, children.items);
     }
 
     fn parseBlockStmtNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -2472,7 +2504,7 @@ const Parser = struct {
     }
 
     fn looksLikeLabeledBlockStmt(self: *const Parser) bool {
-        return self.at(.Identifier) and self.peekKind(1) == .Colon and self.peekKind(2) == .LeftBrace;
+        return self.at(.Identifier) and self.peekKind(1) == .Colon and (self.peekKind(2) == .LeftBrace or self.peekKind(2) == .Switch);
     }
 
     fn looksLikeDestructuringAssignStmt(self: *const Parser) bool {
