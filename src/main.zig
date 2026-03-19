@@ -1098,6 +1098,49 @@ fn writeCompilerDiagnosticLocation(
     try writer.print("{s}:{d}:{d}: ", .{ file.path, line_column.line, line_column.column });
 }
 
+fn sourceLineBounds(text: []const u8, line_starts: []const u32, line_index: usize) struct { start: usize, end: usize } {
+    const start: usize = line_starts[line_index];
+    const next_start: usize = if (line_index + 1 < line_starts.len) line_starts[line_index + 1] else text.len;
+    var end = next_start;
+    while (end > start and (text[end - 1] == '\n' or text[end - 1] == '\r')) : (end -= 1) {}
+    return .{ .start = start, .end = end };
+}
+
+fn writeCompilerDiagnosticSnippet(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    labels: []const compiler.diagnostics.Label,
+) !void {
+    if (sources == null or labels.len == 0) return;
+
+    const primary = labels[0];
+    const file = sources.?.file(primary.location.file_id);
+    const line_column = sources.?.lineColumn(primary.location);
+    const line_index: usize = @intCast(line_column.line - 1);
+    const bounds = sourceLineBounds(file.text, file.line_starts, line_index);
+    const line_text = file.text[bounds.start..bounds.end];
+    const line_no_width = std.fmt.count("{d}", .{line_column.line});
+    const caret_column: usize = @intCast(line_column.column);
+    const span_len = @max(primary.location.range.len(), 1);
+    const caret_len: usize = @intCast(span_len);
+
+    try writer.print("  --> {s}:{d}:{d}\n", .{ file.path, line_column.line, line_column.column });
+    for (0..line_no_width) |_| try writer.writeByte(' ');
+    try writer.writeAll(" |\n");
+    const line_number_text = try std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{line_column.line});
+    defer std.heap.page_allocator.free(line_number_text);
+    for (0..line_no_width - line_number_text.len) |_| try writer.writeByte(' ');
+    try writer.print("{s} | {s}\n", .{ line_number_text, line_text });
+    for (0..line_no_width) |_| try writer.writeByte(' ');
+    try writer.writeAll(" | ");
+    for (1..caret_column) |_| try writer.writeByte(' ');
+    for (0..caret_len) |_| try writer.writeByte('^');
+    if (primary.message.len != 0) {
+        try writer.print(" {s}", .{primary.message});
+    }
+    try writer.writeByte('\n');
+}
+
 fn writeCompilerDiagnosticsText(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
@@ -1113,6 +1156,7 @@ fn writeCompilerDiagnosticsText(
             try writer.print(" ({s})", .{diag.labels[0].message});
         }
         try writer.writeByte('\n');
+        try writeCompilerDiagnosticSnippet(writer, sources, diag.labels);
     }
 }
 
