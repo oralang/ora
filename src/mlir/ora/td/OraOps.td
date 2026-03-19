@@ -41,12 +41,12 @@ def Ora_RefinementValueType : TypeConstraint<
   "Ora refinement type">;
 
 def Ora_RefinementBaseValueType : TypeConstraint<
-  CPred<"::llvm::isa<ora::IntegerType, ora::AddressType>($_self)">,
-  "ora.int or ora.address">;
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType, ora::AddressType>($_self)">,
+  "ora.int, builtin integer, or ora.address">;
 
 def Ora_ComparableValueType : TypeConstraint<
-  CPred<"::llvm::isa<ora::IntegerType, ora::BoolType, ora::AddressType>($_self)">,
-  "ora.int, ora.bool, or ora.address">;
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType, ora::BoolType, ora::AddressType>($_self)">,
+  "ora.int, builtin integer, ora.bool, or ora.address">;
 
 //===----------------------------------------------------------------------===//
 // Contract Operations

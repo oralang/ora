@@ -11,6 +11,7 @@ const support = @import("support.zig");
 const appendOp = support.appendOp;
 const appendScfYieldValues = support.appendScfYieldValues;
 const appendValueOp = support.appendValueOp;
+const addressType = support.addressType;
 const boolType = support.boolType;
 const bytesType = support.bytesType;
 const cmpPredicate = support.cmpPredicate;
@@ -209,7 +210,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (base_type == .map) {
                         const result_type = self.parent.lowerExprType(expr_id);
-                        const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base, key, result_type);
+                        const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base));
+                        const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.convertValueForFlow(key, map_key_type, index.range)
+                        else
+                            key;
+                        const op = mlir.oraMapGetOpCreate(self.parent.context, self.parent.location(index.range), base, converted_key, result_type);
                         if (!mlir.oraOperationIsNull(op)) break :blk appendValueOp(self.block, op);
                     }
                     const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{}, self.parent.lowerExprType(expr_id));
@@ -382,10 +388,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerBinary(self: *FunctionLowerer, expr_id: ast.ExprId, binary: ast.BinaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            const lhs = try self.lowerExpr(binary.lhs, locals);
-            const rhs = try self.lowerExpr(binary.rhs, locals);
+            var lhs = try self.lowerExpr(binary.lhs, locals);
+            var rhs = try self.lowerExpr(binary.rhs, locals);
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
+
+            lhs = try @This().unwrapRefinementForCast(self, lhs, binary.range);
+            rhs = try @This().unwrapRefinementForCast(self, rhs, binary.range);
+
+            switch (binary.op) {
+                .eq, .ne, .lt, .le, .gt, .ge => {
+                    lhs = try @This().normalizeCompareOperand(self, lhs, binary.lhs);
+                    rhs = try @This().normalizeCompareOperand(self, rhs, binary.rhs);
+                    const lhs_type = mlir.oraValueGetType(lhs);
+                    const rhs_type = mlir.oraValueGetType(rhs);
+                    if (mlir.oraTypeIsAddressType(lhs_type) and !mlir.oraTypeIsAddressType(rhs_type)) {
+                        rhs = try @This().convertCompareOperandToAddress(self, rhs, binary.rhs);
+                    } else if (mlir.oraTypeIsAddressType(rhs_type) and !mlir.oraTypeIsAddressType(lhs_type)) {
+                        lhs = try @This().convertCompareOperandToAddress(self, lhs, binary.lhs);
+                    }
+                },
+                else => {},
+            }
 
             if (binary.op == .pow) {
                 return self.lowerCheckedPower(lhs, rhs, result_type, binary.range);
@@ -432,7 +456,55 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return mlir.oraArithCmpIOpCreate(self.parent.context, loc, cmpPredicate(predicate), lhs, rhs);
         }
 
+        fn normalizeCompareOperand(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            expr_id: ast.ExprId,
+        ) anyerror!mlir.MlirValue {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .IntegerLiteral => |literal| if (std.mem.eql(u8, std.mem.trim(u8, literal.text, " \t\n\r"), "0"))
+                    appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, self.parent.location(literal.range), defaultIntegerType(self.parent.context), 0),
+                    )
+                else
+                    value,
+                else => value,
+            };
+        }
+
+        fn convertCompareOperandToAddress(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            expr_id: ast.ExprId,
+        ) anyerror!mlir.MlirValue {
+            const expr = self.parent.file.expression(expr_id).*;
+            switch (expr) {
+                .IntegerLiteral => |literal| {
+                    if (std.mem.eql(u8, std.mem.trim(u8, literal.text, " \t\n\r"), "0")) {
+                        const zero_i160 = appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), mlir.oraIntegerTypeCreate(self.parent.context, 160), 0));
+                        const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, self.parent.location(literal.range), zero_i160);
+                        if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
+                        return appendValueOp(self.block, addr_op);
+                    }
+                },
+                else => {},
+            }
+            return self.convertValueForFlow(value, addressType(self.parent.context), exprRange(self.parent.file, expr_id));
+        }
+
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (call.args.len == 0) {
+                const callee_expr = self.parent.file.expression(call.callee).*;
+                if (callee_expr == .Field) {
+                    const path = try @This().fieldExprPath(self, call.callee);
+                    defer self.parent.allocator.free(path);
+                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, self.parent.lowerExprType(expr_id), path)) |value| {
+                        return value;
+                    }
+                }
+            }
             if (try @This().lowerExternProxyMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
@@ -1893,7 +1965,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?mlir.MlirValue {
             const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender") or
                 std.mem.eql(u8, path, "std.transaction.sender"))
-                "ora.evm.origin"
+                "ora.evm.caller"
             else if (std.mem.eql(u8, path, "std.tx.origin"))
                 "ora.evm.origin"
             else if (std.mem.eql(u8, path, "std.transaction.gasprice"))
@@ -1905,13 +1977,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 return null;
 
+            const builtin_result_type =
+                if (std.mem.eql(u8, opcode_name, "ora.evm.caller") or std.mem.eql(u8, opcode_name, "ora.evm.origin"))
+                    addressType(self.parent.context)
+                else
+                    result_type;
+
             const op = mlir.oraEvmOpCreate(
                 self.parent.context,
                 self.parent.location(field.range),
                 strRef(opcode_name),
                 null,
                 0,
-                result_type,
+                builtin_result_type,
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);

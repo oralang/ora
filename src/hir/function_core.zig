@@ -1074,12 +1074,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try locals.setValue(local_id, converted);
                         return;
                     }
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                     if (self.parent.item_index.lookup(name.name)) |item_id| {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
                             const field = item.Field;
+                            const target_type = if (field.type_expr) |type_expr|
+                                self.parent.lowerTypeExpr(type_expr)
+                            else
+                                self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
+                            const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                             const loc = self.parent.location(name.range);
                             const op = switch (field.storage_class) {
                                 .storage => blk: {
@@ -1175,7 +1178,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             key_value: mlir.MlirValue,
             value: mlir.MlirValue,
         ) anyerror!void {
-            const op = mlir.oraMapStoreOpCreate(self.parent.context, self.parent.location(range), map_value, key_value, value);
+            const map_type = mlir.oraValueGetType(map_value);
+            const key_type = mlir.oraMapTypeGetKeyType(map_type);
+            const converted_key = if (!mlir.oraTypeIsNull(key_type))
+                try @This().convertValueForFlow(self, key_value, key_type, range)
+            else
+                key_value;
+            const op = mlir.oraMapStoreOpCreate(self.parent.context, self.parent.location(range), map_value, converted_key, value);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
         }
