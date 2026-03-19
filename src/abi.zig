@@ -5,8 +5,8 @@
 const std = @import("std");
 const crypto = std.crypto;
 const compiler = @import("compiler/mod.zig");
-const compiler_abi = @import("compiler/hir/abi.zig");
-const compiler_type_descriptors = @import("compiler/sema/type_descriptors.zig");
+const compiler_abi = @import("hir/abi.zig");
+const compiler_type_descriptors = @import("sema/type_descriptors.zig");
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";

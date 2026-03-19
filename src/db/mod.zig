@@ -1,6 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
-const comptime_eval = @import("../../comptime/mod.zig").compiler_ast_eval;
+const comptime_eval = @import("../comptime/mod.zig").compiler_ast_eval;
 const diagnostics = @import("../diagnostics/mod.zig");
 const hir = @import("../hir/mod.zig");
 const sema = @import("../sema/mod.zig");

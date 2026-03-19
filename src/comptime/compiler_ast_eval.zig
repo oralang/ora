@@ -1,11 +1,11 @@
 const std = @import("std");
-const ast = @import("../compiler/ast/mod.zig");
+const ast = @import("../ast/mod.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
-const diagnostics = @import("../compiler/diagnostics/mod.zig");
+const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
-const model = @import("../compiler/sema/model.zig");
-const source = @import("../compiler/source/mod.zig");
+const model = @import("../sema/model.zig");
+const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 
 const ConstEvalResult = model.ConstEvalResult;

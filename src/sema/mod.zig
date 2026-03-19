@@ -1,5 +1,5 @@
 const model = @import("model.zig");
-const comptime_eval = @import("../../comptime/mod.zig").compiler_ast_eval;
+const comptime_eval = @import("../comptime/mod.zig").compiler_ast_eval;
 const module_graph = @import("module_graph.zig");
 const region = @import("region.zig");
 const resolve = @import("resolve.zig");

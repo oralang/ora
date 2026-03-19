@@ -1,6 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
-const const_bridge = @import("../../comptime/compiler_const_bridge.zig");
+const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");

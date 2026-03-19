@@ -1,8 +1,8 @@
 const std = @import("std");
-const ast = @import("../compiler/ast/mod.zig");
+const ast = @import("../ast/mod.zig");
 const comptime_eval = @import("mod.zig");
 const error_mod = @import("error.zig");
-const model = @import("../compiler/sema/model.zig");
+const model = @import("../sema/model.zig");
 
 const BigInt = std.math.big.int.Managed;
 pub const ConstValue = model.ConstValue;
