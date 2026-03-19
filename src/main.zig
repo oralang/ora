@@ -650,15 +650,6 @@ fn runBuildArtifacts(
         else => return err,
     };
 
-    // Reorganize generated outputs under stable subfolders.
-    const sir_file = try std.fmt.allocPrint(allocator, "{s}.sir", .{stem});
-    defer allocator.free(sir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_file, sir_dir);
-
-    const hex_file = try std.fmt.allocPrint(allocator, "{s}.hex", .{stem});
-    defer allocator.free(hex_file);
-    try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
-
     const smt_md_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{stem});
     defer allocator.free(smt_md_file);
     try moveArtifactFile(allocator, artifact_root, smt_md_file, verify_dir);
@@ -667,20 +658,33 @@ fn runBuildArtifacts(
     defer allocator.free(smt_json_file);
     try moveArtifactFile(allocator, artifact_root, smt_json_file, verify_dir);
 
+    if (verification_failed) {
+        try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+
     const ora_mlir_file = try std.fmt.allocPrint(allocator, "{s}.ora.mlir", .{stem});
     defer allocator.free(ora_mlir_file);
     try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
 
-    const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
-    defer allocator.free(sir_mlir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
-
     try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
     try stdout.flush();
 
-    if (verification_failed) {
-        return error.VerificationFailed;
-    }
+    // Reorganize generated outputs under stable subfolders only after a successful
+    // verification/build run. Verification failures intentionally stop before
+    // OraToSIR and bytecode emission, so these artifacts do not exist yet.
+    const sir_file = try std.fmt.allocPrint(allocator, "{s}.sir", .{stem});
+    defer allocator.free(sir_file);
+    try moveArtifactFile(allocator, artifact_root, sir_file, sir_dir);
+
+    const hex_file = try std.fmt.allocPrint(allocator, "{s}.hex", .{stem});
+    defer allocator.free(hex_file);
+    try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
+
+    const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
+    defer allocator.free(sir_mlir_file);
+    try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
 }
 
 fn freeResolvedIncludeRoots(allocator: std.mem.Allocator, include_roots: []const []const u8) void {
@@ -1618,6 +1622,10 @@ fn runMlirEmitAdvanced(
         defer smt_report.deinit(mlir_allocator);
         try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
         m.end();
+    }
+
+    if (verification_failed) {
+        return error.VerificationFailed;
     }
 
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
