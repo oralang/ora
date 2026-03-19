@@ -660,8 +660,7 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
                     shouldAddBlankLine = true;
                 }
                 else if (prevLine.find("}") != std::string::npos &&
-                         (prevLine.find("} {gas_cost") != std::string::npos ||
-                          (prevLine.find("}") == prevLine.find_last_of("}") &&
+                         ((prevLine.find("}") == prevLine.find_last_of("}") &&
                            prevLine.find("} else {") == std::string::npos)) &&
                          !line.empty() && line.find("}") == std::string::npos &&
                          line.find("func.func") == std::string::npos)
@@ -839,8 +838,6 @@ MlirOperation oraContractOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
         {
             bodyRegion.push_back(new Block());
         }
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        contractOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(contractOp.getOperation());
     }
@@ -909,8 +906,6 @@ MlirModule oraLowerContractStub(MlirContext ctx, MlirLocation loc, MlirStringRef
 
         auto contractDeclAttr = builder.getBoolAttr(true);
         contractOp->setAttr("ora.contract_decl", contractDeclAttr);
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        contractOp->setAttr("gas_cost", gasCostAttr);
 
         Block &contractBody = bodyRegion.front();
         builder.setInsertionPointToStart(&contractBody);
@@ -1006,8 +1001,6 @@ MlirModule oraLowerContractStubWithSig(
 
         auto contractDeclAttr = builder.getBoolAttr(true);
         contractOp->setAttr("ora.contract_decl", contractDeclAttr);
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        contractOp->setAttr("gas_cost", gasCostAttr);
 
         SmallVector<Type> argTypes;
         argTypes.reserve(numParams);
@@ -1098,10 +1091,7 @@ MlirOperation oraGlobalOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef
 
         auto globalOp = builder.create<GlobalOp>(location, nameAttr, typeAttr, initAttr);
 
-        // Add gas_cost attribute (global variable declaration has minimal cost = 0)
         // Actual access costs are handled by sload/sstore operations
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        globalOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(globalOp.getOperation());
     }
@@ -1161,8 +1151,6 @@ MlirOperation oraSLoadOpCreateWithName(MlirContext ctx, MlirLocation loc, MlirSt
 
         auto sloadOp = builder.create<SLoadOp>(location, typeRef, StringAttr::get(context, nameRef));
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 2100);
-        sloadOp->setAttr("gas_cost", gasCostAttr);
         if (resultName.data != nullptr && resultName.length > 0)
         {
             StringRef resultNameRef = unwrap(resultName);
@@ -1197,8 +1185,6 @@ MlirOperation oraSStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 
         auto sstoreOp = builder.create<SStoreOp>(location, valueRef, StringAttr::get(context, nameRef));
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 20000);
-        sstoreOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(sstoreOp.getOperation());
     }
@@ -1238,9 +1224,6 @@ MlirOperation oraConditionalReturnOpCreate(MlirContext ctx, MlirLocation loc, Ml
             elseRegion.push_back(new Block());
         }
 
-        // Add gas_cost attribute (branch operation has cost = 10)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        ifOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(ifOp.getOperation());
     }
@@ -1985,9 +1968,6 @@ MlirOperation oraRequiresOpCreate(MlirContext ctx, MlirLocation loc, MlirValue c
         OpBuilder builder(context);
         auto requiresOp = builder.create<RequiresOp>(location, conditionRef);
 
-        // Add gas_cost attribute (verification operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        requiresOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(requiresOp.getOperation());
     }
@@ -2013,9 +1993,6 @@ MlirOperation oraEnsuresOpCreate(MlirContext ctx, MlirLocation loc, MlirValue co
         OpBuilder builder(context);
         auto ensuresOp = builder.create<EnsuresOp>(location, conditionRef);
 
-        // Add gas_cost attribute (verification operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        ensuresOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(ensuresOp.getOperation());
     }
@@ -2041,9 +2018,6 @@ MlirOperation oraInvariantOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
         OpBuilder builder(context);
         auto invariantOp = builder.create<InvariantOp>(location, conditionRef);
 
-        // Add gas_cost attribute (verification operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        invariantOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(invariantOp.getOperation());
     }
@@ -2077,9 +2051,6 @@ MlirOperation oraAssertOpCreate(MlirContext ctx, MlirLocation loc, MlirValue con
 
         auto assertOp = builder.create<AssertOp>(location, conditionRef, messageAttr);
 
-        // Add gas_cost attribute (assert operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        assertOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(assertOp.getOperation());
     }
@@ -2113,9 +2084,6 @@ MlirOperation oraRefinementGuardOpCreate(MlirContext ctx, MlirLocation loc, Mlir
 
         auto guardOp = builder.create<RefinementGuardOp>(location, conditionRef, messageAttr);
 
-        // Add gas_cost attribute (guard operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        guardOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(guardOp.getOperation());
     }
@@ -2148,9 +2116,6 @@ MlirOperation oraYieldOpCreate(MlirContext ctx, MlirLocation loc, const MlirValu
 
         auto yieldOp = builder.create<YieldOp>(location, operandValues);
 
-        // Add gas_cost attribute (yield operation has minimal cost = 1)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 1);
-        yieldOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(yieldOp.getOperation());
     }
@@ -2178,9 +2143,6 @@ MlirOperation oraMLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         auto varNameAttr = StringAttr::get(context, varNameRef);
         auto mloadOp = builder.create<MLoadOp>(location, resultTypeRef, varNameAttr);
 
-        // Add gas_cost attribute (memory load has minimal cost = 3)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        mloadOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(mloadOp.getOperation());
     }
@@ -2208,9 +2170,6 @@ MlirOperation oraMStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
         auto varNameAttr = StringAttr::get(context, varNameRef);
         auto mstoreOp = builder.create<MStoreOp>(location, valueRef, varNameAttr);
 
-        // Add gas_cost attribute (memory store has minimal cost = 3)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        mstoreOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(mstoreOp.getOperation());
     }
@@ -2238,9 +2197,6 @@ MlirOperation oraTLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         auto keyAttr = StringAttr::get(context, keyRef);
         auto tloadOp = builder.create<TLoadOp>(location, resultTypeRef, keyAttr);
 
-        // Add gas_cost attribute (transient load has minimal cost = 3)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        tloadOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(tloadOp.getOperation());
     }
@@ -2268,9 +2224,6 @@ MlirOperation oraTStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
         auto keyAttr = StringAttr::get(context, keyRef);
         auto tstoreOp = builder.create<TStoreOp>(location, valueRef, keyAttr);
 
-        // Add gas_cost attribute (transient store has minimal cost = 3)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        tstoreOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(tstoreOp.getOperation());
     }
@@ -2347,9 +2300,6 @@ MlirOperation oraMapGetOpCreate(MlirContext ctx, MlirLocation loc, MlirValue map
         OpBuilder builder(context);
         auto mapGetOp = builder.create<MapGetOp>(location, resultTypeRef, mapRef, keyRef);
 
-        // Add gas_cost attribute (map get has cost = 2100, similar to sload)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 2100);
-        mapGetOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(mapGetOp.getOperation());
     }
@@ -2377,9 +2327,6 @@ MlirOperation oraMapStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue m
         OpBuilder builder(context);
         auto mapStoreOp = builder.create<MapStoreOp>(location, mapRef, keyRef, valueRef);
 
-        // Add gas_cost attribute (map store has cost = 20000, similar to sstore)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 20000);
-        mapStoreOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(mapStoreOp.getOperation());
     }
@@ -2412,9 +2359,6 @@ MlirOperation oraContinueOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
 
         auto continueOp = builder.create<ContinueOp>(location, labelAttr);
 
-        // Add gas_cost attribute (continue operation has minimal cost = 1)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 1);
-        continueOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(continueOp.getOperation());
     }
@@ -2447,8 +2391,6 @@ MlirOperation oraReturnOpCreate(MlirContext ctx, MlirLocation loc, const MlirVal
 
         auto returnOp = builder.create<ReturnOp>(location, operandValues);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 8);
-        returnOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(returnOp.getOperation());
     }
@@ -2474,8 +2416,6 @@ MlirOperation oraDecreasesOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
         OpBuilder builder(context);
         auto decreasesOp = builder.create<DecreasesOp>(location, measureRef);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        decreasesOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(decreasesOp.getOperation());
     }
@@ -2501,8 +2441,6 @@ MlirOperation oraIncreasesOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
         OpBuilder builder(context);
         auto increasesOp = builder.create<IncreasesOp>(location, measureRef);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        increasesOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(increasesOp.getOperation());
     }
@@ -2528,8 +2466,6 @@ MlirOperation oraAssumeOpCreate(MlirContext ctx, MlirLocation loc, MlirValue con
         OpBuilder builder(context);
         auto assumeOp = builder.create<AssumeOp>(location, conditionRef);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        assumeOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(assumeOp.getOperation());
     }
@@ -2556,9 +2492,6 @@ MlirOperation oraHavocOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         auto varNameAttr = StringAttr::get(context, varNameRef);
         auto havocOp = builder.create<HavocOp>(location, varNameAttr);
 
-        // Add gas_cost attribute (verification operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        havocOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(havocOp.getOperation());
     }
@@ -2585,9 +2518,6 @@ MlirOperation oraOldOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value,
         OpBuilder builder(context);
         auto oldOp = builder.create<OldOp>(location, resultTypeRef, valueRef);
 
-        // Add gas_cost attribute (verification operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        oldOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(oldOp.getOperation());
     }
@@ -2628,9 +2558,6 @@ MlirOperation oraArithConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirTy
         auto op = builder.create<arith::ConstantOp>(location, resultTy, typedAttr);
         op->setLoc(location);
 
-        // attach gas_cost=0 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(0);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -2651,8 +2578,6 @@ MlirOperation oraArithAddIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
 
         OpBuilder builder(context);
         auto op = builder.create<arith::AddIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(3);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2673,8 +2598,6 @@ MlirOperation oraAddWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
 
         OpBuilder builder(context);
         auto op = builder.create<ora::AddWrappingOp>(location, resultTy, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(3);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2695,7 +2618,6 @@ MlirOperation oraSubWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
 
         OpBuilder builder(context);
         auto op = builder.create<ora::SubWrappingOp>(location, resultTy, lhsVal, rhsVal);
-        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2716,7 +2638,6 @@ MlirOperation oraMulWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
 
         OpBuilder builder(context);
         auto op = builder.create<ora::MulWrappingOp>(location, resultTy, lhsVal, rhsVal);
-        op->setAttr("gas_cost", builder.getI64IntegerAttr(5));
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2736,8 +2657,6 @@ MlirOperation oraArithSubIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
 
         OpBuilder builder(context);
         auto op = builder.create<arith::SubIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(3);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2757,8 +2676,6 @@ MlirOperation oraArithMulIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
 
         OpBuilder builder(context);
         auto op = builder.create<arith::MulIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2778,8 +2695,6 @@ MlirOperation oraArithDivUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::DivUIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2799,8 +2714,6 @@ MlirOperation oraArithDivSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::DivSIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2820,8 +2733,6 @@ MlirOperation oraArithRemUIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::RemUIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2841,8 +2752,6 @@ MlirOperation oraArithRemSIOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 
         OpBuilder builder(context);
         auto op = builder.create<arith::RemSIOp>(location, lhsVal, rhsVal);
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2939,7 +2848,6 @@ MlirOperation oraShlWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
 
         OpBuilder builder(context);
         auto op = builder.create<ora::ShlWrappingOp>(location, resultTy, lhsVal, rhsVal);
-        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
         return wrap(op.getOperation());
     }
     catch (...)
@@ -2998,7 +2906,6 @@ MlirOperation oraShrWrappingOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
 
         OpBuilder builder(context);
         auto op = builder.create<ora::ShrWrappingOp>(location, resultTy, lhsVal, rhsVal);
-        op->setAttr("gas_cost", builder.getI64IntegerAttr(3));
         return wrap(op.getOperation());
     }
     catch (...)
@@ -3166,9 +3073,6 @@ MlirOperation oraFuncCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
 
         auto op = builder.create<func::CallOp>(location, calleeRef, results, args);
 
-        // attach gas_cost=10 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -3365,9 +3269,6 @@ MlirOperation oraScfYieldOpCreate(MlirContext ctx, MlirLocation loc, const MlirV
 
         auto op = builder.create<scf::YieldOp>(location, values);
 
-        // attach gas_cost=1 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(1);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -3561,9 +3462,6 @@ MlirOperation oraScfIfOpCreate(MlirContext ctx, MlirLocation loc, MlirValue cond
         OpBuilder builder(context);
         auto op = scf::IfOp::create(builder, location, results, condVal, /*addThenBlock=*/true, /*addElseBlock=*/withElse);
 
-        // attach gas_cost=10 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -3650,9 +3548,6 @@ MlirOperation oraScfWhileOpCreate(MlirContext ctx, MlirLocation loc, const MlirV
         OpBuilder builder(context);
         auto op = scf::WhileOp::create(builder, location, results, initOperands);
 
-        // attach gas_cost=10 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -3742,9 +3637,6 @@ MlirOperation oraScfForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue low
         OpBuilder builder(context);
         auto op = builder.create<scf::ForOp>(location, lb, ub, st, init, nullptr, unsignedCmp);
 
-        // attach gas_cost=10 like the Zig-side builder
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -3922,9 +3814,6 @@ MlirOperation oraLockOpCreateWithKey(MlirContext ctx, MlirLocation loc, MlirValu
             : StringAttr();
         auto lockOp = builder.create<LockOp>(location, resourceRef, keyAttr);
 
-        // Add gas_cost attribute (locking operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        lockOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(lockOp.getOperation());
     }
@@ -3959,9 +3848,6 @@ MlirOperation oraUnlockOpCreateWithKey(MlirContext ctx, MlirLocation loc, MlirVa
             : StringAttr();
         auto unlockOp = builder.create<UnlockOp>(location, resourceRef, keyAttr);
 
-        // Add gas_cost attribute (unlocking operation has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        unlockOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(unlockOp.getOperation());
     }
@@ -3995,9 +3881,6 @@ MlirOperation oraStringConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirS
         auto valueAttr = StringAttr::get(context, valueRef);
         auto stringConstOp = builder.create<StringConstantOp>(location, resultTypeRef, valueAttr);
 
-        // Add gas_cost attribute (constant has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        stringConstOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(stringConstOp.getOperation());
     }
@@ -4051,9 +3934,6 @@ MlirOperation oraHexConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStri
         auto valueAttr = StringAttr::get(context, valueRef);
         auto hexConstOp = builder.create<HexConstantOp>(location, resultTypeRef, valueAttr);
 
-        // Add gas_cost attribute (constant has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        hexConstOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(hexConstOp.getOperation());
     }
@@ -4183,9 +4063,6 @@ MlirOperation oraPowerOpCreate(MlirContext ctx, MlirLocation loc, MlirValue base
         OpBuilder builder(context);
         auto powerOp = builder.create<PowerOp>(location, resultTypeRef, baseRef, exponentRef);
 
-        // Add gas_cost attribute (power operation has cost = 5, similar to multiplication)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 5);
-        powerOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(powerOp.getOperation());
     }
@@ -4214,9 +4091,6 @@ MlirOperation oraConstOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         auto nameAttr = StringAttr::get(context, nameRef);
         auto constOp = builder.create<ConstOp>(location, resultTypeRef, nameAttr, valueAttr);
 
-        // Add gas_cost attribute (constant declaration has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        constOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(constOp.getOperation());
     }
@@ -4245,9 +4119,6 @@ MlirOperation oraImmutableOpCreate(MlirContext ctx, MlirLocation loc, MlirString
         auto nameAttr = StringAttr::get(context, nameRef);
         auto immutableOp = builder.create<ImmutableOp>(location, resultTypeRef, nameAttr, valueRef);
 
-        // Add gas_cost attribute (immutable declaration has no runtime cost = 0)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 0);
-        immutableOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(immutableOp.getOperation());
     }
@@ -4276,9 +4147,6 @@ MlirOperation oraStructFieldStoreOpCreate(MlirContext ctx, MlirLocation loc, Mli
         auto fieldNameAttr = StringAttr::get(context, fieldNameRef);
         auto structFieldStoreOp = builder.create<StructFieldStoreOp>(location, structValueRef, fieldNameAttr, valueRef);
 
-        // Add gas_cost attribute (struct field store has cost = 3, similar to memory store)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        structFieldStoreOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(structFieldStoreOp.getOperation());
     }
@@ -4307,9 +4175,6 @@ MlirOperation oraStructFieldExtractOpCreate(MlirContext ctx, MlirLocation loc, M
         auto fieldNameAttr = StringAttr::get(context, fieldNameRef);
         auto structFieldExtractOp = builder.create<StructFieldExtractOp>(location, resultTypeRef, structValueRef, fieldNameAttr);
 
-        // Add gas_cost attribute (field extraction has minimal cost = 1)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 1);
-        structFieldExtractOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(structFieldExtractOp.getOperation());
     }
@@ -4342,9 +4207,6 @@ MlirOperation oraStructFieldUpdateOpCreate(MlirContext ctx, MlirLocation loc, Ml
         Type resultType = structValueRef.getType();
         auto structFieldUpdateOp = builder.create<StructFieldUpdateOp>(location, resultType, structValueRef, fieldNameAttr, valueRef);
 
-        // Add gas_cost attribute (struct field update has cost = 3, similar to memory store)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        structFieldUpdateOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(structFieldUpdateOp.getOperation());
     }
@@ -4378,9 +4240,6 @@ MlirOperation oraStructInitOpCreate(MlirContext ctx, MlirLocation loc, const Mli
 
         auto structInitOp = builder.create<StructInitOp>(location, resultTypeRef, fieldValueRefs);
 
-        // Add gas_cost attribute (struct initialization has cost = 3 per field, minimum 3)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        structInitOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(structInitOp.getOperation());
     }
@@ -4414,8 +4273,6 @@ MlirOperation oraTupleCreateOpCreate(MlirContext ctx, MlirLocation loc, const Ml
 
         auto tupleCreateOp = builder.create<TupleCreateOp>(location, resultTypeRef, elementRefs);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 3);
-        tupleCreateOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(tupleCreateOp.getOperation());
     }
@@ -4443,8 +4300,6 @@ MlirOperation oraTupleExtractOpCreate(MlirContext ctx, MlirLocation loc, MlirVal
         auto indexAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), index);
         auto tupleExtractOp = builder.create<TupleExtractOp>(location, resultTypeRef, tupleValueRef, indexAttr);
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 1);
-        tupleExtractOp->setAttr("gas_cost", gasCostAttr);
 
         return wrap(tupleExtractOp.getOperation());
     }
@@ -4475,8 +4330,6 @@ MlirOperation oraDestructureOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
         auto op = builder.create<ora::DestructureOp>(location, resultTy, val, patternTypeAttr);
 
         // Add gas cost attribute (destructuring has minimal cost)
-        auto gasCostAttr = builder.getI64IntegerAttr(3);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -4505,8 +4358,6 @@ MlirOperation oraEnumDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
         // Creating an empty block without terminator violates MLIR verifier.
 
         // Add gas cost attribute (declaration has no runtime cost)
-        auto gasCostAttr = builder.getI64IntegerAttr(0);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -4532,8 +4383,6 @@ MlirOperation oraEnumConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStr
         auto variantNameAttr = StringAttr::get(context, variantNameRef);
         auto op = builder.create<ora::EnumConstantOp>(location, resultTy, enumNameAttr, variantNameAttr);
 
-        auto gasCostAttr = builder.getI64IntegerAttr(0);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -4559,8 +4408,6 @@ MlirOperation oraStructDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStrin
         // Keep declaration region empty unless explicitly populated.
         // Creating an empty block without terminator violates MLIR verifier.
 
-        auto gasCostAttr = builder.getI64IntegerAttr(0);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -4591,8 +4438,6 @@ MlirOperation oraStructInstantiateOpCreate(MlirContext ctx, MlirLocation loc, Ml
         auto structNameAttr = StringAttr::get(context, structNameRef);
         auto op = builder.create<ora::StructInstantiateOp>(location, resultTy, structNameAttr, fieldVals);
 
-        auto gasCostAttr = builder.getI64IntegerAttr(10);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -4618,8 +4463,6 @@ MlirOperation oraMoveOpCreate(MlirContext ctx, MlirLocation loc, MlirValue amoun
         auto op = builder.create<ora::MoveOp>(location, amt, src, dst);
 
         // Add gas cost attribute (move operation has cost for balance updates)
-        auto gasCostAttr = builder.getI64IntegerAttr(5000);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -5738,8 +5581,6 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
 
         // Add gas cost attribute (logging has cost based on data size)
         // Base cost + per-byte cost (simplified to fixed cost for now)
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 375 + (numParameters * 375));
-        state.addAttribute("gas_cost", gasCostAttr);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -6069,8 +5910,6 @@ MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOpe
         }
 
         // Add gas cost attribute (try-catch has minimal overhead)
-        auto gasCostAttr = builder.getI64IntegerAttr(5);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -6167,8 +6006,6 @@ MlirOperation oraTryStmtOpCreate(MlirContext ctx, MlirLocation loc, const MlirTy
             builder.createBlock(&op.getCatchRegion());
         }
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 5);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -6258,8 +6095,6 @@ MlirOperation oraBreakOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         auto op = builder.create<ora::BreakOp>(location, labelAttr, vals);
 
         // Add gas cost attribute (break has minimal cost)
-        auto gasCostAttr = builder.getI64IntegerAttr(1);
-        op->setAttr("gas_cost", gasCostAttr);
 
         return wrap(op.getOperation());
     }
@@ -6273,7 +6108,6 @@ MlirOperation oraSwitchOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
         Value val = unwrap(value);
         Type resultTy = unwrap(resultType);
@@ -6283,8 +6117,6 @@ MlirOperation oraSwitchOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
         state.addTypes(resultTy);
         // Zero cases — no regions to add
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        state.addAttribute("gas_cost", gasCostAttr);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -6299,7 +6131,6 @@ MlirOperation oraSwitchOpCreateWithCases(MlirContext ctx, MlirLocation loc, Mlir
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
         Value val = unwrap(value);
 
@@ -6316,8 +6147,6 @@ MlirOperation oraSwitchOpCreateWithCases(MlirContext ctx, MlirLocation loc, Mlir
         for (size_t i = 0; i < numCases; ++i)
             state.addRegion(std::make_unique<Region>());
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        state.addAttribute("gas_cost", gasCostAttr);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -6367,7 +6196,6 @@ MlirOperation oraSwitchExprOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
         Value val = unwrap(value);
         Type resultTy = unwrap(resultType);
@@ -6377,8 +6205,6 @@ MlirOperation oraSwitchExprOpCreate(MlirContext ctx, MlirLocation loc, MlirValue
         state.addTypes(resultTy);
         // Zero cases — no regions to add
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        state.addAttribute("gas_cost", gasCostAttr);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -6393,7 +6219,6 @@ MlirOperation oraSwitchExprOpCreateWithCases(MlirContext ctx, MlirLocation loc, 
 {
     try
     {
-        MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
         Value val = unwrap(value);
 
@@ -6410,8 +6235,6 @@ MlirOperation oraSwitchExprOpCreateWithCases(MlirContext ctx, MlirLocation loc, 
         for (size_t i = 0; i < numCases; ++i)
             state.addRegion(std::make_unique<Region>());
 
-        auto gasCostAttr = IntegerAttr::get(::mlir::IntegerType::get(context, 64), 10);
-        state.addAttribute("gas_cost", gasCostAttr);
 
         Operation *op = Operation::create(state);
         return wrap(op);

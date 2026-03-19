@@ -1780,24 +1780,6 @@ public:
         // are intentionally disabled here — they caused crashes in converted loop
         // CFGs. Re-enable when SIR CFG normalization is more robust.
 
-        // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup start\n";
-            llvm::errs().flush();
-        }
-        module.walk([&](Operation *op)
-                    {
-                if (op->hasAttr("gas_cost"))
-                {
-                    op->removeAttr("gas_cost");
-                } });
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup done\n";
-            llvm::errs().flush();
-        }
-
         // Check what Ora ops remain (should be none)
         module.walk([&](Operation *op)
                     {
