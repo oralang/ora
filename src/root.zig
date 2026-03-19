@@ -19,7 +19,6 @@ pub const ast_arena = @import("ora_types").ast_arena;
 pub const ast_builder = @import("ast/ast_builder.zig");
 pub const ast_serializer = @import("ora_ast").ast_serializer;
 pub const semantics = @import("semantics.zig");
-pub const state_tracker = @import("analysis/state_tracker.zig");
 pub const abi = @import("abi.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler/mod.zig");
