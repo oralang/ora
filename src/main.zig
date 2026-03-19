@@ -140,10 +140,7 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_mlir_sir or
         parsed.emit_sir_text or
         parsed.emit_bytecode or
-        parsed.emit_cfg or
-        parsed.emit_abi or
-        parsed.emit_abi_solidity or
-        parsed.emit_abi_extras;
+        parsed.emit_cfg;
 }
 
 fn initProjectLayout(target_dir: []const u8) !void {
@@ -274,9 +271,6 @@ pub fn main() !void {
     const emit_bytecode: bool = parsed.emit_bytecode;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
-    const emit_abi: bool = parsed.emit_abi;
-    const emit_abi_solidity: bool = parsed.emit_abi_solidity;
-    const emit_abi_extras: bool = parsed.emit_abi_extras;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
@@ -353,7 +347,7 @@ pub fn main() !void {
 
     if (command_kind == .Emit) {
         // if no --emit-X flag is set, default to MLIR generation
-        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
+        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
             emit_mlir = true; // Default: emit MLIR
         }
         // Emit SIR MLIR only when explicitly requested or needed for SIR text/bytecode.
@@ -537,7 +531,7 @@ pub fn main() !void {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
-    if (emit_cfg or emit_sir_text or emit_bytecode or emit_abi or emit_abi_solidity or emit_abi_extras or emit_tokens) {
+    if (emit_cfg or emit_sir_text or emit_bytecode or emit_tokens) {
         std.debug.print("error: this emit flow is not supported by the current compiler path.\n", .{});
         std.process.exit(2);
     }
@@ -1049,9 +1043,6 @@ fn printUsage() !void {
     try stdout.print("  --emit-sir-text        - Emit Sensei SIR text IR (after conversion)\n", .{});
     try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
     try stdout.print("  --emit-cfg[=ora|sir]   - Generate control flow graph (default: ora)\n", .{});
-    try stdout.print("  --emit-abi             - Emit Ora ABI manifest JSON\n", .{});
-    try stdout.print("  --emit-abi-solidity    - Emit Solidity-compatible ABI JSON\n", .{});
-    try stdout.print("  --emit-abi-extras      - Emit ABI sidecar extras JSON (frontend metadata)\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
