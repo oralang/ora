@@ -16,7 +16,6 @@ const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
 const log = @import("log");
-const comptime_eval = lib.comptime_eval;
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -1920,3 +1919,4 @@ pub fn createSwitchIfChain(
         "Use switch expression lowering via ora.switch_expr until this path is implemented.",
     );
 }
+const comptime_eval = lib.comptime_eval;

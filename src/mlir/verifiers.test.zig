@@ -1,7 +1,25 @@
 const std = @import("std");
 const testing = std.testing;
-const mlir = @import("mod.zig");
 const c = @import("mlir_c_api").c;
+
+const MlirContextHandle = struct {
+    ctx: c.MlirContext,
+};
+
+fn createContext() MlirContextHandle {
+    const ctx = c.oraContextCreate();
+    const registry = c.oraDialectRegistryCreate();
+    c.oraRegisterAllDialects(registry);
+    c.oraContextAppendDialectRegistry(ctx, registry);
+    c.oraDialectRegistryDestroy(registry);
+    c.oraContextLoadAllAvailableDialects(ctx);
+    _ = c.oraDialectRegister(ctx);
+    return .{ .ctx = ctx };
+}
+
+fn destroyContext(handle: MlirContextHandle) void {
+    c.oraContextDestroy(handle.ctx);
+}
 
 fn parseModuleFromText(ctx: c.MlirContext, text: []const u8) !c.MlirModule {
     const ref = c.oraStringRefCreate(text.ptr, text.len);
@@ -16,8 +34,8 @@ fn expectModuleVerificationFailure(text: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const h = mlir.createContext(arena.allocator());
-    defer mlir.destroyContext(h);
+    const h = createContext();
+    defer destroyContext(h);
 
     const module = parseModuleFromText(h.ctx, text) catch |err| switch (err) {
         error.MlirParseFailed => return,
