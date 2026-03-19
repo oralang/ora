@@ -183,19 +183,21 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
 }
 
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
-    if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
-    if (isIntegerType(expected_type) and isIntegerType(actual_type)) return true;
-    if (expected_type.kind() == .error_union) {
-        const expected = expected_type.error_union;
-        if (typesAssignable(expected.payload_type.*, actual_type)) return true;
-        if (errorSetContains(expected.error_types, actual_type)) return true;
-        if (actual_type.kind() == .error_union) {
-            const actual = actual_type.error_union;
+    const expected_unwrapped = unwrapRefinement(expected_type);
+    const actual_unwrapped = unwrapRefinement(actual_type);
+    if (expected_unwrapped.kind() == .unknown or actual_unwrapped.kind() == .unknown) return true;
+    if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) return true;
+    if (expected_unwrapped.kind() == .error_union) {
+        const expected = expected_unwrapped.error_union;
+        if (typesAssignable(expected.payload_type.*, actual_unwrapped)) return true;
+        if (errorSetContains(expected.error_types, actual_unwrapped)) return true;
+        if (actual_unwrapped.kind() == .error_union) {
+            const actual = actual_unwrapped.error_union;
             return typesAssignable(expected.payload_type.*, actual.payload_type.*) and
                 errorSetContainsAll(expected.error_types, actual.error_types);
         }
     }
-    return typeEql(expected_type, actual_type);
+    return typeEql(expected_unwrapped, actual_unwrapped);
 }
 
 fn optionalTypeEql(lhs: ?*const Type, rhs: ?*const Type) bool {
@@ -204,7 +206,11 @@ fn optionalTypeEql(lhs: ?*const Type, rhs: ?*const Type) bool {
 }
 
 fn isIntegerType(ty: Type) bool {
-    return ty.kind() == .integer;
+    return unwrapRefinement(ty).kind() == .integer;
+}
+
+fn unwrapRefinement(ty: Type) Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
 }
 
 fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {

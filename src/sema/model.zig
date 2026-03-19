@@ -131,6 +131,13 @@ pub const Region = enum {
     calldata,
 };
 
+pub const Provenance = enum {
+    local,
+    calldata,
+    storage,
+    external,
+};
+
 pub const NamedType = struct {
     name: []const u8,
 };
@@ -346,11 +353,13 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
 pub const LocatedType = struct {
     type: Type,
     region: Region = .none,
+    provenance: Provenance = .local,
 
     pub fn unlocated(ty: Type) LocatedType {
         return .{
             .type = ty,
             .region = .none,
+            .provenance = .local,
         };
     }
 
@@ -358,6 +367,15 @@ pub const LocatedType = struct {
         return .{
             .type = ty,
             .region = region,
+            .provenance = .local,
+        };
+    }
+
+    pub fn withRegionAndProvenance(ty: Type, region: Region, provenance: Provenance) LocatedType {
+        return .{
+            .type = ty,
+            .region = region,
+            .provenance = provenance,
         };
     }
 

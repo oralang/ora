@@ -4731,11 +4731,15 @@ test "compiler tracks declaration root regions in type check output" {
     try testing.expectEqual(compiler.sema.Region.transient, typecheck.itemLocatedType(contract.members[2]).region);
 
     const function = ast_file.item(ast_file.root_items[1]).Function;
-    try testing.expectEqual(compiler.sema.Region.calldata, typecheck.pattern_types[function.parameters[0].pattern.index()].region);
+    const parameter_type = typecheck.pattern_types[function.parameters[0].pattern.index()];
+    try testing.expectEqual(compiler.sema.Region.memory, parameter_type.region);
+    try testing.expectEqual(compiler.sema.Provenance.calldata, parameter_type.provenance);
 
     const body = ast_file.body(function.body);
     const local_stmt = ast_file.statement(body.statements[0]).VariableDecl;
-    try testing.expectEqual(compiler.sema.Region.memory, typecheck.pattern_types[local_stmt.pattern.index()].region);
+    const local_type = typecheck.pattern_types[local_stmt.pattern.index()];
+    try testing.expectEqual(compiler.sema.Region.memory, local_type.region);
+    try testing.expectEqual(compiler.sema.Provenance.calldata, local_type.provenance);
 }
 
 test "compiler allows implicit region reads into locals" {
@@ -4780,8 +4784,7 @@ test "compiler rejects writes to calldata and direct storage transient transfer"
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     const diags = &module_typecheck.diagnostics;
-    try testing.expect(diags.len() >= 3);
-    try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'calldata'"));
+    try testing.expect(diags.len() >= 2);
     try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'transient'"));
     try testing.expect(diagnosticMessagesContain(diags, "assignment expects region 'storage'"));
 }

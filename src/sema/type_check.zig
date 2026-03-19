@@ -15,6 +15,7 @@ const TypeCheckResult = model.TypeCheckResult;
 const Type = model.Type;
 const LocatedType = model.LocatedType;
 const Region = model.Region;
+const Provenance = model.Provenance;
 const Effect = model.Effect;
 const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
@@ -48,8 +49,8 @@ fn declarationRegion(storage_class: ast.StorageClass) Region {
     };
 }
 
-fn locatedValue(expr_type: Type, expr_region: Region) LocatedType {
-    return LocatedType.withRegion(expr_type, expr_region);
+fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) LocatedType {
+    return LocatedType.withRegionAndProvenance(expr_type, expr_region, provenance);
 }
 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
@@ -296,7 +297,7 @@ pub fn typeCheck(
         switch (item) {
             .Function => |function| {
                 for (function.parameters) |parameter| {
-                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(.{ .unknown = {} }, .calldata);
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(.{ .unknown = {} }, .memory, .calldata);
                 }
                 body_types[function.body.index()] = if (function.return_type) |_| .{ .unknown = {} } else .{ .void = {} };
             },
@@ -352,7 +353,7 @@ pub fn typeCheck(
                         ty
                     else
                         Type{ .unknown = {} };
-                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(resolved_type, .calldata);
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(resolved_type, .memory, .calldata);
                 }
             },
             else => {},
@@ -372,7 +373,7 @@ pub fn typeCheck(
                     else
                         try typechecker.resolveTypeExprWithBindings(parameter.type_expr, function_bindings);
                     resolved_params[param_index] = resolved_type;
-                    pattern_types[parameter.pattern.index()] = LocatedType.withRegion(resolved_type, .calldata);
+                    pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(resolved_type, .memory, .calldata);
                 }
                 const resolved_returns = if (function.return_type) |type_expr| blk_returns: {
                     const slice = try arena.alloc(Type, 1);
@@ -555,7 +556,8 @@ const TypeChecker = struct {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                         const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
-                        const actual = locatedValue(actual_type, self.exprLocatedType(expr_id).region);
+                        const actual_located = self.exprLocatedType(expr_id);
+                        const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                         if (!region_rules.isAssignable(actual, expected)) {
                             if (!typesAssignable(expected_type, actual_type)) {
                                 try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
@@ -961,24 +963,30 @@ const TypeChecker = struct {
             .VariableDecl => |decl| {
                 if (decl.type_expr) |type_expr| {
                     if (self.pattern_types[decl.pattern.index()].type.kind() == .unknown) {
-                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegion(
+                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegionAndProvenance(
                             try self.resolveTypeExpr(type_expr),
                             declarationRegion(decl.storage_class),
+                            .local,
                         );
                     }
                 }
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
                     const actual_type = self.expr_types[expr_id.index()];
+                    const actual_located = self.exprLocatedType(expr_id);
                     if (decl.type_expr == null) {
-                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegion(actual_type, declarationRegion(decl.storage_class));
+                        self.pattern_types[decl.pattern.index()] = LocatedType.withRegionAndProvenance(
+                            actual_type,
+                            declarationRegion(decl.storage_class),
+                            actual_located.provenance,
+                        );
                     } else {
                         const expected = self.pattern_types[decl.pattern.index()];
                         const expected_type = expected.type;
                         if (try self.emitIntegerOverflowIfNeeded(decl.range, expr_id, expected_type)) {
                             // Keep lowering/recovery moving after reporting the overflow.
                         } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                            const actual = locatedValue(actual_type, self.exprLocatedType(expr_id).region);
+                            const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                             if (!region_rules.isAssignable(actual, expected)) {
                                 if (!typesAssignable(expected_type, actual_type)) {
                                     try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
@@ -1081,7 +1089,8 @@ const TypeChecker = struct {
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
                 } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
-                    const actual = locatedValue(actual_type, self.exprLocatedType(assign.value).region);
+                    const actual_located = self.exprLocatedType(assign.value);
+                    const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                     if (!region_rules.isAssignable(actual, expected)) {
                         if (!typesAssignable(expected_type, actual_type)) {
                             try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
@@ -1822,6 +1831,13 @@ const TypeChecker = struct {
         return switch (self.file.typeExpr(type_expr).*) {
             .Path => |path| blk: {
                 const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                if (std.mem.eql(u8, trimmed, "NonZeroAddress")) {
+                    break :blk .{ .refinement = .{
+                        .name = "NonZeroAddress",
+                        .base_type = try self.storeType(.{ .address = {} }),
+                        .args = &.{},
+                    } };
+                }
                 for (bindings) |binding| {
                     if (!std.mem.eql(u8, trimmed, binding.name)) continue;
                     if (genericBindingType(binding)) |bound_type| break :blk bound_type;
@@ -4268,11 +4284,21 @@ const TypeChecker = struct {
             .StructDestructure => self.pattern_types[pattern_id.index()],
             .Field => |field| blk: {
                 const base = self.patternLocatedType(field.base);
-                break :blk .{ .type = self.fieldPatternType(field), .region = base.region };
+                const field_type = self.fieldPatternType(field);
+                break :blk .{
+                    .type = field_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                };
             },
             .Index => |index| blk: {
                 const base = self.patternLocatedType(index.base);
-                break :blk .{ .type = self.indexPatternType(index), .region = base.region };
+                const index_type = self.indexPatternType(index);
+                break :blk .{
+                    .type = index_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                };
             },
             .Error => LocatedType.unlocated(.{ .unknown = {} }),
         };
@@ -4285,11 +4311,19 @@ const TypeChecker = struct {
             .ExternalProxy => LocatedType.unlocated(self.expr_types[expr_id.index()]),
             .Field => |field| blk: {
                 const base = self.exprLocatedType(field.base);
-                break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
+                break :blk .{
+                    .type = self.expr_types[expr_id.index()],
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                };
             },
             .Index => |index| blk: {
                 const base = self.exprLocatedType(index.base);
-                break :blk .{ .type = self.expr_types[expr_id.index()], .region = base.region };
+                break :blk .{
+                    .type = self.expr_types[expr_id.index()],
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                };
             },
             // Transparent: region passes through wrapper.
             .Group => |group| self.exprLocatedType(group.expr),
@@ -4305,7 +4339,10 @@ const TypeChecker = struct {
             .Comptime,
             .Unary,
             .Binary,
-            .Call,
+            .Call => if (self.externProxyMethodSignature(expr_id) != null)
+                LocatedType.withRegionAndProvenance(self.expr_types[expr_id.index()], .none, .external)
+            else
+                LocatedType.unlocated(self.expr_types[expr_id.index()]),
             .Builtin,
             .Tuple,
             .ArrayLiteral,
@@ -4359,19 +4396,24 @@ const TypeChecker = struct {
         return .{
             .type = self.item_types[item_id.index()],
             .region = self.item_regions[item_id.index()],
+            .provenance = if (self.item_regions[item_id.index()] == .storage) .storage else .local,
         };
     }
 };
 
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
-    if (!isIntegerType(lhs_type) or !isIntegerType(rhs_type)) return .{ .unknown = {} };
-    if (sameConcreteType(lhs_type, rhs_type)) return lhs_type;
-    return lhs_type;
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
+    if (sameConcreteType(lhs, rhs)) return lhs;
+    return lhs;
 }
 
 fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
-    if (!isIntegerType(lhs_type) or !isIntegerType(rhs_type)) return .{ .unknown = {} };
-    return lhs_type;
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
+    return lhs;
 }
 
 fn integerLiteralType(text: []const u8) Type {
@@ -4405,18 +4447,26 @@ fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
 }
 
 fn typesComparable(lhs_type: Type, rhs_type: Type) bool {
-    if (sameConcreteType(lhs_type, rhs_type)) return true;
-    if (isIntegerType(lhs_type) and isIntegerType(rhs_type)) return true;
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (sameConcreteType(lhs, rhs)) return true;
+    if (isIntegerType(lhs) and isIntegerType(rhs)) return true;
     return false;
 }
 
 fn orderedTypesComparable(lhs_type: Type, rhs_type: Type) bool {
-    if (lhs_type.kind() == .bool or rhs_type.kind() == .bool) return false;
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .bool or rhs.kind() == .bool) return false;
     return typesComparable(lhs_type, rhs_type);
 }
 
 fn isIntegerType(ty: Type) bool {
-    return ty.kind() == .integer;
+    return unwrapRefinement(ty).kind() == .integer;
+}
+
+fn unwrapRefinement(ty: Type) Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
 }
 
 fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {

@@ -16,7 +16,7 @@ pub fn regionDisplayName(region: Region) []const u8 {
 }
 
 pub fn locatedTypeEql(lhs: LocatedType, rhs: LocatedType) bool {
-    return lhs.region == rhs.region and type_descriptors.typeEql(lhs.type, rhs.type);
+    return lhs.region == rhs.region and lhs.provenance == rhs.provenance and type_descriptors.typeEql(lhs.type, rhs.type);
 }
 
 pub fn isAssignable(from: LocatedType, to: LocatedType) bool {
@@ -60,10 +60,12 @@ test "locatedTypeEql compares value type and region" {
     const rhs_same = LocatedType.withRegion(.{ .bool = {} }, .storage);
     const rhs_other_region = LocatedType.withRegion(.{ .bool = {} }, .memory);
     const rhs_other_type = LocatedType.withRegion(.{ .address = {} }, .storage);
+    const rhs_other_provenance = LocatedType.withRegionAndProvenance(.{ .bool = {} }, .storage, .storage);
 
     try std.testing.expect(locatedTypeEql(lhs, rhs_same));
     try std.testing.expect(!locatedTypeEql(lhs, rhs_other_region));
     try std.testing.expect(!locatedTypeEql(lhs, rhs_other_type));
+    try std.testing.expect(!locatedTypeEql(lhs, rhs_other_provenance));
 }
 
 test "regionAssignable follows implicit coercion rules" {
