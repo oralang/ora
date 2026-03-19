@@ -15,7 +15,7 @@
 const std = @import("std");
 const z3 = @import("c.zig");
 const mlir = @import("mlir_c_api").c;
-const lib = @import("ora_lib");
+const ast = @import("ora_ast");
 const Context = @import("context.zig").Context;
 const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
@@ -25,8 +25,8 @@ const ManagedArrayList = std.array_list.Managed;
 /// Verification annotation extracted from AST
 pub const VerificationAnnotation = struct {
     kind: AnnotationKind,
-    condition: *lib.ast.Expressions.ExprNode,
-    source_location: lib.ast.SourceSpan,
+    condition: *ast.Expressions.ExprNode,
+    source_location: ast.SourceSpan,
 
     pub const AnnotationKind = enum {
         Requires, // Function precondition
@@ -42,15 +42,15 @@ pub const VerificationAnnotation = struct {
 /// Collection of verification annotations for a function
 pub const FunctionAnnotations = struct {
     function_name: []const u8,
-    requires: []*lib.ast.Expressions.ExprNode,
-    ensures: []*lib.ast.Expressions.ExprNode,
+    requires: []*ast.Expressions.ExprNode,
+    ensures: []*ast.Expressions.ExprNode,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, function_name: []const u8) FunctionAnnotations {
         return .{
             .function_name = function_name,
-            .requires = &[_]*lib.ast.Expressions.ExprNode{},
-            .ensures = &[_]*lib.ast.Expressions.ExprNode{},
+            .requires = &[_]*ast.Expressions.ExprNode{},
+            .ensures = &[_]*ast.Expressions.ExprNode{},
             .allocator = allocator,
         };
     }
@@ -63,10 +63,10 @@ pub const FunctionAnnotations = struct {
 
 /// Collection of loop invariants
 pub const LoopInvariants = struct {
-    invariants: []*lib.ast.Expressions.ExprNode,
-    source_location: lib.ast.SourceSpan,
+    invariants: []*ast.Expressions.ExprNode,
+    source_location: ast.SourceSpan,
 
-    pub fn init(invariants: []*lib.ast.Expressions.ExprNode, span: lib.ast.SourceSpan) LoopInvariants {
+    pub fn init(invariants: []*ast.Expressions.ExprNode, span: ast.SourceSpan) LoopInvariants {
         return .{
             .invariants = invariants,
             .source_location = span,
@@ -300,7 +300,7 @@ pub const VerificationPass = struct {
     //===----------------------------------------------------------------------===//
 
     /// Extract verification annotations from AST module
-    pub fn extractAnnotationsFromAST(self: *VerificationPass, module: *lib.ast.AstNode) !void {
+    pub fn extractAnnotationsFromAST(self: *VerificationPass, module: *ast.AstNode) !void {
         switch (module.*) {
             .Module => |*mod| {
                 // walk all top-level declarations
@@ -316,7 +316,7 @@ pub const VerificationPass = struct {
     }
 
     /// Extract annotations from a declaration (contract, function, etc.)
-    fn extractAnnotationsFromDeclaration(self: *VerificationPass, decl: *lib.ast.AstNode) !void {
+    fn extractAnnotationsFromDeclaration(self: *VerificationPass, decl: *ast.AstNode) !void {
         switch (decl.*) {
             .Contract => |*contract| {
                 // extract annotations from contract members
@@ -336,7 +336,7 @@ pub const VerificationPass = struct {
     }
 
     /// Extract requires/ensures clauses from a function node
-    fn extractFunctionAnnotations(self: *VerificationPass, function: *lib.ast.FunctionNode) !void {
+    fn extractFunctionAnnotations(self: *VerificationPass, function: *ast.FunctionNode) !void {
         const function_name = function.name;
 
         // create function annotations entry
@@ -344,12 +344,12 @@ pub const VerificationPass = struct {
 
         // extract requires clauses
         if (function.requires_clauses.len > 0) {
-            annotations.requires = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, function.requires_clauses);
+            annotations.requires = try self.allocator.dupe(*ast.Expressions.ExprNode, function.requires_clauses);
         }
 
         // extract ensures clauses
         if (function.ensures_clauses.len > 0) {
-            annotations.ensures = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, function.ensures_clauses);
+            annotations.ensures = try self.allocator.dupe(*ast.Expressions.ExprNode, function.ensures_clauses);
         }
 
         // store in map
@@ -358,18 +358,18 @@ pub const VerificationPass = struct {
     }
 
     /// Extract loop invariants from a while statement
-    pub fn extractLoopInvariantsFromWhile(self: *VerificationPass, while_stmt: *lib.ast.Statements.WhileNode) !void {
+    pub fn extractLoopInvariantsFromWhile(self: *VerificationPass, while_stmt: *ast.Statements.WhileNode) !void {
         if (while_stmt.invariants.len > 0) {
-            const invariants_copy = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, while_stmt.invariants);
+            const invariants_copy = try self.allocator.dupe(*ast.Expressions.ExprNode, while_stmt.invariants);
             const loop_invariants = LoopInvariants.init(invariants_copy, while_stmt.span);
             try self.loop_invariants.append(loop_invariants);
         }
     }
 
     /// Extract loop invariants from a for loop statement
-    pub fn extractLoopInvariantsFromFor(self: *VerificationPass, for_stmt: *lib.ast.Statements.ForLoopNode) !void {
+    pub fn extractLoopInvariantsFromFor(self: *VerificationPass, for_stmt: *ast.Statements.ForLoopNode) !void {
         if (for_stmt.invariants.len > 0) {
-            const invariants_copy = try self.allocator.dupe(*lib.ast.Expressions.ExprNode, for_stmt.invariants);
+            const invariants_copy = try self.allocator.dupe(*ast.Expressions.ExprNode, for_stmt.invariants);
             const loop_invariants = LoopInvariants.init(invariants_copy, for_stmt.span);
             try self.loop_invariants.append(loop_invariants);
         }
@@ -1281,9 +1281,9 @@ pub const VerificationPass = struct {
         std.debug.print("[Z3] {s}:\n{s}\n", .{ label, std.mem.span(c_str) });
     }
 
-    fn logAst(self: *VerificationPass, label: []const u8, ast: z3.Z3_ast) void {
+    fn logAst(self: *VerificationPass, label: []const u8, term: z3.Z3_ast) void {
         if (!self.debug_z3) return;
-        const raw = z3.Z3_ast_to_string(self.context.ctx, ast);
+        const raw = z3.Z3_ast_to_string(self.context.ctx, term);
         if (raw == null) return;
         const c_str: [*:0]const u8 = @ptrCast(raw);
         std.debug.print("[Z3] {s}: {s}\n", .{ label, std.mem.span(c_str) });
