@@ -278,7 +278,6 @@ pub fn main() !void {
     const emit_abi_solidity: bool = parsed.emit_abi_solidity;
     const emit_abi_extras: bool = parsed.emit_abi_extras;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
-    const analyze_state: bool = parsed.analyze_state;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
     const verify_calls: ?bool = parsed.verify_calls;
@@ -332,16 +331,6 @@ pub fn main() !void {
         .Emit => .Emit,
         .None => if (emit_flags_requested) .Emit else .Build,
     };
-    // handle state analysis (also a special analysis mode)
-    if (analyze_state) {
-        if (input_file == null) {
-            std.debug.print("error: --analyze-state requires <file.ora>\n", .{});
-            std.process.exit(2);
-        }
-        try runStateAnalysis(allocator, input_file.?);
-        return;
-    }
-
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
         std.process.exit(2);
@@ -1084,7 +1073,6 @@ fn printUsage() !void {
     try stdout.print("  --mlir-crash-reproducer <path> - Save current MLIR when a stage fails\n", .{});
     try stdout.print("  --mlir-print-op-on-diagnostic - Print module snapshot with MLIR diagnostics\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
-    try stdout.print("  --analyze-state        - Analyze storage reads/writes per function\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
@@ -1850,75 +1838,6 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
 // ============================================================================
 // SECTION 5: Parser & Compilation Workflows
 // ============================================================================
-
-/// Run state analysis on AST nodes (used during normal compilation)
-fn runStateAnalysisForContracts(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode) !void {
-    const state_tracker = lib.state_tracker;
-
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    // analyze each contract
-    for (ast_nodes) |*node| {
-        switch (node.*) {
-            .Contract => |*contract| {
-                // run state analysis on this contract
-                var contract_analysis = state_tracker.analyzeContract(allocator, contract) catch |err| {
-                    try stdout.print("State analysis error: {s}\n", .{@errorName(err)});
-                    continue;
-                };
-                defer contract_analysis.deinit();
-
-                // print only warnings during compilation (not full analysis)
-                try state_tracker.printWarnings(stdout, &contract_analysis);
-            },
-            else => {},
-        }
-    }
-
-    try stdout.flush();
-}
-
-/// Run state analysis on all functions in the contract (standalone mode with --analyze-state)
-fn runStateAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
-    const state_tracker = lib.state_tracker;
-
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    try stdout.print("Analyzing state changes for {s}\n", .{file_path});
-    try stdout.print("==================================================\n", .{});
-
-    var program = import_program.loadProgramWithImportsRawWithResolverOptions(allocator, file_path, .{}) catch |err| {
-        try stdout.print("Parser error: {s}\n", .{@errorName(err)});
-        try stdout.flush();
-        std.process.exit(1);
-    };
-    defer program.deinit();
-    const ast_nodes = program.nodes;
-
-    // analyze each contract
-    for (ast_nodes) |*node| {
-        switch (node.*) {
-            .Contract => |*contract| {
-                // run state analysis on this contract
-                var contract_analysis = state_tracker.analyzeContract(allocator, contract) catch |err| {
-                    try stdout.print("State analysis error: {s}\n", .{@errorName(err)});
-                    continue;
-                };
-                defer contract_analysis.deinit();
-
-                // print results
-                try state_tracker.printAnalysis(stdout, &contract_analysis);
-            },
-            else => {},
-        }
-    }
-
-    try stdout.flush();
-}
 
 /// Generate Ora ABI outputs
 fn runAbiEmit(

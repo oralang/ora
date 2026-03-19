@@ -23,7 +23,6 @@ pub const CliOptions = struct {
     emit_abi_extras: bool = false,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
-    analyze_state: bool = false,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
@@ -217,9 +216,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--analyze-state")) {
-            opts.analyze_state = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "-O0") or std.mem.eql(u8, arg, "-Onone")) {
             opts.mlir_opt_level = "none";
