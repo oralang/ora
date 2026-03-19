@@ -4459,6 +4459,7 @@ fn overflowTupleFieldType(base_type: Type, field_name: []const u8) ?Type {
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
     if (sameConcreteType(lhs, rhs)) return lhs;
     return lhs;
@@ -4467,6 +4468,7 @@ fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
 fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
     return lhs;
 }
@@ -4512,6 +4514,7 @@ fn typesComparable(lhs_type: Type, rhs_type: Type) bool {
 fn orderedTypesComparable(lhs_type: Type, rhs_type: Type) bool {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return true;
     if (lhs.kind() == .bool or rhs.kind() == .bool) return false;
     return typesComparable(lhs_type, rhs_type);
 }
@@ -4522,6 +4525,10 @@ fn isIntegerType(ty: Type) bool {
 
 fn unwrapRefinement(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
+fn isGenericTypeParam(ty: Type) bool {
+    return unwrapRefinement(ty).kind() == .named;
 }
 
 fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
