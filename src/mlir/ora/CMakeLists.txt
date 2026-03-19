@@ -189,7 +189,6 @@ install(TARGETS MLIROraDialectC
 install(FILES
   include/OraDialect.h
   include/OraDialectC.h
-  include/OraGasConstants.h
   lowering/OraToSIR/OraToSIR.h
   lowering/OraToSIR/OraToSIRTypeConverter.h
   lowering/OraToSIR/SIRTextEmitter.h

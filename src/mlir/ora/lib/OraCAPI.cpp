@@ -4329,8 +4329,6 @@ MlirOperation oraDestructureOpCreate(MlirContext ctx, MlirLocation loc, MlirValu
         auto patternTypeAttr = StringAttr::get(context, patternTypeRef);
         auto op = builder.create<ora::DestructureOp>(location, resultTy, val, patternTypeAttr);
 
-        // Add gas cost attribute (destructuring has minimal cost)
-
         return wrap(op.getOperation());
     }
     catch (...)
@@ -4356,8 +4354,6 @@ MlirOperation oraEnumDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
 
         // Keep declaration region empty unless explicitly populated.
         // Creating an empty block without terminator violates MLIR verifier.
-
-        // Add gas cost attribute (declaration has no runtime cost)
 
         return wrap(op.getOperation());
     }
@@ -4461,8 +4457,6 @@ MlirOperation oraMoveOpCreate(MlirContext ctx, MlirLocation loc, MlirValue amoun
 
         // Create the move operation
         auto op = builder.create<ora::MoveOp>(location, amt, src, dst);
-
-        // Add gas cost attribute (move operation has cost for balance updates)
 
         return wrap(op.getOperation());
     }
@@ -5579,9 +5573,6 @@ MlirOperation oraLogOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef ev
         auto eventNameAttr = StringAttr::get(context, eventNameRef);
         state.addAttribute("event_name", eventNameAttr);
 
-        // Add gas cost attribute (logging has cost based on data size)
-        // Base cost + per-byte cost (simplified to fixed cost for now)
-
         Operation *op = Operation::create(state);
         return wrap(op);
     }
@@ -5909,8 +5900,6 @@ MlirOperation oraTryOpCreate(MlirContext ctx, MlirLocation loc, MlirValue tryOpe
             builder.createBlock(&op.getCatchRegion());
         }
 
-        // Add gas cost attribute (try-catch has minimal overhead)
-
         return wrap(op.getOperation());
     }
     catch (...)
@@ -6093,8 +6082,6 @@ MlirOperation oraBreakOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef 
         // Create the break operation with optional label
         StringAttr labelAttr = label.data ? StringAttr::get(context, StringRef(label.data, label.length)) : StringAttr();
         auto op = builder.create<ora::BreakOp>(location, labelAttr, vals);
-
-        // Add gas cost attribute (break has minimal cost)
 
         return wrap(op.getOperation());
     }
