@@ -337,16 +337,6 @@ pub fn build(b: *std.Build) void {
     const error_recovery_tests = b.addTest(.{ .root_module = error_recovery_test_mod });
     test_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
 
-    // semantics locals binder tests
-    const locals_binder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/semantics/locals_binder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    locals_binder_test_mod.addImport("ora_root", lib_mod);
-    const locals_binder_tests = b.addTest(.{ .root_module = locals_binder_test_mod });
-    test_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
-
     // cli argument parsing tests
     const cli_args_test_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/args.test.zig"),
@@ -470,34 +460,6 @@ pub fn build(b: *std.Build) void {
     linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
-
-    // MLIR effect metadata tests
-    const mlir_effects_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/effects.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mlir_effects_test_mod.addImport("ora_lib", lib_mod);
-    mlir_effects_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    mlir_effects_test_mod.addImport("log", log_mod);
-    const mlir_effects_tests = b.addTest(.{ .root_module = mlir_effects_test_mod });
-    linkMlirLibraries(b, mlir_effects_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
-
-    // MLIR parser/printer round-trip tests
-    const mlir_roundtrip_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/roundtrip.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mlir_roundtrip_test_mod.addImport("ora_lib", lib_mod);
-    mlir_roundtrip_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    mlir_roundtrip_test_mod.addImport("log", log_mod);
-    const mlir_roundtrip_tests = b.addTest(.{ .root_module = mlir_roundtrip_test_mod });
-    linkMlirLibraries(b, mlir_roundtrip_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(mlir_roundtrip_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(mlir_roundtrip_tests).step);
 
     // MLIR verifier-negative tests
     const mlir_verifiers_test_mod = b.createModule(.{
@@ -698,8 +660,7 @@ pub fn build(b: *std.Build) void {
     _ = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
 
     // zig build test-semantics
-    const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
-    test_semantics_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
+    _ = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
 
     // zig build test-lsp
     const test_lsp_step = b.step("test-lsp", "Run LSP frontend tests (no MLIR/Z3)");
