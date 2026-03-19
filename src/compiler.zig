@@ -1,11 +1,11 @@
-pub const source = @import("../source/mod.zig");
-pub const diagnostics = @import("../diagnostics/mod.zig");
-pub const syntax = @import("../syntax/mod.zig");
-pub const ast = @import("../ast/mod.zig");
-pub const sema = @import("../sema/mod.zig");
-pub const hir = @import("../hir/mod.zig");
-pub const db = @import("../db/mod.zig");
-pub const driver = @import("../driver/mod.zig");
+pub const source = @import("source/mod.zig");
+pub const diagnostics = @import("diagnostics/mod.zig");
+pub const syntax = @import("syntax/mod.zig");
+pub const ast = @import("ast/mod.zig");
+pub const sema = @import("sema/mod.zig");
+pub const hir = @import("hir/mod.zig");
+pub const db = @import("db/mod.zig");
+pub const driver = @import("driver/mod.zig");
 
 pub const CompilerDb = db.CompilerDb;
 pub const FileId = source.FileId;

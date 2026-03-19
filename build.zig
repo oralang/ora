@@ -541,7 +541,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
 
     const compiler_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/compiler/mod.test.zig"),
+        .root_source_file = b.path("src/compiler.test.zig"),
         .target = target,
         .optimize = optimize,
     });

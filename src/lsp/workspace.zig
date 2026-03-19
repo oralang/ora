@@ -1,6 +1,6 @@
 const std = @import("std");
 const lexer = @import("ora_lexer");
-const compiler = @import("../compiler/mod.zig");
+const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
 
 const Allocator = std.mem.Allocator;

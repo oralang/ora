@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const crypto = std.crypto;
-const compiler = @import("compiler/mod.zig");
+const compiler = @import("compiler.zig");
 const compiler_abi = @import("hir/abi.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
 

@@ -15,7 +15,7 @@ pub const lexer = @import("ora_lexer");
 pub const ast_arena = @import("ora_types").ast_arena;
 pub const abi = @import("abi.zig");
 pub const lsp = @import("lsp/mod.zig");
-pub const compiler = @import("compiler/mod.zig");
+pub const compiler = @import("compiler.zig");
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.

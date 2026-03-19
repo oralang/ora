@@ -1,5 +1,5 @@
 const std = @import("std");
-const compiler = @import("../compiler/mod.zig");
+const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
 
 const Allocator = std.mem.Allocator;
