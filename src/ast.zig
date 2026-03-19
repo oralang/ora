@@ -14,12 +14,7 @@ pub const expressions = @import("ast/expressions.zig");
 pub const statements = @import("ast/statements.zig");
 pub const type_info = @import("ast/type_info.zig");
 pub const slot_key = @import("ast/slot_key.zig");
-pub const ast_visitor = @import("ast/ast_visitor.zig");
 pub const verification = @import("ast/verification.zig");
-
-// Import serializer
-pub const ast_serializer = @import("ast/ast_serializer.zig");
-pub const AstSerializer = ast_serializer.AstSerializer;
 
 // Note: TypeResolver is exported from ast/type_resolver/mod.zig directly
 // to avoid circular dependency (ast.zig imports type_resolver, type_resolver imports ast.zig)
