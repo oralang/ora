@@ -187,6 +187,28 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     const actual_unwrapped = unwrapRefinement(actual_type);
     if (expected_unwrapped.kind() == .unknown or actual_unwrapped.kind() == .unknown) return true;
     if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) return true;
+    if (expected_unwrapped.kind() == .array and actual_unwrapped.kind() == .array) {
+        const expected_arr = expected_unwrapped.array;
+        const actual_arr = actual_unwrapped.array;
+        return expected_arr.len == actual_arr.len and
+            typesAssignable(expected_arr.element_type.*, actual_arr.element_type.*);
+    }
+    if (expected_unwrapped.kind() == .slice and actual_unwrapped.kind() == .slice) {
+        return typesAssignable(expected_unwrapped.slice.element_type.*, actual_unwrapped.slice.element_type.*);
+    }
+    if (expected_unwrapped.kind() == .map and actual_unwrapped.kind() == .map) {
+        const expected_map = expected_unwrapped.map;
+        const actual_map = actual_unwrapped.map;
+        const key_ok = if (expected_map.key_type != null and actual_map.key_type != null)
+            typesAssignable(expected_map.key_type.?.*, actual_map.key_type.?.*)
+        else
+            expected_map.key_type == null and actual_map.key_type == null;
+        const val_ok = if (expected_map.value_type != null and actual_map.value_type != null)
+            typesAssignable(expected_map.value_type.?.*, actual_map.value_type.?.*)
+        else
+            expected_map.value_type == null and actual_map.value_type == null;
+        return key_ok and val_ok;
+    }
     if (expected_unwrapped.kind() == .error_union) {
         const expected = expected_unwrapped.error_union;
         if (typesAssignable(expected.payload_type.*, actual_unwrapped)) return true;

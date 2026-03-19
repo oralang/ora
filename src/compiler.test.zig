@@ -7878,6 +7878,53 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(ret_stmt.value.?).kind());
 }
 
+test "compiler assigns integer array literals to concrete integer array types" {
+    const source_text =
+        \\pub fn build() -> [u256; 4] {
+        \\    let dest: [u256; 4] = [0, 0, 0, 0];
+        \\    return dest;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects integer array literals assigned to bool arrays" {
+    const source_text =
+        \\pub fn build() -> [bool; 2] {
+        \\    let dest: [bool; 2] = [0, 0];
+        \\    return dest;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
+}
+
+test "compiler rejects array length mismatches in assignments" {
+    const source_text =
+        \\pub fn build() -> [u256; 3] {
+        \\    let dest: [u256; 3] = [0, 0, 0, 0];
+        \\    return dest;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
+}
+
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
