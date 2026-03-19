@@ -94,16 +94,6 @@ pub fn build(b: *std.Build) void {
     });
     ora_fmt_mod.addImport("ora_lib", lib_mod);
 
-    const ora_frontend_mod = b.createModule(.{
-        .root_source_file = b.path("src/ora_frontend.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ora_frontend_mod.addImport("ora_ast", ora_ast_mod);
-    ora_frontend_mod.addImport("ora_lexer", ora_lexer_mod);
-    ora_frontend_mod.addImport("ora_types", ora_types_mod);
-    ora_frontend_mod.addImport("log", log_mod);
-
     const mlir_c_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/c.zig"),
         .target = target,
@@ -492,7 +482,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    import_program_loader_test_mod.addImport("ora_lib", ora_frontend_mod);
+    import_program_loader_test_mod.addImport("ora_lib", lib_mod);
     import_program_loader_test_mod.addImport("ora_imports", ora_imports_mod);
     import_program_loader_test_mod.addImport("ora_ast", ora_ast_mod);
     import_program_loader_test_mod.addImport("ora_lexer", ora_lexer_mod);

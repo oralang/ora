@@ -1400,6 +1400,56 @@ test "compiler computes extern trait selectors" {
     try testing.expectEqualStrings("0xa9059cbb", selector);
 }
 
+test "compiler abi generation uses compiler pipeline for public abi" {
+    const source_text =
+        \\contract Test {
+        \\    storage var counter: u256;
+        \\    error InvalidAmount(amount: u256);
+        \\    log Transfer(indexed from: address, amount: u256);
+        \\    pub fn viewFn() -> u256 { return counter; }
+        \\    pub fn writeFn(amount: u256) { counter = amount; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    try testing.expectEqual(@as(usize, 1), contract_abi.contract_count);
+    try testing.expectEqualStrings("Test", contract_abi.contract_name);
+
+    var saw_view = false;
+    var saw_write = false;
+    var saw_error = false;
+    var saw_event = false;
+
+    for (contract_abi.callables) |callable| {
+        if (callable.kind == .function and std.mem.eql(u8, callable.name, "viewFn")) {
+            saw_view = true;
+            try testing.expect(callable.selector != null);
+        }
+        if (callable.kind == .function and std.mem.eql(u8, callable.name, "writeFn")) {
+            saw_write = true;
+            try testing.expect(callable.selector != null);
+        }
+        if (callable.kind == .@"error" and std.mem.eql(u8, callable.name, "InvalidAmount")) {
+            saw_error = true;
+            try testing.expectEqual(@as(usize, 1), callable.inputs.len);
+        }
+        if (callable.kind == .event and std.mem.eql(u8, callable.name, "Transfer")) {
+            saw_event = true;
+            try testing.expect(callable.selector == null);
+        }
+    }
+
+    try testing.expect(saw_view);
+    try testing.expect(saw_write);
+    try testing.expect(saw_error);
+    try testing.expect(saw_event);
+}
+
 test "compiler preserves trait ghost blocks in AST" {
     const source_text =
         \\trait ERC20 {

@@ -9,7 +9,6 @@ const lexer = ora_root.lexer;
 const parser = ora_root.parser;
 const ast_arena = ora_root.ast_arena;
 const abi = ora_root.abi;
-const compiler = ora_root.compiler;
 
 fn generateAbiForSource(
     allocator: std.mem.Allocator,
@@ -235,43 +234,4 @@ test "abi type ids are stable across repeated generation for same source" {
     defer allocator.free(json_b);
 
     try testing.expectEqualStrings(json_a, json_b);
-}
-
-test "compiler abi generation uses compiler pipeline for public abi" {
-    const allocator = testing.allocator;
-    const source =
-        \\contract Test {
-        \\    storage var counter: u256;
-        \\    error InvalidAmount(amount: u256);
-        \\    log Transfer(indexed from: address, amount: u256);
-        \\    pub fn viewFn() -> u256 { return counter; }
-        \\    pub fn writeFn(amount: u256) { counter = amount; }
-        \\}
-    ;
-
-    var compilation = try compiler.compileSource(allocator, "test.ora", source);
-    defer compilation.deinit();
-
-    var contract_abi = try abi.generateCompilerAbi(allocator, &compilation);
-    defer contract_abi.deinit();
-
-    try testing.expectEqual(@as(usize, 1), contract_abi.contract_count);
-    try testing.expectEqualStrings("Test", contract_abi.contract_name);
-
-    const view_fn = findCallable(&contract_abi, .function, "viewFn") orelse return error.TestUnexpectedResult;
-    const write_fn = findCallable(&contract_abi, .function, "writeFn") orelse return error.TestUnexpectedResult;
-    const invalid_amount = findCallable(&contract_abi, .@"error", "InvalidAmount") orelse return error.TestUnexpectedResult;
-    const transfer = findCallable(&contract_abi, .event, "Transfer") orelse return error.TestUnexpectedResult;
-
-    try testing.expect(view_fn.selector != null);
-    try testing.expect(write_fn.selector != null);
-    try testing.expect(hasEffectKind(view_fn, .reads));
-    try testing.expect(hasEffectKind(write_fn, .writes));
-    try testing.expectEqual(@as(usize, 1), invalid_amount.inputs.len);
-    try testing.expect(transfer.selector == null);
-
-    const manifest_json = try contract_abi.toJson(allocator);
-    defer allocator.free(manifest_json);
-    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"error\"") != null);
-    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"event\"") != null);
 }
