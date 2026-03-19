@@ -8052,6 +8052,37 @@ test "compiler lowers overflow builtins through real tuple results" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.tuple.create\""));
 }
 
+test "compiler supports named field access on overflow builtin results" {
+    const source_text =
+        \\pub fn overflow_fields(a: u8, b: u8) -> bool {
+        \\    let added = @addWithOverflow(a, b);
+        \\    let subbed = @subWithOverflow(a, b);
+        \\    let mulled = @mulWithOverflow(a, b);
+        \\    return added.value == a && !added.overflow && subbed.value == a && mulled.overflow == mulled[1];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    const added_pattern = findVariablePatternByName(ast_file, body.statements, "added").?;
+    const added_type = typecheck.pattern_types[added_pattern.index()];
+    try testing.expectEqual(compiler.sema.TypeKind.tuple, added_type.kind());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "ora.tuple_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {

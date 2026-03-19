@@ -1769,6 +1769,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const base = try self.lowerExpr(field.base, locals);
+            if (@This().overflowTupleFieldIndex(base_type, field.name)) |tuple_index| {
+                const op = mlir.oraTupleExtractOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    base,
+                    tuple_index,
+                    result_type,
+                );
+                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+            }
             if (@This().isBitfieldLikeType(self, base_type)) {
                 const extracted_type = self.parent.lowerExprType(expr_id);
                 return try self.createBitfieldFieldExtract(base, base_type, field.name, extracted_type, field.range);
@@ -1800,6 +1810,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (self.parent.typecheck.instantiatedBitfieldByName(name) != null) return true;
             const item_id = self.parent.item_index.lookup(name) orelse return false;
             return self.parent.file.item(item_id).* == .Bitfield;
+        }
+
+        fn overflowTupleFieldIndex(base_type: sema.Type, field_name: []const u8) ?i64 {
+            if (base_type.kind() != .tuple) return null;
+            const elements = base_type.tuple;
+            if (elements.len != 2) return null;
+            if (elements[1].kind() != .bool) return null;
+            if (std.mem.eql(u8, field_name, "value")) return 0;
+            if (std.mem.eql(u8, field_name, "overflow")) return 1;
+            return null;
         }
 
         fn lowerBuiltinFieldExpr(

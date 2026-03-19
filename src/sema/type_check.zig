@@ -3554,6 +3554,7 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
+        if (overflowTupleFieldType(base_type, field_name)) |field_type| return field_type;
         if (self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
         if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
@@ -4400,6 +4401,16 @@ const TypeChecker = struct {
         };
     }
 };
+
+fn overflowTupleFieldType(base_type: Type, field_name: []const u8) ?Type {
+    if (base_type.kind() != .tuple) return null;
+    const elements = base_type.tuple;
+    if (elements.len != 2) return null;
+    if (elements[1].kind() != .bool) return null;
+    if (std.mem.eql(u8, field_name, "value")) return elements[0];
+    if (std.mem.eql(u8, field_name, "overflow")) return elements[1];
+    return null;
+}
 
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);

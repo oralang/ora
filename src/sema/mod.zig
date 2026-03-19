@@ -23,6 +23,7 @@ pub const Binding = model.Binding;
 pub const ResolvedBinding = model.ResolvedBinding;
 pub const TypeKind = model.TypeKind;
 pub const Region = model.Region;
+pub const Provenance = model.Provenance;
 pub const Type = model.Type;
 pub const LocatedType = model.LocatedType;
 pub const ArrayType = model.ArrayType;
