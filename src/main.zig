@@ -766,61 +766,39 @@ fn isValidAddressValue(value: []const u8) bool {
     return true;
 }
 
-fn findInitParamByName(parameters: []const lib.ast.ParameterNode, name: []const u8) ?*const lib.ast.ParameterNode {
-    for (parameters) |*param| {
-        if (std.mem.eql(u8, param.name, name)) return param;
-    }
-    return null;
-}
-
-fn validateInitArgValue(type_info: lib.ast.Types.TypeInfo, raw_value: []const u8) !void {
+fn validateInitArgValue(ty: compiler.sema.Type, raw_value: []const u8) !void {
     const value = std.mem.trim(u8, raw_value, " \t\r\n");
     if (value.len == 0) return error.InvalidInitArgValue;
 
-    if (type_info.ora_type) |ora_type| {
-        if (ora_type == .bool) {
+    switch (ty) {
+        .bool => {
             if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
                 return error.InvalidInitArgValue;
             }
-            return;
-        }
-        if (ora_type.isInteger()) {
-            if (ora_type.isSignedInteger()) {
+        },
+        .integer => |integer| {
+            if (integer.signed == true) {
                 _ = std.fmt.parseInt(i256, value, 0) catch return error.InvalidInitArgValue;
             } else {
                 _ = std.fmt.parseInt(u256, value, 0) catch return error.InvalidInitArgValue;
             }
-            return;
-        }
-        switch (ora_type) {
-            .address, .non_zero_address => {
-                if (!isValidAddressValue(value)) {
-                    return error.InvalidInitArgValue;
-                }
-                return;
-            },
-            .string => return,
-            else => return error.UnsupportedInitArgType,
-        }
-    }
-
-    switch (type_info.category) {
-        .Bool => {
-            if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
-                return error.InvalidInitArgValue;
-            }
         },
-        .Integer => {
-            _ = std.fmt.parseInt(u256, value, 0) catch return error.InvalidInitArgValue;
-        },
-        .Address => {
+        .address => {
             if (!isValidAddressValue(value)) {
                 return error.InvalidInitArgValue;
             }
         },
-        .String => {},
+        .string => {},
+        .refinement => |refinement| try validateInitArgValue(refinement.base_type.*, value),
         else => return error.UnsupportedInitArgType,
     }
+}
+
+fn initParameterName(ast_file: *const compiler.AstFile, parameter: compiler.ast.Parameter) ?[]const u8 {
+    return switch (ast_file.pattern(parameter.pattern).*) {
+        .Name => |pattern| pattern.name,
+        else => null,
+    };
 }
 
 fn validateConfiguredInitArgs(
@@ -831,18 +809,24 @@ fn validateConfiguredInitArgs(
 ) !void {
     if (configured_init_args.len == 0) return;
 
-    var program = try import_program.loadProgramWithImportsRawWithResolverOptions(allocator, file_path, resolver_options);
-    defer program.deinit();
+    var compilation = try compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options);
+    defer compilation.deinit();
 
-    var init_fn: ?*const lib.FunctionNode = null;
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    var init_fn: ?compiler.ast.FunctionItem = null;
     var init_contract_name: []const u8 = "<unknown>";
 
-    for (program.nodes) |*node| {
-        if (node.* != .Contract) continue;
-        const contract = &node.Contract;
-        for (contract.body) |*member| {
-            if (member.* != .Function) continue;
-            const func = &member.Function;
+    for (ast_file.root_items) |item_id| {
+        const item = ast_file.item(item_id).*;
+        if (item != .Contract) continue;
+        const contract = item.Contract;
+        for (contract.members) |member_id| {
+            const member = ast_file.item(member_id).*;
+            if (member != .Function) continue;
+            const func = member.Function;
             if (!std.mem.eql(u8, func.name, "init")) continue;
             if (init_fn != null) {
                 std.log.warn("Configured init_args for '{s}' but multiple contracts define init().", .{file_path});
@@ -868,7 +852,15 @@ fn validateConfiguredInitArgs(
         }
         try seen_names.put(arg.name, {});
 
-        const param = findInitParamByName(init_fn.?.parameters, arg.name) orelse {
+        var param_opt: ?compiler.ast.Parameter = null;
+        for (init_fn.?.parameters) |parameter| {
+            const parameter_name = initParameterName(ast_file, parameter) orelse continue;
+            if (!std.mem.eql(u8, parameter_name, arg.name)) continue;
+            param_opt = parameter;
+            break;
+        }
+
+        const param = param_opt orelse {
             std.log.warn("Configured init arg '{s}' is not a parameter of {s}.init().", .{ arg.name, init_contract_name });
             return error.UnknownInitArg;
         };
@@ -876,7 +868,7 @@ fn validateConfiguredInitArgs(
             std.log.warn("Configured init arg '{s}' targets comptime parameter, which is not supported.", .{arg.name});
             return error.UnsupportedInitArgParameter;
         }
-        validateInitArgValue(param.type_info, arg.value) catch |err| {
+        validateInitArgValue(typecheck.pattern_types[param.pattern.index()].type, arg.value) catch |err| {
             std.log.warn("Invalid value for init arg '{s}' in {s}.init(): {s}", .{
                 arg.name,
                 init_contract_name,
