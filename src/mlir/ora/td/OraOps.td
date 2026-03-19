@@ -24,6 +24,10 @@ def Ora_IntegerValueType : TypeConstraint<
   CPred<"::llvm::isa<ora::IntegerType>($_self)">,
   "ora.int">;
 
+def Ora_IntegerLikeValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType>($_self)">,
+  "ora.int or builtin integer">;
+
 def Ora_BoolValueType : TypeConstraint<
   CPred<"::llvm::isa<ora::BoolType>($_self)">,
   "ora.bool">;
@@ -302,6 +306,22 @@ def Ora_TStoreGlobalOp : Ora_Op<"tstore.global"> {
   let traits = [Symbol, MemoryEffects<[MemWrite]>];
 }
 
+def Ora_BitfieldDeclOp : Ora_Op<"bitfield_decl"> {
+  let summary = "Bitfield declaration";
+  let description = [{
+    Declares a bitfield type with optional layout metadata used by Ora lowering.
+
+    Example:
+    ```mlir
+    "ora.bitfield_decl"() {sym_name = "Flags", ora.bitfield = "Flags", ora.bitfield_layout = "u1:enabled,u7:mode"}
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
+}
+
 //===----------------------------------------------------------------------===//
 // Test Operation (Simple Custom Printer Test)
 //===----------------------------------------------------------------------===//
@@ -442,8 +462,8 @@ def Ora_AddWrappingOp : Ora_PureOp<"add_wrapping", [
     ```
   }];
 
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
 
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
@@ -453,8 +473,8 @@ def Ora_SubWrappingOp : Ora_PureOp<"sub_wrapping", [
   ]> {
   let summary = "Wrapping subtract operation";
   let description = [{Subtracts two Ora integer values with modular wrapping semantics.}];
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
@@ -463,8 +483,8 @@ def Ora_MulWrappingOp : Ora_PureOp<"mul_wrapping", [
   ]> {
   let summary = "Wrapping multiply operation";
   let description = [{Multiplies two Ora integer values with modular wrapping semantics.}];
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
@@ -473,8 +493,8 @@ def Ora_ShlWrappingOp : Ora_PureOp<"shl_wrapping", [
   ]> {
   let summary = "Wrapping shift-left operation";
   let description = [{Shifts an Ora integer left with modular wrapping semantics.}];
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
@@ -1003,7 +1023,7 @@ def Ora_StructDeclOp : Ora_Op<"struct.decl"> {
     ```
   }];
   
-  let arguments = (ins StrAttr:$name);
+  let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$fields);
 
   let traits = [Symbol, MemoryEffects<[MemWrite]>];

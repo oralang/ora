@@ -415,6 +415,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return self.lowerCheckedPower(lhs, rhs, result_type, binary.range);
             }
 
+            switch (binary.op) {
+                .wrapping_add, .wrapping_sub, .wrapping_mul, .wrapping_shl, .wrapping_shr, .wrapping_pow => {
+                    lhs = try self.convertValueForFlow(lhs, result_type, binary.range);
+                    rhs = try self.convertValueForFlow(rhs, result_type, binary.range);
+                },
+                else => {},
+            }
+
             const op = switch (binary.op) {
                 .add => mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_add => mlir.oraAddWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
@@ -530,7 +538,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (index < runtime_parameters.len) {
                     const parameter = runtime_parameters[index];
                     if (callee_function != null) {
-                        const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
+                        const target_sema_type = try self.parent.resolvedRuntimeParameterTypeForCall(callee_function.?, parameter, call);
+                        const target_type = self.parent.lowerSemaType(target_sema_type, parameter.range);
                         arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
                     }
                 }
@@ -1768,7 +1777,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return packed_word;
             }
             const struct_item = switch (item) {
-                .Struct => |struct_item| struct_item,
+                .Struct => |struct_item| blk: {
+                    if (struct_item.is_generic) {
+                        if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
+                            return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
+                        }
+                    }
+                    break :blk struct_item;
+                },
                 else => {
                     if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
                         return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);

@@ -140,12 +140,15 @@ pub fn lowerModule(
     @memset(lowerer.contract_body_blocks, std.mem.zeroes(mlir.MlirBlock));
 
     for (typecheck.instantiated_structs) |instantiated| {
+        if (lowerer.enclosingContractForItem(instantiated.template_item_id) != null) continue;
         try lowerer.lowerInstantiatedStructDecl(instantiated, lowerer.module_body);
     }
     for (typecheck.instantiated_enums) |instantiated| {
+        if (lowerer.enclosingContractForItem(instantiated.template_item_id) != null) continue;
         try lowerer.lowerInstantiatedEnumDecl(instantiated, lowerer.module_body);
     }
     for (typecheck.instantiated_bitfields) |instantiated| {
+        if (lowerer.enclosingContractForItem(instantiated.template_item_id) != null) continue;
         try lowerer.lowerInstantiatedBitfieldDecl(instantiated, lowerer.module_body);
     }
 
@@ -212,6 +215,7 @@ const Lowerer = struct {
     pub const createNamedPlaceholderOp = ModuleLowering.createNamedPlaceholderOp;
     pub const createPlaceholderOp = ModuleLowering.createPlaceholderOp;
     pub const appendItemHandle = ModuleLowering.appendItemHandle;
+    pub const enclosingContractForItem = ModuleLowering.enclosingContractForItem;
     pub const ensureMonomorphizedFunction = ModuleLowering.ensureMonomorphizedFunction;
     pub const ensureLoweredImplMethod = ModuleLowering.ensureLoweredImplMethod;
     pub const attachBitfieldParamMetadata = ModuleLowering.attachBitfieldParamMetadata;
@@ -503,6 +507,32 @@ const Lowerer = struct {
             try parameters.append(self.allocator, parameter);
         }
         return parameters.toOwnedSlice(self.allocator);
+    }
+
+    pub fn resolvedRuntimeParameterTypeForCall(self: *Lowerer, function: ast.FunctionItem, parameter: ast.Parameter, call: ast.CallExpr) !sema.Type {
+        if (!function.is_generic) {
+            return self.typecheck.pattern_types[parameter.pattern.index()].type;
+        }
+
+        const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse {
+            return self.typecheck.pattern_types[parameter.pattern.index()].type;
+        };
+
+        const type_expr = parameter.type_expr;
+        const type_expr_node = self.file.typeExpr(type_expr).*;
+        switch (type_expr_node) {
+            .Path => |path| {
+                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                for (bindings) |binding| {
+                    if (!std.mem.eql(u8, binding.name, trimmed)) continue;
+                    if (hirGenericBindingType(binding)) |bound_type| return bound_type;
+                    break;
+                }
+            },
+            else => {},
+        }
+
+        return self.typecheck.pattern_types[parameter.pattern.index()].type;
     }
 
     pub fn genericTypeBindingsForCall(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {

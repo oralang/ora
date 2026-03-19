@@ -628,10 +628,21 @@ namespace mlir
 
             static StructDeclOp findStructDecl(Operation *op, StringRef structName)
             {
-                auto structAttr = mlir::StringAttr::get(op->getContext(), structName);
-                if (Operation *symbol = mlir::SymbolTable::lookupNearestSymbolFrom(op, structAttr))
-                    return llvm::dyn_cast<StructDeclOp>(symbol);
-                return nullptr;
+                ModuleOp module = op->getParentOfType<ModuleOp>();
+                if (!module)
+                    return nullptr;
+
+                StructDeclOp structDecl = nullptr;
+                module.walk([&](StructDeclOp declOp)
+                            {
+                    auto sym = declOp->getAttrOfType<StringAttr>("sym_name");
+                    if (sym && sym.getValue() == structName)
+                    {
+                        structDecl = declOp;
+                        return WalkResult::interrupt();
+                    }
+                    return WalkResult::advance(); });
+                return structDecl;
             }
 
             static mlir::LogicalResult replaceOpWithConstant(

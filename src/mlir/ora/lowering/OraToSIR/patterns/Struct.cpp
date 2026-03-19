@@ -42,7 +42,7 @@ namespace
         ora::StructDeclOp structDecl = nullptr;
         module.walk([&](ora::StructDeclOp declOp)
                     {
-            auto nameAttr = declOp->getAttrOfType<StringAttr>("name");
+            auto nameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
             if (nameAttr && nameAttr.getValue() == structName)
             {
                 structDecl = declOp;

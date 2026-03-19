@@ -1644,6 +1644,30 @@ pub const Encoder = struct {
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.add_wrapping") or
+            std.mem.eql(u8, op_name, "ora.sub_wrapping") or
+            std.mem.eql(u8, op_name, "ora.mul_wrapping"))
+        {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const arith_op = if (std.mem.eql(u8, op_name, "ora.add_wrapping"))
+                ArithmeticOp.Add
+            else if (std.mem.eql(u8, op_name, "ora.sub_wrapping"))
+                ArithmeticOp.Sub
+            else
+                ArithmeticOp.Mul;
+            return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.shl_wrapping") or
+            std.mem.eql(u8, op_name, "ora.shr_wrapping"))
+        {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            return if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
+                z3.Z3_mk_bvshl(self.context.ctx, operands[0], operands[1])
+            else
+                z3.Z3_mk_bvlshr(self.context.ctx, operands[0], operands[1]);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.power")) {
             if (operands.len < 2) return error.InvalidOperandCount;
             return try self.encodePowerOp(operands[0], operands[1]);

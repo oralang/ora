@@ -77,6 +77,27 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             for (contract.invariants) |expr_id| {
                 try contract_lowerer.lowerInvariant(expr_id);
             }
+            for (self.typecheck.instantiated_structs) |instantiated| {
+                if (self.enclosingContractForItem(instantiated.template_item_id)) |contract_id| {
+                    if (contract_id.index() == item_id.index()) {
+                        try self.lowerInstantiatedStructDecl(instantiated, body);
+                    }
+                }
+            }
+            for (self.typecheck.instantiated_enums) |instantiated| {
+                if (self.enclosingContractForItem(instantiated.template_item_id)) |contract_id| {
+                    if (contract_id.index() == item_id.index()) {
+                        try self.lowerInstantiatedEnumDecl(instantiated, body);
+                    }
+                }
+            }
+            for (self.typecheck.instantiated_bitfields) |instantiated| {
+                if (self.enclosingContractForItem(instantiated.template_item_id)) |contract_id| {
+                    if (contract_id.index() == item_id.index()) {
+                        try self.lowerInstantiatedBitfieldDecl(instantiated, body);
+                    }
+                }
+            }
             for (contract.members) |member_id| {
                 try self.lowerItem(member_id, body);
             }
@@ -149,6 +170,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             return error.MlirOperationCreationFailed;
+        }
+
+        pub fn enclosingContractForItem(self: *const Lowerer, item_id: ast.ItemId) ?ast.ItemId {
+            for (self.file.items, 0..) |item, index| {
+                if (item != .Contract) continue;
+                for (item.Contract.members) |member_id| {
+                    if (member_id.index() == item_id.index()) return ast.ItemId.fromIndex(index);
+                }
+            }
+            return null;
         }
 
         fn firstImplSelfPattern(self: *Lowerer, impl_item: ast.ImplItem) ?ast.PatternId {
