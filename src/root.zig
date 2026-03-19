@@ -37,22 +37,9 @@ pub const Token = lexer.Token;
 /// Token type enumeration
 pub const TokenType = lexer.TokenType;
 
-/// Cleanup function for AST nodes
-pub const deinitAstNodes = ast.deinitAstNodes;
-
 // AST Arena memory management
 /// Arena-based allocator for AST nodes
 pub const AstArena = ast_arena.AstArena;
-/// Memory statistics for AST arena
-pub const MemoryStats = ast_arena.MemoryStats;
-/// Error type for AST arena operations
-pub const AstArenaError = ast_arena.AstArenaError;
-
-// AST Serialization
-/// Enhanced AST serializer with comprehensive customization options
-pub const AstSerializer = ast_serializer.AstSerializer;
-/// Serialization options for customizing output
-pub const SerializationOptions = ast_serializer.SerializationOptions;
 /// Type resolver entry point
 pub const TypeResolver = type_resolver.TypeResolver;
 pub const comptime_eval = @import("comptime/mod.zig");
