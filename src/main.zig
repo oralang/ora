@@ -1085,23 +1085,44 @@ fn compilerDiagnosticsHasErrors(diagnostics_list: *const compiler.diagnostics.Di
     return false;
 }
 
+fn writeCompilerDiagnosticLocation(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    labels: []const compiler.diagnostics.Label,
+) !void {
+    if (sources == null or labels.len == 0) return;
+
+    const primary = labels[0];
+    const line_column = sources.?.lineColumn(primary.location);
+    const file = sources.?.file(primary.location.file_id);
+    try writer.print("{s}:{d}:{d}: ", .{ file.path, line_column.line, line_column.column });
+}
+
 fn writeCompilerDiagnosticsText(
     writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
     diagnostics_list: *const compiler.diagnostics.DiagnosticList,
 ) !void {
     if (diagnostics_list.items.items.len == 0) return;
     try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
     for (diagnostics_list.items.items) |diag| {
-        try writer.print("  [{s}] {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
+        try writer.writeAll("  ");
+        try writeCompilerDiagnosticLocation(writer, sources, diag.labels);
+        try writer.print("[{s}] {s}", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
+        if (diag.labels.len != 0 and diag.labels[0].message.len != 0) {
+            try writer.print(" ({s})", .{diag.labels[0].message});
+        }
+        try writer.writeByte('\n');
     }
 }
 
 fn exitOnCompilerErrors(
     writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
     diagnostics_list: *const compiler.diagnostics.DiagnosticList,
 ) !void {
     if (!compilerDiagnosticsHasErrors(diagnostics_list)) return;
-    try writeCompilerDiagnosticsText(writer, diagnostics_list);
+    try writeCompilerDiagnosticsText(writer, sources, diagnostics_list);
     try writer.flush();
     std.process.exit(1);
 }
@@ -1295,7 +1316,7 @@ fn writeCompilerAst(
 
     try writer.print("Compiler {s}AST\n", .{if (typecheck != null) "typed " else ""});
     try writer.print("Root items: {d}\n", .{ast_file.root_items.len});
-    try writeCompilerDiagnosticsText(writer, diagnostics_list);
+    try writeCompilerDiagnosticsText(writer, null, diagnostics_list);
     for (ast_file.root_items, 0..) |item_id, index| {
         const item = ast_file.item(item_id).*;
         try writer.print("[{d}] {s}", .{ index, compilerItemKindName(item) });
@@ -1337,7 +1358,7 @@ fn runCompilerAstEmit(
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     const typecheck = if (include_types) module_typecheck else null;
     const diagnostics_list = &module_typecheck.diagnostics;
-    try exitOnCompilerErrors(stdout, diagnostics_list);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, diagnostics_list);
 
     writeCompilerAst(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
         error.InvalidArgument => {
@@ -1374,7 +1395,7 @@ fn runCompilerMlirEmit(
     defer compilation.deinit();
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     if (mlir_options.emit_mlir_sir) {
@@ -1452,7 +1473,7 @@ fn runMlirEmitAdvanced(
     defer compilation.deinit();
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
@@ -1921,7 +1942,7 @@ fn runAbiEmit(
     defer compilation.deinit();
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &module_typecheck.diagnostics);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
 
     var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
     defer contract_abi.deinit();
