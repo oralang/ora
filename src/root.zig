@@ -29,10 +29,6 @@ pub const compiler = @import("compiler/mod.zig");
 // Re-export key types for convenience
 /// Lexical analyzer for Ora source code
 pub const Lexer = lexer.Lexer;
-/// Parser for generating AST from tokens
-pub const Parser = parser.Parser;
-/// Parser error type
-pub const ParserError = parser.ParserError;
 /// Token representation
 pub const Token = lexer.Token;
 /// Token type enumeration

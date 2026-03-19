@@ -628,12 +628,6 @@ pub fn build(b: *std.Build) void {
     test_lexer_step.dependOn(&b.addRunArtifact(strings_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
 
-    // zig build test-parser
-    _ = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
-
-    // zig build test-semantics
-    _ = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
-
     // zig build test-lsp
     const test_lsp_step = b.step("test-lsp", "Run LSP frontend tests (no MLIR/Z3)");
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_frontend_tests).step);
