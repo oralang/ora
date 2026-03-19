@@ -10275,7 +10275,7 @@ test "compiler lowers real HIR if and try regions" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_stmt"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.log"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assume"));
@@ -11548,7 +11548,7 @@ test "compiler supports call-style payload error constructors" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.call @Failure"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"Failure\""));
 }
 
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {

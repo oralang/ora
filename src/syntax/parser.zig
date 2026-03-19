@@ -1801,6 +1801,10 @@ const Parser = struct {
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
         return switch (self.current().kind) {
+            .Dot => if (self.peekKind(1) == .LeftBrace)
+                self.parseAnonymousStructLiteralExprNode(terminators)
+            else
+                self.parseExpressionErrorNode("expected expression"),
             .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
                 self.parseExternalProxyExprNode()
             else if (self.looksLikeGenericTypeValueExpr(terminators))
@@ -1817,6 +1821,33 @@ const Parser = struct {
             .Switch => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
+    }
+
+    fn parseAnonymousStructLiteralExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '{' after '.'");
+            return self.finishNode(SyntaxKind.StructLiteral, children.items);
+        }
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseStructLiteralFieldNode() });
+        }
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '}' after struct literal");
+        }
+        _ = terminators;
+        return self.finishNode(SyntaxKind.StructLiteral, children.items);
     }
 
     fn parseComptimeExprNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -2411,6 +2442,10 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        if (self.at(.Dot)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
         if (self.at(.Identifier)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
@@ -2418,10 +2453,10 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.AnonymousStructLiteralField, children.items);
         }
 
-        if (self.at(.Colon)) {
+        if (self.at(.Colon) or self.at(.Equal)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
-            try self.reportHere("expected ':' after struct literal field name");
+            try self.reportHere("expected ':' or '=' after struct literal field name");
             return self.finishNode(SyntaxKind.AnonymousStructLiteralField, children.items);
         }
 

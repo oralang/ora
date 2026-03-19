@@ -115,6 +115,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
             if (created_deferred_return) {
                 try self.appendDeferredReturnCheck(if_stmt.range);
+                if (then_terminated and else_terminated and !blockEndsWithTerminator(self.block)) {
+                    try self.appendDeferredReturnTerminator(if_stmt.range, locals);
+                }
             }
             return then_terminated and else_terminated;
         }
@@ -408,14 +411,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
+            var all_cases_terminate = switch_stmt.else_body != null;
             for (switch_stmt.arms, 0..) |arm, case_index| {
-                try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items, has_return);
+                const arm_terminated = try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items, has_return);
+                all_cases_terminate = all_cases_terminate and arm_terminated;
             }
 
             if (switch_stmt.else_body) |else_body| {
-                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, switch_stmt.range, locals, carried_locals.items, has_return);
+                const else_terminated = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, switch_stmt.range, locals, carried_locals.items, has_return);
+                all_cases_terminate = all_cases_terminate and else_terminated;
             } else if (carried_locals.items.len > 0) {
-                try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, switch_stmt.range, locals, carried_locals.items, has_return);
+                _ = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, switch_stmt.range, locals, carried_locals.items, has_return);
             }
 
             mlir.oraSwitchOpSetCasePatterns(
@@ -433,8 +439,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             if (created_deferred_return) {
                 try self.appendDeferredReturnCheck(switch_stmt.range);
+                if (all_cases_terminate and !blockEndsWithTerminator(self.block)) {
+                    try self.appendDeferredReturnTerminator(switch_stmt.range, locals);
+                }
             }
-            return false;
+            return all_cases_terminate;
         }
 
         fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
@@ -668,7 +677,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
             has_return: bool,
-        ) anyerror!void {
+        ) anyerror!bool {
             const case_block = mlir.oraSwitchOpGetCaseBlock(op, case_index);
             if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
 
@@ -684,8 +693,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             case_lowerer.switch_context = &switch_context;
             var case_locals = try self.cloneLocals(locals);
+            var terminated = false;
             if (body_id) |body| {
-                _ = try case_lowerer.lowerBody(body, &case_locals);
+                terminated = try case_lowerer.lowerBody(body, &case_locals);
             }
             if (!blockEndsWithTerminator(case_block)) {
                 if (carried_locals.len == 0) {
@@ -694,6 +704,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try case_lowerer.appendOraYieldFromLocals(case_block, range, &case_locals, carried_locals);
                 }
             }
+            return terminated;
         }
 
         pub fn lowerSwitchExpr(self: *FunctionLowerer, expr_id: ast.ExprId, switch_expr: ast.SwitchExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {

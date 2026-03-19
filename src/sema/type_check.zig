@@ -990,6 +990,9 @@ const TypeChecker = struct {
                 }
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
+                    if (decl.type_expr != null) {
+                        try self.contextualizeAnonymousStructLiteral(expr_id, self.pattern_types[decl.pattern.index()].type);
+                    }
                     const actual_type = self.expr_types[expr_id.index()];
                     const actual_located = self.exprLocatedType(expr_id);
                     if (decl.type_expr == null) {
@@ -1026,6 +1029,7 @@ const TypeChecker = struct {
                 try self.visitExpr(expr_id);
                 const actual_type = self.expr_types[expr_id.index()];
                 if (self.current_return_type) |expected_type| {
+                    try self.contextualizeAnonymousStructLiteral(expr_id, expected_type);
                     if (try self.emitIntegerOverflowIfNeeded(ret.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
@@ -1176,8 +1180,10 @@ const TypeChecker = struct {
                 for (struct_literal.fields) |field| try self.visitExpr(field.value);
                 self.expr_types[expr_id.index()] = if (struct_literal.type_expr) |type_expr|
                     try self.resolveTypeExprInCurrentContext(type_expr)
+                else if (struct_literal.type_name.len != 0)
+                    self.structLiteralType(struct_literal.type_name)
                 else
-                    self.structLiteralType(struct_literal.type_name);
+                    .{ .unknown = {} };
             },
             .ExternalProxy => |proxy| {
                 try self.visitExpr(proxy.address_expr);
@@ -1494,13 +1500,15 @@ const TypeChecker = struct {
 
         const bindings = self.genericTypeBindingsForCall(function, call) orelse return .{ .unknown = {} };
         const runtime_parameters = self.runtimeFunctionParameters(function) catch return .{ .unknown = {} };
-        const generic_count = self.leadingComptimeParameterCount(function);
-        const explicit_generics = call.args.len >= generic_count + runtime_parameters.len;
+        const comptime_count = self.leadingComptimeParameterCount(function);
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
+        const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
+        const explicit_generics = call.args.len >= comptime_count + effective_runtime_count;
         const runtime_arg_count = if (explicit_generics)
-            call.args.len - generic_count
+            call.args.len - comptime_count
         else
             call.args.len;
-        if (runtime_parameters.len != runtime_arg_count) return .{ .unknown = {} };
+        if (effective_runtime_count != runtime_arg_count) return .{ .unknown = {} };
         if (function.return_type) |type_expr| {
             return self.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
         }
@@ -1531,13 +1539,16 @@ const TypeChecker = struct {
     }
 
     fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
-        const generic_count = self.leadingComptimeParameterCount(function);
-        if (generic_count == 0) return &.{};
+        const comptime_count = self.leadingComptimeParameterCount(function);
+        const inferable_type_count = self.leadingGenericTypeParameterCount(function);
+        if (comptime_count == 0) return &.{};
         const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
+        const effective_runtime_count = runtime_params.len - @as(usize, if (method_receiver_supplied) 1 else 0);
 
-        if (call.args.len >= generic_count + runtime_params.len) {
-            const bindings = self.arena.alloc(GenericTypeBinding, generic_count) catch return null;
-            for (function.parameters[0..generic_count], 0..) |parameter, index| {
+        if (call.args.len >= comptime_count + effective_runtime_count) {
+            const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+            for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternName(parameter.pattern) orelse return null;
                 const value = self.genericBindingValueForCallArg(parameter, call.args[index]) orelse return null;
                 bindings[index] = .{ .name = name, .value = value };
@@ -1546,17 +1557,19 @@ const TypeChecker = struct {
             return bindings;
         }
 
-        if (call.args.len != runtime_params.len) return null;
+        if (call.args.len != effective_runtime_count) return null;
+        if (comptime_count != inferable_type_count) return null;
 
-        const bindings = self.arena.alloc(GenericTypeBinding, generic_count) catch return null;
+        const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
 
-        for (call.args, runtime_params) |arg, param| {
+        const infer_runtime_params = if (method_receiver_supplied) runtime_params[1..] else runtime_params;
+        for (call.args, infer_runtime_params) |arg, param| {
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() == .unknown) continue;
-            self.inferBindingFromArgType(function, generic_count, param.type_expr, arg_type, bindings);
+            self.inferBindingFromArgType(function, inferable_type_count, param.type_expr, arg_type, bindings);
         }
 
         for (bindings) |binding| {
@@ -1585,6 +1598,32 @@ const TypeChecker = struct {
         return count;
     }
 
+    fn leadingGenericTypeParameterCount(self: *const TypeChecker, function: ast.FunctionItem) usize {
+        var count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) break;
+            if (!self.isGenericTypeParameter(parameter)) break;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn functionHasRuntimeSelf(self: *const TypeChecker, function: ast.FunctionItem) bool {
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
+        }
+        return false;
+    }
+
+    fn callSuppliesMethodReceiver(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Field => true,
+            .Group => |group| self.callSuppliesMethodReceiver(group.expr),
+            else => false,
+        };
+    }
+
     fn exprRange(self: *const TypeChecker, expr_id: ast.ExprId) source.TextRange {
         return switch (self.file.expression(expr_id).*) {
             inline else => |expr| expr.range,
@@ -1598,15 +1637,15 @@ const TypeChecker = struct {
                 .Function => |function| function,
                 else => return,
             };
-            const generic_count = self.leadingComptimeParameterCount(function);
+            const comptime_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
             const bindings = if (function.is_generic)
                 self.genericTypeBindingsForCall(function, call) orelse return
             else
                 &.{};
-            const explicit_generics = call.args.len >= generic_count + runtime_parameters.len;
+            const explicit_generics = call.args.len >= comptime_count + runtime_parameters.len;
             const runtime_args = if (explicit_generics)
-                call.args[generic_count..]
+                call.args[comptime_count..]
             else
                 call.args;
             if (runtime_parameters.len != runtime_args.len) return;
@@ -2110,6 +2149,18 @@ const TypeChecker = struct {
             return .{ .bitfield = .{ .name = name } };
         }
         return .{ .named = .{ .name = name } };
+    }
+
+    fn contextualizeAnonymousStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
+        const expr = self.file.expression(expr_id).*;
+        switch (expr) {
+            .Group => |group| return self.contextualizeAnonymousStructLiteral(group.expr, expected_type),
+            .StructLiteral => |struct_literal| {
+                if (struct_literal.type_expr != null or struct_literal.type_name.len != 0) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
+            else => {},
+        }
     }
 
     fn instantiateGenericStruct(

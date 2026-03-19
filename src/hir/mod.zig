@@ -536,21 +536,19 @@ const Lowerer = struct {
     }
 
     pub fn genericTypeBindingsForCall(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
-        var generic_count: usize = 0;
-        for (function.parameters) |parameter| {
-            if (!parameter.is_comptime) break;
-            generic_count += 1;
-        }
-        if (generic_count == 0) return &.{};
-
+        const comptime_count = self.leadingComptimeParameterCount(function);
+        const inferable_type_count = self.leadingGenericTypeParameterCount(function);
+        if (comptime_count == 0) return &.{};
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         var runtime_count: usize = 0;
         for (function.parameters) |parameter| {
             if (!parameter.is_comptime) runtime_count += 1;
         }
+        const effective_runtime_count = runtime_count - @as(usize, if (method_receiver_supplied) 1 else 0);
 
-        if (call.args.len >= generic_count + runtime_count) {
+        if (call.args.len >= comptime_count + effective_runtime_count) {
             var bindings: std.ArrayList(GenericTypeBinding) = .{};
-            for (function.parameters[0..generic_count], 0..) |parameter, index| {
+            for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const type_name = self.patternName(parameter.pattern) orelse return null;
                 const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
                 try bindings.append(self.allocator, .{
@@ -562,10 +560,11 @@ const Lowerer = struct {
             return @constCast(try bindings.toOwnedSlice(self.allocator));
         }
 
-        if (call.args.len != runtime_count) return null;
+        if (call.args.len != effective_runtime_count) return null;
+        if (comptime_count != inferable_type_count) return null;
 
         var bindings: std.ArrayList(GenericTypeBinding) = .{};
-        for (function.parameters[0..generic_count]) |param| {
+        for (function.parameters[0..comptime_count]) |param| {
             const name = self.patternName(param.pattern) orelse return null;
             try bindings.append(self.allocator, .{
                 .name = name,
@@ -575,12 +574,13 @@ const Lowerer = struct {
         }
 
         var runtime_index: usize = 0;
-        for (function.parameters) |param| {
-            if (param.is_comptime) continue;
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            if (method_receiver_supplied and runtime_index == 0 and std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) continue;
             if (runtime_index >= call.args.len) break;
             const arg_type = self.typecheck.exprType(call.args[runtime_index]);
             if (arg_type.kind() != .unknown) {
-                try self.inferHirBinding(function, generic_count, param, arg_type, bindings.items);
+                try self.inferHirBinding(function, inferable_type_count, parameter, arg_type, bindings.items);
             }
             runtime_index += 1;
         }
@@ -596,20 +596,50 @@ const Lowerer = struct {
     }
 
     pub fn stripGenericCallArgs(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) []const ast.ExprId {
-        _ = self;
-        var generic_count: usize = 0;
-        for (function.parameters) |parameter| {
-            if (!parameter.is_comptime) break;
-            generic_count += 1;
-        }
-        if (call.args.len <= generic_count) return call.args;
+        const comptime_count = self.leadingComptimeParameterCount(function);
         var runtime_count: usize = 0;
         for (function.parameters) |parameter| {
             if (!parameter.is_comptime) runtime_count += 1;
         }
         if (call.args.len == runtime_count) return call.args;
-        if (generic_count >= call.args.len) return &.{};
-        return call.args[generic_count..];
+        if (comptime_count >= call.args.len) return &.{};
+        return call.args[comptime_count..];
+    }
+
+    pub fn leadingComptimeParameterCount(self: *const Lowerer, function: ast.FunctionItem) usize {
+        _ = self;
+        var count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) break;
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn leadingGenericTypeParameterCount(self: *const Lowerer, function: ast.FunctionItem) usize {
+        var count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) break;
+            if (!self.isGenericTypeParameter(parameter)) break;
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn functionHasRuntimeSelf(self: *const Lowerer, function: ast.FunctionItem) bool {
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
+        }
+        return false;
+    }
+
+    pub fn callSuppliesMethodReceiver(self: *const Lowerer, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Field => true,
+            .Group => |group| self.callSuppliesMethodReceiver(group.expr),
+            else => false,
+        };
     }
 
     pub fn mangleGenericFunctionName(self: *Lowerer, base_name: []const u8, bindings: []const GenericTypeBinding) ![]const u8 {

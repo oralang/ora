@@ -1254,13 +1254,25 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerStructLiteralExprNode(self: *Builder, node: SyntaxNode) !ExprId {
-            const base_node = nthDirectNode(node, 0) orelse return Lowering.malformedExpr(self, node, "missing struct literal base");
-            const base_expr = try Lowering.lowerExpressionNode(self, base_node);
-            const type_expr = try Lowering.structLiteralTypeExpr(self, base_expr);
-            const type_name = if (type_expr) |resolved_type_expr|
-                (Lowering.typeValueBaseName(self, resolved_type_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"))
+            const StructLiteralTypeInfo = struct {
+                type_expr: ?TypeExprId,
+                type_name: []const u8,
+            };
+            const first_node = nthDirectNode(node, 0);
+            const has_base = if (first_node) |base_node|
+                base_node.kind() != .AnonymousStructLiteralField
             else
-                (Lowering.structLiteralTypeName(self, base_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"));
+                false;
+            const type_info: StructLiteralTypeInfo = if (has_base) blk: {
+                const base_node = first_node.?;
+                const base_expr = try Lowering.lowerExpressionNode(self, base_node);
+                const type_expr = try Lowering.structLiteralTypeExpr(self, base_expr);
+                const type_name = if (type_expr) |resolved_type_expr|
+                    (Lowering.typeValueBaseName(self, resolved_type_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"))
+                else
+                    (Lowering.structLiteralTypeName(self, base_expr) orelse return Lowering.malformedExpr(self, node, "invalid struct literal type"));
+                break :blk .{ .type_expr = type_expr, .type_name = type_name };
+            } else .{ .type_expr = null, .type_name = "" };
 
             var fields: std.ArrayList(nodes.StructFieldInit) = .{};
             var it = node.children();
@@ -1276,8 +1288,8 @@ pub fn mixin(Builder: type) type {
 
             return Support.pushExpr(self, .{ .StructLiteral = .{
                 .range = node.range(),
-                .type_name = type_name,
-                .type_expr = type_expr,
+                .type_name = type_info.type_name,
+                .type_expr = type_info.type_expr,
                 .fields = try fields.toOwnedSlice(self.allocator),
             } });
         }

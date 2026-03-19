@@ -406,6 +406,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         rhs = try @This().convertCompareOperandToAddress(self, rhs, binary.rhs);
                     } else if (mlir.oraTypeIsAddressType(rhs_type) and !mlir.oraTypeIsAddressType(lhs_type)) {
                         lhs = try @This().convertCompareOperandToAddress(self, lhs, binary.lhs);
+                    } else if (mlir.oraTypeIsAInteger(lhs_type) and mlir.oraTypeIsAInteger(rhs_type) and !mlir.oraTypeEqual(lhs_type, rhs_type)) {
+                        switch (self.parent.file.expression(binary.lhs).*) {
+                            .IntegerLiteral => lhs = try self.convertValueForFlow(lhs, rhs_type, binary.range),
+                            else => switch (self.parent.file.expression(binary.rhs).*) {
+                                .IntegerLiteral => rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range),
+                                else => {},
+                            },
+                        }
                     }
                 },
                 else => {},
@@ -514,6 +522,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             if (try @This().lowerExternProxyMethodCall(self, expr_id, call, locals)) |value| return value;
+            if (try @This().lowerCurrentFunctionCallResult(self, call)) |value| return value;
             if (try @This().lowerCurrentMethodSelfCallResult(self, call)) |value| return value;
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
@@ -968,6 +977,39 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
+        fn lowerCurrentFunctionCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {
+            const current_result = self.current_return_value orelse return null;
+            const current_item_id = self.item_id orelse return null;
+            const current_function = self.function orelse return null;
+
+            const callee_item_id = @This().calleeFunctionItemId(self, call.callee) orelse return null;
+            if (callee_item_id.index() != current_item_id.index()) return null;
+
+            const runtime_args = if (current_function.is_generic)
+                self.parent.stripGenericCallArgs(current_function, call)
+            else
+                call.args;
+
+            var runtime_param_index: usize = 0;
+            for (current_function.parameters) |parameter| {
+                if (parameter.is_comptime) continue;
+                if (runtime_param_index >= runtime_args.len) return null;
+
+                const binding = self.parent.resolution.expr_bindings[runtime_args[runtime_param_index].index()] orelse return null;
+                switch (binding) {
+                    .pattern => |pattern_id| {
+                        if (pattern_id.index() != parameter.pattern.index()) return null;
+                    },
+                    .item => return null,
+                }
+
+                runtime_param_index += 1;
+            }
+
+            if (runtime_param_index != runtime_args.len) return null;
+            return current_result;
+        }
+
         fn lowerTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveTraitBoundMethodCall(self, call.callee) orelse return null;
             const runtime_parameters = try self.parent.runtimeFunctionParameters(resolved.function);
@@ -1002,6 +1044,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.function,
                 resolved.target_name,
                 call,
+                @This().currentContractParentBlock(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -1101,6 +1144,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.function,
                 resolved.target_name,
                 call,
+                @This().currentContractParentBlock(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -1249,6 +1293,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Group => |group| @This().calleeName(self, group.expr),
                 else => null,
             };
+        }
+
+        fn currentContractParentBlock(self: *FunctionLowerer) ?mlir.MlirBlock {
+            const function = self.function orelse return null;
+            const contract_id = function.parent_contract orelse return null;
+            const block = self.parent.contract_body_blocks[contract_id.index()];
+            if (mlir.oraBlockIsNull(block)) return null;
+            return block;
         }
 
         fn calleeFunctionItem(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.FunctionItem {
@@ -1756,7 +1808,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const expr_type = self.parent.typecheck.exprType(expr_id);
             const concrete_name = expr_type.name() orelse struct_literal.type_name;
-            const struct_item_id = self.parent.item_index.lookup(struct_literal.type_name) orelse {
+            const struct_item_id = self.parent.item_index.lookup(concrete_name) orelse {
                 if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
                     return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
                 }
@@ -1898,12 +1950,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const base = try self.lowerExpr(field.base, locals);
             if (@This().overflowTupleFieldIndex(base_type, field.name)) |tuple_index| {
+                const extract_type = if (std.mem.eql(u8, field.name, "overflow"))
+                    mlir.oraIntegerTypeCreate(self.parent.context, 1)
+                else
+                    result_type;
                 const op = mlir.oraTupleExtractOpCreate(
                     self.parent.context,
                     self.parent.location(field.range),
                     base,
                     tuple_index,
-                    result_type,
+                    extract_type,
+                );
+                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+            }
+            if (@This().fallbackOverflowFieldIndex(base_type, field.name)) |tuple_index| {
+                const extract_type = if (std.mem.eql(u8, field.name, "overflow"))
+                    mlir.oraIntegerTypeCreate(self.parent.context, 1)
+                else
+                    result_type;
+                const op = mlir.oraTupleExtractOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    base,
+                    tuple_index,
+                    extract_type,
                 );
                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
@@ -1945,6 +2015,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const elements = base_type.tuple;
             if (elements.len != 2) return null;
             if (elements[1].kind() != .bool) return null;
+            if (std.mem.eql(u8, field_name, "value")) return 0;
+            if (std.mem.eql(u8, field_name, "overflow")) return 1;
+            return null;
+        }
+
+        fn fallbackOverflowFieldIndex(base_type: sema.Type, field_name: []const u8) ?i64 {
+            if (base_type.kind() == .tuple) return null;
+            if (base_type.kind() == .struct_ or base_type.kind() == .named) return null;
             if (std.mem.eql(u8, field_name, "value")) return 0;
             if (std.mem.eql(u8, field_name, "overflow")) return 1;
             return null;
@@ -2211,6 +2289,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
+            if (mlir.oraTypeIsNull(ty)) return error.MlirOperationCreationFailed;
+
             if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ty))) {
                 const payload_type = mlir.oraErrorUnionTypeGetSuccessType(ty);
                 const payload = try self.defaultValue(payload_type, range);
@@ -2224,10 +2304,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return payload;
             }
 
+            const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
+            if (!mlir.oraTypeIsNull(refinement_base)) {
+                const op = try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
+                return appendValueOp(self.block, op);
+            }
+
             const op = if (mlir.oraTypeIsAddressType(ty))
                 try self.createValuePlaceholder("ora.address.zero", "0x0", range, ty)
+            else if (mlir.oraTypeIsAInteger(ty) or mlir.oraTypeIsIntegerType(ty))
+                createIntegerConstant(self.parent.context, self.parent.location(range), ty, 0)
             else
-                createIntegerConstant(self.parent.context, self.parent.location(range), ty, 0);
+                try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
             return appendValueOp(self.block, op);
         }
 

@@ -112,10 +112,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!terminated) {
                     try @This().emitEnsuresClauses(self, &locals);
                     if (self.return_type) |return_type| {
-                        const value = try self.defaultValue(return_type, function.range);
-                        const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
-                        if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
-                        appendOp(self.block, ret);
+                        if (self.typeIsVoid(return_type)) {
+                            const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), null, 0);
+                            if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, ret);
+                        } else {
+                            const value = appendValueOp(
+                                self.block,
+                                try self.createAggregatePlaceholder("ora.default_value", function.range, &.{}, return_type),
+                            );
+                            const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
+                            if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, ret);
+                        }
                     } else {
                         const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), null, 0);
                         if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
@@ -368,7 +377,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn appendDeferredReturnTerminator(self: *FunctionLowerer, range: source.TextRange, locals: *LocalEnv) anyerror!void {
             switch (self.deferred_return_kind) {
-                .none => return,
+                .none => {
+                    const loc = self.parent.location(range);
+                    if (self.deferred_return_value_slot) |slot| {
+                        const return_type = self.return_type orelse return error.MlirOperationCreationFailed;
+                        const value_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, slot, null, 0, return_type);
+                        if (mlir.oraOperationIsNull(value_load)) return error.MlirOperationCreationFailed;
+                        const value = appendValueOp(self.block, value_load);
+                        const ret = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
+                        if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                        appendOp(self.block, ret);
+                    } else {
+                        const ret = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
+                        if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                        appendOp(self.block, ret);
+                    }
+                },
                 .ora_yield => try self.appendOraYieldFromLocals(self.block, range, locals, self.deferred_return_carried_locals),
                 .scf_yield => try self.appendScfYieldFromLocals(self.block, range, locals, self.deferred_return_carried_locals),
             }
@@ -1180,11 +1204,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!void {
             const map_type = mlir.oraValueGetType(map_value);
             const key_type = mlir.oraMapTypeGetKeyType(map_type);
+            const value_type = mlir.oraMapTypeGetValueType(map_type);
             const converted_key = if (!mlir.oraTypeIsNull(key_type))
                 try @This().convertValueForFlow(self, key_value, key_type, range)
             else
                 key_value;
-            const op = mlir.oraMapStoreOpCreate(self.parent.context, self.parent.location(range), map_value, converted_key, value);
+            const converted_value = if (!mlir.oraTypeIsNull(value_type))
+                try @This().convertValueForFlow(self, value, value_type, range)
+            else
+                value;
+            const op = mlir.oraMapStoreOpCreate(self.parent.context, self.parent.location(range), map_value, converted_key, converted_value);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
         }

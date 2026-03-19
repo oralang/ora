@@ -255,7 +255,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn ensureMonomorphizedFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, call: ast.CallExpr, parameters: []const ast.Parameter) anyerror!?[]const u8 {
             if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
-                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.target_name, call);
+                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.target_name, call, null);
                 return symbol_name;
             }
             if (!function.is_generic) return function.name;
@@ -288,15 +288,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             function: ast.FunctionItem,
             target_name: []const u8,
             call: ?ast.CallExpr,
+            parent_block_override: ?mlir.MlirBlock,
         ) anyerror![]const u8 {
             const base_symbol_name = try @This().implMethodSymbolName(self, target_name, function.name);
+            const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name);
             if (function.is_generic) {
                 const method_call = call orelse return base_symbol_name;
                 const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return base_symbol_name;
                 const runtime_parameters = try self.runtimeFunctionParameters(function);
                 const symbol_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
-                    const parent_block = @This().implParentBlock(self, target_name);
                     try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
@@ -305,7 +306,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             const symbol_name = base_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
-                const parent_block = @This().implParentBlock(self, target_name);
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{});
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
