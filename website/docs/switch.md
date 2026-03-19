@@ -1,135 +1,141 @@
 ---
 id: switch
 title: Switch
-description: The Ora switch statement and expression with labels, ranges, enums, and semantics
+description: Pattern matching with switch statements and expressions — literal, range, and enum patterns with exhaustiveness checking.
 ---
 
-### Overview
+# Switch
 
-Ora provides a powerful switch that works as both a statement and an expression. It supports:
+Ora's `switch` works as both a statement and an expression. It supports literal patterns, inclusive/exclusive ranges, enum variants, and an `else` (default) arm. No fallthrough — each arm is independent.
 
-- Literal, enum, and range patterns
-- Multiple comma-separated patterns per case
-- Optional commas between cases
-- An `else` (default) arm that must be last
-- Labeled switch statements and labeled block arms
-- `continue :label value;` to re-evaluate a labeled switch with a new operand (Zig 0.14 style)
-
-### Basics
+## Switch Statements
 
 ```ora
-var x: u256 = 3;
-
-// Switch as a statement
-switch (x) {
-  0 => { log "zero"; },
-  1, 2 => { log "one or two"; },
-  3...5 => { log "in [3,5]"; },
-  else => { log "other" }
+contract Router {
+    pub fn classify(value: u256) -> u256 {
+        switch (value) {
+            0 => { return 10; }
+            1 => { return 20; }
+            2 => { return 30; }
+            else => { return 0; }
+        }
+    }
 }
-
-// Switch as an expression
-var y: u256 = switch (x) {
-  0 => 10,
-  1...9 => 20,
-  else => 30
-};
 ```
 
-Notes:
-- Commas between cases are allowed, but the `else` arm must be last and cannot be followed by a comma.
-- Switch expressions require each arm body to be a single expression (no blocks).
+Each arm has a pattern and a block body. No fallthrough between arms — unlike Solidity/C, you don't need `break`.
 
-### Patterns
+## Switch Expressions
 
-- Literal patterns: integers, bool, string, address, hex, binary
-- Enum patterns: `Enum.Variant` or bare `Variant` when the condition is that enum
-- Range patterns: `a...b` (inclusive) and `a..b` (exclusive)
+Switch can be used as an expression — each arm produces a value:
+
+```ora
+pub fn classify(value: u256) -> u256 {
+    return switch (value) {
+        0 => 100,
+        1 => 200,
+        2 => 300,
+        else => 0
+    };
+}
+```
+
+All arms in a switch expression must produce compatible types.
+
+## Range Patterns
+
+Inclusive ranges with `...` and exclusive ranges with `..`:
+
+```ora
+pub fn tier(value: u256) -> u256 {
+    switch (value) {
+        0...9 => { return 1; }      // 0 through 9 inclusive
+        10...99 => { return 2; }    // 10 through 99 inclusive
+        100...999 => { return 3; }  // 100 through 999 inclusive
+        else => { return 0; }
+    }
+}
+```
+
+The compiler rejects overlapping ranges:
+
+```ora
+switch (x) {
+    1...5 => { }
+    4...10 => { }  // Compile error: overlaps with 1...5
+}
+```
+
+## Enum Patterns
+
+When switching on an enum, use qualified or bare variant names:
 
 ```ora
 enum Color { Red, Green, Blue }
-var c: Color = .Red;
 
+pub fn describe(c: Color) -> u256 {
+    switch (c) {
+        Color.Red => { return 1; }
+        Green => { return 2; }       // bare variant OK when type is known
+        Blue => { return 3; }
+    }
+}
+```
+
+Without `else`, all variants must be covered:
+
+```ora
 switch (c) {
-  Color.Red => { log "R"; },
-  Green => { log "G"; },
-  Blue => { log "B"; }
-}
-
-// Ranges with integers
-switch (x) {
-  0..10 => { log "[0,10)"; },
-  10...20 => { log "[10,20]"; },
-  else => { log "other" }
+    Red => { }
+    Green => { }
+    // Compile error: non-exhaustive — Blue not covered and no else
 }
 ```
 
-### Labeled switches and labeled blocks
+## Labeled Switch
 
-You can label a switch and target it with `continue :label value;`. The value becomes the new operand and the switch re-executes from the top.
+A labeled switch can be re-entered with `continue :label value`, where the value becomes the new operand and the switch re-evaluates:
 
 ```ora
-label: switch (x) {
-  0 => { continue :label 1; },
-  1 => { continue :label 2; },
-  else => { log "done" }
+pub fn stateMachine(start: u256) -> u256 {
+    var x: u256 = start;
+    outer: switch (x) {
+        0 => { x = 100; }
+        1...5 => { x = x + 1; }
+        else => {
+            continue :outer (0);
+        }
+    }
+    return x;
 }
 ```
 
-Arms in switch statements may be blocks or labeled blocks:
+The compiler lowers this as a loop that re-dispatches on the new value. `break :label` exits the labeled switch.
+
+## Else Arm
+
+The `else` arm handles all unmatched values. It must be the last arm:
 
 ```ora
-switch (x) {
-  0 => block0: { log "in block0"; },
-  1 => labelA: { log "A"; },
-  else => { log "fallback" }
+switch (value) {
+    0 => { return 1; }
+    else => { return 0; }  // must be last
 }
 ```
 
-In contrast, switch expressions only allow expression bodies:
+For enum switches, `else` makes the switch non-exhaustive — the compiler won't warn about missing variants.
 
-```ora
-var v: u256 = switch (x) {
-  0 => 10,
-  else => 42
-};
-```
+## Compiler Checks
 
-### Semantics and checks
+The compiler validates:
 
-- Type compatibility: each pattern must be compatible with the switch operand type
-- Enum names: qualified enum patterns must match the operand enum
-- Ranges: endpoints must be compatible with the operand; overlapping integer ranges are rejected
-- Duplicates: duplicate literals or enum variants are rejected
-- `else`: at most one `else`, and it must be the last arm
-- Expressions: all arms in a switch expression must produce compatible result types
-- Exhaustiveness: when switching on enums without `else`, all variants must be covered
+| Check | What's rejected |
+|-------|----------------|
+| Duplicate literals | Same value in two arms |
+| Duplicate enum variants | Same variant in two arms |
+| Overlapping ranges | `1...5` and `4...10` in the same switch |
+| Non-exhaustive enum | Missing variants without `else` |
+| Type mismatch | Pattern type incompatible with operand |
+| `else` position | `else` not last |
+| Expression type consistency | Arms in switch expression with different types |
 
-Examples of invalid cases (rejected by the compiler):
-
-```ora
-// Duplicate enum variants
-switch (c) {
-  Red => { },
-  Red => { }, // duplicate
-}
-
-// Overlapping ranges
-switch (x) {
-  1...5 => { },
-  4...10 => { }, // overlaps with 1...5
-}
-
-// Non-exhaustive enum without else
-switch (c) {
-  Red => { },
-  Green => { },
-  // Blue missing and no else
-}
-```
-
-### Tips
-
-- Prefer explicit enum coverage to catch additions of new variants.
-- Use labeled switches to write state-machine-like control flow without loops.
-- Keep switch expressions simple: return a single, consistent type across all arms.
