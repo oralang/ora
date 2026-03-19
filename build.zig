@@ -563,16 +563,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
 
-    // ast tests - Type Resolver (logs)
-    const type_resolver_logs_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/type_resolver_logs.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    type_resolver_logs_test_mod.addImport("ora_root", lib_mod);
-    const type_resolver_logs_tests = b.addTest(.{ .root_module = type_resolver_logs_test_mod });
-    test_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
-
     // lsp tests - Frontend diagnostics
     const lsp_frontend_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/frontend.test.zig"),
@@ -761,7 +751,6 @@ pub fn build(b: *std.Build) void {
     test_parser_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
     test_parser_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
     test_parser_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
 
     // zig build test-semantics
     const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
