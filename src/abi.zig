@@ -48,6 +48,7 @@ pub const AbiInput = struct {
 
 pub const CallableKind = enum {
     function,
+    constructor,
     @"error",
     event,
 };
@@ -283,6 +284,7 @@ pub const ContractAbi = struct {
         _ = self;
         return switch (callable.kind) {
             .function => true,
+            .constructor => true,
             .event => true,
             .@"error" => true,
         };
@@ -307,6 +309,17 @@ pub const ContractAbi = struct {
                     "normal";
 
                 try writeObjectStringField(writer, &ui_first, "group", group);
+                try writeObjectStringField(writer, &ui_first, "dangerLevel", danger_level);
+                try self.writeCallableUiForms(writer, &ui_first, callable.inputs);
+            },
+            .constructor => {
+                const mutability = projectStateMutability(callable);
+                const danger_level = if (std.mem.eql(u8, mutability, "payable"))
+                    "warning"
+                else
+                    "normal";
+
+                try writeObjectStringField(writer, &ui_first, "group", "Deploy");
                 try writeObjectStringField(writer, &ui_first, "dangerLevel", danger_level);
                 try self.writeCallableUiForms(writer, &ui_first, callable.inputs);
             },
@@ -579,7 +592,9 @@ pub const ContractAbi = struct {
             var first = true;
 
             try writeObjectStringField(writer, &first, "type", callableKindString(callable.kind));
-            try writeObjectStringField(writer, &first, "name", callable.name);
+            if (callable.kind != .constructor) {
+                try writeObjectStringField(writer, &first, "name", callable.name);
+            }
 
             try writeObjectKey(writer, &first, "inputs");
             try writer.writeByte('[');
@@ -610,6 +625,9 @@ pub const ContractAbi = struct {
                     }
                     try writer.writeByte(']');
 
+                    try writeObjectStringField(writer, &first, "stateMutability", projectStateMutability(callable));
+                },
+                .constructor => {
                     try writeObjectStringField(writer, &first, "stateMutability", projectStateMutability(callable));
                 },
                 .event => {
@@ -814,7 +832,11 @@ const CompilerAbiGenerator = struct {
             switch (ctx.file.item(member_id).*) {
                 .Function => |function| {
                     if (function.visibility == .public) {
-                        try self.addFunctionCallable(ctx, contract.name, member_id, function);
+                        if (std.mem.eql(u8, function.name, "init")) {
+                            try self.addConstructorCallable(ctx, contract.name, member_id, function);
+                        } else {
+                            try self.addFunctionCallable(ctx, contract.name, member_id, function);
+                        }
                     }
                 },
                 .ErrorDecl => |error_decl| try self.addErrorCallable(ctx, contract.name, error_decl),
@@ -892,6 +914,52 @@ const CompilerAbiGenerator = struct {
             .selector = selector,
             .inputs = try inputs.toOwnedSlice(self.allocator),
             .outputs = try outputs.toOwnedSlice(self.allocator),
+            .effects = try effects.toOwnedSlice(self.allocator),
+            .allocator = self.allocator,
+        });
+    }
+
+    fn addConstructorCallable(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        function_item_id: compiler.ItemId,
+        function: compiler.ast.FunctionItem,
+    ) anyerror!void {
+        var signature_types: std.ArrayList([]const u8) = .{};
+        defer {
+            for (signature_types.items) |item| self.allocator.free(item);
+            signature_types.deinit(self.allocator);
+        }
+        var inputs: std.ArrayList(AbiInput) = .{};
+        defer inputs.deinit(self.allocator);
+
+        for (function.parameters) |parameter| {
+            const resolved = try self.resolveSemaType(ctx, ctx.typecheck.pattern_types[parameter.pattern.index()].type, &.{});
+            try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+            try inputs.append(self.allocator, .{
+                .name = patternName(ctx.file, parameter.pattern),
+                .type_id = resolved.type_id,
+                .indexed = null,
+            });
+        }
+
+        const signature = try self.buildSignature(function.name, signature_types.items);
+        const id = try self.buildCallableId(contract_name, signature);
+        try self.ensureCallableIdUnique(id);
+
+        var effects: std.ArrayList(AbiEffect) = .{};
+        defer effects.deinit(self.allocator);
+        try self.buildEffects(ctx.typecheck.itemEffect(function_item_id), &effects);
+
+        try self.callables.append(self.allocator, .{
+            .id = id,
+            .kind = .constructor,
+            .name = function.name,
+            .signature = signature,
+            .selector = null,
+            .inputs = try inputs.toOwnedSlice(self.allocator),
+            .outputs = &.{},
             .effects = try effects.toOwnedSlice(self.allocator),
             .allocator = self.allocator,
         });
@@ -1077,10 +1145,27 @@ const CompilerAbiGenerator = struct {
             .named => |named| {
                 if (self.global_structs.contains(named.name)) return self.resolveNamedStructType(ctx, named.name);
                 if (self.global_enums.contains(named.name)) return self.resolveNamedEnumType(ctx, named.name);
+                if (std.mem.eql(u8, named.name, "bool")) return self.resolveSemaType(ctx, .bool, &.{} );
+                if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{} );
+                if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{} );
+                if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{} );
+                if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{} );
+                if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{} );
                 return error.UnsupportedAbiType;
             },
             else => return error.UnsupportedAbiType,
         }
+    }
+
+    fn parseIntegerSpelling(name: []const u8) ?compiler.sema.Type {
+        if (name.len < 2) return null;
+        const signed = switch (name[0]) {
+            'u' => false,
+            'i' => true,
+            else => return null,
+        };
+        const bits = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
+        return .{ .integer = .{ .bits = bits, .signed = signed, .spelling = name } };
     }
 
     fn resolveArrayType(
@@ -1421,6 +1506,7 @@ fn patternName(file: *const compiler.AstFile, pattern_id: compiler.PatternId) []
 fn callableKindString(kind: CallableKind) []const u8 {
     return switch (kind) {
         .function => "function",
+        .constructor => "constructor",
         .@"error" => "error",
         .event => "event",
     };

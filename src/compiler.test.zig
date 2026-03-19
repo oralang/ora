@@ -7076,6 +7076,26 @@ test "compiler lowers for invariants through ora.invariant" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers named contract invariants through ora.invariant" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var value: u256;
+        \\    invariant value_nonnegative(value >= 0);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.invariant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.call\""));
+}
+
 test "compiler lowers for loops with early return without placeholders" {
     const source_text =
         \\pub fn scan(values: slice[u256], stop_at: u256) -> u256 {
@@ -11341,6 +11361,22 @@ test "compiler emits ABI attrs for public contract entries" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_params"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"address\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
+}
+
+test "compiler rejects invalid constructor shape" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn init(self, owner: address) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!module_typecheck.diagnostics.isEmpty());
 }
 
 test "compiler emits error selector and error-union ABI attrs" {

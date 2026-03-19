@@ -484,20 +484,23 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
             }
 
-            const joined = try std.mem.join(self.allocator, ",", signature_parts.items);
-            defer self.allocator.free(joined);
-            const signature = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ function.name, joined });
-            defer self.allocator.free(signature);
-            const selector = try abi_support.keccakSelectorHex(self.allocator, signature);
-            defer self.allocator.free(selector);
-
-            try attrs.append(self.allocator, namedStringAttr(self.context, "ora.selector", selector));
             if (abi_param_attrs.items.len != 0) {
                 const abi_params_attr = mlir.oraArrayAttrCreate(self.context, @intCast(abi_param_attrs.items.len), abi_param_attrs.items.ptr);
                 try attrs.append(self.allocator, .{
                     .name = identifier(self.context, "ora.abi_params"),
                     .attribute = abi_params_attr,
                 });
+            }
+
+            if (!std.mem.eql(u8, function.name, "init")) {
+                const joined = try std.mem.join(self.allocator, ",", signature_parts.items);
+                defer self.allocator.free(joined);
+                const signature = try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ function.name, joined });
+                defer self.allocator.free(signature);
+                const selector = try abi_support.keccakSelectorHex(self.allocator, signature);
+                defer self.allocator.free(selector);
+
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.selector", selector));
             }
 
             if (function.return_type) |_| {

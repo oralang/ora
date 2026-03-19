@@ -1707,6 +1707,14 @@ pub fn mixin(Builder: type) type {
 
         fn lowerContractInvariantNode(self: *Builder, node: SyntaxNode) !ExprId {
             const expr_node = firstDirectExprChild(node) orelse return Lowering.malformedExpr(self, node, "missing contract invariant expression");
+            if (expr_node.kind() == .CallExpr) {
+                const callee_node = nthDirectNode(expr_node, 0);
+                const arg0 = nthDirectNode(expr_node, 1);
+                const arg1 = nthDirectNode(expr_node, 2);
+                if (callee_node != null and callee_node.?.kind() == .NameExpr and arg0 != null and arg1 == null) {
+                    return Lowering.lowerExpressionNode(self, arg0.?);
+                }
+            }
             return Lowering.lowerExpressionNode(self, expr_node);
         }
 
@@ -2108,7 +2116,7 @@ fn tokenText(token: SyntaxToken) []const u8 {
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Identifier, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

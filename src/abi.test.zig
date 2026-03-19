@@ -189,6 +189,36 @@ test "abi emits one bundle for multiple contracts and disambiguates callable ids
     try testing.expect(found_b_error);
 }
 
+test "abi models init as constructor instead of runtime function" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Token {
+        \\    storage var owner: address;
+        \\
+        \\    pub fn init(owner_arg: address) {
+        \\        owner = owner_arg;
+        \\    }
+        \\
+        \\    pub fn run() -> address { return owner; }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const ctor = findCallable(contract_abi, .constructor, "init") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), ctor.inputs.len);
+    try testing.expectEqual(@as(usize, 0), ctor.outputs.len);
+    try testing.expect(ctor.selector == null);
+    try testing.expectEqual(@as(usize, 0), countCallables(contract_abi, .function, "init"));
+
+    const solidity_json = try contract_abi.toSolidityJson(allocator);
+    defer allocator.free(solidity_json);
+    try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"constructor\"") != null);
+    try testing.expect(std.mem.indexOf(u8, solidity_json, "\"name\":\"init\"") == null);
+}
+
 test "abi type ids are stable across repeated generation for same source" {
     const allocator = testing.allocator;
     const source =

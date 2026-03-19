@@ -849,6 +849,19 @@ fn validateConfiguredInitArgs(
         return error.InitArgsRequireInitFunction;
     }
 
+    if (init_fn.?.visibility != .public) {
+        std.log.warn("Configured init_args for '{s}' but {s}.init() is not public.", .{ file_path, init_contract_name });
+        return error.InvalidInitFunction;
+    }
+    if (functionHasBareSelf(ast_file, init_fn.?)) {
+        std.log.warn("Configured init_args for '{s}' but {s}.init() declares self, which constructors do not support.", .{ file_path, init_contract_name });
+        return error.InvalidInitFunction;
+    }
+    if (init_fn.?.return_type != null) {
+        std.log.warn("Configured init_args for '{s}' but {s}.init() returns values, which constructors do not support.", .{ file_path, init_contract_name });
+        return error.InvalidInitFunction;
+    }
+
     var seen_names = std.StringHashMap(void).init(allocator);
     defer seen_names.deinit();
 
@@ -884,6 +897,17 @@ fn validateConfiguredInitArgs(
             return err;
         };
     }
+}
+
+fn functionHasBareSelf(file: *const compiler.AstFile, function: compiler.ast.FunctionItem) bool {
+    for (function.parameters) |parameter| {
+        if (parameter.is_comptime) continue;
+        return switch (file.pattern(parameter.pattern).*) {
+            .Name => |name| std.mem.eql(u8, name.name, "self"),
+            else => false,
+        };
+    }
+    return false;
 }
 
 fn runBuildFromDiscoveredConfig(
@@ -2365,6 +2389,32 @@ test "build config init_args: missing init function errors" {
     };
 
     try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+}
+
+test "build config init_args: invalid constructor shape errors" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "Main.ora",
+        .data =
+        \\contract Main {
+        \\    fn init(seed: u256) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        ,
+    });
+
+    const entry_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/Main.ora", .{tmp.sub_path});
+    defer allocator.free(entry_path);
+
+    const init_args = [_]project_config.InitArg{
+        .{ .name = "seed", .value = "10" },
+    };
+
+    try std.testing.expectError(error.InvalidInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
 }
 
 test "init command: scaffolds new project layout" {

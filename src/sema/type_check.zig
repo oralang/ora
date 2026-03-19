@@ -470,6 +470,7 @@ const TypeChecker = struct {
                 for (contract.members) |member_id| try self.visitItem(member_id);
             },
             .Function => |function| {
+                try self.validateConstructorFunction(function);
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
                 const function_bindings = try self.genericBindingsForFunctionTemplate(function);
@@ -602,6 +603,23 @@ const TypeChecker = struct {
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
+        }
+    }
+
+    fn validateConstructorFunction(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {
+        if (!std.mem.eql(u8, function.name, "init")) return;
+
+        if (self.current_contract == null) {
+            try self.emitRangeError(function.range, "init() is only supported as a contract constructor", .{});
+        }
+        if (function.visibility != .public) {
+            try self.emitRangeError(function.range, "constructor init() must be public", .{});
+        }
+        if (self.functionHasBareSelf(function)) {
+            try self.emitRangeError(function.range, "constructor init() must not declare a self parameter", .{});
+        }
+        if (function.return_type != null) {
+            try self.emitRangeError(function.range, "constructor init() must not return values", .{});
         }
     }
 
