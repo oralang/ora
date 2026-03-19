@@ -1051,7 +1051,6 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --v2                   - Accepted for compatibility; build/emit already use the current compiler\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
