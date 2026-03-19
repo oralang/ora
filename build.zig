@@ -110,6 +110,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_imports", ora_imports_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
     exe_mod.addImport("log", log_mod);
+    exe_mod.addImport("ora_ast", ora_ast_mod);
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
     exe_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
