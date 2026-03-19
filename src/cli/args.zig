@@ -7,12 +7,17 @@ const std = @import("std");
 pub const CliOptions = struct {
     output_dir: ?[]const u8 = null,
     input_file: ?[]const u8 = null,
+    emit_tokens: bool = false,
     emit_ast: bool = false,
     emit_ast_format: ?[]const u8 = null,
     emit_typed_ast: bool = false,
     emit_typed_ast_format: ?[]const u8 = null,
     emit_mlir: bool = false,
     emit_mlir_sir: bool = false,
+    emit_sir_text: bool = false,
+    emit_bytecode: bool = false,
+    emit_cfg: bool = false,
+    emit_cfg_mode: ?[]const u8 = null,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
     verify_z3: bool = true,
@@ -56,6 +61,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.output_dir = args[i + 1];
             i += 2;
+        } else if (std.mem.eql(u8, arg, "--emit-tokens")) {
+            opts.emit_tokens = true;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-ast")) {
             opts.emit_ast = true;
             i += 1;
@@ -85,6 +93,23 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             } else {
                 return error.UnknownArgument;
             }
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-sir-text")) {
+            opts.emit_sir_text = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-bytecode")) {
+            opts.emit_bytecode = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--emit-cfg")) {
+            opts.emit_cfg = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--emit-cfg=")) {
+            const mode = arg["--emit-cfg=".len..];
+            if (!std.ascii.eqlIgnoreCase(mode, "ora") and !std.ascii.eqlIgnoreCase(mode, "sir")) {
+                return error.UnknownArgument;
+            }
+            opts.emit_cfg = true;
+            opts.emit_cfg_mode = mode;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--cpp-lowering-stub")) {
             opts.cpp_lowering_stub = true;

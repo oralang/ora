@@ -133,10 +133,14 @@ const InitTemplates = struct {
 };
 
 fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
-    return parsed.emit_ast or
+    return parsed.emit_tokens or
+        parsed.emit_ast or
         parsed.emit_typed_ast or
         parsed.emit_mlir or
-        parsed.emit_mlir_sir;
+        parsed.emit_mlir_sir or
+        parsed.emit_sir_text or
+        parsed.emit_bytecode or
+        parsed.emit_cfg;
 }
 
 fn initProjectLayout(target_dir: []const u8) !void {
@@ -256,12 +260,17 @@ pub fn main() !void {
 
     const output_dir: ?[]const u8 = parsed.output_dir;
     const input_file: ?[]const u8 = parsed.input_file;
+    const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
     const emit_ast_format: ?[]const u8 = parsed.emit_ast_format;
     const emit_typed_ast: bool = parsed.emit_typed_ast;
     const emit_typed_ast_format: ?[]const u8 = parsed.emit_typed_ast_format;
     var emit_mlir: bool = parsed.emit_mlir;
     var emit_mlir_sir: bool = parsed.emit_mlir_sir;
+    const emit_sir_text: bool = parsed.emit_sir_text;
+    const emit_bytecode: bool = parsed.emit_bytecode;
+    const emit_cfg: bool = parsed.emit_cfg;
+    const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
@@ -338,8 +347,11 @@ pub fn main() !void {
 
     if (command_kind == .Emit) {
         // if no --emit-X flag is set, default to MLIR generation
-        if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
+        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
             emit_mlir = true; // Default: emit MLIR
+        }
+        if ((emit_sir_text or emit_bytecode or (emit_cfg and emit_cfg_mode != null and std.ascii.eqlIgnoreCase(emit_cfg_mode.?, "sir"))) and !emit_mlir_sir) {
+            emit_mlir_sir = true;
         }
     }
 
@@ -347,9 +359,9 @@ pub fn main() !void {
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
         .emit_mlir_sir = emit_mlir_sir,
-        .emit_sir_text = false,
-        .emit_bytecode = false,
-        .emit_cfg_mode = null,
+        .emit_sir_text = emit_sir_text,
+        .emit_bytecode = emit_bytecode,
+        .emit_cfg_mode = emit_cfg_mode,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
         .debug_enabled = debug_enabled,
@@ -518,17 +530,21 @@ pub fn main() !void {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
-    if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
-        std.debug.print("error: emit requires --emit-ast, --emit-typed-ast, or --emit-mlir.\n", .{});
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
+        std.debug.print("error: emit requires an explicit --emit-* mode.\n", .{});
         std.process.exit(2);
     }
 
-    if (emit_ast or emit_typed_ast) {
+    if (emit_tokens) {
+        try runCompilerV2TokenEmit(allocator, file_path);
+    } else if (emit_ast or emit_typed_ast) {
         const format = if (emit_typed_ast)
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
         try runCompilerV2AstEmit(allocator, file_path, format, emit_typed_ast, v2_resolver.options, &metrics);
+    } else if (emit_cfg or emit_sir_text or emit_bytecode) {
+        try runMlirEmitAdvancedV2(allocator, file_path, mlir_options, v2_resolver.options);
     } else {
         try runCompilerV2MlirEmit(allocator, file_path, mlir_options, v2_resolver.options);
     }
@@ -1017,11 +1033,15 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
+    try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
     try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-mlir[=ora|sir|both] - Emit MLIR (default mode: ora)\n", .{});
+    try stdout.print("  --emit-sir-text        - Emit Sensei SIR text IR (after conversion)\n", .{});
+    try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
+    try stdout.print("  --emit-cfg[=ora|sir]   - Generate control flow graph (default: ora)\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
@@ -1362,6 +1382,29 @@ fn runCompilerV2MlirEmit(
     try stdout.flush();
 }
 
+fn runCompilerV2TokenEmit(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+) !void {
+    const source_text = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    defer allocator.free(source_text);
+
+    var lexer = try lib.Lexer.init(allocator, source_text);
+    defer lexer.deinit();
+
+    const tokens = try lexer.scanTokens();
+    defer allocator.free(tokens);
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    for (tokens) |token| {
+        try stdout.print("{any}\n", .{token});
+    }
+    try stdout.flush();
+}
+
 fn runMlirEmitAdvancedV2(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -1586,6 +1629,32 @@ fn runMlirEmitAdvancedV2(
             } else {
                 try stdout.print("{s}", .{mlir_content_sir});
             }
+        }
+    }
+
+    if (mlir_options.emit_cfg_mode) |cfg_mode| {
+        const mlir_cfg = @import("mlir/cfg.zig");
+        const dot = try mlir_cfg.generateCFG(ctx, final_module, allocator);
+        defer allocator.free(dot);
+
+        if (mlir_options.output_dir) |output_dir| {
+            const basename = std.fs.path.stem(file_path);
+            const suffix = if (std.ascii.eqlIgnoreCase(cfg_mode, "sir")) ".sir.dot" else ".ora.dot";
+
+            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+
+            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
+            defer allocator.free(filename);
+            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
+            defer allocator.free(output_file);
+            var dot_file = try std.fs.cwd().createFile(output_file, .{});
+            defer dot_file.close();
+            try dot_file.writeAll(dot);
+        } else {
+            try stdout.print("{s}", .{dot});
         }
     }
 

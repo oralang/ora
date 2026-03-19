@@ -6,6 +6,32 @@ const std = @import("std");
 const testing = std.testing;
 const cli = @import("args.zig");
 
+test "emit-cfg consumes one arg and preserves following input file" {
+    const args = [_][]const u8{ "--emit-cfg", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_cfg);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
+test "emit-cfg does not skip subsequent flags" {
+    const args = [_][]const u8{ "--emit-cfg", "--emit-ast", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_cfg);
+    try testing.expect(parsed.emit_ast);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
+test "emit-cfg=ora sets cfg mode" {
+    const args = [_][]const u8{ "--emit-cfg=ora", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_cfg);
+    try testing.expect(parsed.emit_cfg_mode != null);
+    try testing.expectEqualStrings("ora", parsed.emit_cfg_mode.?);
+}
+
 test "emit-mlir=sir sets emit_mlir_sir" {
     const args = [_][]const u8{ "--emit-mlir=sir", "contract.ora" };
     const parsed = try cli.parseArgs(&args);
@@ -20,6 +46,22 @@ test "emit-mlir=both sets ora and sir MLIR flags" {
 
     try testing.expect(parsed.emit_mlir);
     try testing.expect(parsed.emit_mlir_sir);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
+test "emit-sir-text sets emit_sir_text" {
+    const args = [_][]const u8{ "--emit-sir-text", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_sir_text);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
+test "emit-bytecode sets emit_bytecode" {
+    const args = [_][]const u8{ "--emit-bytecode", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_bytecode);
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 
