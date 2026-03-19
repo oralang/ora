@@ -133,14 +133,10 @@ const InitTemplates = struct {
 };
 
 fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
-    return parsed.emit_tokens or
-        parsed.emit_ast or
+    return parsed.emit_ast or
         parsed.emit_typed_ast or
         parsed.emit_mlir or
-        parsed.emit_mlir_sir or
-        parsed.emit_sir_text or
-        parsed.emit_bytecode or
-        parsed.emit_cfg;
+        parsed.emit_mlir_sir;
 }
 
 fn initProjectLayout(target_dir: []const u8) !void {
@@ -260,17 +256,12 @@ pub fn main() !void {
 
     const output_dir: ?[]const u8 = parsed.output_dir;
     const input_file: ?[]const u8 = parsed.input_file;
-    const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
     const emit_ast_format: ?[]const u8 = parsed.emit_ast_format;
     const emit_typed_ast: bool = parsed.emit_typed_ast;
     const emit_typed_ast_format: ?[]const u8 = parsed.emit_typed_ast_format;
     var emit_mlir: bool = parsed.emit_mlir;
     var emit_mlir_sir: bool = parsed.emit_mlir_sir;
-    const emit_sir_text: bool = parsed.emit_sir_text;
-    const emit_bytecode: bool = parsed.emit_bytecode;
-    const emit_cfg: bool = parsed.emit_cfg;
-    const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
@@ -347,12 +338,8 @@ pub fn main() !void {
 
     if (command_kind == .Emit) {
         // if no --emit-X flag is set, default to MLIR generation
-        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
+        if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
             emit_mlir = true; // Default: emit MLIR
-        }
-        // Emit SIR MLIR only when explicitly requested or needed for SIR text/bytecode.
-        if ((emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
-            emit_mlir_sir = true;
         }
     }
 
@@ -360,9 +347,9 @@ pub fn main() !void {
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
         .emit_mlir_sir = emit_mlir_sir,
-        .emit_sir_text = emit_sir_text,
-        .emit_bytecode = emit_bytecode,
-        .emit_cfg_mode = emit_cfg_mode,
+        .emit_sir_text = false,
+        .emit_bytecode = false,
+        .emit_cfg_mode = null,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
         .debug_enabled = debug_enabled,
@@ -531,10 +518,6 @@ pub fn main() !void {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
-    if (emit_cfg or emit_sir_text or emit_bytecode or emit_tokens) {
-        std.debug.print("error: this emit flow is not supported by the current compiler path.\n", .{});
-        std.process.exit(2);
-    }
     if (!emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir) {
         std.debug.print("error: emit requires --emit-ast, --emit-typed-ast, or --emit-mlir.\n", .{});
         std.process.exit(2);
@@ -1034,15 +1017,11 @@ fn printUsage() !void {
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
     try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
     try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
     try stdout.print("  --emit-mlir[=ora|sir|both] - Emit MLIR (default mode: ora)\n", .{});
-    try stdout.print("  --emit-sir-text        - Emit Sensei SIR text IR (after conversion)\n", .{});
-    try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
-    try stdout.print("  --emit-cfg[=ora|sir]   - Generate control flow graph (default: ora)\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
