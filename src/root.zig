@@ -14,10 +14,7 @@ const testing = std.testing;
 pub const lexer = @import("ora_lexer");
 pub const parser = @import("parser/mod.zig");
 pub const ast = @import("ora_ast");
-pub const ast_visitor = @import("ora_ast").ast_visitor;
 pub const ast_arena = @import("ora_types").ast_arena;
-pub const ast_serializer = @import("ora_ast").ast_serializer;
-pub const type_resolver = @import("ast/type_resolver/mod.zig");
 pub const semantics = @import("semantics.zig");
 pub const abi = @import("abi.zig");
 pub const lsp = @import("lsp/mod.zig");
@@ -37,6 +34,4 @@ pub const TokenType = lexer.TokenType;
 // AST Arena memory management
 /// Arena-based allocator for AST nodes
 pub const AstArena = ast_arena.AstArena;
-/// Type resolver entry point
-pub const TypeResolver = type_resolver.TypeResolver;
 pub const comptime_eval = @import("comptime/mod.zig");
