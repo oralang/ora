@@ -12,7 +12,6 @@ const testing = std.testing;
 
 // Export core compiler modules
 pub const lexer = @import("ora_lexer");
-pub const parser = @import("parser/mod.zig");
 pub const ast = @import("ora_ast");
 pub const ast_arena = @import("ora_types").ast_arena;
 pub const semantics = @import("semantics.zig");
