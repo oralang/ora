@@ -714,7 +714,7 @@ fn collectLockedRootsFromBlock(
 fn collectContractLockedRootsFromNodes(
     symbol_table: *SymbolTable,
     allocator: std.mem.Allocator,
-    nodes: []lib.AstNode,
+    nodes: []lib.ast.AstNode,
 ) !void {
     for (nodes) |node| {
         switch (node) {
@@ -740,7 +740,7 @@ fn preRegisterFunctionSignatureFromAst(
     symbol_table: *SymbolTable,
     type_mapper: *const TypeMapper,
     ctx: c.MlirContext,
-    func: lib.FunctionNode,
+    func: lib.ast.FunctionNode,
 ) !void {
     const owned_params = try symbol_table.allocator.alloc(c.MlirType, func.parameters.len);
     for (func.parameters, 0..) |param, i| {
@@ -756,7 +756,7 @@ fn preRegisterFunctionSignatureFromAst(
 }
 
 fn preRegisterFunctionSignaturesFromAst(
-    nodes: []const lib.AstNode,
+    nodes: []const lib.ast.AstNode,
     symbol_table: *SymbolTable,
     type_mapper: *const TypeMapper,
     ctx: c.MlirContext,
@@ -790,7 +790,7 @@ fn preRegisterFunctionSignaturesFromAst(
 }
 
 /// Helper to get span from AstNode
-fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
+fn getNodeSpan(node: *const lib.ast.AstNode) ?lib.ast.SourceSpan {
     return switch (node.*) {
         .Contract => |contract| contract.span,
         .Function => |func| func.span,
@@ -808,7 +808,7 @@ fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
 
 /// Main entry point for lowering Ora AST nodes to MLIR module with semantic analysis symbol table
 /// This function uses the semantic analysis symbol table for type resolution
-pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable, source_filename: ?[]const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.ast.AstNode, allocator: std.mem.Allocator, semantic_table: *const lib.semantics.state.SymbolTable, source_filename: ?[]const u8) !LoweringResult {
     // create location tracker to get proper module location
     const location_tracker = if (source_filename) |fname|
         LocationTracker.initWithFilename(ctx, fname)
@@ -1104,7 +1104,7 @@ pub fn lowerFunctionsToModuleWithSemanticTable(ctx: c.MlirContext, nodes: []lib.
 /// This function orchestrates the modular lowering components and provides robust error reporting
 pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
     ctx: c.MlirContext,
-    nodes: []lib.AstNode,
+    nodes: []lib.ast.AstNode,
     allocator: std.mem.Allocator,
     source_filename: ?[]const u8,
     module_exports: ?*const lib.semantics.state.ModuleExportMap,
@@ -1781,7 +1781,7 @@ pub fn lowerFunctionsToModuleWithErrorsAndModuleExports(
 
 pub fn lowerFunctionsToModuleWithErrors(
     ctx: c.MlirContext,
-    nodes: []lib.AstNode,
+    nodes: []lib.ast.AstNode,
     allocator: std.mem.Allocator,
     source_filename: ?[]const u8,
 ) !LoweringResult {
@@ -1789,7 +1789,7 @@ pub fn lowerFunctionsToModuleWithErrors(
 }
 
 /// Main entry point with pass management support
-pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.ast.AstNode, allocator: std.mem.Allocator, pass_config: ?PassPipelineConfig, source_filename: ?[]const u8) !LoweringResult {
     // first, perform the basic lowering
     var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 
@@ -1889,7 +1889,7 @@ pub fn lowerFunctionsToModuleWithPasses(ctx: c.MlirContext, nodes: []lib.AstNode
 }
 
 /// Backward compatibility function - maintains the original interface
-pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirModule {
+pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.ast.AstNode) c.MlirModule {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
@@ -1920,19 +1920,19 @@ pub fn lowerFunctionsToModule(ctx: c.MlirContext, nodes: []lib.AstNode) c.MlirMo
 }
 
 /// Convenience function for debug builds with verification passes
-pub fn lowerFunctionsToModuleDebug(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator) !LoweringResult {
+pub fn lowerFunctionsToModuleDebug(ctx: c.MlirContext, nodes: []lib.ast.AstNode, allocator: std.mem.Allocator) !LoweringResult {
     const debug_config = PassPipelineConfig.debug();
     return lowerFunctionsToModuleWithPasses(ctx, nodes, allocator, debug_config);
 }
 
 /// Convenience function for release builds with aggressive optimization
-pub fn lowerFunctionsToModuleRelease(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator) !LoweringResult {
+pub fn lowerFunctionsToModuleRelease(ctx: c.MlirContext, nodes: []lib.ast.AstNode, allocator: std.mem.Allocator) !LoweringResult {
     const release_config = PassPipelineConfig.release();
     return lowerFunctionsToModuleWithPasses(ctx, nodes, allocator, release_config);
 }
 
 /// Convenience function with custom pass pipeline string
-pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8, source_filename: ?[]const u8) !LoweringResult {
+pub fn lowerFunctionsToModuleWithPipelineString(ctx: c.MlirContext, nodes: []lib.ast.AstNode, allocator: std.mem.Allocator, pipeline_str: []const u8, source_filename: ?[]const u8) !LoweringResult {
     // first, perform the basic lowering
     var lowering_result = try lowerFunctionsToModuleWithErrors(ctx, nodes, allocator, source_filename);
 

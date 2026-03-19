@@ -94,7 +94,7 @@ pub const Formatter = struct {
 
     // Comment preservation is best-effort: preserve trivia in source order around nodes.
 
-    fn formatNode(self: *Formatter, node: *const lib.AstNode) FormatError!void {
+    fn formatNode(self: *Formatter, node: *const lib.ast.AstNode) FormatError!void {
         switch (node.*) {
             .Contract => |*contract| try self.formatContract(contract),
             .Function => |*function| try self.formatFunction(function),
@@ -109,7 +109,7 @@ pub const Formatter = struct {
         }
     }
 
-    fn formatContract(self: *Formatter, contract: *const lib.ContractNode) FormatError!void {
+    fn formatContract(self: *Formatter, contract: *const lib.ast.ContractNode) FormatError!void {
         try self.writer.write("contract ");
         try self.writer.write(contract.name);
         try self.writer.write(" {");
@@ -192,7 +192,7 @@ pub const Formatter = struct {
         Other,
     };
 
-    fn contractMemberGroup(node: lib.AstNode) ContractMemberGroup {
+    fn contractMemberGroup(node: lib.ast.AstNode) ContractMemberGroup {
         return switch (node) {
             .Function => .Functions,
             .VariableDecl, .StructDecl, .BitfieldDecl, .EnumDecl, .LogDecl, .Import, .ErrorDecl => .Decls,
@@ -200,7 +200,7 @@ pub const Formatter = struct {
         };
     }
 
-    fn getNodeSpan(node: *const lib.AstNode) ?lib.ast.SourceSpan {
+    fn getNodeSpan(node: *const lib.ast.AstNode) ?lib.ast.SourceSpan {
         return switch (node.*) {
             .Contract => |contract| contract.span,
             .Function => |func| func.span,
@@ -287,7 +287,7 @@ pub const Formatter = struct {
         };
     }
 
-    fn formatFunction(self: *Formatter, function: *const lib.FunctionNode) FormatError!void {
+    fn formatFunction(self: *Formatter, function: *const lib.ast.FunctionNode) FormatError!void {
         // Visibility modifier
         if (function.visibility == .Public) {
             try self.writer.write("pub ");

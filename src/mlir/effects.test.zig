@@ -764,7 +764,7 @@ test "mlir keeps top-level constants visible in contract functions" {
         .type_info = lib.ast.Types.CommonTypes.bool_type(),
         .span = span,
     } } };
-    const feature_const = lib.AstNode{ .Constant = .{
+    const feature_const = lib.ast.AstNode{ .Constant = .{
         .name = try arena.createString("FEATURE_ON"),
         .typ = lib.ast.Types.CommonTypes.bool_type(),
         .value = feature_value,
@@ -778,7 +778,7 @@ test "mlir keeps top-level constants visible in contract functions" {
         .type_info = lib.ast.Types.CommonTypes.u256_type(),
         .span = span,
     } } };
-    const base_fee_const = lib.AstNode{ .Constant = .{
+    const base_fee_const = lib.ast.AstNode{ .Constant = .{
         .name = try arena.createString("BASE_FEE"),
         .typ = lib.ast.Types.CommonTypes.u256_type(),
         .value = base_fee_value,
@@ -786,7 +786,7 @@ test "mlir keeps top-level constants visible in contract functions" {
         .span = span,
     } };
 
-    const merged_nodes = try allocator.alloc(lib.AstNode, nodes.len + 2);
+    const merged_nodes = try allocator.alloc(lib.ast.AstNode, nodes.len + 2);
     defer allocator.free(merged_nodes);
     merged_nodes[0] = feature_const;
     merged_nodes[1] = base_fee_const;

@@ -37,13 +37,6 @@ pub const Token = lexer.Token;
 /// Token type enumeration
 pub const TokenType = lexer.TokenType;
 
-// AST types and functions
-/// Abstract Syntax Tree node
-pub const AstNode = ast.AstNode;
-/// Contract declaration node
-pub const ContractNode = ast.ContractNode;
-/// Function declaration node
-pub const FunctionNode = ast.FunctionNode;
 /// Cleanup function for AST nodes
 pub const deinitAstNodes = ast.deinitAstNodes;
 

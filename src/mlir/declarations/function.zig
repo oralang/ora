@@ -187,7 +187,7 @@ fn refinementCacheKey(value: c.MlirValue) usize {
 }
 
 /// Lower function declarations with enhanced features
-pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionNode, contract_storage_map: ?*StorageMap, local_var_map: ?*LocalVarMap) c.MlirOperation {
+pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.ast.FunctionNode, contract_storage_map: ?*StorageMap, local_var_map: ?*LocalVarMap) c.MlirOperation {
     // create a local variable map for this function
     var local_vars = LocalVarMap.init(std.heap.page_allocator);
     defer local_vars.deinit();
@@ -632,7 +632,7 @@ pub fn lowerFunction(self: *const DeclarationLowerer, func: *const lib.FunctionN
 }
 
 /// Lower function body statements
-fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.FunctionNode, func_op: c.MlirOperation, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, refinement_base_cache: *std.AutoHashMap(usize, c.MlirValue), refinement_guard_cache: *std.AutoHashMap(u128, void)) LoweringError!void {
+fn lowerFunctionBody(self: *const DeclarationLowerer, func: *const lib.ast.FunctionNode, func_op: c.MlirOperation, block: c.MlirBlock, param_map: *const ParamMap, storage_map: ?*const StorageMap, local_var_map: ?*LocalVarMap, refinement_base_cache: *std.AutoHashMap(usize, c.MlirValue), refinement_guard_cache: *std.AutoHashMap(u128, void)) LoweringError!void {
     // create a statement lowerer for this function
     const const_local_var_map = if (local_var_map) |lvm| @as(*const LocalVarMap, lvm) else null;
     var expr_lowerer = ExpressionLowerer.init(self.ctx, block, self.type_mapper, param_map, storage_map, const_local_var_map, self.symbol_table, self.builtin_registry, self.error_handler, self.locations, self.ora_dialect);

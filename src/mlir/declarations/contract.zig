@@ -81,7 +81,7 @@ fn collectLockedRootsFromBlock(st: *lower.SymbolTable, block: lib.ast.Statements
     }
 }
 
-fn refreshContractLockedRoots(st: *lower.SymbolTable, contract: *const lib.ContractNode) !void {
+fn refreshContractLockedRoots(st: *lower.SymbolTable, contract: *const lib.ast.ContractNode) !void {
     var existing_it = st.contract_locked_storage_roots.keyIterator();
     while (existing_it.next()) |k| {
         st.allocator.free(k.*);
@@ -98,7 +98,7 @@ fn refreshContractLockedRoots(st: *lower.SymbolTable, contract: *const lib.Contr
     }
 }
 
-fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ContractNode) void {
+fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contract: *const lib.ast.ContractNode) void {
     for (contract.body) |child| {
         switch (child) {
             .StructDecl => |struct_decl| {
@@ -189,7 +189,7 @@ fn lowerContractTypes(self: *const DeclarationLowerer, block: c.MlirBlock, contr
     }
 }
 
-fn registerLogSignatures(self: *const DeclarationLowerer, contract: *const lib.ContractNode) void {
+fn registerLogSignatures(self: *const DeclarationLowerer, contract: *const lib.ast.ContractNode) void {
     if (self.symbol_table) |st| {
         // contract-scoped log signatures: clear previous contract entries
         st.log_signatures.clearRetainingCapacity();
@@ -207,7 +207,7 @@ fn registerLogSignatures(self: *const DeclarationLowerer, contract: *const lib.C
 }
 
 /// Lower contract declarations with enhanced metadata and inheritance support
-pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ContractNode) c.MlirOperation {
+pub fn lowerContract(self: *const DeclarationLowerer, contract: *const lib.ast.ContractNode) c.MlirOperation {
     // create the contract operation using C++ API
     const name_ref = c.oraStringRefCreate(contract.name.ptr, contract.name.len);
     const contract_op = c.oraContractOpCreate(self.ctx, helpers.createFileLocation(self, contract.span), name_ref);

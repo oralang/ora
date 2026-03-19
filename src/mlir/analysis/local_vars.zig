@@ -21,7 +21,7 @@ const Usage = struct {
 
 pub fn analyzeLocalVarReprs(
     allocator: std.mem.Allocator,
-    func: *const lib.FunctionNode,
+    func: *const lib.ast.FunctionNode,
 ) std.StringHashMap(LocalVarRepr) {
     var usage = std.StringHashMap(Usage).init(allocator);
     scanBlock(func.body, &usage);

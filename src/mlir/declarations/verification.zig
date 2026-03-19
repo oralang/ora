@@ -101,7 +101,7 @@ pub fn addVerificationAttributes(self: *const DeclarationLowerer, operation: c.M
 }
 
 /// Handle formal verification constructs in function contracts
-pub fn lowerFormalVerificationConstructs(self: *const DeclarationLowerer, func: *const lib.FunctionNode, func_op: c.MlirOperation) void {
+pub fn lowerFormalVerificationConstructs(self: *const DeclarationLowerer, func: *const lib.ast.FunctionNode, func_op: c.MlirOperation) void {
     // add verification attributes for functions with requires/ensures clauses
     if (func.requires_clauses.len > 0 or func.ensures_clauses.len > 0) {
         self.addVerificationAttributes(func_op, "function_contract", null);

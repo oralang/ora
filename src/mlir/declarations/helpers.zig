@@ -128,7 +128,7 @@ pub fn oraTypeToString(self: *const DeclarationLowerer, type_info: lib.ast.Types
 }
 
 /// Enhanced function type creation with parameter default values (Requirements 6.3)
-pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.FunctionNode) c.MlirType {
+pub fn createFunctionType(self: *const DeclarationLowerer, func: *const lib.ast.FunctionNode) c.MlirType {
     // create parameter types array
     var param_types = std.ArrayList(c.MlirType){};
     defer param_types.deinit(std.heap.page_allocator);

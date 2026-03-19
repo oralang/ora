@@ -9,7 +9,7 @@ pub const ExportInfo = lib.semantics.state.ExportInfo;
 pub const ModuleExportMap = lib.semantics.state.ModuleExportMap;
 
 pub const ParsedProgram = struct {
-    nodes: []lib.AstNode,
+    nodes: []lib.ast.AstNode,
     arena: lib.ast_arena.AstArena,
     module_exports: ?*ModuleExportMap = null,
     module_exports_allocator: ?std.mem.Allocator = null,
@@ -28,7 +28,7 @@ pub const ParsedProgram = struct {
 
 const ParsedModuleState = struct {
     allocator: std.mem.Allocator,
-    nodes: []lib.AstNode = &.{},
+    nodes: []lib.ast.AstNode = &.{},
     exports: std.StringHashMap(ExportInfo),
     alias_targets: std.StringHashMap([]const u8),
 
@@ -54,8 +54,8 @@ const ParsedModuleState = struct {
 
 fn injectImportedRuntimeFunctionsIntoEntryContracts(
     arena_allocator: std.mem.Allocator,
-    entry_nodes: []lib.AstNode,
-    imported_runtime_functions: []const lib.FunctionNode,
+    entry_nodes: []lib.ast.AstNode,
+    imported_runtime_functions: []const lib.ast.FunctionNode,
 ) !void {
     if (imported_runtime_functions.len == 0) return;
 
@@ -64,7 +64,7 @@ fn injectImportedRuntimeFunctionsIntoEntryContracts(
 
         const contract = &node.Contract;
         const existing_body = contract.body;
-        const new_body = try arena_allocator.alloc(lib.AstNode, existing_body.len + imported_runtime_functions.len);
+        const new_body = try arena_allocator.alloc(lib.ast.AstNode, existing_body.len + imported_runtime_functions.len);
         @memcpy(new_body[0..existing_body.len], existing_body);
 
         var write_idx: usize = existing_body.len;
@@ -79,7 +79,7 @@ fn injectImportedRuntimeFunctionsIntoEntryContracts(
     }
 }
 
-fn ensureLogSignaturesForProgram(symbols: *lib.semantics.state.SymbolTable, nodes: []const lib.AstNode) !void {
+fn ensureLogSignaturesForProgram(symbols: *lib.semantics.state.SymbolTable, nodes: []const lib.ast.AstNode) !void {
     for (nodes) |node| switch (node) {
         .LogDecl => |l| {
             if (symbols.log_signatures.get(l.name) == null) {
@@ -310,7 +310,7 @@ fn normalizeStmtEnumLiterals(
 
 fn normalizeNodeEnumLiterals(
     arena: *lib.ast_arena.AstArena,
-    node: *lib.AstNode,
+    node: *lib.ast.AstNode,
     alias_targets: *const std.StringHashMap([]const u8),
 ) anyerror!void {
     switch (node.*) {
@@ -331,7 +331,7 @@ fn normalizeNodeEnumLiterals(
     }
 }
 
-fn validateImportedLibraryModule(module_path: []const u8, nodes: []const lib.AstNode) !void {
+fn validateImportedLibraryModule(module_path: []const u8, nodes: []const lib.ast.AstNode) !void {
     for (nodes) |node| {
         switch (node) {
             .Import, .Constant, .StructDecl, .BitfieldDecl => {},
@@ -505,7 +505,7 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
     // Imported runtime functions are materialized as private helpers inside
     // entry contracts so alias.fn() in contracts lowers to an in-contract
     // func.call target.
-    var imported_runtime_functions = std.ArrayList(lib.FunctionNode){};
+    var imported_runtime_functions = std.ArrayList(lib.ast.FunctionNode){};
     defer imported_runtime_functions.deinit(arena_allocator);
     for (module_states, 0..) |state, i| {
         if (i == entry_module_idx) continue;
@@ -579,7 +579,7 @@ pub fn loadProgramWithImportsRawWithResolverOptions(
     // Merge all module nodes. Deduplicate Import nodes by alias so that the
     // same alias imported in multiple modules doesn't cause false redeclaration
     // errors in semantics collect.
-    var merged_nodes = std.ArrayList(lib.AstNode){};
+    var merged_nodes = std.ArrayList(lib.ast.AstNode){};
     defer merged_nodes.deinit(arena_allocator);
     var seen_import_aliases = std.StringHashMap(void).init(allocator);
     defer seen_import_aliases.deinit();
