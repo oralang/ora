@@ -856,11 +856,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerTraitBoundMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveTraitBoundMethodCall(self, call.callee) orelse return null;
-            const runtime_args = if (resolved.function.is_generic)
-                self.parent.stripGenericCallArgs(resolved.function, call)
+            const runtime_parameters = try self.parent.runtimeFunctionParameters(resolved.function);
+            var generic_count: usize = 0;
+            for (resolved.function.parameters) |parameter| {
+                if (!parameter.is_comptime) break;
+                generic_count += 1;
+            }
+            const method_runtime_count = if (runtime_parameters.len == 0) 0 else runtime_parameters.len - 1;
+            const explicit_generics = resolved.function.is_generic and call.args.len >= generic_count + method_runtime_count;
+            const runtime_args = if (explicit_generics)
+                call.args[generic_count..]
             else
                 call.args;
-            const runtime_parameters = try self.parent.runtimeFunctionParameters(resolved.function);
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             var receiver_value = try self.lowerExpr(resolved.receiver_expr, locals);

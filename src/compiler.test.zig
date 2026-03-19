@@ -1964,6 +1964,76 @@ test "compiler accepts bounded generic calls for implemented trait types" {
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
+test "compiler infers generic type arguments from runtime call arguments" {
+    const source_text =
+        \\contract Test {
+        \\    fn add(comptime T: type, a: T, b: T) -> T {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256) -> u256 {
+        \\        return add(a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@add__"));
+}
+
+test "compiler still accepts explicit generic type arguments" {
+    const source_text =
+        \\contract Test {
+        \\    fn add(comptime T: type, a: T, b: T) -> T {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256) -> u256 {
+        \\        return add(u256, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@add__"));
+}
+
+test "compiler rejects conflicting inferred generic type arguments" {
+    const source_text =
+        \\contract Test {
+        \\    fn pick(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: bool) -> u256 {
+        \\        return pick(a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "could not infer generic type arguments"));
+}
+
 test "compiler rejects bounded generic calls for types without impl" {
     const source_text =
         \\trait Marker {
@@ -2159,8 +2229,8 @@ test "compiler lowers generic impl methods for trait-bound calls" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked__7"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked__7"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked__"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
 }
 
@@ -11366,7 +11436,7 @@ test "compiler supports call-style payload error constructors" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
-    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.len);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     const hir_text = try hir_result.renderText(testing.allocator);

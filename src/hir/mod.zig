@@ -512,18 +512,56 @@ const Lowerer = struct {
             generic_count += 1;
         }
         if (generic_count == 0) return &.{};
-        if (call.args.len < generic_count) return null;
+
+        var runtime_count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) runtime_count += 1;
+        }
+
+        if (call.args.len >= generic_count + runtime_count) {
+            var bindings: std.ArrayList(GenericTypeBinding) = .{};
+            for (function.parameters[0..generic_count], 0..) |parameter, index| {
+                const type_name = self.patternName(parameter.pattern) orelse return null;
+                const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
+                try bindings.append(self.allocator, .{
+                    .name = binding.name,
+                    .value = binding.value,
+                    .mangle_name = binding.mangle_name,
+                });
+            }
+            return @constCast(try bindings.toOwnedSlice(self.allocator));
+        }
+
+        if (call.args.len != runtime_count) return null;
 
         var bindings: std.ArrayList(GenericTypeBinding) = .{};
-        for (function.parameters[0..generic_count], 0..) |parameter, index| {
-            const type_name = self.patternName(parameter.pattern) orelse return null;
-            const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
+        for (function.parameters[0..generic_count]) |param| {
+            const name = self.patternName(param.pattern) orelse return null;
             try bindings.append(self.allocator, .{
-                .name = binding.name,
-                .value = binding.value,
-                .mangle_name = binding.mangle_name,
+                .name = name,
+                .value = .{ .ty = .{ .unknown = {} } },
+                .mangle_name = "",
             });
         }
+
+        var runtime_index: usize = 0;
+        for (function.parameters) |param| {
+            if (param.is_comptime) continue;
+            if (runtime_index >= call.args.len) break;
+            const arg_type = self.typecheck.exprType(call.args[runtime_index]);
+            if (arg_type.kind() != .unknown) {
+                try self.inferHirBinding(function, generic_count, param, arg_type, bindings.items);
+            }
+            runtime_index += 1;
+        }
+
+        for (bindings.items) |*binding| {
+            if (binding.mangle_name.len == 0) {
+                const ty = hirGenericBindingType(binding.*) orelse return null;
+                binding.mangle_name = try self.typeMangleName(ty);
+            }
+        }
+
         return @constCast(try bindings.toOwnedSlice(self.allocator));
     }
 
@@ -534,6 +572,12 @@ const Lowerer = struct {
             if (!parameter.is_comptime) break;
             generic_count += 1;
         }
+        if (call.args.len <= generic_count) return call.args;
+        var runtime_count: usize = 0;
+        for (function.parameters) |parameter| {
+            if (!parameter.is_comptime) runtime_count += 1;
+        }
+        if (call.args.len == runtime_count) return call.args;
         if (generic_count >= call.args.len) return &.{};
         return call.args[generic_count..];
     }
@@ -608,6 +652,49 @@ const Lowerer = struct {
             };
         }
         return null;
+    }
+
+    fn inferHirBinding(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        param: ast.Parameter,
+        arg_type: sema.Type,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        const type_expr_node = self.file.typeExpr(param.type_expr).*;
+        const name = switch (type_expr_node) {
+            .Path => |path| path.name,
+            else => return,
+        };
+
+        for (function.parameters[0..generic_count], 0..) |generic_param, index| {
+            const param_name = self.patternName(generic_param.pattern) orelse continue;
+            if (!std.mem.eql(u8, name, param_name)) continue;
+            if (!self.isGenericTypeParameter(generic_param)) continue;
+
+            if (bindings[index].mangle_name.len > 0) {
+                const existing = hirGenericBindingType(bindings[index]) orelse return;
+                const existing_mangle = try self.typeMangleName(existing);
+                const arg_mangle = try self.typeMangleName(arg_type);
+                if (!std.mem.eql(u8, existing_mangle, arg_mangle)) {
+                    bindings[index].mangle_name = "";
+                    bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                }
+                return;
+            }
+
+            bindings[index].value = .{ .ty = arg_type };
+            bindings[index].mangle_name = try self.typeMangleName(arg_type);
+            return;
+        }
+    }
+
+    fn hirGenericBindingType(binding: GenericTypeBinding) ?sema.Type {
+        return switch (binding.value) {
+            .ty => |ty| ty,
+            .integer => null,
+        };
     }
 
     fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
