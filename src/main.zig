@@ -17,7 +17,7 @@ const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const compiler = lib.compiler;
 const project_config = @import("config/mod.zig");
-const import_program = @import("imports/program_loader.zig");
+const import_graph = @import("ora_imports");
 const log = @import("log");
 const Metrics = @import("metrics.zig").Metrics;
 const ManagedArrayList = std.array_list.Managed;
@@ -401,7 +401,7 @@ pub fn main() !void {
             allocator.free(out_dir);
         };
 
-        var build_resolver_options: import_program.ResolverOptions = .{};
+        var build_resolver_options: import_graph.ResolverOptions = .{};
         var build_output_dir: ?[]const u8 = output_dir;
         if (input_file) |build_file_path| {
             const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
@@ -575,7 +575,7 @@ fn runBuildArtifacts(
     file_path: []const u8,
     output_dir: ?[]const u8,
     base_options: MlirOptions,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
     configured_init_args: []const project_config.InitArg,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -804,7 +804,7 @@ fn initParameterName(ast_file: *const compiler.AstFile, parameter: compiler.ast.
 fn validateConfiguredInitArgs(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
     configured_init_args: []const project_config.InitArg,
 ) !void {
     if (configured_init_args.len == 0) return;
@@ -959,7 +959,7 @@ fn discoverResolverOptionsForFile(
     file_path: []const u8,
 ) !struct {
     include_roots: ?[]const []const u8,
-    options: import_program.ResolverOptions,
+    options: import_graph.ResolverOptions,
 } {
     const start_dir = std.fs.path.dirname(file_path) orelse ".";
     const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
@@ -1292,7 +1292,7 @@ fn runCompilerV2AstEmit(
     file_path: []const u8,
     format: []const u8,
     include_types: bool,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
     m: *Metrics,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -1330,7 +1330,7 @@ fn runCompilerV2MlirEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     mlir_options: MlirOptions,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
 ) !void {
     const c = @import("mlir_c_api").c;
 
@@ -1401,7 +1401,7 @@ fn runMlirEmitAdvancedV2(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     mlir_options: MlirOptions,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
 ) !void {
     const c = @import("mlir_c_api").c;
 
@@ -1878,7 +1878,7 @@ fn runAbiEmit(
     emit_abi: bool,
     emit_abi_solidity: bool,
     emit_abi_extras: bool,
-    resolver_options: import_program.ResolverOptions,
+    resolver_options: import_graph.ResolverOptions,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
