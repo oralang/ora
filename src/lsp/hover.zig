@@ -17,8 +17,14 @@ pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Posi
     var index = try semantic_index.indexDocument(allocator, source);
     defer index.deinit(allocator);
 
-    const symbol_index = semantic_index.findSymbolAtPosition(index.symbols, position) orelse return null;
-    const symbol = index.symbols[symbol_index];
+    if (!index.parse_succeeded) return null;
+
+    const symbol = blk: {
+        const symbol_index = semantic_index.findSymbolAtPosition(index.symbols, position) orelse return null;
+        const candidate = index.symbols[symbol_index];
+        if (!rangeContainsPosition(candidate.selection_range, position)) return null;
+        break :blk candidate;
+    };
 
     const value = try formatHoverValueAlloc(allocator, symbol);
     return .{
@@ -70,4 +76,16 @@ fn formatSignatureAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]
         else
             std.fmt.allocPrint(allocator, "error {s}", .{symbol.name}),
     };
+}
+
+fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {
+    if (positionLessThan(position, range.start)) return false;
+    if (!positionLessThan(position, range.end)) return false;
+    return true;
+}
+
+fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
+    if (lhs.line < rhs.line) return true;
+    if (lhs.line > rhs.line) return false;
+    return lhs.character < rhs.character;
 }
