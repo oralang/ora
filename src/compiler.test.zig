@@ -11346,6 +11346,35 @@ test "compiler lowers payload error return constructors through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
 }
 
+test "compiler supports call-style payload error constructors" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn run(flag: bool) -> !bool | Failure {
+        \\        if (flag) {
+        \\            return Failure(7);
+        \\        }
+        \\        return false;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.call @Failure"));
+}
+
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);

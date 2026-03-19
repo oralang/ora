@@ -1298,22 +1298,31 @@ const TypeChecker = struct {
             .Call => |call| {
                 try self.visitExpr(call.callee);
                 for (call.args) |arg| try self.visitExpr(arg);
-                const callee_type = self.callableType(call.callee);
-                const callee_expr_type = self.expr_types[call.callee.index()];
                 const result_type = self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
-                if (callee_type.kind() != .function) {
-                    const bad_type = if (callee_expr_type.kind() != .unknown) callee_expr_type else callee_type;
-                    if (bad_type.kind() != .unknown) {
-                        try self.emitExprError(expr_id, "type '{s}' is not callable", .{typeDisplayName(bad_type)});
-                    }
-                } else if (result_type.kind() == .unknown) {
-                    const expected_args = self.expectedCallArgCount(call) orelse callee_type.paramTypes().len;
-                    if (expected_args != call.args.len) {
-                        try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
+                if (self.calleeErrorDeclItem(call.callee)) |item_id| {
+                    const error_decl = self.file.item(item_id).ErrorDecl;
+                    if (error_decl.parameters.len != call.args.len) {
+                        try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ error_decl.parameters.len, call.args.len });
+                    } else {
+                        try self.checkErrorDeclCallArguments(call, error_decl);
                     }
                 } else {
-                    try self.checkCallArguments(call, callee_type);
+                    const callee_type = self.callableType(call.callee);
+                    const callee_expr_type = self.expr_types[call.callee.index()];
+                    if (callee_type.kind() != .function) {
+                        const bad_type = if (callee_expr_type.kind() != .unknown) callee_expr_type else callee_type;
+                        if (bad_type.kind() != .unknown) {
+                            try self.emitExprError(expr_id, "type '{s}' is not callable", .{typeDisplayName(bad_type)});
+                        }
+                    } else if (result_type.kind() == .unknown) {
+                        const expected_args = self.expectedCallArgCount(call) orelse callee_type.paramTypes().len;
+                        if (expected_args != call.args.len) {
+                            try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
+                        }
+                    } else {
+                        try self.checkCallArguments(call, callee_type);
+                    }
                 }
             },
             .Builtin => |builtin| {
@@ -1391,6 +1400,9 @@ const TypeChecker = struct {
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
         if (self.genericCallReturnType(call)) |result| return result;
         if (self.externProxyCallReturnType(call)) |result| return result;
+        if (self.calleeErrorDeclItem(call.callee)) |item_id| {
+            return self.item_types[item_id.index()];
+        }
         const callee_type = self.callableType(call.callee);
         if (callee_type.kind() != .function) return .{ .unknown = {} };
 
@@ -1421,6 +1433,22 @@ const TypeChecker = struct {
             else => {},
         }
         return .{ .unknown = {} };
+    }
+
+    fn calleeErrorDeclItem(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.calleeErrorDeclItem(group.expr),
+            else => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                break :blk switch (binding) {
+                    .item => |item_id| switch (self.file.item(item_id).*) {
+                        .ErrorDecl => item_id,
+                        else => null,
+                    },
+                    else => null,
+                };
+            },
+        };
     }
 
     fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
@@ -1542,6 +1570,22 @@ const TypeChecker = struct {
         const param_types = callee_type.paramTypes();
         if (param_types.len != call.args.len) return;
         for (call.args, param_types) |arg, param_type| {
+            if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
+            const arg_type = self.expr_types[arg.index()];
+            if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
+                !typesAssignable(param_type, arg_type))
+            {
+                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
+                    typeDisplayName(param_type), typeDisplayName(arg_type),
+                });
+            }
+        }
+    }
+
+    fn checkErrorDeclCallArguments(self: *TypeChecker, call: ast.CallExpr, error_decl: ast.ErrorDeclItem) !void {
+        if (error_decl.parameters.len != call.args.len) return;
+        for (call.args, error_decl.parameters) |arg, parameter| {
+            const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
