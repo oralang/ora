@@ -849,7 +849,7 @@ fn validateConfiguredInitArgs(
 ) !void {
     if (configured_init_args.len == 0) return;
 
-    var program = try loadProgramWithImportsRaw(allocator, file_path, resolver_options);
+    var program = try import_program.loadProgramWithImportsRawWithResolverOptions(allocator, file_path, resolver_options);
     defer program.deinit();
 
     var init_fn: ?*const lib.FunctionNode = null;
@@ -1851,22 +1851,6 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
 // SECTION 5: Parser & Compilation Workflows
 // ============================================================================
 
-fn loadProgramWithImportsRaw(
-    allocator: std.mem.Allocator,
-    entry_file_path: []const u8,
-    resolver_options: import_program.ResolverOptions,
-) !import_program.ParsedProgram {
-    return import_program.loadProgramWithImportsRawWithResolverOptions(allocator, entry_file_path, resolver_options);
-}
-
-fn loadProgramWithImportsTyped(
-    allocator: std.mem.Allocator,
-    entry_file_path: []const u8,
-    resolver_options: import_program.ResolverOptions,
-) !import_program.ParsedProgram {
-    return import_program.loadProgramWithImportsTypedWithResolverOptions(allocator, entry_file_path, resolver_options);
-}
-
 /// Run state analysis on AST nodes (used during normal compilation)
 fn runStateAnalysisForContracts(allocator: std.mem.Allocator, ast_nodes: []lib.AstNode) !void {
     const state_tracker = lib.state_tracker;
@@ -1907,7 +1891,7 @@ fn runStateAnalysis(allocator: std.mem.Allocator, file_path: []const u8) !void {
     try stdout.print("Analyzing state changes for {s}\n", .{file_path});
     try stdout.print("==================================================\n", .{});
 
-    var program = loadProgramWithImportsRaw(allocator, file_path, .{}) catch |err| {
+    var program = import_program.loadProgramWithImportsRawWithResolverOptions(allocator, file_path, .{}) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
@@ -1950,7 +1934,7 @@ fn runAbiEmit(
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var program = loadProgramWithImportsTyped(allocator, file_path, resolver_options) catch |err| {
+    var program = import_program.loadProgramWithImportsTypedWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
         try stdout.print("Parser error: {s}\n", .{@errorName(err)});
         return;
     };
