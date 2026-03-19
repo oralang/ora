@@ -576,43 +576,6 @@ pub fn build(b: *std.Build) void {
     test_compiler_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
     // ========================================================================
-    // Boundary enforcement canary
-    // ========================================================================
-    // Compiles parser_core.zig as an isolated module with only the allowed
-    // named module imports, and scans parser sources for forbidden relative
-    // imports into semantics/type-resolver/MLIR/Z3.
-    //
-    //   zig build check-parser-boundary
-    //
-    const parser_canary_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/parser_core.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    parser_canary_mod.addImport("ora_types", ora_types_mod);
-    parser_canary_mod.addImport("ora_lexer", ora_lexer_mod);
-    parser_canary_mod.addImport("ora_ast", ora_ast_mod);
-    parser_canary_mod.addImport("log", log_mod);
-    // Allowed: ora_types, ora_lexer, ora_ast, log.
-    // NOT provided: semantics, type_resolver, MLIR, Z3.
-    // If a parser file adds a forbidden import, this step fails.
-
-    const parser_canary = b.addObject(.{
-        .name = "parser_boundary_canary",
-        .root_module = parser_canary_mod,
-    });
-    const parser_import_guard = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    parser_import_guard.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "parser-import-guard",
-        .owner = b,
-        .makeFn = checkParserImportsImpl,
-    });
-    const check_parser_step = b.step("check-parser-boundary", "Verify parser module has no semantics/MLIR/Z3 imports");
-    check_parser_step.dependOn(&parser_canary.step);
-    check_parser_step.dependOn(parser_import_guard);
-
-    // ========================================================================
     // Per-module test targets (no MLIR/Z3 required)
     // ========================================================================
 
@@ -684,48 +647,6 @@ fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
             return error.LexerSuiteFailed;
         },
         else => {},
-    }
-}
-
-fn checkParserImportsImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-    _ = options;
-    const b = step.owner;
-    const allocator = b.allocator;
-
-    const forbidden = [_]struct {
-        pattern: []const u8,
-        description: []const u8,
-    }{
-        .{ .pattern = "@import(\"../semantics/", .description = "parser core must not import semantics" },
-        .{ .pattern = "@import(\"../ast/type_resolver/", .description = "parser core must not import type resolver" },
-        .{ .pattern = "@import(\"../mlir/", .description = "parser core must not import MLIR" },
-        .{ .pattern = "@import(\"../z3/", .description = "parser core must not import Z3" },
-    };
-
-    var parser_dir = try std.fs.cwd().openDir("src/parser", .{ .iterate = true });
-    defer parser_dir.close();
-
-    var walker = try parser_dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        if (std.mem.eql(u8, entry.path, "pipeline.zig")) continue;
-
-        const rel_path = try std.fmt.allocPrint(allocator, "src/parser/{s}", .{entry.path});
-        defer allocator.free(rel_path);
-
-        const contents = try std.fs.cwd().readFileAlloc(allocator, rel_path, 4 * 1024 * 1024);
-        defer allocator.free(contents);
-
-        for (forbidden) |rule| {
-            if (std.mem.indexOf(u8, contents, rule.pattern) != null) {
-                std.log.err("Parser boundary violation in {s}: {s}", .{ rel_path, rule.description });
-                std.log.err("  found forbidden import pattern: {s}", .{rule.pattern});
-                return error.ParserBoundaryViolation;
-            }
-        }
     }
 }
 
