@@ -13,6 +13,7 @@ const LocationTracker = @import("../locations.zig").LocationTracker;
 const OraDialect = @import("../dialect.zig").OraDialect;
 const expr_helpers = @import("helpers.zig");
 const log = @import("log");
+const OraType = lib.ast.type_info.OraType;
 
 /// ExpressionLowerer type (forward declaration)
 const ExpressionLowerer = @import("mod.zig").ExpressionLowerer;
@@ -415,7 +416,7 @@ const IntegerBoundary = enum { min, max };
 /// Lower integer boundary constants (e.g., U256_MAX, I128_MIN).
 fn lowerIntegerBoundaryConstant(
     self: *const ExpressionLowerer,
-    ora_type: lib.OraType,
+    ora_type: OraType,
     boundary: IntegerBoundary,
     span: lib.ast.SourceSpan,
 ) c.MlirValue {

@@ -9,6 +9,7 @@ const lexer = ora_root.lexer;
 const parser_mod = ora_root.parser;
 const semantics = ora_root.semantics;
 const AstArena = ora_root.AstArena;
+const TypeResolver = ora_root.type_resolver.TypeResolver;
 
 fn isU256Type(ti: ora_root.ast.Types.TypeInfo) bool {
     if (ti.ora_type) |ot| {
@@ -48,7 +49,6 @@ test "catch variable is u256 payload" {
     defer sem.symbols.deinit();
     defer allocator.free(sem.diagnostics);
 
-    const TypeResolver = ora_root.TypeResolver;
     var type_resolver = TypeResolver.init(allocator, arena.allocator(), &sem.symbols);
     defer type_resolver.deinit();
     try type_resolver.resolveTypes(nodes);

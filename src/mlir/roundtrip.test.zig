@@ -4,7 +4,7 @@ const lib = @import("ora_lib");
 const mlir = @import("mod.zig");
 const c = @import("mlir_c_api").c;
 const mlir_c_api = @import("mlir_c_api");
-const TypeResolver = lib.TypeResolver;
+const TypeResolver = lib.type_resolver.TypeResolver;
 
 fn printOperationOwned(allocator: std.mem.Allocator, op: c.MlirOperation) ![]u8 {
     const text_ref = c.oraOperationPrintToString(op);

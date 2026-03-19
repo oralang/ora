@@ -5,7 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 const mlir = @import("mlir_c_api").c;
-const lib = @import("ora_lib");
+const TypeInfo = @import("ora_lib").ast.type_info.TypeInfo;
 const TypeMapper = @import("types.zig").TypeMapper;
 const ErrorHandler = @import("error_handling.zig").ErrorHandler;
 
@@ -21,7 +21,7 @@ test "toMlirType reports missing ora type" {
     mapper.setErrorHandler(&handler);
     defer mapper.deinit();
 
-    const unknown = lib.TypeInfo.unknown();
+    const unknown = TypeInfo.unknown();
     const ty = mapper.toMlirType(unknown);
 
     try testing.expect(mlir.oraTypeIsNull(ty));

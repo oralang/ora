@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const ast = @import("ora_ast");
-const lib = @import("ora_types").type_info;
+const type_info = @import("ora_types").type_info;
 
 /// Information about a built-in function or constant
 pub const BuiltinInfo = struct {
@@ -29,10 +29,10 @@ pub const BuiltinInfo = struct {
     full_path: []const u8,
 
     /// Return type of the builtin
-    return_type: lib.OraType,
+    return_type: type_info.OraType,
 
     /// Parameter types (empty for constants and no-arg functions)
-    param_types: []const lib.OraType,
+    param_types: []const type_info.OraType,
 
     /// EVM opcode name (e.g., "TIMESTAMP", "ORIGIN", "CALLER")
     evm_opcode: []const u8,
@@ -469,7 +469,7 @@ test "builtin registry exposes integer min/max constants" {
 
     const expected = [_]struct {
         path: []const u8,
-        ty: lib.OraType,
+        ty: type_info.OraType,
     }{
         .{ .path = "std.constants.U8_MIN", .ty = .u8 },
         .{ .path = "std.constants.U8_MAX", .ty = .u8 },
@@ -502,6 +502,6 @@ test "builtin registry exposes integer min/max constants" {
         try std.testing.expect(info_opt != null);
         const info = info_opt.?;
         try std.testing.expect(!info.is_call);
-        try std.testing.expect(lib.OraType.equals(info.return_type, entry.ty));
+        try std.testing.expect(type_info.OraType.equals(info.return_type, entry.ty));
     }
 }

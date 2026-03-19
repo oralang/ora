@@ -18,6 +18,7 @@ pub const ast_visitor = @import("ora_ast").ast_visitor;
 pub const ast_arena = @import("ora_types").ast_arena;
 pub const ast_builder = @import("ast/ast_builder.zig");
 pub const ast_serializer = @import("ora_ast").ast_serializer;
+pub const type_resolver = @import("ast/type_resolver/mod.zig");
 pub const semantics = @import("semantics.zig");
 pub const abi = @import("abi.zig");
 pub const lsp = @import("lsp/mod.zig");
@@ -43,13 +44,6 @@ pub const AstNode = ast.AstNode;
 pub const ContractNode = ast.ContractNode;
 /// Function declaration node
 pub const FunctionNode = ast.FunctionNode;
-/// Variable declaration node
-pub const VariableDeclNode = ast.Statements.VariableDeclNode;
-/// Expression node
-pub const ExprNode = ast.Expressions.ExprNode;
-/// Type reference
-/// Memory region specification
-pub const MemoryRegion = ast.Memory.Region;
 /// Cleanup function for AST nodes
 pub const deinitAstNodes = ast.deinitAstNodes;
 
@@ -67,10 +61,5 @@ pub const AstSerializer = ast_serializer.AstSerializer;
 /// Serialization options for customizing output
 pub const SerializationOptions = ast_serializer.SerializationOptions;
 /// Type resolver entry point
-pub const TypeResolver = @import("ast/type_resolver/mod.zig").TypeResolver;
+pub const TypeResolver = type_resolver.TypeResolver;
 pub const comptime_eval = @import("comptime/mod.zig");
-
-// Core analysis types
-/// Type representation (unified AST type info)
-pub const OraType = ast.type_info.OraType;
-pub const TypeInfo = ast.type_info.TypeInfo;

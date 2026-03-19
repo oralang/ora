@@ -243,7 +243,7 @@ pub const Formatter = struct {
         };
     }
 
-    fn getExprSpan(expr: *const lib.ExprNode) ?lib.ast.SourceSpan {
+    fn getExprSpan(expr: *const lib.ast.Expressions.ExprNode) ?lib.ast.SourceSpan {
         return switch (expr.*) {
             .Identifier => |id| id.span,
             .Literal => |lit| getLiteralSpan(&lit),
@@ -343,15 +343,15 @@ pub const Formatter = struct {
         try self.formatTypeInfo(param.type_info);
     }
 
-    fn formatTypeInfo(self: *Formatter, type_info: lib.TypeInfo) FormatError!void {
-        if (type_info.ora_type) |ora_type| {
+    fn formatTypeInfo(self: *Formatter, info: lib.ast.type_info.TypeInfo) FormatError!void {
+        if (info.ora_type) |ora_type| {
             try self.formatOraType(ora_type);
         } else {
             return FormatError.UnsupportedType;
         }
     }
 
-    fn formatOraType(self: *Formatter, ora_type: lib.OraType) FormatError!void {
+    fn formatOraType(self: *Formatter, ora_type: lib.ast.type_info.OraType) FormatError!void {
         switch (ora_type) {
             .u8 => try self.writer.write("u8"),
             .u16 => try self.writer.write("u16"),
@@ -481,7 +481,7 @@ pub const Formatter = struct {
         }
     }
 
-    fn formatClause(self: *Formatter, clause: *lib.ExprNode) FormatError!void {
+    fn formatClause(self: *Formatter, clause: *lib.ast.Expressions.ExprNode) FormatError!void {
         try self.writer.write("(");
         try self.formatExpression(clause);
         try self.writer.write(")");
@@ -847,7 +847,7 @@ pub const Formatter = struct {
         }
     }
 
-    fn formatExpression(self: *Formatter, expr: *const lib.ExprNode) FormatError!void {
+    fn formatExpression(self: *Formatter, expr: *const lib.ast.Expressions.ExprNode) FormatError!void {
         switch (expr.*) {
             .Literal => |lit| try self.formatLiteral(&lit),
             .Identifier => |*id| try self.writer.write(id.name),
@@ -1140,7 +1140,7 @@ pub const Formatter = struct {
         try self.writer.write(op_str);
     }
 
-    fn formatVariableDecl(self: *Formatter, var_decl: *const lib.VariableDeclNode) FormatError!void {
+    fn formatVariableDecl(self: *Formatter, var_decl: *const lib.ast.Statements.VariableDeclNode) FormatError!void {
         // Memory region
         const region_str = switch (var_decl.region) {
             .Storage => "storage",

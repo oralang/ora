@@ -642,7 +642,7 @@ pub fn loadProgramWithImportsTypedWithResolverOptions(
 
     try ensureLogSignaturesForProgram(&semantics_result.symbols, program.nodes);
 
-    var type_resolver = lib.TypeResolver.init(allocator, program.arena.allocator(), &semantics_result.symbols);
+    var type_resolver = lib.type_resolver.TypeResolver.init(allocator, program.arena.allocator(), &semantics_result.symbols);
     defer type_resolver.deinit();
     try type_resolver.resolveTypes(program.nodes);
 
