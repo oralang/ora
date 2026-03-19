@@ -1381,7 +1381,7 @@ fn runCompilerV2TokenEmit(
     const source_text = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
     defer allocator.free(source_text);
 
-    var lexer = try lib.Lexer.init(allocator, source_text);
+    var lexer = lib.Lexer.init(allocator, source_text);
     defer lexer.deinit();
 
     const tokens = try lexer.scanTokens();
