@@ -12,7 +12,7 @@ const testing = std.testing;
 
 // Export core compiler modules
 pub const lexer = @import("ora_lexer");
-pub const parser = @import("parser.zig");
+pub const parser = @import("parser/mod.zig");
 pub const ast = @import("ora_ast");
 pub const ast_visitor = @import("ora_ast").ast_visitor;
 pub const ast_arena = @import("ora_types").ast_arena;
@@ -31,6 +31,8 @@ pub const compiler = @import("compiler/mod.zig");
 pub const Lexer = lexer.Lexer;
 /// Parser for generating AST from tokens
 pub const Parser = parser.Parser;
+/// Parser error type
+pub const ParserError = parser.ParserError;
 /// Token representation
 pub const Token = lexer.Token;
 /// Token type enumeration

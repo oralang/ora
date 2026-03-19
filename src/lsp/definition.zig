@@ -1,6 +1,6 @@
 const std = @import("std");
 const lexer = @import("ora_lexer");
-const parser = @import("../parser.zig");
+const parser = @import("../parser/mod.zig");
 const ast = @import("ora_ast");
 const frontend = @import("frontend.zig");
 
