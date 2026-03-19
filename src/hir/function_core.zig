@@ -110,6 +110,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var locals = try self.cloneLocals(&self.locals);
                 const terminated = try self.lowerBody(function.body, &locals);
                 if (!terminated) {
+                    try @This().emitEnsuresClauses(self, &locals);
                     if (self.return_type) |return_type| {
                         const value = try self.defaultValue(return_type, function.range);
                         const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
@@ -127,6 +128,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn cloneLocals(self: *FunctionLowerer, locals: *const LocalEnv) anyerror!LocalEnv {
             _ = self;
             return locals.clone();
+        }
+
+        fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
+            if (self.function) |function| {
+                for (function.clauses) |clause| {
+                    if (clause.kind != .ensures) continue;
+                    const condition = try self.lowerExpr(clause.expr, locals);
+                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                    if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                    appendOp(self.block, ensure);
+                }
+            }
+            for (self.extra_verification_clauses) |clause| {
+                if (clause.kind != .ensures) continue;
+                const condition = try self.lowerExpr(clause.expr, locals);
+                const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+                if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, ensure);
+            }
         }
 
         fn insertParameterRefinementGuards(self: *FunctionLowerer, function: ast.FunctionItem) anyerror!void {

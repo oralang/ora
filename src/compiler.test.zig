@@ -1640,6 +1640,29 @@ test "compiler verifies trait ghost method calls with self end to end" {
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
 }
 
+test "compiler lowers ensures on implicit void returns" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn bump() ensures total >= 1 {
+        \\        total = 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures") orelse return error.TestUnexpectedResult;
+    const return_index = std.mem.indexOf(u8, hir_text, "ora.return") orelse return error.TestUnexpectedResult;
+    try testing.expect(ensures_index < return_index);
+}
+
 test "compiler reports trait method body parse error" {
     const source_text =
         \\trait ERC20 {
