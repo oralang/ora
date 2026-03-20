@@ -24,6 +24,7 @@ const constToCtValue = bridge.constToCtValue;
 const evalBinary = bridge.evalBinary;
 const evalUnary = bridge.evalUnary;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
+const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
 const named_type_id_base: u32 = 1_000_000;
 
 pub const TypeQuery = struct {
@@ -178,7 +179,10 @@ const ConstEvaluator = struct {
         for (body.statements) |statement_id| {
             switch (self.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
-                    const value = if (decl.value) |expr_id| self.evalExpr(expr_id) catch null else null;
+                    const value = if (decl.value) |expr_id|
+                        self.normalizeWrappingValueForDecl(decl, expr_id, self.evalExpr(expr_id) catch null) catch null
+                    else
+                        null;
                     self.bindPattern(decl.pattern, value) catch {};
                     if (decl.value) |expr_id| self.values[expr_id.index()] = value;
                 },
@@ -1761,19 +1765,30 @@ const ConstEvaluator = struct {
                     if (decl.value) |expr_id| {
                         switch (self.file.expression(expr_id).*) {
                             .Call => |call| if (try self.evalCallCtValue(call, false)) |ct_value| {
-                                try self.bindPatternCtValue(decl.pattern, ct_value);
-                                self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
+                                var persisted = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
+                                persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, persisted);
+                                if (self.shouldBindNormalizedWrappingValue(decl, expr_id, persisted)) {
+                                    try self.bindPattern(decl.pattern, persisted);
+                                } else {
+                                    try self.bindPatternCtValue(decl.pattern, ct_value);
+                                }
+                                self.values[expr_id.index()] = persisted;
                                 last_value = null;
                                 continue;
                             },
                             else => {},
                         }
                         if (try self.evalExprCtValue(expr_id)) |ct_value| {
-                            try self.bindPatternCtValue(decl.pattern, ct_value);
-                            const persisted = (try ctValueToConstValue(self.allocator, &self.env.heap, ct_value)) orelse try self.evalExprUncached(expr_id);
+                            var persisted = (try ctValueToConstValue(self.allocator, &self.env.heap, ct_value)) orelse try self.evalExprUncached(expr_id);
+                            persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, persisted);
+                            if (self.shouldBindNormalizedWrappingValue(decl, expr_id, persisted)) {
+                                try self.bindPattern(decl.pattern, persisted);
+                            } else {
+                                try self.bindPatternCtValue(decl.pattern, ct_value);
+                            }
                             self.values[expr_id.index()] = persisted;
                         } else {
-                            const persisted = try self.evalExprUncached(expr_id);
+                            const persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, try self.evalExprUncached(expr_id));
                             try self.bindPattern(decl.pattern, persisted);
                             self.values[expr_id.index()] = persisted;
                         }
@@ -1852,10 +1867,16 @@ const ConstEvaluator = struct {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {
                         if (try self.evalExprAsCtValue(expr_id, use_cache)) |ct_value| {
-                            try self.bindPatternCtValue(decl.pattern, ct_value);
-                            self.values[expr_id.index()] = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
+                            var persisted = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
+                            persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, persisted);
+                            if (self.shouldBindNormalizedWrappingValue(decl, expr_id, persisted)) {
+                                try self.bindPattern(decl.pattern, persisted);
+                            } else {
+                                try self.bindPatternCtValue(decl.pattern, ct_value);
+                            }
+                            self.values[expr_id.index()] = persisted;
                         } else {
-                            const persisted = try self.evalExprUncached(expr_id);
+                            const persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, try self.evalExprUncached(expr_id));
                             try self.bindPattern(decl.pattern, persisted);
                             self.values[expr_id.index()] = persisted;
                         }
@@ -2412,6 +2433,48 @@ const ConstEvaluator = struct {
     fn readBoundName(self: *ConstEvaluator, name: []const u8) anyerror!?ConstValue {
         const value = self.env.lookupValue(name) orelse return null;
         return try ctValueToConstValue(self.allocator, &self.env.heap, value);
+    }
+
+    fn normalizeWrappingValueForDecl(self: *ConstEvaluator, decl: ast.VariableDeclStmt, expr_id: ast.ExprId, value: ?ConstValue) !?ConstValue {
+        const type_expr = decl.type_expr orelse return value;
+        if (!self.exprIsWrappingOp(expr_id)) return value;
+        const integer = self.typeExprIntegerType(type_expr) orelse return value;
+        return if (value) |v| try wrapIntegerConstToType(self.allocator, v, integer) else null;
+    }
+
+    fn shouldBindNormalizedWrappingValue(self: *ConstEvaluator, decl: ast.VariableDeclStmt, expr_id: ast.ExprId, value: ?ConstValue) bool {
+        _ = value;
+        return decl.type_expr != null and self.exprIsWrappingOp(expr_id);
+    }
+
+    fn exprIsWrappingOp(self: *ConstEvaluator, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsWrappingOp(group.expr),
+            .Binary => |binary| switch (binary.op) {
+                .wrapping_add, .wrapping_sub, .wrapping_mul, .wrapping_pow, .wrapping_shl, .wrapping_shr => true,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    fn typeExprIntegerType(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?model.IntegerType {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| integerTypeFromName(path.name),
+            else => null,
+        };
+    }
+
+    fn integerTypeFromName(name: []const u8) ?model.IntegerType {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (trimmed.len < 2) return null;
+        const signed = switch (trimmed[0]) {
+            'u' => false,
+            'i' => true,
+            else => return null,
+        };
+        const bits = std.fmt.parseInt(u16, trimmed[1..], 10) catch return null;
+        return .{ .bits = bits, .signed = signed, .spelling = trimmed };
     }
 
     fn constConditionTruthy(self: *ConstEvaluator, value: ConstValue) ?bool {

@@ -92,6 +92,44 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
     };
 }
 
+pub fn wrapIntegerConstToType(allocator: std.mem.Allocator, value: ConstValue, integer: model.IntegerType) !?ConstValue {
+    return switch (value) {
+        .integer => |integer_value| .{ .integer = try wrapIntegerToType(allocator, integer_value, integer) },
+        else => null,
+    };
+}
+
+pub fn wrapIntegerToType(allocator: std.mem.Allocator, value: BigInt, integer: model.IntegerType) !BigInt {
+    const bits = integer.bits orelse return cloneInteger(allocator, value);
+    const signed = integer.signed orelse return cloneInteger(allocator, value);
+    if (bits == 0) return BigInt.initSet(allocator, 0);
+
+    var modulus = try BigInt.initSet(allocator, 1);
+    try BigInt.shiftLeft(&modulus, &modulus, bits);
+
+    var quotient = try BigInt.init(allocator);
+    var remainder = try BigInt.init(allocator);
+    try BigInt.divTrunc(&quotient, &remainder, &value, &modulus);
+
+    const zero = try BigInt.initSet(allocator, 0);
+    if (remainder.order(zero).compare(.lt)) {
+        var adjusted = try BigInt.init(allocator);
+        try BigInt.add(&adjusted, &remainder, &modulus);
+        remainder = adjusted;
+    }
+
+    if (!signed) return remainder;
+
+    var sign_threshold = try BigInt.initSet(allocator, 1);
+    try BigInt.shiftLeft(&sign_threshold, &sign_threshold, bits - 1);
+    if (remainder.order(sign_threshold).compare(.gte)) {
+        var adjusted = try BigInt.init(allocator);
+        try BigInt.sub(&adjusted, &remainder, &modulus);
+        return adjusted;
+    }
+    return remainder;
+}
+
 pub fn constEquals(lhs: ConstValue, rhs: ConstValue) bool {
     return switch (lhs) {
         .integer => |a| switch (rhs) {
@@ -113,6 +151,13 @@ fn negateInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
     var zero = try BigInt.initSet(allocator, 0);
     var result = try BigInt.init(allocator);
     try BigInt.sub(&result, &zero, &value);
+    return result;
+}
+
+fn cloneInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
+    const zero = try BigInt.initSet(allocator, 0);
+    var result = try BigInt.init(allocator);
+    try BigInt.add(&result, &value, &zero);
     return result;
 }
 

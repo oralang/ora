@@ -4342,8 +4342,12 @@ const TypeChecker = struct {
     fn emitIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
         const value = self.const_eval.values[expr_id.index()] orelse return false;
         if (value != .integer or expected_type.kind() != .integer) return false;
-        if (integerValueFitsType(value.integer, expected_type.integer)) return false;
-        const value_text = try self.integerValueText(value.integer);
+        const checked_value = if (exprUsesWrappedIntegerValue(self, expr_id))
+            try const_bridge.wrapIntegerToType(self.arena, value.integer, expected_type.integer)
+        else
+            value.integer;
+        if (integerValueFitsType(checked_value, expected_type.integer)) return false;
+        const value_text = try self.integerValueText(checked_value);
         try self.emitRangeError(range, "constant value {s} does not fit in type '{s}'", .{
             value_text,
             typeDisplayName(expected_type),
@@ -4684,6 +4688,32 @@ fn unwrapRefinement(ty: Type) Type {
 
 fn isGenericTypeParam(ty: Type) bool {
     return unwrapRefinement(ty).kind() == .named;
+}
+
+fn exprIsWrappingOp(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+    return switch (self.file.expression(expr_id).*) {
+        .Group => |group| exprIsWrappingOp(self, group.expr),
+        .Binary => |binary| switch (binary.op) {
+            .wrapping_add, .wrapping_sub, .wrapping_mul, .wrapping_pow, .wrapping_shl, .wrapping_shr => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn exprUsesWrappedIntegerValue(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+    if (exprIsWrappingOp(self, expr_id)) return true;
+    return switch (self.file.expression(expr_id).*) {
+        .Group => |group| exprUsesWrappedIntegerValue(self, group.expr),
+        .Name => if (self.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+            .pattern => |pattern_id| if (self.initializerExprForPattern(pattern_id)) |init_expr|
+                exprUsesWrappedIntegerValue(self, init_expr)
+            else
+                false,
+            else => false,
+        } else false,
+        else => false,
+    };
 }
 
 fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {

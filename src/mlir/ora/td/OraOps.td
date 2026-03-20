@@ -441,8 +441,8 @@ def Ora_AddOp : Ora_PureOp<"add", [
     ```
   }];
   
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   
@@ -503,8 +503,8 @@ def Ora_ShrWrappingOp : Ora_PureOp<"shr_wrapping", [
   ]> {
   let summary = "Wrapping shift-right operation";
   let description = [{Shifts an Ora integer right with wrapping semantics, preserving signedness from the Ora type.}];
-  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
