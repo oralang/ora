@@ -4639,18 +4639,50 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     typename mlir::scf::ForOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    if (!op.getInitArgs().empty())
-        return rewriter.notifyMatchFailure(op, "scf.for iter_args not supported");
-
     auto loc = op.getLoc();
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
+    auto *tc = getTypeConverter();
 
     auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    SmallVector<Type, 4> resultTypes;
+    for (Type t : op.getResultTypes())
+    {
+        SmallVector<Type, 4> convertedTypes;
+        if (!tc || failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty())
+            return failure();
+        resultTypes.append(convertedTypes.begin(), convertedTypes.end());
+    }
+    for (Type t : resultTypes)
+        afterBlock->addArgument(t, loc);
+
+    SmallVector<Type, 4> loopStateTypes;
+    SmallVector<Location, 4> loopStateLocs;
+    loopStateTypes.push_back(u256Type);
+    loopStateLocs.push_back(loc);
+    for (Type t : resultTypes)
+    {
+        loopStateTypes.push_back(t);
+        loopStateLocs.push_back(loc);
+    }
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), loopStateTypes, loopStateLocs);
 
     Region &bodyRegion = op.getRegion();
+    if (!bodyRegion.empty())
+    {
+        Block &entryBlock = bodyRegion.front();
+        if (entryBlock.getNumArguments() != op.getRegionIterArgs().size() + 1)
+            return rewriter.notifyMatchFailure(op, "scf.for body entry args must match induction variable + iter args");
+
+        TypeConverter::SignatureConversion entryConversion(entryBlock.getNumArguments());
+        entryConversion.addInputs(0, u256Type);
+        for (auto [index, resultType] : llvm::enumerate(resultTypes))
+            entryConversion.addInputs(index + 1, resultType);
+        if (failed(rewriter.convertRegionTypes(&bodyRegion, *tc, &entryConversion)))
+            return rewriter.notifyMatchFailure(op, "failed to convert for body region types");
+    }
+
     SmallVector<mlir::scf::YieldOp, 4> yields;
     SmallVector<ora::BreakOp, 4> breaks;
     SmallVector<ora::ContinueOp, 4> continues;
@@ -4672,27 +4704,30 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     parentRegion->getBlocks().splice(afterBlock->getIterator(), bodyRegion.getBlocks());
     Block *bodyBlock = movedBlocks.empty() ? nullptr : movedBlocks.front();
     if (!bodyBlock)
-        bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
-    // Ensure all moved blocks use SIR-compatible argument types (u256), not index.
-    for (Block *b : movedBlocks)
-    {
-        for (BlockArgument arg : b->getArguments())
-        {
-            if (llvm::isa<mlir::IndexType>(arg.getType()))
-                arg.setType(u256Type);
-        }
-    }
+        bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), loopStateTypes, loopStateLocs);
 
     rewriter.setInsertionPointToEnd(parentBlock);
     Value lb = ensureU256(rewriter, loc, adaptor.getLowerBound());
     Value ub = ensureU256(rewriter, loc, adaptor.getUpperBound());
     Value step = ensureU256(rewriter, loc, adaptor.getStep());
-    rewriter.create<sir::BrOp>(loc, ValueRange{lb}, condBlock);
+    SmallVector<Value, 4> initialState;
+    initialState.push_back(lb);
+    initialState.append(adaptor.getInitArgs().begin(), adaptor.getInitArgs().end());
+    rewriter.create<sir::BrOp>(loc, ValueRange(initialState), condBlock);
 
     rewriter.setInsertionPointToStart(condBlock);
     Value iv = condBlock->getArgument(0);
     Value cond = rewriter.create<sir::LtOp>(loc, u256Type, iv, ub);
-    rewriter.create<sir::CondBrOp>(loc, cond, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+    SmallVector<Value, 4> bodyArgs;
+    bodyArgs.push_back(iv);
+    SmallVector<Value, 4> afterArgs;
+    for (unsigned i = 1; i < condBlock->getNumArguments(); ++i)
+    {
+        Value current = condBlock->getArgument(i);
+        bodyArgs.push_back(current);
+        afterArgs.push_back(current);
+    }
+    rewriter.create<sir::CondBrOp>(loc, cond, ValueRange(bodyArgs), ValueRange(afterArgs), bodyBlock, afterBlock);
 
     if (yields.empty())
     {
@@ -4727,9 +4762,12 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         // Avoid trailing ops after a newly inserted terminator by splitting the block.
         auto *tailBlock = rewriter.splitBlock(yBlock, std::next(Block::iterator(y)));
         rewriter.setInsertionPointToEnd(yBlock);
-        Value bodyIv = bodyBlock->getArgument(0);
-        Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
-        rewriter.create<sir::BrOp>(y.getLoc(), ValueRange{next}, condBlock);
+        Value bodyIv = yBlock->getNumArguments() > 0 ? yBlock->getArgument(0) : bodyBlock->getArgument(0);
+        Value next = rewriter.create<sir::AddOp>(loc, u256Type, ensureU256(rewriter, loc, bodyIv), ensureU256(rewriter, loc, step));
+        SmallVector<Value, 4> nextState;
+        nextState.push_back(next);
+        nextState.append(y.getOperands().begin(), y.getOperands().end());
+        rewriter.create<sir::BrOp>(y.getLoc(), ValueRange(nextState), condBlock);
         rewriter.eraseOp(y);
         if (!tailBlock->empty())
         {
@@ -4745,7 +4783,15 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         // Split to avoid trailing ops after the inserted terminator.
         auto *tailBlock = rewriter.splitBlock(brBlock, std::next(Block::iterator(br)));
         rewriter.setInsertionPointToEnd(brBlock);
-        rewriter.create<sir::BrOp>(br.getLoc(), ValueRange{}, afterBlock);
+        SmallVector<Value, 4> exitState;
+        for (unsigned i = 1; i < condBlock->getNumArguments(); ++i)
+        {
+            if (i < brBlock->getNumArguments())
+                exitState.push_back(brBlock->getArgument(i));
+            else
+                exitState.push_back(condBlock->getArgument(i));
+        }
+        rewriter.create<sir::BrOp>(br.getLoc(), ValueRange(exitState), afterBlock);
         rewriter.eraseOp(br);
         if (!tailBlock->empty())
         {
@@ -4760,9 +4806,18 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         // Split to avoid trailing ops after the new terminator.
         auto *tailBlock = rewriter.splitBlock(cBlock, std::next(Block::iterator(cont)));
         rewriter.setInsertionPointToEnd(cBlock);
-        Value bodyIv = bodyBlock->getArgument(0);
-        Value next = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, step);
-        rewriter.create<sir::BrOp>(cont.getLoc(), ValueRange{next}, condBlock);
+        Value bodyIv = cBlock->getNumArguments() > 0 ? cBlock->getArgument(0) : bodyBlock->getArgument(0);
+        Value next = rewriter.create<sir::AddOp>(loc, u256Type, ensureU256(rewriter, loc, bodyIv), ensureU256(rewriter, loc, step));
+        SmallVector<Value, 4> nextState;
+        nextState.push_back(next);
+        for (unsigned i = 1; i < condBlock->getNumArguments(); ++i)
+        {
+            if (i < cBlock->getNumArguments())
+                nextState.push_back(cBlock->getArgument(i));
+            else
+                nextState.push_back(condBlock->getArgument(i));
+        }
+        rewriter.create<sir::BrOp>(cont.getLoc(), ValueRange(nextState), condBlock);
         rewriter.eraseOp(cont);
         if (!tailBlock->empty())
         {
@@ -4776,14 +4831,22 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
     {
         if (b->empty() || !b->back().hasTrait<mlir::OpTrait::IsTerminator>())
         {
+            if (!resultTypes.empty())
+                return rewriter.notifyMatchFailure(op, "scf.for iter_args body missing scf.yield");
             if (b->getNumArguments() == 0)
                 continue;
             rewriter.setInsertionPointToEnd(b);
-            Value next = rewriter.create<sir::AddOp>(loc, u256Type, b->getArgument(0), step);
-            rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
+            Value next = rewriter.create<sir::AddOp>(loc, u256Type, ensureU256(rewriter, loc, b->getArgument(0)), ensureU256(rewriter, loc, step));
+            SmallVector<Value, 4> nextState;
+            nextState.push_back(next);
+            for (unsigned i = 1; i < b->getNumArguments(); ++i)
+                nextState.push_back(b->getArgument(i));
+            rewriter.create<sir::BrOp>(loc, ValueRange(nextState), condBlock);
         }
     }
 
+    if (!resultTypes.empty())
+        op->replaceAllUsesWith(afterBlock->getArguments());
     rewriter.eraseOp(op);
     return success();
 }

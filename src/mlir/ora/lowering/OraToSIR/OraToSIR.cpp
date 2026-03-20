@@ -1613,6 +1613,8 @@ public:
             RewritePatternSet castCleanupPatterns(ctx);
             castCleanupPatterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
             castCleanupPatterns.add<StripNormalizedErrorUnionCastOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
 
             ConversionTarget castCleanupTarget(*ctx);
             castCleanupTarget.addLegalDialect<mlir::BuiltinDialect>();
