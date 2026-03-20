@@ -187,6 +187,15 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     const actual_unwrapped = unwrapRefinement(actual_type);
     if (expected_unwrapped.kind() == .unknown or actual_unwrapped.kind() == .unknown) return true;
     if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) return true;
+    if (expected_unwrapped.kind() == .tuple and actual_unwrapped.kind() == .tuple) {
+        const expected_tuple = expected_unwrapped.tuple;
+        const actual_tuple = actual_unwrapped.tuple;
+        if (expected_tuple.len != actual_tuple.len) return false;
+        for (expected_tuple, actual_tuple) |expected_element, actual_element| {
+            if (!typesAssignable(expected_element, actual_element)) return false;
+        }
+        return true;
+    }
     if (expected_unwrapped.kind() == .array and actual_unwrapped.kind() == .array) {
         const expected_arr = expected_unwrapped.array;
         const actual_arr = actual_unwrapped.array;

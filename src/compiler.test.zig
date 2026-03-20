@@ -8373,6 +8373,24 @@ test "compiler supports named field access on overflow builtin results" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler assigns overflow builtin results to overflow record types" {
+    const source_text =
+        \\pub fn run(rate_per_second: u256, duration: u256) -> u256 {
+        \\    let expected_total: struct { value: u256, overflow: bool } = @mulWithOverflow(rate_per_second, duration);
+        \\    if (expected_total.overflow) {
+        \\        return 0;
+        \\    }
+        \\    return expected_total.value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_extract"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {
