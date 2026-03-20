@@ -16,6 +16,7 @@ pub const Label = struct {
 pub const Diagnostic = struct {
     severity: Severity,
     message: []const u8,
+    debug_detail: ?[]const u8,
     code: ?[]const u8,
     labels: []Label,
 };
@@ -34,6 +35,7 @@ pub const DiagnosticList = struct {
     pub fn deinit(self: *DiagnosticList) void {
         for (self.items.items) |diag| {
             self.allocator.free(diag.message);
+            if (diag.debug_detail) |detail| self.allocator.free(detail);
             if (diag.code) |code| self.allocator.free(code);
             for (diag.labels) |label| {
                 self.allocator.free(label.message);
@@ -49,15 +51,29 @@ pub const DiagnosticList = struct {
     }
 
     pub fn append(self: *DiagnosticList, severity: Severity, message: []const u8, location: source.SourceLocation) !void {
-        try self.appendWithCode(severity, null, message, &[_]Label{.{
+        try self.appendWithCodeAndDebug(severity, null, message, null, &[_]Label{.{
             .location = location,
             .message = "here",
         }});
     }
 
     pub fn appendWithCode(self: *DiagnosticList, severity: Severity, code: ?[]const u8, message: []const u8, labels: []const Label) !void {
+        try self.appendWithCodeAndDebug(severity, code, message, null, labels);
+    }
+
+    pub fn appendWithCodeAndDebug(
+        self: *DiagnosticList,
+        severity: Severity,
+        code: ?[]const u8,
+        message: []const u8,
+        debug_detail: ?[]const u8,
+        labels: []const Label,
+    ) !void {
         const owned_message = try self.allocator.dupe(u8, message);
         errdefer self.allocator.free(owned_message);
+
+        const owned_debug_detail = if (debug_detail) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (owned_debug_detail) |value| self.allocator.free(value);
 
         const owned_code = if (code) |value| try self.allocator.dupe(u8, value) else null;
         errdefer if (owned_code) |value| self.allocator.free(value);
@@ -78,6 +94,7 @@ pub const DiagnosticList = struct {
         try self.items.append(self.allocator, .{
             .severity = severity,
             .message = owned_message,
+            .debug_detail = owned_debug_detail,
             .code = owned_code,
             .labels = owned_labels,
         });
@@ -87,13 +104,20 @@ pub const DiagnosticList = struct {
         try self.append(.Error, message, location);
     }
 
+    pub fn appendErrorWithDebug(self: *DiagnosticList, message: []const u8, debug_detail: []const u8, location: source.SourceLocation) !void {
+        try self.appendWithCodeAndDebug(.Error, null, message, debug_detail, &[_]Label{.{
+            .location = location,
+            .message = "here",
+        }});
+    }
+
     pub fn appendNote(self: *DiagnosticList, message: []const u8, location: source.SourceLocation) !void {
         try self.append(.Note, message, location);
     }
 
     pub fn appendList(self: *DiagnosticList, other: *const DiagnosticList) !void {
         for (other.items.items) |diag| {
-            try self.appendWithCode(diag.severity, diag.code, diag.message, diag.labels);
+            try self.appendWithCodeAndDebug(diag.severity, diag.code, diag.message, diag.debug_detail, diag.labels);
         }
     }
 

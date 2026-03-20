@@ -1812,24 +1812,28 @@ pub fn mixin(Builder: type) type {
         }
 
         fn recordUnsupportedSyntax(self: *Builder, node: SyntaxNode, comptime category: []const u8) !void {
-            var buffer: [160]u8 = undefined;
-            const message = std.fmt.bufPrint(&buffer, "unsupported syntax lowering for {s} node {s}", .{
+            var user_buffer: [96]u8 = undefined;
+            const user_message = std.fmt.bufPrint(&user_buffer, "unsupported {s} syntax", .{
+                category,
+            }) catch "unsupported syntax";
+            var debug_buffer: [160]u8 = undefined;
+            const debug_message = std.fmt.bufPrint(&debug_buffer, "unsupported syntax lowering for {s} node {s}", .{
                 category,
                 @tagName(node.kind()),
             }) catch "unsupported syntax lowering";
-            try self.diagnostics.appendError(message, .{
+            try self.diagnostics.appendErrorWithDebug(user_message, debug_message, .{
                 .file_id = self.file.file_id,
                 .range = node.range(),
             });
         }
 
         fn recordMalformedSyntax(self: *Builder, node: SyntaxNode, comptime category: []const u8, detail: []const u8) !void {
-            var buffer: [192]u8 = undefined;
-            const message = std.fmt.bufPrint(&buffer, "malformed {s}: {s}", .{
+            var debug_buffer: [192]u8 = undefined;
+            const debug_message = std.fmt.bufPrint(&debug_buffer, "malformed {s}: {s}", .{
                 @tagName(node.kind()),
                 detail,
             }) catch "malformed syntax";
-            try self.diagnostics.appendError(message, .{
+            try self.diagnostics.appendErrorWithDebug(detail, debug_message, .{
                 .file_id = self.file.file_id,
                 .range = node.range(),
             });

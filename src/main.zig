@@ -545,11 +545,11 @@ pub fn main() !void {
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, resolver.options, &metrics);
+        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, resolver.options, &metrics, debug_enabled);
     } else if (emit_cfg or emit_sir_text or emit_bytecode) {
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, resolver.options);
+        try runMlirEmitAdvanced(allocator, file_path, mlir_options, resolver.options, debug_enabled);
     } else {
-        try runCompilerMlirEmit(allocator, file_path, mlir_options, resolver.options);
+        try runCompilerMlirEmit(allocator, file_path, mlir_options, resolver.options, debug_enabled);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -631,7 +631,7 @@ fn runBuildArtifacts(
     try validateConfiguredInitArgs(allocator, file_path, resolver_options, configured_init_args);
 
     // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -646,7 +646,7 @@ fn runBuildArtifacts(
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
-    const build_emit_result = runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options);
+    const build_emit_result = runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options, build_mlir_options.debug_enabled);
     build_emit_result catch |err| switch (err) {
         error.VerificationFailed => verification_failed = true,
         else => return err,
@@ -1191,11 +1191,17 @@ fn writeCompilerDiagnosticsText(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
     diagnostics_list: *const compiler.diagnostics.DiagnosticList,
+    debug_enabled: bool,
 ) !void {
     if (diagnostics_list.items.items.len == 0) return;
     try writer.print("Diagnostics: {d}\n", .{diagnostics_list.items.items.len});
     for (diagnostics_list.items.items) |diag| {
         try writer.print("{s}: {s}\n", .{ compilerDiagnosticSeverityName(diag.severity), diag.message });
+        if (debug_enabled) {
+            if (diag.debug_detail) |detail| {
+                try writer.print("  = debug: {s}\n", .{detail});
+            }
+        }
         try writeCompilerDiagnosticSnippet(writer, sources, diag.labels);
         try writeCompilerDiagnosticSecondaryLabels(writer, sources, diag.labels);
     }
@@ -1205,9 +1211,10 @@ fn exitOnCompilerErrors(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
     diagnostics_list: *const compiler.diagnostics.DiagnosticList,
+    debug_enabled: bool,
 ) !void {
     if (!compilerDiagnosticsHasErrors(diagnostics_list)) return;
-    try writeCompilerDiagnosticsText(writer, sources, diagnostics_list);
+    try writeCompilerDiagnosticsText(writer, sources, diagnostics_list, debug_enabled);
     try writer.flush();
     std.process.exit(1);
 }
@@ -1216,20 +1223,21 @@ fn exitOnCompilationErrors(
     writer: anytype,
     db: *compiler.db.CompilerDb,
     module_id: compiler.source.ModuleId,
+    debug_enabled: bool,
 ) !*const compiler.sema.TypeCheckResult {
     const module = db.sources.module(module_id);
 
     const syntax_diags = try db.syntaxDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, syntax_diags);
+    try exitOnCompilerErrors(writer, &db.sources, syntax_diags, debug_enabled);
 
     const ast_diags = try db.astDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, ast_diags);
+    try exitOnCompilerErrors(writer, &db.sources, ast_diags, debug_enabled);
 
     const resolution_diags = try db.resolutionDiagnostics(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, resolution_diags);
+    try exitOnCompilerErrors(writer, &db.sources, resolution_diags, debug_enabled);
 
     const module_typecheck = try db.moduleTypeCheck(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics);
+    try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
     return module_typecheck;
 }
 
@@ -1382,6 +1390,7 @@ fn writeCompilerAst(
     typecheck: ?*const compiler.sema.TypeCheckResult,
     diagnostics_list: *const compiler.diagnostics.DiagnosticList,
     format: []const u8,
+    debug_enabled: bool,
 ) !void {
     if (!std.mem.eql(u8, format, "tree") and !std.mem.eql(u8, format, "json")) {
         return error.InvalidArgument;
@@ -1422,7 +1431,7 @@ fn writeCompilerAst(
 
     try writer.print("Compiler {s}AST\n", .{if (typecheck != null) "typed " else ""});
     try writer.print("Root items: {d}\n", .{ast_file.root_items.len});
-    try writeCompilerDiagnosticsText(writer, null, diagnostics_list);
+    try writeCompilerDiagnosticsText(writer, null, diagnostics_list, debug_enabled);
     for (ast_file.root_items, 0..) |item_id, index| {
         const item = ast_file.item(item_id).*;
         try writer.print("[{d}] {s}", .{ index, compilerItemKindName(item) });
@@ -1444,6 +1453,7 @@ fn runCompilerAstEmit(
     include_types: bool,
     resolver_options: import_graph.ResolverOptions,
     m: *Metrics,
+    debug_enabled: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -1461,11 +1471,11 @@ fn runCompilerAstEmit(
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
-    const module_typecheck = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
+    const module_typecheck = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
     const typecheck = if (include_types) module_typecheck else null;
     const diagnostics_list = &module_typecheck.diagnostics;
 
-    writeCompilerAst(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
+    writeCompilerAst(allocator, stdout, ast_file, typecheck, diagnostics_list, format, debug_enabled) catch |err| switch (err) {
         error.InvalidArgument => {
             try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
             try stdout.flush();
@@ -1481,6 +1491,7 @@ fn runCompilerMlirEmit(
     file_path: []const u8,
     mlir_options: MlirOptions,
     resolver_options: import_graph.ResolverOptions,
+    debug_enabled: bool,
 ) !void {
     const c = @import("mlir_c_api").c;
 
@@ -1499,7 +1510,7 @@ fn runCompilerMlirEmit(
     m.end();
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     if (mlir_options.validate_mlir) {
@@ -1557,6 +1568,7 @@ fn runMlirEmitAdvanced(
     file_path: []const u8,
     mlir_options: MlirOptions,
     resolver_options: import_graph.ResolverOptions,
+    debug_enabled: bool,
 ) !void {
     const c = @import("mlir_c_api").c;
 
@@ -1579,7 +1591,7 @@ fn runMlirEmitAdvanced(
     m.end();
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
@@ -2048,6 +2060,7 @@ fn runAbiEmit(
     emit_abi_solidity: bool,
     emit_abi_extras: bool,
     resolver_options: import_graph.ResolverOptions,
+    debug_enabled: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -2059,7 +2072,7 @@ fn runAbiEmit(
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
     defer contract_abi.deinit();
@@ -2503,7 +2516,7 @@ test "compiler typed AST writer prints root item types" {
 
     var buffer: std.ArrayList(u8) = .{};
     defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree");
+    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree", false);
 
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler typed AST") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Function id : fn(u256) -> u256") != null);
@@ -2526,7 +2539,7 @@ test "compiler JSON AST writer includes diagnostics array" {
 
     var buffer: std.ArrayList(u8) = .{};
     defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json");
+    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json", false);
 
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);

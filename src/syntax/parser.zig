@@ -2258,7 +2258,19 @@ const Parser = struct {
 
         try children.append(self.allocator, .{ .token = self.bump() });
         var builtin_name: ?[]const u8 = null;
-        if (self.at(.Identifier)) {
+        if (self.at(.Import)) {
+            const name_token = self.bump();
+            builtin_name = "import";
+            try children.append(self.allocator, .{ .token = name_token });
+            try self.diagnostics.appendErrorWithDebug(
+                "@import(...) is only allowed in 'comptime const' declarations",
+                "builtin expression parser encountered reserved import syntax outside a top-level comptime import item",
+                .{
+                    .file_id = self.file_id,
+                    .range = self.tokens.items[name_token.index()].range,
+                },
+            );
+        } else if (self.at(.Identifier)) {
             const name_token = self.bump();
             builtin_name = self.source_text[self.tokens.items[name_token.index()].range.start..self.tokens.items[name_token.index()].range.end];
             try children.append(self.allocator, .{ .token = name_token });
