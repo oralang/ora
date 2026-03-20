@@ -608,6 +608,8 @@ fn runBuildArtifacts(
         try std.fs.cwd().deleteTree(artifact_root);
     }
     try std.fs.cwd().makePath(artifact_root);
+    var build_succeeded = false;
+    errdefer if (!build_succeeded) std.fs.cwd().deleteTree(artifact_root) catch {};
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
@@ -659,8 +661,6 @@ fn runBuildArtifacts(
     try moveArtifactFile(allocator, artifact_root, smt_json_file, verify_dir);
 
     if (verification_failed) {
-        try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
-        try stdout.flush();
         return error.VerificationFailed;
     }
 
@@ -685,6 +685,7 @@ fn runBuildArtifacts(
     const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
     defer allocator.free(sir_mlir_file);
     try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+    build_succeeded = true;
 }
 
 fn freeResolvedIncludeRoots(allocator: std.mem.Allocator, include_roots: []const []const u8) void {
@@ -1572,8 +1573,10 @@ fn runMlirEmitAdvanced(
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
     var verification_failed = false;
+    var pending_smt_report: ?@import("z3/mod.zig").SmtReportArtifacts = null;
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
+        if (pending_smt_report) |*report| report.deinit(mlir_allocator);
     }
 
     if (mlir_options.verify_z3) {
@@ -1608,9 +1611,7 @@ fn runMlirEmitAdvanced(
         }
 
         if (mlir_options.emit_smt_report) {
-            var smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
-            defer smt_report.deinit(mlir_allocator);
-            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
+            pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
         }
 
         if (!verification_result.success) {
@@ -1642,9 +1643,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
-        var smt_report = try verifier.buildSmtReport(final_module, file_path, null);
-        defer smt_report.deinit(mlir_allocator);
-        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, smt_report, stdout);
+        pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
         m.end();
     }
 
@@ -1846,6 +1845,12 @@ fn runMlirEmitAdvanced(
             try emitBytecodeFromSirText(allocator, sir_text, file_path, mlir_options.output_dir, stdout);
             m.end();
         }
+    }
+
+    if (pending_smt_report) |*report| {
+        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout);
+        report.deinit(mlir_allocator);
+        pending_smt_report = null;
     }
 
     try stdout.flush();

@@ -3638,6 +3638,25 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         }
     }
 
+    // Narrow error_union materialization from (tag, payload): pack to u256.
+    if (op.getNumOperands() == 2 && op.getNumResults() == 1)
+    {
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+        {
+            if (!isNarrowErrorUnion(errType))
+                return failure();
+            auto u256Ty = sir::U256Type::get(rewriter.getContext());
+            auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+            Value tag = ensureU256(rewriter, loc, adaptor.getOperands()[0]);
+            Value payload = ensureU256(rewriter, loc, adaptor.getOperands()[1]);
+            Value one = rewriter.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
+            Value shifted = rewriter.create<sir::ShlOp>(loc, u256Ty, payload, one);
+            Value packed = rewriter.create<sir::OrOp>(loc, u256Ty, shifted, tag);
+            rewriter.replaceOp(op, packed);
+            return success();
+        }
+    }
+
     // Wide error_union materialization: split packed u256 into (tag, payload).
     if (op.getNumOperands() == 1 && op.getNumResults() == 2)
     {
@@ -3745,6 +3764,28 @@ LogicalResult NormalizeReturnOp::matchAndRewrite(
                 changed = true;
                 continue;
             }
+            if (auto castOp = operand.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (castOp.getNumOperands() == 1)
+                {
+                    newOperands.push_back(ensureU256(rewriter, op.getLoc(), castOp.getOperand(0)));
+                    changed = true;
+                    continue;
+                }
+                if (castOp.getNumOperands() == 2)
+                {
+                    auto u256Type = sir::U256Type::get(rewriter.getContext());
+                    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+                    Value tag = ensureU256(rewriter, op.getLoc(), castOp.getOperand(0));
+                    Value payload = ensureU256(rewriter, op.getLoc(), castOp.getOperand(1));
+                    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 1));
+                    Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, payload, one);
+                    Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, tag);
+                    newOperands.push_back(packed);
+                    changed = true;
+                    continue;
+                }
+            }
         }
         newOperands.push_back(operand);
     }
@@ -3792,6 +3833,28 @@ LogicalResult NormalizeScfYieldOp::matchAndRewrite(
                 changed = true;
                 continue;
             }
+            if (auto castOp = operand.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (castOp.getNumOperands() == 1)
+                {
+                    newOperands.push_back(ensureU256(rewriter, op.getLoc(), castOp.getOperand(0)));
+                    changed = true;
+                    continue;
+                }
+                if (castOp.getNumOperands() == 2)
+                {
+                    auto u256Type = sir::U256Type::get(rewriter.getContext());
+                    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+                    Value tag = ensureU256(rewriter, op.getLoc(), castOp.getOperand(0));
+                    Value payload = ensureU256(rewriter, op.getLoc(), castOp.getOperand(1));
+                    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 1));
+                    Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, payload, one);
+                    Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, tag);
+                    newOperands.push_back(packed);
+                    changed = true;
+                    continue;
+                }
+            }
         }
         newOperands.push_back(operand);
     }
@@ -3838,6 +3901,28 @@ LogicalResult NormalizeOraYieldOp::matchAndRewrite(
                 newOperands.push_back(packed);
                 changed = true;
                 continue;
+            }
+            if (auto castOp = operand.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (castOp.getNumOperands() == 1)
+                {
+                    newOperands.push_back(ensureU256(rewriter, op.getLoc(), castOp.getOperand(0)));
+                    changed = true;
+                    continue;
+                }
+                if (castOp.getNumOperands() == 2)
+                {
+                    auto u256Type = sir::U256Type::get(rewriter.getContext());
+                    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+                    Value tag = ensureU256(rewriter, op.getLoc(), castOp.getOperand(0));
+                    Value payload = ensureU256(rewriter, op.getLoc(), castOp.getOperand(1));
+                    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 1));
+                    Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, payload, one);
+                    Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, tag);
+                    newOperands.push_back(packed);
+                    changed = true;
+                    continue;
+                }
             }
         }
         newOperands.push_back(operand);
