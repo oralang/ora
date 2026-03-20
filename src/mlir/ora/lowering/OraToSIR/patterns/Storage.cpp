@@ -971,11 +971,11 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
             return rewriter.notifyMatchFailure(op, "could not find module for struct field lookup");
         }
 
-        // Look for ora.struct.decl operation with matching name
+        // Look for ora.struct.decl operation with matching symbol name
         ora::StructDeclOp structDecl = nullptr;
         module.walk([&](ora::StructDeclOp declOp)
                     {
-            auto declNameAttr = declOp->getAttrOfType<StringAttr>("name");
+            auto declNameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
             if (declNameAttr && declNameAttr.getValue() == structName)
             {
                 structDecl = declOp;
