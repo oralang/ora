@@ -8391,6 +8391,40 @@ test "compiler assigns overflow builtin results to overflow record types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
 }
 
+test "compiler supports general anonymous struct types" {
+    const source_text =
+        \\pub fn run(amount: u256) -> u256 {
+        \\    let payload: struct { amount: u256, ok: bool } = .{ .amount = amount, .ok = true };
+        \\    if (payload.ok) {
+        \\        return payload.amount;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const payload_pattern = findVariablePatternByName(ast_file, body.statements, "payload").?;
+    const payload_type = typecheck.pattern_types[payload_pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.anonymous_struct, payload_type.kind());
+    try testing.expectEqual(@as(usize, 2), payload_type.anonymous_struct.fields.len);
+    try testing.expectEqualStrings("amount", payload_type.anonymous_struct.fields[0].name);
+    try testing.expectEqualStrings("ok", payload_type.anonymous_struct.fields[1].name);
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {

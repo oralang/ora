@@ -23,6 +23,16 @@ pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.Ast
             }
             break :blk .{ .tuple = elements };
         },
+        .AnonymousStruct => |struct_type| blk: {
+            const fields = try allocator.alloc(model.AnonymousStructField, struct_type.fields.len);
+            for (struct_type.fields, 0..) |field, index| {
+                fields[index] = .{
+                    .name = field.name,
+                    .ty = try descriptorFromTypeExpr(allocator, file, item_index, field.type_expr),
+                };
+            }
+            break :blk .{ .anonymous_struct = .{ .fields = fields } };
+        },
         .Array => |array| .{ .array = .{
             .element_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, array.element)),
             .len = parseArrayLen(array.size),
@@ -162,6 +172,7 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
             break :blk std.meta.eql(left.name, right.name) and typeSliceEql(left.param_types, right.param_types) and typeSliceEql(left.return_types, right.return_types);
         },
         .tuple => |left| typeSliceEql(left, rhs.tuple),
+        .anonymous_struct => |left| anonymousStructFieldSliceEql(left.fields, rhs.anonymous_struct.fields),
         .array => |left| blk: {
             const right = rhs.array;
             break :blk left.len == right.len and typeEql(left.element_type.*, right.element_type.*);
@@ -195,6 +206,22 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
             if (!typesAssignable(expected_element, actual_element)) return false;
         }
         return true;
+    }
+    if (expected_unwrapped.kind() == .anonymous_struct and actual_unwrapped.kind() == .anonymous_struct) {
+        const expected_fields = expected_unwrapped.anonymous_struct.fields;
+        const actual_fields = actual_unwrapped.anonymous_struct.fields;
+        if (expected_fields.len != actual_fields.len) return false;
+        for (expected_fields, actual_fields) |expected_field, actual_field| {
+            if (!std.mem.eql(u8, expected_field.name, actual_field.name)) return false;
+            if (!typesAssignable(expected_field.ty, actual_field.ty)) return false;
+        }
+        return true;
+    }
+    if (expected_unwrapped.kind() == .anonymous_struct and actual_unwrapped.kind() == .tuple) {
+        return anonymousStructAssignableFromTuple(expected_unwrapped.anonymous_struct.fields, actual_unwrapped.tuple);
+    }
+    if (expected_unwrapped.kind() == .tuple and actual_unwrapped.kind() == .anonymous_struct) {
+        return anonymousStructAssignableToTuple(expected_unwrapped.tuple, actual_unwrapped.anonymous_struct.fields);
     }
     if (expected_unwrapped.kind() == .array and actual_unwrapped.kind() == .array) {
         const expected_arr = expected_unwrapped.array;
@@ -234,6 +261,31 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
 fn optionalTypeEql(lhs: ?*const Type, rhs: ?*const Type) bool {
     if (lhs == null or rhs == null) return lhs == null and rhs == null;
     return typeEql(lhs.?.*, rhs.?.*);
+}
+
+fn anonymousStructFieldSliceEql(lhs: []const model.AnonymousStructField, rhs: []const model.AnonymousStructField) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left.name, right.name)) return false;
+        if (!typeEql(left.ty, right.ty)) return false;
+    }
+    return true;
+}
+
+fn anonymousStructAssignableFromTuple(fields: []const model.AnonymousStructField, elements: []const Type) bool {
+    if (fields.len != elements.len) return false;
+    for (fields, elements) |field, element| {
+        if (!typesAssignable(field.ty, element)) return false;
+    }
+    return true;
+}
+
+fn anonymousStructAssignableToTuple(elements: []const Type, fields: []const model.AnonymousStructField) bool {
+    if (elements.len != fields.len) return false;
+    for (elements, fields) |element, field| {
+        if (!typesAssignable(element, field.ty)) return false;
+    }
+    return true;
 }
 
 fn isIntegerType(ty: Type) bool {

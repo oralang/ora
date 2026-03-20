@@ -51,6 +51,7 @@ pub const TypeExpr = union(enum) {
     Path: PathTypeExpr,
     Generic: GenericTypeExpr,
     Tuple: TupleTypeExpr,
+    AnonymousStruct: AnonymousStructTypeExpr,
     Array: ArrayTypeExpr,
     Slice: SliceTypeExpr,
     ErrorUnion: ErrorUnionTypeExpr,
@@ -86,6 +87,17 @@ pub const GenericTypeExpr = struct {
 pub const TupleTypeExpr = struct {
     range: source.TextRange,
     elements: []TypeExprId,
+};
+
+pub const AnonymousStructFieldType = struct {
+    range: source.TextRange,
+    name: []const u8,
+    type_expr: TypeExprId,
+};
+
+pub const AnonymousStructTypeExpr = struct {
+    range: source.TextRange,
+    fields: []const AnonymousStructFieldType,
 };
 
 pub const ArrayTypeExpr = struct {

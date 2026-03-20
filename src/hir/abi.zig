@@ -17,6 +17,19 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
             break :blk allocator.dupe(u8, spelling);
         },
         .refinement => |refinement| canonicalAbiType(allocator, refinement.base_type.*),
+        .anonymous_struct => |struct_type| blk: {
+            var parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (parts.items) |part| allocator.free(part);
+                parts.deinit(allocator);
+            }
+            for (struct_type.fields) |field| {
+                try parts.append(allocator, try canonicalAbiType(allocator, field.ty));
+            }
+            const joined = try std.mem.join(allocator, ",", parts.items);
+            defer allocator.free(joined);
+            break :blk std.fmt.allocPrint(allocator, "({s})", .{joined});
+        },
         .array => |array| blk: {
             const element = try canonicalAbiType(allocator, array.element_type.*);
             defer allocator.free(element);
@@ -35,6 +48,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
 pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
     return switch (ty) {
         .tuple => allocator.dupe(u8, "tuple"),
+        .anonymous_struct => allocator.dupe(u8, "tuple"),
         .struct_, .contract => allocator.dupe(u8, "tuple"),
         else => canonicalAbiType(allocator, ty),
     };
@@ -48,6 +62,14 @@ pub fn staticAbiWordCount(ty: sema.Type) ?usize {
             var total: usize = 0;
             for (elements) |element| {
                 const words = staticAbiWordCount(element) orelse return null;
+                total += words;
+            }
+            break :blk total;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            var total: usize = 0;
+            for (struct_type.fields) |field| {
+                const words = staticAbiWordCount(field.ty) orelse return null;
                 total += words;
             }
             break :blk total;

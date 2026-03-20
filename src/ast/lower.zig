@@ -339,6 +339,12 @@ const Validator = struct {
             .Tuple => |tuple| {
                 for (tuple.elements) |type_id| _ = try self.expectType(type_id, type_range, "tuple type references invalid element type id");
             },
+            .AnonymousStruct => |struct_type| {
+                try self.validateNames(AnonymousStructFieldAdapter.init(struct_type.fields), "duplicate anonymous struct field '{s}'");
+                for (struct_type.fields) |field| {
+                    _ = try self.expectType(field.type_expr, field.range, "anonymous struct type references invalid field type id");
+                }
+            },
             .Array => |array| _ = try self.expectType(array.element, type_range, "array type references invalid element type id"),
             .Slice => |slice| _ = try self.expectType(slice.element, type_range, "slice type references invalid element type id"),
             .ErrorUnion => |union_type| {
@@ -385,6 +391,24 @@ const Validator = struct {
             }
         }
     }
+
+    const AnonymousStructFieldAdapter = struct {
+        slice: []const nodes.AnonymousStructFieldType,
+
+        fn init(fields: []const nodes.AnonymousStructFieldType) AnonymousStructFieldAdapter {
+            return .{ .slice = fields };
+        }
+
+        pub fn name(self: AnonymousStructFieldAdapter, entry: nodes.AnonymousStructFieldType) []const u8 {
+            _ = self;
+            return entry.name;
+        }
+
+        pub fn range(self: AnonymousStructFieldAdapter, entry: nodes.AnonymousStructFieldType) source.TextRange {
+            _ = self;
+            return entry.range;
+        }
+    };
 
     fn validateStructFields(self: *Validator, fields: []const nodes.StructField, noun: []const u8) !void {
         var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);

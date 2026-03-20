@@ -270,6 +270,18 @@ const Lowerer = struct {
                     if (element_types.items.len == 0) null else element_types.items.ptr,
                 );
             },
+            .AnonymousStruct => |struct_type| blk: {
+                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                for (struct_type.fields) |field| {
+                    field_types.append(self.allocator, self.lowerTypeExpr(field.type_expr)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    field_types.items.len,
+                    if (field_types.items.len == 0) null else field_types.items.ptr,
+                );
+            },
             .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
@@ -387,6 +399,18 @@ const Lowerer = struct {
                     self.context,
                     element_types.items.len,
                     if (element_types.items.len == 0) null else element_types.items.ptr,
+                );
+            },
+            .anonymous_struct => |struct_type| blk: {
+                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                for (struct_type.fields) |field| {
+                    field_types.append(self.allocator, self.lowerSemaType(field.ty, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    field_types.items.len,
+                    if (field_types.items.len == 0) null else field_types.items.ptr,
                 );
             },
         };
@@ -787,6 +811,7 @@ const Lowerer = struct {
             .Path => |node| node.range,
             .Generic => |node| node.range,
             .Tuple => |node| node.range,
+            .AnonymousStruct => |node| node.range,
             .Array => |node| node.range,
             .Slice => |node| node.range,
             .ErrorUnion => |node| node.range,

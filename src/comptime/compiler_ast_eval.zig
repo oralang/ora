@@ -944,6 +944,13 @@ const ConstEvaluator = struct {
                 }
                 break :blk total;
             },
+            .AnonymousStruct => |struct_type| blk: {
+                var total: u256 = 0;
+                for (struct_type.fields) |field| {
+                    total += self.typeExprByteSize(field.type_expr) orelse break :blk null;
+                }
+                break :blk total;
+            },
             .Array => |array| blk: {
                 const element_size = self.typeExprByteSize(array.element) orelse break :blk null;
                 const len = self.arraySizeValue(array.size) orelse break :blk null;
@@ -994,6 +1001,16 @@ const ConstEvaluator = struct {
                     try rendered_elements.append(self.allocator, name);
                 }
                 const joined = try std.mem.join(self.allocator, ",", rendered_elements.items);
+                break :blk try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+            },
+            .AnonymousStruct => |struct_type| blk: {
+                var rendered_fields: std.ArrayList([]const u8) = .{};
+                defer rendered_fields.deinit(self.allocator);
+                for (struct_type.fields) |field| {
+                    const name = (try self.typeExprAbiName(field.type_expr)) orelse break :blk null;
+                    try rendered_fields.append(self.allocator, name);
+                }
+                const joined = try std.mem.join(self.allocator, ",", rendered_fields.items);
                 break :blk try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
             },
             .Array => |array| blk: {
@@ -1075,6 +1092,7 @@ const ConstEvaluator = struct {
                 };
             },
             .Tuple => |tuple| for (tuple.elements) |element| try self.ensureTypeExprTypeChecked(element),
+            .AnonymousStruct => |struct_type| for (struct_type.fields) |field| try self.ensureTypeExprTypeChecked(field.type_expr),
             .Array => |array| try self.ensureTypeExprTypeChecked(array.element),
             .Slice => |slice| try self.ensureTypeExprTypeChecked(slice.element),
             .ErrorUnion => |error_union| {
@@ -1457,6 +1475,7 @@ const ConstEvaluator = struct {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| self.pathTypeId(path.name),
             .Generic => |generic| self.pathTypeId(generic.name),
+            .AnonymousStruct => null,
             else => null,
         };
     }

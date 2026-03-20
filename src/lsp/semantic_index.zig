@@ -23,6 +23,7 @@ pub const SymbolKind = enum {
 pub const Symbol = struct {
     name: []const u8,
     detail: ?[]const u8 = null,
+    doc_comment: ?[]const u8 = null,
     kind: SymbolKind,
     range: frontend.Range,
     selection_range: frontend.Range,
@@ -37,6 +38,7 @@ pub const SemanticIndex = struct {
         for (self.symbols) |symbol| {
             allocator.free(symbol.name);
             if (symbol.detail) |detail| allocator.free(detail);
+            if (symbol.doc_comment) |doc| allocator.free(doc);
         }
         allocator.free(self.symbols);
     }
@@ -295,7 +297,105 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
         try writer.writeAll(return_type_text);
     }
 
+    // Append spec clauses (requires/ensures) for formal verification visibility.
+    for (function_decl.clauses) |clause| {
+        try writer.writeByte('\n');
+        try writer.writeAll(switch (clause.kind) {
+            .requires => "    requires(",
+            .ensures => "    ensures(",
+            .invariant => "    invariant(",
+        });
+        try writeExprText(writer, file, clause.expr);
+        try writer.writeByte(')');
+    }
+
     return buffer.toOwnedSlice(allocator);
+}
+
+/// Write a best-effort text representation of an expression (for spec clause display).
+fn writeExprText(writer: anytype, file: *const compiler.ast.AstFile, expr_id: compiler.ast.ExprId) !void {
+    switch (file.expression(expr_id).*) {
+        .Name => |name| try writer.writeAll(name.name),
+        .IntegerLiteral => |lit| try writer.writeAll(lit.text),
+        .BoolLiteral => |lit| try writer.writeAll(if (lit.value) "true" else "false"),
+        .Field => |field| {
+            try writeExprText(writer, file, field.base);
+            try writer.writeByte('.');
+            try writer.writeAll(field.name);
+        },
+        .Index => |index| {
+            try writeExprText(writer, file, index.base);
+            try writer.writeByte('[');
+            try writeExprText(writer, file, index.index);
+            try writer.writeByte(']');
+        },
+        .Binary => |bin| {
+            try writeExprText(writer, file, bin.lhs);
+            try writer.print(" {s} ", .{binaryOpText(bin.op)});
+            try writeExprText(writer, file, bin.rhs);
+        },
+        .Unary => |un| {
+            try writer.writeAll(unaryOpText(un.op));
+            try writeExprText(writer, file, un.operand);
+        },
+        .Call => |call| {
+            try writeExprText(writer, file, call.callee);
+            try writer.writeByte('(');
+            for (call.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExprText(writer, file, arg);
+            }
+            try writer.writeByte(')');
+        },
+        .Group => |group| {
+            try writer.writeByte('(');
+            try writeExprText(writer, file, group.expr);
+            try writer.writeByte(')');
+        },
+        .Old => |old| {
+            try writer.writeAll("old(");
+            try writeExprText(writer, file, old.expr);
+            try writer.writeByte(')');
+        },
+        .Result => try writer.writeAll("result"),
+        .AddressLiteral => |lit| try writer.writeAll(lit.text),
+        .StringLiteral => |lit| try writer.print("\"{s}\"", .{lit.text}),
+        else => try writer.writeAll("..."),
+    }
+}
+
+fn binaryOpText(op: compiler.ast.BinaryOp) []const u8 {
+    return switch (op) {
+        .add => "+",
+        .sub => "-",
+        .mul => "*",
+        .div => "/",
+        .mod => "%",
+        .pow => "**",
+        .eq => "==",
+        .ne => "!=",
+        .lt => "<",
+        .le => "<=",
+        .gt => ">",
+        .ge => ">=",
+        .and_and => "&&",
+        .or_or => "||",
+        .bit_and => "&",
+        .bit_or => "|",
+        .bit_xor => "^",
+        .shl => "<<",
+        .shr => ">>",
+        else => "?",
+    };
+}
+
+fn unaryOpText(op: compiler.ast.UnaryOp) []const u8 {
+    return switch (op) {
+        .neg => "-",
+        .not_ => "!",
+        .bit_not => "~",
+        .try_ => "try ",
+    };
 }
 
 fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, error_decl: compiler.ast.ErrorDeclItem) ![]u8 {
@@ -364,6 +464,16 @@ fn writeTypeExpr(writer: anytype, file: *const compiler.ast.AstFile, type_expr_i
                 try writeTypeExpr(writer, file, element);
             }
             try writer.writeByte(')');
+        },
+        .AnonymousStruct => |struct_type| {
+            try writer.writeAll("struct { ");
+            for (struct_type.fields, 0..) |field, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(field.name);
+                try writer.writeAll(": ");
+                try writeTypeExpr(writer, file, field.type_expr);
+            }
+            try writer.writeAll(" }");
         },
         .Array => |array| {
             try writer.writeByte('[');
@@ -472,6 +582,7 @@ const SymbolBuilder = struct {
         for (self.symbols.items) |symbol| {
             self.allocator.free(symbol.name);
             if (symbol.detail) |detail| self.allocator.free(detail);
+            if (symbol.doc_comment) |doc| self.allocator.free(doc);
         }
         self.symbols.deinit(self.allocator);
         self.sources.deinit();
@@ -496,9 +607,12 @@ const SymbolBuilder = struct {
         errdefer self.allocator.free(name_copy);
         errdefer if (detail) |detail_text| self.allocator.free(detail_text);
 
+        const doc = try self.extractDocComment(range);
+
         try self.symbols.append(self.allocator, .{
             .name = name_copy,
             .detail = detail,
+            .doc_comment = doc,
             .kind = kind,
             .range = self.textRangeToRange(range),
             .selection_range = self.textRangeToSelectionRange(range, name),
@@ -506,6 +620,79 @@ const SymbolBuilder = struct {
         });
 
         return self.symbols.items.len - 1;
+    }
+
+    /// Extract doc comments (// lines) immediately preceding a declaration.
+    /// Scans backwards from the declaration start to find contiguous comment lines.
+    fn extractDocComment(self: *const SymbolBuilder, range: compiler.TextRange) !?[]u8 {
+        const start: usize = @intCast(@min(range.start, self.source_text.len));
+        if (start == 0) return null;
+
+        // Walk backwards to find the start of the line containing the declaration.
+        var line_start = start;
+        while (line_start > 0 and self.source_text[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+
+        // Now walk backwards through preceding comment lines.
+        var comment_lines = std.ArrayList([]const u8){};
+        defer comment_lines.deinit(self.allocator);
+
+        var scan_pos = line_start;
+        while (scan_pos > 0) {
+            // Move to the previous line.
+            var prev_line_end = scan_pos;
+            if (prev_line_end > 0 and self.source_text[prev_line_end - 1] == '\n') {
+                prev_line_end -= 1;
+            }
+            var prev_line_start = prev_line_end;
+            while (prev_line_start > 0 and self.source_text[prev_line_start - 1] != '\n') {
+                prev_line_start -= 1;
+            }
+
+            const line = self.source_text[prev_line_start..prev_line_end];
+            const trimmed = std.mem.trimLeft(u8, line, " \t");
+
+            if (std.mem.startsWith(u8, trimmed, "//")) {
+                // Strip the // prefix and optional leading space.
+                var comment_text = trimmed[2..];
+                if (comment_text.len > 0 and comment_text[0] == ' ') {
+                    comment_text = comment_text[1..];
+                }
+                try comment_lines.append(self.allocator, comment_text);
+                scan_pos = prev_line_start;
+            } else if (trimmed.len == 0) {
+                // Empty line — stop collecting.
+                break;
+            } else {
+                // Non-comment, non-empty line — stop.
+                break;
+            }
+        }
+
+        if (comment_lines.items.len == 0) return null;
+
+        // Reverse the lines (we collected bottom-up) and join.
+        std.mem.reverse([]const u8, comment_lines.items);
+
+        var total_len: usize = 0;
+        for (comment_lines.items, 0..) |line, i| {
+            total_len += line.len;
+            if (i < comment_lines.items.len - 1) total_len += 1; // newline
+        }
+
+        const result = try self.allocator.alloc(u8, total_len);
+        var offset: usize = 0;
+        for (comment_lines.items, 0..) |line, i| {
+            @memcpy(result[offset .. offset + line.len], line);
+            offset += line.len;
+            if (i < comment_lines.items.len - 1) {
+                result[offset] = '\n';
+                offset += 1;
+            }
+        }
+
+        return result;
     }
 
     fn textRangeToRange(self: *const SymbolBuilder, range: compiler.TextRange) frontend.Range {

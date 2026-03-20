@@ -1139,6 +1139,13 @@ const CompilerAbiGenerator = struct {
             .array => |array| return self.resolveArrayType(ctx, array),
             .slice => |slice| return self.resolveSliceType(ctx, slice),
             .tuple => |elements| return self.resolveTupleType(ctx, elements),
+            .anonymous_struct => |struct_type| {
+                const elements = try self.allocator.alloc(compiler.sema.Type, struct_type.fields.len);
+                for (struct_type.fields, 0..) |field, index| {
+                    elements[index] = field.ty;
+                }
+                return self.resolveTupleType(ctx, elements);
+            },
             .struct_ => |named| return self.resolveNamedStructType(ctx, named.name),
             .enum_ => |named| return self.resolveNamedEnumType(ctx, named.name),
             .error_union => |error_union| return self.resolveSemaType(ctx, error_union.payload_type.*, &.{}),

@@ -1520,51 +1520,35 @@ pub fn mixin(Builder: type) type {
                 .ArrayType => Lowering.lowerArrayTypeNode(self, node),
                 .SliceType => Lowering.lowerSliceTypeNode(self, node),
                 .ErrorUnionType => Lowering.lowerErrorUnionTypeNode(self, node),
-                .AnonymousStructType => Lowering.lowerOverflowRecordTypeNode(self, node),
+                .AnonymousStructType => Lowering.lowerAnonymousStructTypeNode(self, node),
                 .Error => Support.pushTypeExpr(self, .{ .Error = .{ .range = node.range() } }),
                 else => Lowering.unsupportedType(self, node),
             };
         }
 
-        fn lowerOverflowRecordTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            var value_type_node: ?SyntaxNode = null;
-            var overflow_type_node: ?SyntaxNode = null;
-            var field_count: usize = 0;
-
+        fn lowerAnonymousStructTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
+            var fields: std.ArrayList(nodes.AnonymousStructFieldType) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
                     .node => |field_node| {
                         if (field_node.kind() != .AnonymousStructField) continue;
-                        field_count += 1;
                         const field_name_token = nthDirectIdentifierLikeToken(field_node, 0) orelse
                             return Lowering.malformedType(self, node, "missing field name in anonymous struct type");
-                        const field_name = tokenText(field_name_token);
                         const field_type = firstDirectTypeChild(field_node) orelse
                             return Lowering.malformedType(self, node, "missing field type in anonymous struct type");
-
-                        if (std.mem.eql(u8, field_name, "value")) {
-                            value_type_node = field_type;
-                        } else if (std.mem.eql(u8, field_name, "overflow")) {
-                            overflow_type_node = field_type;
-                        } else {
-                            return Lowering.malformedType(self, node, "anonymous struct types are only supported for { value, overflow }");
-                        }
+                        try fields.append(self.allocator, .{
+                            .range = field_node.range(),
+                            .name = tokenText(field_name_token),
+                            .type_expr = try Lowering.lowerTypeNode(self, field_type),
+                        });
                     },
                 }
             }
-
-            if (field_count != 2 or value_type_node == null or overflow_type_node == null) {
-                return Lowering.malformedType(self, node, "anonymous struct types are only supported for { value, overflow }");
-            }
-
-            const elements = try self.allocator.alloc(TypeExprId, 2);
-            elements[0] = try Lowering.lowerTypeNode(self, value_type_node.?);
-            elements[1] = try Lowering.lowerTypeNode(self, overflow_type_node.?);
-            return Support.pushTypeExpr(self, .{ .Tuple = .{
+            return Support.pushTypeExpr(self, .{ .AnonymousStruct = .{
                 .range = node.range(),
-                .elements = elements,
+                .fields = try fields.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -1609,8 +1593,6 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |element_node| if (isTypeKind(element_node.kind())) {
                         try elements.append(self.allocator, try Lowering.lowerTypeNode(self, element_node));
-                    } else if (element_node.kind() == .AnonymousStructType) {
-                        try elements.append(self.allocator, try Lowering.unsupportedType(self, element_node));
                     },
                 }
             }

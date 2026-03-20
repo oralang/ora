@@ -1952,6 +1952,16 @@ const TypeChecker = struct {
                 }
                 break :blk .{ .tuple = substituted };
             },
+            .anonymous_struct => |struct_type| blk: {
+                const fields = try self.arena.alloc(model.AnonymousStructField, struct_type.fields.len);
+                for (struct_type.fields, 0..) |field, index| {
+                    fields[index] = .{
+                        .name = field.name,
+                        .ty = try self.substituteGenericType(field.ty, bindings),
+                    };
+                }
+                break :blk .{ .anonymous_struct = .{ .fields = fields } };
+            },
             .error_union => |error_union| blk: {
                 const payload = try self.substituteGenericType(error_union.payload_type.*, bindings);
                 const errors = try self.arena.alloc(Type, error_union.error_types.len);
@@ -1976,6 +1986,7 @@ const TypeChecker = struct {
             .Path => |node| node.range,
             .Generic => |node| node.range,
             .Tuple => |node| node.range,
+            .AnonymousStruct => |node| node.range,
             .Array => |node| node.range,
             .Slice => |node| node.range,
             .ErrorUnion => |node| node.range,
@@ -2048,6 +2059,16 @@ const TypeChecker = struct {
                     elements[index] = try self.resolveTypeExprWithBindings(element, bindings);
                 }
                 break :blk .{ .tuple = elements };
+            },
+            .AnonymousStruct => |struct_type| blk: {
+                const fields = try self.arena.alloc(model.AnonymousStructField, struct_type.fields.len);
+                for (struct_type.fields, 0..) |field, index| {
+                    fields[index] = .{
+                        .name = field.name,
+                        .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
+                    };
+                }
+                break :blk .{ .anonymous_struct = .{ .fields = fields } };
             },
             .Array => |array| .{ .array = .{
                 .element_type = try self.storeType(try self.resolveTypeExprWithBindings(array.element, bindings)),
@@ -3789,6 +3810,7 @@ const TypeChecker = struct {
 
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
         if (overflowTupleFieldType(base_type, field_name)) |field_type| return field_type;
+        if (anonymousStructFieldType(base_type, field_name)) |field_type| return field_type;
         if (self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
         if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
@@ -4651,6 +4673,14 @@ fn overflowTupleFieldType(base_type: Type, field_name: []const u8) ?Type {
     return null;
 }
 
+fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
+    if (base_type.kind() != .anonymous_struct) return null;
+    for (base_type.anonymous_struct.fields) |field| {
+        if (std.mem.eql(u8, field.name, field_name)) return field.ty;
+    }
+    return null;
+}
+
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
@@ -4836,6 +4866,7 @@ fn typeDisplayName(ty: Type) []const u8 {
         .struct_ => |named| named.name,
         .bitfield => |named| named.name,
         .enum_ => |named| named.name,
+        .anonymous_struct => "anonymous struct",
         .tuple => "tuple",
         .array => "array",
         .slice => "slice",

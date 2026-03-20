@@ -1287,6 +1287,15 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
             }
             try writer.writeAll(")");
         },
+        .anonymous_struct => |struct_type| {
+            try writer.writeAll("struct { ");
+            for (struct_type.fields, 0..) |field, index| {
+                if (index != 0) try writer.writeAll(", ");
+                try writer.print("{s}: ", .{field.name});
+                try writeCompilerType(writer, field.ty);
+            }
+            try writer.writeAll(" }");
+        },
         .array => |array| {
             try writer.writeByte('[');
             try writeCompilerType(writer, array.element_type.*);

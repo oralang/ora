@@ -117,6 +117,7 @@ pub const TypeKind = enum {
     bitfield,
     enum_,
     tuple,
+    anonymous_struct,
     array,
     slice,
     map,
@@ -173,6 +174,15 @@ pub const MapType = struct {
     value_type: ?*const Type = null,
 };
 
+pub const AnonymousStructField = struct {
+    name: []const u8,
+    ty: Type,
+};
+
+pub const AnonymousStructType = struct {
+    fields: []const AnonymousStructField,
+};
+
 pub const ErrorUnionType = struct {
     payload_type: *const Type,
     error_types: []const Type = &.{},
@@ -200,6 +210,7 @@ pub const Type = union(TypeKind) {
     bitfield: NamedType,
     enum_: NamedType,
     tuple: []const Type,
+    anonymous_struct: AnonymousStructType,
     array: ArrayType,
     slice: SliceType,
     map: MapType,
@@ -275,6 +286,13 @@ pub const Type = union(TypeKind) {
         };
     }
 
+    pub fn anonymousStructFields(self: *const Type) []const AnonymousStructField {
+        return switch (self.*) {
+            .anonymous_struct => |struct_type| struct_type.fields,
+            else => &.{},
+        };
+    }
+
     pub fn errorTypes(self: *const Type) []const Type {
         return switch (self.*) {
             .error_union => |error_union| error_union.error_types,
@@ -312,6 +330,15 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
         .bitfield => |named| try buffer.appendSlice(allocator, named.name),
         .enum_ => |named| try buffer.appendSlice(allocator, named.name),
         .refinement => |refinement| try buffer.appendSlice(allocator, refinement.name),
+        .anonymous_struct => |struct_type| {
+            try buffer.appendSlice(allocator, "anon_struct");
+            for (struct_type.fields) |field| {
+                try buffer.append(allocator, '_');
+                try buffer.appendSlice(allocator, field.name);
+                try buffer.append(allocator, '_');
+                try appendTypeMangleName(allocator, buffer, field.ty);
+            }
+        },
         .slice => |slice| {
             try buffer.appendSlice(allocator, "slice_");
             try appendTypeMangleName(allocator, buffer, slice.element_type.*);
