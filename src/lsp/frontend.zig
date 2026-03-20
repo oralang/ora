@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const DiagnosticSource = enum {
     lexer,
     parser,
+    sema,
 };
 
 pub const Severity = enum {
@@ -53,6 +54,7 @@ pub const DocumentAnalysis = struct {
 };
 
 pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalysis {
+    const file_id = compiler.FileId.fromIndex(0);
     var diagnostics = std.ArrayList(Diagnostic){};
     errdefer {
         for (diagnostics.items) |diagnostic| {
@@ -77,7 +79,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         });
     }
 
-    var parse_result = try compiler.syntax.parse(allocator, compiler.FileId.fromIndex(0), source);
+    var parse_result = try compiler.syntax.parse(allocator, file_id, source);
     defer parse_result.deinit();
 
     const parse_had_diagnostics = parse_result.diagnostics.items.items.len != 0;
@@ -107,9 +109,56 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         });
     }
 
+    // Run sema type checking if parsing succeeded — produces type errors,
+    // region errors, effect errors, and refinement diagnostics.
+    var sema_had_diagnostics = false;
+    if (!parse_had_diagnostics and !lower_had_diagnostics) {
+        var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
+        defer item_index.deinit();
+        var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
+        defer resolution.deinit();
+        var const_eval_result = try compiler.comptime_eval.constEval(allocator, &lower_result.file, .{});
+        defer const_eval_result.deinit();
+
+        var typecheck_result = try compiler.sema.typeCheck(
+            allocator,
+            file_id,
+            &lower_result.file,
+            &item_index,
+            &resolution,
+            &const_eval_result,
+            .{ .body = compiler.ast.BodyId.fromIndex(0) },
+        );
+        defer typecheck_result.deinit();
+
+        sema_had_diagnostics = typecheck_result.diagnostics.items.items.len != 0;
+        for (typecheck_result.diagnostics.items.items) |diag| {
+            const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+            const message = try allocator.dupe(u8, diag.message);
+            try diagnostics.append(allocator, Diagnostic{
+                .source = .sema,
+                .severity = mapCompilerSeverity(diag.severity),
+                .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+                .message = message,
+            });
+        }
+
+        // Also collect comptime diagnostics.
+        for (const_eval_result.diagnostics.items.items) |diag| {
+            const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+            const message = try allocator.dupe(u8, diag.message);
+            try diagnostics.append(allocator, Diagnostic{
+                .source = .sema,
+                .severity = mapCompilerSeverity(diag.severity),
+                .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+                .message = message,
+            });
+        }
+    }
+
     return .{
         .diagnostics = try diagnostics.toOwnedSlice(allocator),
-        .parse_succeeded = !(parse_had_diagnostics or lower_had_diagnostics),
+        .parse_succeeded = !(parse_had_diagnostics or lower_had_diagnostics or sema_had_diagnostics),
     };
 }
 

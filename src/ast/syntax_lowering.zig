@@ -636,6 +636,9 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerIfStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            if (firstDirectTokenOfKind(node, .LeftParen) == null) {
+                return Lowering.malformedStmt(self, node, "expected '(' after if");
+            }
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing if condition");
             const then_body_node = nthDirectChildOfKind(node, .Body, 0) orelse return Lowering.malformedStmt(self, node, "missing then body");
             const else_body = if (nthDirectChildOfKind(node, .Body, 1)) |else_body_node|
@@ -654,6 +657,9 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerWhileStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            if (firstDirectTokenOfKind(node, .LeftParen) == null) {
+                return Lowering.malformedStmt(self, node, "expected '(' after while");
+            }
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing while condition");
             const body_node = firstDirectChildOfKind(node, .Body) orelse return Lowering.malformedStmt(self, node, "missing while body");
             const invariants = try Lowering.lowerInvariantClauses(self, node);

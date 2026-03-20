@@ -1219,6 +1219,9 @@ const Parser = struct {
             try self.appendConditionExpr(&children);
         } else {
             try self.reportHere("expected '(' after if");
+            if (!self.at(.LeftBrace) and !self.at(.Else) and !self.at(.RightBrace) and !self.at(.Eof)) {
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Else, .RightBrace }) });
+            }
         }
 
         if (self.at(.LeftBrace)) {
@@ -1250,6 +1253,9 @@ const Parser = struct {
             try self.appendConditionExpr(&children);
         } else {
             try self.reportHere("expected '(' after while");
+            if (!self.at(.LeftBrace) and !self.at(.Invariant) and !self.at(.RightBrace) and !self.at(.Eof)) {
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Invariant, .RightBrace }) });
+            }
         }
 
         while (self.at(.Invariant)) {

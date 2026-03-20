@@ -1212,6 +1212,27 @@ fn exitOnCompilerErrors(
     std.process.exit(1);
 }
 
+fn exitOnCompilationErrors(
+    writer: anytype,
+    db: *compiler.db.CompilerDb,
+    module_id: compiler.source.ModuleId,
+) !*const compiler.sema.TypeCheckResult {
+    const module = db.sources.module(module_id);
+
+    const syntax_diags = try db.syntaxDiagnostics(module.file_id);
+    try exitOnCompilerErrors(writer, &db.sources, syntax_diags);
+
+    const ast_diags = try db.astDiagnostics(module.file_id);
+    try exitOnCompilerErrors(writer, &db.sources, ast_diags);
+
+    const resolution_diags = try db.resolutionDiagnostics(module_id);
+    try exitOnCompilerErrors(writer, &db.sources, resolution_diags);
+
+    const module_typecheck = try db.moduleTypeCheck(module_id);
+    try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics);
+    return module_typecheck;
+}
+
 fn writeJsonString(writer: anytype, text: []const u8) !void {
     try std.json.Stringify.value(text, .{}, writer);
 }
@@ -1440,10 +1461,9 @@ fn runCompilerAstEmit(
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
-    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const module_typecheck = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
     const typecheck = if (include_types) module_typecheck else null;
     const diagnostics_list = &module_typecheck.diagnostics;
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, diagnostics_list);
 
     writeCompilerAst(allocator, stdout, ast_file, typecheck, diagnostics_list, format) catch |err| switch (err) {
         error.InvalidArgument => {
@@ -1479,8 +1499,7 @@ fn runCompilerMlirEmit(
     m.end();
     defer compilation.deinit();
 
-    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     if (mlir_options.validate_mlir) {
@@ -1560,8 +1579,7 @@ fn runMlirEmitAdvanced(
     m.end();
     defer compilation.deinit();
 
-    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
@@ -2041,8 +2059,7 @@ fn runAbiEmit(
     };
     defer compilation.deinit();
 
-    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, &module_typecheck.diagnostics);
+    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id);
 
     var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
     defer contract_abi.deinit();
