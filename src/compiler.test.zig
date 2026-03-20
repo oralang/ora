@@ -2036,6 +2036,32 @@ test "compiler still accepts explicit generic type arguments" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@add__"));
 }
 
+test "compiler accepts explicit comptime value bindings on generic calls" {
+    const source_text =
+        \\contract Test {
+        \\    fn ct(comptime T: type, comptime value: T) -> T {
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn run() -> u8 {
+        \\        return ct(u8, 18);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 18"));
+}
+
 test "compiler rejects conflicting inferred generic type arguments" {
     const source_text =
         \\contract Test {

@@ -1751,7 +1751,15 @@ const TypeChecker = struct {
     fn typeArgNameFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
         return switch (self.file.expression(expr_id).*) {
             .Name => |name| name.name,
+            .TypeValue => |type_value| self.typeArgNameFromTypeExpr(type_value.type_expr),
             .Group => |group| self.typeArgNameFromExpr(group.expr),
+            else => null,
+        };
+    }
+
+    fn typeArgNameFromTypeExpr(self: *const TypeChecker, type_expr_id: ast.TypeExprId) ?[]const u8 {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| path.name,
             else => null,
         };
     }
@@ -1780,7 +1788,7 @@ const TypeChecker = struct {
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
             return .{ .ty = descriptorFromPathName(self.file, self.item_index, arg_name) };
         }
-        if (self.comptimeIntegerParameter(parameter)) {
+        if (parameter.is_comptime) {
             const integer = self.exprIntegerText(arg_expr) orelse return null;
             return .{ .integer = integer };
         }

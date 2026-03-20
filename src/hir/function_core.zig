@@ -57,7 +57,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (parameter.is_comptime) {
                     if (parent.patternName(parameter.pattern)) |name| {
                         if (parent.substitutedInteger(name)) |integer_text| {
-                            const param_type = parent.lowerSemaType(parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
+                            const param_type = if (parent.active_type_bindings.len == 0)
+                                parent.lowerSemaType(parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
+                            else
+                                parent.lowerTypeExpr(parameter.type_expr);
                             const parsed = support.parseIntLiteral(integer_text) orelse 0;
                             const value = appendValueOp(block, createIntegerConstant(parent.context, parent.location(parameter.range), param_type, parsed));
                             self.locals.bindPattern(parent.file, parameter.pattern, value) catch {};
