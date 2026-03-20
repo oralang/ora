@@ -21,17 +21,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn lowerItem(self: *Lowerer, item_id: ast.ItemId, parent_block: mlir.MlirBlock) anyerror!void {
             const item = self.file.item(item_id).*;
             switch (item) {
-                .Import => |import_item| {
-                    const op = try self.createPlaceholderOp(
-                        "ora.import_decl",
-                        self.location(import_item.range),
-                        &.{
-                            namedStringAttr(self.context, "ora.import_path", import_item.path),
-                            namedBoolAttr(self.context, "ora.is_comptime", import_item.is_comptime),
-                        },
-                    );
-                    appendOp(parent_block, op);
-                },
+                .Import => {},
                 .Contract => |contract| try self.lowerContract(item_id, contract, parent_block),
                 .Function => |function| try self.lowerFunction(item_id, function, parent_block),
                 .Struct => |struct_item| try self.lowerStructDecl(item_id, struct_item, parent_block),

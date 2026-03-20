@@ -2781,6 +2781,24 @@ test "compiler HIR output runs through Z3 verification" {
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
 }
 
+test "compiler lowers imports as namespace metadata only" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\contract ArithmeticProbe {
+        \\    pub fn add_case(a: u256, b: u256) {
+        \\        let c: u256 = a + b;
+        \\        assert(c >= a, "add_monotonic");
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.contract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.import"));
+}
+
 test "compiler aggregates sema and verification across multiple root items" {
     const source_text =
         \\pub fn first(x: u256) -> u256
