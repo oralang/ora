@@ -3270,6 +3270,40 @@ test "compiler package loader bridges import graph into source modules" {
     try testing.expect(root_summary.imports[0].target_module_id != null);
 }
 
+test "compiler module graph distinguishes imports with the same basename in different directories" {
+    var compiler_db = compiler.db.CompilerDb.init(testing.allocator);
+    defer compiler_db.deinit();
+
+    const package_id = try compiler_db.addPackage("main");
+
+    const left_math_file = try compiler_db.addSourceFile("left/math.ora",
+        \\pub fn left() -> u256 { return 1; }
+    );
+    const right_math_file = try compiler_db.addSourceFile("right/math.ora",
+        \\pub fn right() -> u256 { return 2; }
+    );
+    const main_file = try compiler_db.addSourceFile("main.ora",
+        \\comptime const left_math = @import("./left/math.ora");
+        \\comptime const right_math = @import("./right/math.ora");
+        \\pub fn run() -> u256 { return 0; }
+    );
+
+    const left_math_module = try compiler_db.addModule(package_id, left_math_file, "math");
+    const right_math_module = try compiler_db.addModule(package_id, right_math_file, "math");
+    const main_module = try compiler_db.addModule(package_id, main_file, "main");
+
+    const graph = try compiler_db.moduleGraph(package_id);
+    const main_summary = for (graph.modules) |summary| {
+        if (summary.module_id == main_module) break summary;
+    } else unreachable;
+
+    try testing.expectEqual(@as(usize, 2), main_summary.imports.len);
+    try testing.expectEqual(left_math_module, main_summary.imports[0].target_module_id.?);
+    try testing.expectEqual(right_math_module, main_summary.imports[1].target_module_id.?);
+    try testing.expect(std.mem.indexOfScalar(compiler.source.ModuleId, main_summary.dependencies, left_math_module) != null);
+    try testing.expect(std.mem.indexOfScalar(compiler.source.ModuleId, main_summary.dependencies, right_math_module) != null);
+}
+
 test "compiler const eval executes cross-module comptime calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

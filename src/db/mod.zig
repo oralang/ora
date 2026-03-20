@@ -198,6 +198,7 @@ pub const CompilerDb = struct {
                     .module_id = module.id,
                     .file_id = module.file_id,
                     .path = module.name,
+                    .file_path = self.sources.file(module.file_id).path,
                     .ast_file = try self.astFile(module.file_id),
                 });
             }

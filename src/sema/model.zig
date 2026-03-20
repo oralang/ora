@@ -15,6 +15,7 @@ pub const ModuleGraphInput = struct {
     module_id: source.ModuleId,
     file_id: source.FileId,
     path: []const u8,
+    file_path: []const u8,
     ast_file: *const ast.AstFile,
 };
 

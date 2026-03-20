@@ -23,9 +23,9 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
     errdefer result.deinit();
 
     const arena = result.arena.allocator();
-    var names: std.StringHashMap(source.ModuleId) = .init(arena);
+    var file_paths: std.StringHashMap(source.ModuleId) = .init(arena);
     for (inputs) |input| {
-        try names.put(input.path, input.module_id);
+        try file_paths.put(try normalizeModuleFilePath(arena, input.file_path), input.module_id);
     }
 
     var modules: std.ArrayList(ModuleSummary) = .{};
@@ -35,7 +35,7 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
         for (input.ast_file.root_items) |item_id| {
             const item = input.ast_file.item(item_id).*;
             if (item == .Import) {
-                const target_module_id = names.get(normalizeImportPath(item.Import.path));
+                const target_module_id = try resolveImportTargetModuleId(arena, input.file_path, item.Import.path, inputs, &file_paths);
                 if (target_module_id) |dependency| {
                     if (!containsModuleId(dependencies.items, dependency)) {
                         try dependencies.append(arena, dependency);
@@ -60,6 +60,31 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
     result.modules = try modules.toOwnedSlice(arena);
     result.topo_order = try buildTopoOrder(arena, result.modules, &result.has_cycles);
     return result;
+}
+
+fn resolveImportTargetModuleId(
+    allocator: std.mem.Allocator,
+    importer_file_path: []const u8,
+    import_path: []const u8,
+    inputs: []const ModuleGraphInput,
+    file_paths: *const std.StringHashMap(source.ModuleId),
+) !?source.ModuleId {
+    if (std.mem.eql(u8, import_path, "std")) return null;
+
+    if (std.mem.startsWith(u8, import_path, "./") or std.mem.startsWith(u8, import_path, "../")) {
+        const importer_dir = std.fs.path.dirname(importer_file_path) orelse ".";
+        const resolved = try std.fs.path.resolve(allocator, &.{ importer_dir, import_path });
+        return file_paths.get(resolved);
+    }
+
+    for (inputs) |input| {
+        if (std.mem.eql(u8, input.path, import_path)) return input.module_id;
+    }
+    return null;
+}
+
+fn normalizeModuleFilePath(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    return std.fs.path.resolve(allocator, &.{file_path});
 }
 
 pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !ItemIndexResult {
@@ -130,10 +155,6 @@ fn collectItemEntry(
             try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries);
         }
     }
-}
-
-fn normalizeImportPath(path: []const u8) []const u8 {
-    return std.fs.path.stem(std.fs.path.basename(path));
 }
 
 fn containsModuleId(values: []const source.ModuleId, needle: source.ModuleId) bool {
