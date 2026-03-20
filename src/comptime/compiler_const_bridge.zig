@@ -286,6 +286,14 @@ pub fn positiveShiftAmount(value: BigInt) ?usize {
 }
 
 fn tryEvalUnaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ConstValue) !?ConstValue {
+    switch (op) {
+        .neg, .bit_not => switch (value) {
+            .integer => return null,
+            else => {},
+        },
+        else => {},
+    }
+
     const eval_op = switch (op) {
         .neg => EvalUnaryOp.neg,
         .not_ => EvalUnaryOp.not,
