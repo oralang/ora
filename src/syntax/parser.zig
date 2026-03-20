@@ -2400,6 +2400,12 @@ const Parser = struct {
     }
 
     fn parseSwitchPatternExprNode(self: *Parser) anyerror!green.GreenNodeId {
+        if (self.at(.Else)) {
+            const children = [_]ChildRef{
+                .{ .token = self.bump() },
+            };
+            return self.finishNode(SyntaxKind.ErrorExpr, &children);
+        }
         const start_expr = try self.parseExpressionNode(&.{ .Arrow, .DotDot, .DotDotDot, .RightBrace });
         if (self.at(.DotDot) or self.at(.DotDotDot)) {
             const children = [_]ChildRef{
