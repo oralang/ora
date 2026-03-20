@@ -668,6 +668,10 @@ pub fn mixin(Builder: type) type {
         fn lowerForStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
             const iterable_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing for iterable");
             const loop_vars = parseForBindings(node) orelse return Lowering.malformedStmt(self, node, "missing for bindings");
+            const range_expr = if (iterable_node.kind() == .RangeExpr)
+                try Lowering.lowerRangePatternNode(self, iterable_node)
+            else
+                null;
             const item_pattern = try Support.pushPattern(self, .{ .Name = .{
                 .range = loop_vars.item.range(),
                 .name = tokenText(loop_vars.item),
@@ -683,7 +687,9 @@ pub fn mixin(Builder: type) type {
             const invariants = try Lowering.lowerInvariantClauses(self, node);
             return Support.pushStmt(self, .{ .For = .{
                 .range = node.range(),
-                .iterable = try Lowering.lowerExpressionNode(self, iterable_node),
+                .iterable = if (range_expr) |range| range.start else try Lowering.lowerExpressionNode(self, iterable_node),
+                .range_end = if (range_expr) |range| range.end else null,
+                .range_inclusive = if (range_expr) |range| range.inclusive else true,
                 .item_pattern = item_pattern,
                 .index_pattern = index_pattern,
                 .invariants = invariants,

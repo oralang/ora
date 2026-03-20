@@ -1271,7 +1271,25 @@ const Parser = struct {
 
         try children.append(self.allocator, .{ .token = self.bump() });
         if (self.at(.LeftParen)) {
-            try self.appendConditionExpr(&children);
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (!self.at(.RightParen)) {
+                const start_expr = try self.parseExpressionNode(&.{ .RightParen, .DotDot, .DotDotDot });
+                if (self.at(.DotDot) or self.at(.DotDotDot)) {
+                    const range_children = [_]ChildRef{
+                        .{ .node = start_expr },
+                        .{ .token = self.bump() },
+                        .{ .node = try self.parseExpressionNode(&.{.RightParen}) },
+                    };
+                    try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.RangeExpr, &range_children) });
+                } else {
+                    try children.append(self.allocator, .{ .node = start_expr });
+                }
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after condition");
+            }
         } else {
             try self.reportHere("expected '(' after for");
         }

@@ -373,6 +373,8 @@ pub const WhileStmt = struct {
 pub const ForStmt = struct {
     range: source.TextRange,
     iterable: ExprId,
+    range_end: ?ExprId = null,
+    range_inclusive: bool = true,
     item_pattern: PatternId,
     index_pattern: ?PatternId,
     invariants: []ExprId,

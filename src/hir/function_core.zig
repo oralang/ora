@@ -1676,12 +1676,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
             const loc = self.parent.location(for_stmt.range);
+            const is_range_iterable = for_stmt.range_end != null;
             const iterable = try self.lowerExpr(for_stmt.iterable, locals);
             const iterable_type = mlir.oraValueGetType(iterable);
             const has_return = bodyMayReturn(self.parent.file, for_stmt.body);
 
-            if (!mlir.oraTypeIsAMemRef(iterable_type) or
-                mlir.oraShapedTypeGetRank(iterable_type) != 1)
+            if (!is_range_iterable and
+                (!mlir.oraTypeIsAMemRef(iterable_type) or
+                    mlir.oraShapedTypeGetRank(iterable_type) != 1))
             {
                 try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
                 return false;
@@ -1727,8 +1729,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const index_type = mlir.oraIndexTypeCreate(self.parent.context);
-            const lower_bound = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 0));
-            const upper_bound = if (mlir.oraShapedTypeHasStaticShape(iterable_type)) blk: {
+            const lower_bound = if (is_range_iterable)
+                try @This().convertIndexToIndexType(self, iterable, for_stmt.range)
+            else
+                appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 0));
+            const upper_bound = if (is_range_iterable) blk: {
+                const range_end = try self.lowerExpr(for_stmt.range_end.?, locals);
+                const end_index = try @This().convertIndexToIndexType(self, range_end, for_stmt.range);
+                if (!for_stmt.range_inclusive) break :blk end_index;
+                const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 1));
+                const add_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, end_index, one);
+                if (mlir.oraOperationIsNull(add_op)) {
+                    try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                    return false;
+                }
+                break :blk appendValueOp(self.block, add_op);
+            } else if (mlir.oraShapedTypeHasStaticShape(iterable_type)) blk: {
                 const dim_size = mlir.oraShapedTypeGetDimSize(iterable_type, 0);
                 break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, @intCast(dim_size)));
             } else blk: {
@@ -1760,31 +1776,47 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             clearKnownTerminator(body_block);
 
             const induction_var = mlir.oraBlockGetArgument(body_block, 0);
-            const index_value_op = mlir.oraArithIndexCastUIOpCreate(
+            const current_value_op = mlir.oraArithIndexCastUIOpCreate(
                 self.parent.context,
                 loc,
                 induction_var,
                 defaultIntegerType(self.parent.context),
             );
-            if (mlir.oraOperationIsNull(index_value_op)) return error.MlirOperationCreationFailed;
-            appendOp(body_block, index_value_op);
-            const index_value = mlir.oraOperationGetResult(index_value_op, 0);
+            if (mlir.oraOperationIsNull(current_value_op)) return error.MlirOperationCreationFailed;
+            appendOp(body_block, current_value_op);
+            const current_value = mlir.oraOperationGetResult(current_value_op, 0);
 
-            const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type, for_stmt.range);
-            const item_load = mlir.oraMemrefLoadOpCreate(
-                self.parent.context,
-                loc,
-                iterable,
-                &[_]mlir.MlirValue{induction_var},
-                1,
-                item_type,
-            );
-            if (mlir.oraOperationIsNull(item_load)) {
-                try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
-                return false;
-            }
-            appendOp(body_block, item_load);
-            const item_value = mlir.oraOperationGetResult(item_load, 0);
+            const item_value = if (is_range_iterable) current_value else blk: {
+                const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type, for_stmt.range);
+                const item_load = mlir.oraMemrefLoadOpCreate(
+                    self.parent.context,
+                    loc,
+                    iterable,
+                    &[_]mlir.MlirValue{induction_var},
+                    1,
+                    item_type,
+                );
+                if (mlir.oraOperationIsNull(item_load)) {
+                    try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                    return false;
+                }
+                appendOp(body_block, item_load);
+                break :blk mlir.oraOperationGetResult(item_load, 0);
+            };
+            const index_value = if (is_range_iterable) blk: {
+                const start_value_op = mlir.oraArithIndexCastUIOpCreate(
+                    self.parent.context,
+                    loc,
+                    lower_bound,
+                    defaultIntegerType(self.parent.context),
+                );
+                if (mlir.oraOperationIsNull(start_value_op)) return error.MlirOperationCreationFailed;
+                appendOp(body_block, start_value_op);
+                const start_value = mlir.oraOperationGetResult(start_value_op, 0);
+                const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, current_value, start_value);
+                if (mlir.oraOperationIsNull(sub_op)) return error.MlirOperationCreationFailed;
+                break :blk appendValueOp(body_block, sub_op);
+            } else current_value;
 
             var body_lowerer = self.*;
             body_lowerer.block = body_block;

@@ -7106,6 +7106,30 @@ test "compiler lowers real HIR for loops with break and continue" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler lowers integer range for loops with break and continue" {
+    const source_text =
+        \\pub fn run() {
+        \\    for (0..20) |i, _| {
+        \\        if (i > 10) {
+        \\            break;
+        \\        }
+        \\    }
+        \\    for (0..10) |i, _| {
+        \\        if (i % 2 == 0) {
+        \\            continue;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.for"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers for invariants through ora.invariant" {
     const source_text =
         \\pub fn scan(values: slice[u256]) {

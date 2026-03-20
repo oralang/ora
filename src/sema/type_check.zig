@@ -1058,6 +1058,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
+                if (for_stmt.range_end) |end_expr| try self.visitExpr(end_expr);
                 for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
                 try self.visitBody(for_stmt.body);
             },
@@ -2668,6 +2669,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.validateExprExternalCalls(for_stmt.iterable, state);
+                if (for_stmt.range_end) |end_expr| try self.validateExprExternalCalls(end_expr, state);
                 for (for_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
                 var loop_state = try self.cloneExternalCallValidationState(state.*);
                 defer loop_state.deinit(self.arena);
@@ -2812,6 +2814,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.validateExprLocks(for_stmt.iterable, locked_slots);
+                if (for_stmt.range_end) |end_expr| try self.validateExprLocks(end_expr, locked_slots);
                 for (for_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
                 var loop_locked = try self.cloneEffectSlots(locked_slots.items);
                 defer loop_locked.deinit(self.arena);
@@ -3207,6 +3210,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.collectExprEffects(for_stmt.iterable, state);
+                if (for_stmt.range_end) |end_expr| try self.collectExprEffects(end_expr, state);
                 for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, state);
                 try self.collectBodyEffects(for_stmt.body, state);
             },
@@ -3581,6 +3585,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.collectExprDirectCallees(for_stmt.iterable, callees);
+                if (for_stmt.range_end) |end_expr| try self.collectExprDirectCallees(end_expr, callees);
                 for (for_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
                 try self.collectBodyDirectCallees(for_stmt.body, callees);
             },
@@ -4240,6 +4245,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.collectExprErrorTypes(for_stmt.iterable, error_types);
+                if (for_stmt.range_end) |end_expr| try self.collectExprErrorTypes(end_expr, error_types);
                 for (for_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
                 try self.collectBodyErrorTypes(for_stmt.body, error_types);
             },
