@@ -1808,7 +1808,7 @@ const Parser = struct {
             .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
                 self.parseExternalProxyExprNode()
             else if (self.looksLikeGenericTypeValueExpr(terminators))
-                self.parsePathOrGenericTypeNode()
+                self.parsePathOrGenericTypeNode(terminators)
             else
                 self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
             .IntegerLiteral, .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
@@ -1955,7 +1955,6 @@ const Parser = struct {
     }
 
     fn parseTypePrimaryNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
-        _ = stops;
         return switch (self.current().kind) {
             .LeftParen => self.parseTupleTypeNode(),
             .LeftBracket => self.parseArrayTypeNode(),
@@ -1984,7 +1983,7 @@ const Parser = struct {
             .String,
             .Bytes,
             .Void,
-            => self.parsePathOrGenericTypeNode(),
+            => self.parsePathOrGenericTypeNode(stops),
             else => self.parseTypeErrorNode("expected type expression"),
         };
     }
@@ -2097,7 +2096,7 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.AnonymousStructField, children.items);
     }
 
-    fn parsePathOrGenericTypeNode(self: *Parser) anyerror!green.GreenNodeId {
+    fn parsePathOrGenericTypeNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
@@ -2117,6 +2116,24 @@ const Parser = struct {
                 try children.append(self.allocator, .{ .token = self.bumpTypeGreater() });
             } else {
                 try self.reportHere("expected '>' after generic arguments");
+            }
+            return self.finishNode(SyntaxKind.GenericType, children.items);
+        }
+        if (!std.mem.containsAtLeast(green.TokenKind, stops, 1, &.{.LeftParen}) and self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightParen)) {
+                if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                } else {
+                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                }
+                if (!self.at(.Comma)) break;
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after generic arguments");
             }
             return self.finishNode(SyntaxKind.GenericType, children.items);
         }

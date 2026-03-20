@@ -5916,6 +5916,33 @@ test "compiler lowers instantiated generic struct declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Pair__u256\">"));
 }
 
+test "compiler supports call-style generic types in return annotations" {
+    const source_text =
+        \\contract GenericPairTest {
+        \\    struct Pair(comptime T: type) {
+        \\        first: T;
+        \\        second: T;
+        \\    }
+        \\
+        \\    pub fn make_pair(a: u256, b: u256) -> Pair(u256) {
+        \\        return Pair(u256) { first: a, second: b };
+        \\    }
+        \\
+        \\    pub fn make_pair_u8(a: u8, b: u8) -> Pair(u8) {
+        \\        return Pair(u8) { first: a, second: b };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
+    try testing.expect(typecheck.instantiatedStructByName("Pair__u8") != null);
+}
+
 test "compiler monomorphizes nested generic struct types on type use" {
     const source_text =
         \\struct Pair(comptime T: type) {

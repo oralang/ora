@@ -2071,7 +2071,7 @@ const TypeChecker = struct {
     }
 
     fn resolveGenericTypeWithBindings(self: *TypeChecker, generic: ast.GenericTypeExpr, bindings: []const GenericTypeBinding) anyerror!Type {
-        if (self.item_index.lookup(generic.name)) |item_id| {
+        if (self.lookupTypeItemInScope(generic.name)) |item_id| {
             switch (self.file.item(item_id).*) {
                 .Struct => |struct_item| if (struct_item.is_generic) {
                     if (struct_item.template_parameters.len != generic.args.len) {
@@ -2141,6 +2141,33 @@ const TypeChecker = struct {
         }
 
         return descriptorFromPathName(self.file, self.item_index, generic.name);
+    }
+
+    fn lookupTypeItemInScope(self: *const TypeChecker, name: []const u8) ?ast.ItemId {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (self.current_contract) |contract_id| {
+            const contract = self.file.item(contract_id).Contract;
+            for (contract.members) |member_id| {
+                switch (self.file.item(member_id).*) {
+                    .Struct => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
+                    .Enum => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
+                    .Bitfield => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
+                    .TypeAlias => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
+                    else => {},
+                }
+            }
+        }
+        if (self.item_index.lookup(trimmed)) |item_id| return item_id;
+        for (self.file.items, 0..) |item, index| {
+            switch (item) {
+                .Struct => |struct_item| if (std.mem.eql(u8, struct_item.name, trimmed)) return ast.ItemId.fromIndex(index),
+                .Enum => |enum_item| if (std.mem.eql(u8, enum_item.name, trimmed)) return ast.ItemId.fromIndex(index),
+                .Bitfield => |bitfield_item| if (std.mem.eql(u8, bitfield_item.name, trimmed)) return ast.ItemId.fromIndex(index),
+                .TypeAlias => |type_alias| if (std.mem.eql(u8, type_alias.name, trimmed)) return ast.ItemId.fromIndex(index),
+                else => {},
+            }
+        }
+        return null;
     }
 
     fn structLiteralType(self: *const TypeChecker, name: []const u8) Type {
