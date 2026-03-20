@@ -1275,7 +1275,10 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = if (binding_type.kind() != .unknown)
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
-                    .Name => |name| self.typeValueNameType(name.name),
+                    .Name => |name| if (std.mem.eql(u8, name.name, "result"))
+                        (self.current_return_type orelse .{ .unknown = {} })
+                    else
+                        self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
             },

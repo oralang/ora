@@ -1125,9 +1125,6 @@ pub fn mixin(Builder: type) type {
 
         fn lowerNameExprNode(self: *Builder, node: SyntaxNode) !ExprId {
             const token = firstToken(node) orelse return Lowering.malformedExpr(self, node, "missing name token");
-            if (token.kind() == .Result) {
-                return Support.pushExpr(self, .{ .Result = .{ .range = node.range() } });
-            }
             return Support.pushExpr(self, .{ .Name = .{
                 .range = node.range(),
                 .name = tokenText(token),

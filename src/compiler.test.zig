@@ -6301,7 +6301,8 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const ensures_binary = ast_file.expression(ensures_expr).Binary;
     try testing.expect(ast_file.expression(ensures_binary.lhs).* == .Old);
     const old_result = ast_file.expression(ensures_binary.lhs).Old;
-    try testing.expect(ast_file.expression(old_result.expr).* == .Result);
+    try testing.expect(ast_file.expression(old_result.expr).* == .Name);
+    try testing.expectEqualStrings("result", ast_file.expression(old_result.expr).Name.name);
 
     const body = ast_file.body(function.body);
     try testing.expectEqual(@as(usize, 7), body.statements.len);
@@ -8528,6 +8529,34 @@ test "compiler const eval preserves signed negative literals without wrapping" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqual(@as(i128, -1), try consteval.values[decl_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler allows local result name after early-return if" {
+    const source_text =
+        \\contract EarlyReturn {
+        \\    pub fn process(x: u256) -> u256 {
+        \\        if (x > 1000) {
+        \\            return 1000;
+        \\        }
+        \\
+        \\        var result: u256 = x * 2;
+        \\        if (result > 500) {
+        \\            return 500;
+        \\        }
+        \\
+        \\        result += 10;
+        \\        return result;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+
+    _ = try compilation.db.lowerToHir(compilation.root_module_id);
 }
 
 test "compiler const eval bridges comptime string values into sema results" {

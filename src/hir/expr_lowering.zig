@@ -279,6 +279,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (locals.getValue(local_id)) |value| return value;
             }
 
+            if (std.mem.eql(u8, name.name, "result")) {
+                if (self.current_return_value) |value| return value;
+            }
+
             return self.defaultValue(self.parent.lowerExprType(expr_id), name.range);
         }
 
