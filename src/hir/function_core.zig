@@ -26,6 +26,7 @@ const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
+const BlockContext = support.BlockContext;
 const LoopContext = support.LoopContext;
 const SwitchContext = support.SwitchContext;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
@@ -50,6 +51,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .deferred_return_carried_locals = &.{},
                 .in_try_block = false,
                 .in_ghost_context = function.is_ghost,
+                .current_scf_carried_locals = null,
+                .block_context = null,
             };
 
             var runtime_index: usize = 0;
@@ -89,6 +92,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .deferred_return_carried_locals = &.{},
                 .in_try_block = false,
                 .in_ghost_context = false,
+                .current_scf_carried_locals = null,
+                .block_context = null,
             };
         }
 
@@ -724,8 +729,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return self.lowerBody(block_stmt.body, &child_locals);
                 },
                 .LabeledBlock => |block_stmt| {
-                    var child_locals = try self.cloneLocals(locals);
-                    return self.lowerBody(block_stmt.body, &child_locals);
+                    return self.lowerLabeledBlockStmt(block_stmt, locals);
                 },
                 .If => |if_stmt| return self.lowerIfStmt(if_stmt, locals),
                 .While => |while_stmt| return self.lowerWhileStmt(while_stmt, locals),
@@ -733,11 +737,42 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Switch => |switch_stmt| return self.lowerSwitchStmt(switch_stmt, locals),
                 .Try => |try_stmt| return self.lowerTryStmt(try_stmt, locals),
                 .Break => |jump| {
+                    if (jump.label != null) {
+                        if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
+                            const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                                self.deferred_return_carried_locals
+                            else
+                                switch_context.carried_locals;
+                            if (carried_locals.len == 0) {
+                                try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
+                            } else {
+                                try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            }
+                            return true;
+                        }
+                        if (@This().findTargetBlockContext(self, jump.label)) |block_context| {
+                            const loc = self.parent.location(jump.range);
+                            const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                            const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, false_value, block_context.continue_flag, null, 0);
+                            if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_continue);
+                            const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                                current_region_locals
+                            else
+                                block_context.carried_locals;
+                            try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            return true;
+                        }
+                    }
                     if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
-                        if (switch_context.carried_locals.len == 0) {
+                        const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                            self.deferred_return_carried_locals
+                        else
+                            switch_context.carried_locals;
+                        if (carried_locals.len == 0) {
                             try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
                         } else {
-                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, switch_context.carried_locals);
+                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         }
                         return true;
                     }
@@ -747,7 +782,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const set_break = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, loop_context.break_flag, null, 0);
                         if (mlir.oraOperationIsNull(set_break)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, set_break);
-                        try self.appendScfYieldFromLocals(self.block, jump.range, locals, loop_context.carried_locals);
+                        const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                            current_region_locals
+                        else if (self.deferred_return_kind == .scf_yield)
+                            self.deferred_return_carried_locals
+                        else
+                            loop_context.carried_locals;
+                        try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
                     const op = mlir.oraBreakOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef(), null, 0);
@@ -756,6 +797,46 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Continue => |jump| {
+                    if (jump.label != null) {
+                        if (@This().findContinuableSwitchContext(self, jump.label)) |switch_context| {
+                            const loc = self.parent.location(jump.range);
+                            if (jump.value) |expr_id| {
+                                const raw_value = try self.lowerExpr(expr_id, locals);
+                                const target_type = switch_context.value_type orelse mlir.oraValueGetType(raw_value);
+                                const value = try @This().convertValueForFlow(self, raw_value, target_type, jump.range);
+                                const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
+                                if (mlir.oraOperationIsNull(store)) return error.MlirOperationCreationFailed;
+                                appendOp(self.block, store);
+                            }
+                            const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                            const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
+                            if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_continue);
+                            const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                                self.deferred_return_carried_locals
+                            else
+                                switch_context.carried_locals;
+                            if (carried_locals.len == 0) {
+                                try appendEmptyYield(self.parent.context, self.block, loc);
+                            } else {
+                                try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            }
+                            return true;
+                        }
+                        if (@This().findContinuableBlockContext(self, jump.label)) |block_context| {
+                            const loc = self.parent.location(jump.range);
+                            const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                            const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, block_context.continue_flag, null, 0);
+                            if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_continue);
+                            const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                                current_region_locals
+                            else
+                                block_context.carried_locals;
+                            try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            return true;
+                        }
+                    }
                     if (@This().findContinuableSwitchContext(self, jump.label)) |switch_context| {
                         const loc = self.parent.location(jump.range);
                         if (jump.value) |expr_id| {
@@ -770,10 +851,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
                         if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, set_continue);
-                        if (switch_context.carried_locals.len == 0) {
+                        const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                            self.deferred_return_carried_locals
+                        else
+                            switch_context.carried_locals;
+                        if (carried_locals.len == 0) {
                             try appendEmptyYield(self.parent.context, self.block, loc);
                         } else {
-                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, switch_context.carried_locals);
+                            try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         }
                         return true;
                     }
@@ -784,7 +869,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         return false;
                     }
                     if (self.loop_context != null) {
-                        try self.appendScfYieldFromLocals(self.block, jump.range, locals, self.loop_context.?.carried_locals);
+                        const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                            current_region_locals
+                        else if (self.deferred_return_kind == .scf_yield)
+                            self.deferred_return_carried_locals
+                        else
+                            self.loop_context.?.carried_locals;
+                        try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
                     const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
@@ -808,6 +899,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return null;
+        }
+
+        fn findTargetBlockContext(self: *FunctionLowerer, label: ?[]const u8) ?*const BlockContext {
+            var current = self.block_context;
+            while (current) |block_context| : (current = block_context.parent) {
+                if (label) |target| {
+                    if (block_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return block_context;
+                    }
+                } else {
+                    return block_context;
+                }
+            }
+            return null;
+        }
+
+        fn findContinuableBlockContext(self: *FunctionLowerer, label: ?[]const u8) ?*const BlockContext {
+            return @This().findTargetBlockContext(self, label);
         }
 
         fn findContinuableSwitchContext(self: *FunctionLowerer, label: ?[]const u8) ?*const SwitchContext {
@@ -1761,6 +1870,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                 var then_lowerer = body_lowerer;
                 then_lowerer.block = then_block;
+                then_lowerer.current_scf_carried_locals = carried_locals.items;
                 if (has_return) {
                     then_lowerer.deferred_return_kind = .scf_yield;
                     then_lowerer.deferred_return_carried_locals = carried_locals.items;

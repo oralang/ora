@@ -83,6 +83,7 @@ pub const JumpStmt = nodes.JumpStmt;
 pub const AssignStmt = nodes.AssignStmt;
 pub const ExprStmt = nodes.ExprStmt;
 pub const BlockStmt = nodes.BlockStmt;
+pub const LabeledBlockStmt = nodes.LabeledBlockStmt;
 pub const Body = nodes.Body;
 pub const Parameter = nodes.Parameter;
 pub const SpecClause = nodes.SpecClause;

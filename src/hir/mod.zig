@@ -832,7 +832,9 @@ const FunctionLowerer = struct {
     in_ghost_context: bool = false,
     extra_verification_clauses: []const ExtraVerificationClause = &.{},
     trait_ghost_self_pattern: ?ast.PatternId = null,
+    current_scf_carried_locals: ?[]const hir_locals.LocalId = null,
     loop_context: ?*const support.LoopContext = null,
+    block_context: ?*const support.BlockContext = null,
     switch_context: ?*const support.SwitchContext = null,
 
     const FunctionCore = function_core.mixin(FunctionLowerer, Lowerer);
@@ -864,6 +866,7 @@ const FunctionLowerer = struct {
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;
+    pub const lowerLabeledBlockStmt = ControlFlow.lowerLabeledBlockStmt;
     pub const lowerTryStmt = ControlFlow.lowerTryStmt;
     pub const lowerWhileStmt = ControlFlow.lowerWhileStmt;
     pub const lowerSwitchStmt = ControlFlow.lowerSwitchStmt;

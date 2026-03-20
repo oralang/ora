@@ -12,6 +12,13 @@ pub const LoopContext = struct {
     carried_locals: []const ast.PatternId,
 };
 
+pub const BlockContext = struct {
+    parent: ?*const BlockContext,
+    label: ?[]const u8 = null,
+    continue_flag: mlir.MlirValue,
+    carried_locals: []const hir_locals.LocalId = &.{},
+};
+
 pub const SwitchContext = struct {
     parent: ?*const SwitchContext,
     label: ?[]const u8 = null,
