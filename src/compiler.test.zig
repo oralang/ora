@@ -12538,6 +12538,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/refinements/comprehensive_test.ora",
         "ora-example/refinements/guards_showcase.ora",
         "ora-example/smt/verification/state_invariants.ora",
+        "ora-example/vault/02_errors.ora",
     };
 
     for (example_paths) |path| {

@@ -573,14 +573,16 @@ namespace mlir
                                          return Value(); // Don't handle other cases
                                      });
 
-            // Wide error union N:1 packing: (sir.u256, carrier(T)) → ora.error_union via
-            // unrealized_conversion_cast.
+            // Error union N:1 packing: (sir.u256, carrier(T)) → ora.error_union via
+            // unrealized_conversion_cast. This is needed both for wide error unions
+            // and for narrow success types that temporarily carry a payload-bearing
+            // error path through deferred-return slots.
             addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
                                          if (inputs.size() != 2)
                                              return Value();
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
-                                         if (!errType || isNarrowErrorUnion(errType))
+                                         if (!errType)
                                              return Value();
                                          auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
                                          cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
@@ -591,7 +593,7 @@ namespace mlir
                                          if (inputs.size() != 2)
                                              return Value();
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
-                                         if (!errType || isNarrowErrorUnion(errType))
+                                         if (!errType)
                                              return Value();
                                          auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
                                          cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());

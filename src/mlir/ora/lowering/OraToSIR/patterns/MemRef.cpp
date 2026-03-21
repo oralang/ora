@@ -143,6 +143,22 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
                      << " memrefType=" << memrefType << " valueType=" << op.getValue().getType() << "\n";
     }
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto ensureI256 = [&](Value value) -> Value {
+        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(value.getType()))
+        {
+            if (intType.getWidth() == 256)
+                return value;
+        }
+        if (llvm::isa<sir::U256Type>(value.getType()))
+            return rewriter.create<sir::BitcastOp>(loc, i256Type, value);
+        if (llvm::isa<sir::PtrType>(value.getType()))
+        {
+            Value asU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+            return rewriter.create<sir::BitcastOp>(loc, i256Type, asU256);
+        }
+        return Value();
+    };
     auto packedMemRefType = remapMemRefElementType(memrefType, i256Type);
     Value packedMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, packedMemRefType, op.getMemref()).getResult(0);
     Value packedValue = op.getValue();
@@ -152,12 +168,10 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
         if (cast.getNumOperands() == 2)
         {
             consumedCast = cast;
-            Value tag = cast.getOperand(0);
-            Value payload = cast.getOperand(1);
-            if (llvm::isa<sir::U256Type>(tag.getType()))
-                tag = rewriter.create<sir::BitcastOp>(loc, i256Type, tag);
-            if (llvm::isa<sir::U256Type>(payload.getType()))
-                payload = rewriter.create<sir::BitcastOp>(loc, i256Type, payload);
+            Value tag = ensureI256(cast.getOperand(0));
+            Value payload = ensureI256(cast.getOperand(1));
+            if (!tag || !payload)
+                return failure();
             Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
             Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, payload, one);
             packedValue = rewriter.create<mlir::arith::OrIOp>(loc, shifted, tag);
@@ -189,6 +203,8 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     }
     if (llvm::isa<sir::U256Type>(packedValue.getType()))
         packedValue = rewriter.create<sir::BitcastOp>(loc, i256Type, packedValue);
+    else if (llvm::isa<sir::PtrType>(packedValue.getType()))
+        packedValue = ensureI256(packedValue);
     if (!llvm::isa<mlir::IntegerType>(packedValue.getType()) ||
         llvm::cast<mlir::IntegerType>(packedValue.getType()).getWidth() != 256)
     {
