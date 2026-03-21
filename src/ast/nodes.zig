@@ -377,6 +377,7 @@ pub const IfStmt = struct {
 
 pub const WhileStmt = struct {
     range: source.TextRange,
+    label: ?[]const u8 = null,
     condition: ExprId,
     invariants: []ExprId,
     body: BodyId,
@@ -384,6 +385,7 @@ pub const WhileStmt = struct {
 
 pub const ForStmt = struct {
     range: source.TextRange,
+    label: ?[]const u8 = null,
     iterable: ExprId,
     range_end: ?ExprId = null,
     range_inclusive: bool = true,

@@ -7079,6 +7079,33 @@ test "compiler lowers labeled switch statements and jump values through syntax A
     try testing.expectEqualStrings("again", break_stmt.label.?);
 }
 
+test "compiler lowers labeled for statements through syntax AST path" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    outer: for (0..5) |i, _| {
+        \\        if (i == 3) {
+        \\            break :outer;
+        \\        }
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const for_stmt = ast_file.statement(body.statements[0]).For;
+    const if_stmt = ast_file.statement(ast_file.body(for_stmt.body).statements[0]).If;
+    const break_stmt = ast_file.statement(ast_file.body(if_stmt.then_body).statements[0]).Break;
+
+    try testing.expectEqualStrings("outer", for_stmt.label.?);
+    try testing.expectEqualStrings("outer", break_stmt.label.?);
+}
+
 test "compiler lowers lock and unlock statements through syntax AST and HIR paths" {
     const source_text =
         \\contract Vault {

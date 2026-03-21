@@ -1120,7 +1120,7 @@ const Parser = struct {
     }
 
     fn parseStatementNode(self: *Parser) anyerror!green.GreenNodeId {
-        if (self.looksLikeLabeledBlockStmt()) return self.parseLabeledBlockStmtNode();
+        if (self.looksLikeLabeledStmt()) return self.parseLabeledBlockStmtNode();
         if (self.looksLikeDestructuringAssignStmt()) return self.parseDestructuringAssignStmtNode();
         if (self.looksLikeDirectiveStmt("lock")) return self.parseDirectiveStmtNode(SyntaxKind.LockStmt, "lock");
         if (self.looksLikeDirectiveStmt("unlock")) return self.parseDirectiveStmtNode(SyntaxKind.UnlockStmt, "unlock");
@@ -1187,10 +1187,14 @@ const Parser = struct {
 
         if (self.at(.LeftBrace)) {
             try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        } else if (self.at(.While)) {
+            try children.append(self.allocator, .{ .node = try self.parseWhileStmtNode() });
+        } else if (self.at(.For)) {
+            try children.append(self.allocator, .{ .node = try self.parseForStmtNode() });
         } else if (self.at(.Switch)) {
             try children.append(self.allocator, .{ .node = try self.parseSwitchStmtNode() });
         } else {
-            try self.reportHere("expected block or switch after label");
+            try self.reportHere("expected block, while, for, or switch after label");
         }
 
         return self.finishNode(SyntaxKind.LabeledBlockStmt, children.items);
@@ -2626,8 +2630,12 @@ const Parser = struct {
         return false;
     }
 
-    fn looksLikeLabeledBlockStmt(self: *const Parser) bool {
-        return self.at(.Identifier) and self.peekKind(1) == .Colon and (self.peekKind(2) == .LeftBrace or self.peekKind(2) == .Switch);
+    fn looksLikeLabeledStmt(self: *const Parser) bool {
+        return self.at(.Identifier) and self.peekKind(1) == .Colon and
+            (self.peekKind(2) == .LeftBrace or
+            self.peekKind(2) == .While or
+            self.peekKind(2) == .For or
+            self.peekKind(2) == .Switch);
     }
 
     fn looksLikeDestructuringAssignStmt(self: *const Parser) bool {

@@ -657,6 +657,10 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerWhileStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            return Lowering.lowerWhileStmtNodeWithLabel(self, node, null);
+        }
+
+        fn lowerWhileStmtNodeWithLabel(self: *Builder, node: SyntaxNode, label: ?[]const u8) !StmtId {
             if (firstDirectTokenOfKind(node, .LeftParen) == null) {
                 return Lowering.malformedStmt(self, node, "expected '(' after while");
             }
@@ -665,6 +669,7 @@ pub fn mixin(Builder: type) type {
             const invariants = try Lowering.lowerInvariantClauses(self, node);
             return Support.pushStmt(self, .{ .While = .{
                 .range = node.range(),
+                .label = label,
                 .condition = try Lowering.lowerExpressionNode(self, condition_node),
                 .invariants = invariants,
                 .body = try Lowering.lowerBodyNode(self, body_node),
@@ -672,6 +677,10 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerForStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            return Lowering.lowerForStmtNodeWithLabel(self, node, null);
+        }
+
+        fn lowerForStmtNodeWithLabel(self: *Builder, node: SyntaxNode, label: ?[]const u8) !StmtId {
             const iterable_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing for iterable");
             const loop_vars = parseForBindings(node) orelse return Lowering.malformedStmt(self, node, "missing for bindings");
             const range_expr = if (iterable_node.kind() == .RangeExpr)
@@ -693,6 +702,7 @@ pub fn mixin(Builder: type) type {
             const invariants = try Lowering.lowerInvariantClauses(self, node);
             return Support.pushStmt(self, .{ .For = .{
                 .range = node.range(),
+                .label = label,
                 .iterable = if (range_expr) |range| range.start else try Lowering.lowerExpressionNode(self, iterable_node),
                 .range_end = if (range_expr) |range| range.end else null,
                 .range_inclusive = if (range_expr) |range| range.inclusive else true,
@@ -1059,6 +1069,12 @@ pub fn mixin(Builder: type) type {
 
         fn lowerLabeledBlockStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
             const label_token = firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedStmt(self, node, "missing label name");
+            if (firstDirectChildOfKind(node, .WhileStmt)) |while_node| {
+                return Lowering.lowerWhileStmtNodeWithLabel(self, while_node, tokenText(label_token));
+            }
+            if (firstDirectChildOfKind(node, .ForStmt)) |for_node| {
+                return Lowering.lowerForStmtNodeWithLabel(self, for_node, tokenText(label_token));
+            }
             if (firstDirectChildOfKind(node, .SwitchStmt)) |switch_node| {
                 return Lowering.lowerSwitchStmtNodeWithLabel(self, switch_node, tokenText(label_token));
             }

@@ -776,7 +776,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         return true;
                     }
-                    if (self.loop_context) |loop_context| {
+                    if (@This().findTargetLoopContext(self, jump.label)) |loop_context| {
                         const loc = self.parent.location(jump.range);
                         const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                         const set_break = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, loop_context.break_flag, null, 0);
@@ -868,13 +868,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         appendOp(self.block, op);
                         return false;
                     }
-                    if (self.loop_context != null) {
+                    if (@This().findTargetLoopContext(self, jump.label)) |loop_context| {
                         const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                             current_region_locals
                         else if (self.deferred_return_kind == .scf_yield)
                             self.deferred_return_carried_locals
                         else
-                            self.loop_context.?.carried_locals;
+                            loop_context.carried_locals;
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
@@ -896,6 +896,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                 } else {
                     return switch_context;
+                }
+            }
+            return null;
+        }
+
+        fn findTargetLoopContext(self: *FunctionLowerer, label: ?[]const u8) ?*const LoopContext {
+            var current = self.loop_context;
+            while (current) |loop_context| : (current = loop_context.parent) {
+                if (label) |target| {
+                    if (loop_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return loop_context;
+                    }
+                } else {
+                    return loop_context;
                 }
             }
             return null;
@@ -1822,6 +1836,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             body_lowerer.block = body_block;
             var loop_context = LoopContext{
                 .parent = self.loop_context,
+                .label = for_stmt.label,
                 .break_flag = break_flag,
                 .carried_locals = carried_locals.items,
             };

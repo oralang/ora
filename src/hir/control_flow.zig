@@ -483,6 +483,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             var loop_context = LoopContext{
                 .parent = self.loop_context,
+                .label = while_stmt.label,
                 .break_flag = break_flag,
                 .carried_locals = carried_locals.items,
             };
