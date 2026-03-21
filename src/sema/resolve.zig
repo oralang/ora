@@ -42,6 +42,7 @@ pub fn resolveNames(
         .arena = arena,
         .file_id = file_id,
         .file = file,
+        .item_index = item_index,
         .bindings = bindings,
         .diagnostics = &result.diagnostics,
     };
@@ -76,6 +77,7 @@ const Resolver = struct {
     arena: std.mem.Allocator,
     file_id: source.FileId,
     file: *const ast.AstFile,
+    item_index: *const ItemIndexResult,
     bindings: []?ResolvedBinding,
     diagnostics: *diagnostics.DiagnosticList,
 
@@ -255,7 +257,7 @@ const Resolver = struct {
         switch (self.file.expression(expr_id).*) {
             .Name => |name| {
                 self.bindings[expr_id.index()] = env.lookup(name.name);
-                if (self.bindings[expr_id.index()] == null) {
+                if (self.bindings[expr_id.index()] == null and !self.isRecognizedTypeValueName(name.name)) {
                     var buffer: [256]u8 = undefined;
                     const message = try std.fmt.bufPrint(&buffer, "undefined name '{s}'", .{name.name});
                     try self.diagnostics.appendError(message, .{
@@ -383,5 +385,41 @@ const Resolver = struct {
             .range = field.range,
         }) catch {};
         return true;
+    }
+
+    fn isRecognizedTypeValueName(self: *const Resolver, name: []const u8) bool {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (std.mem.eql(u8, trimmed, "void") or
+            std.mem.eql(u8, trimmed, "bool") or
+            std.mem.eql(u8, trimmed, "string") or
+            std.mem.eql(u8, trimmed, "address") or
+            std.mem.eql(u8, trimmed, "bytes"))
+        {
+            return true;
+        }
+
+        if (trimmed.len >= 2 and (trimmed[0] == 'u' or trimmed[0] == 'i')) {
+            const bits = trimmed[1..];
+            if (std.mem.eql(u8, bits, "8") or
+                std.mem.eql(u8, bits, "16") or
+                std.mem.eql(u8, bits, "32") or
+                std.mem.eql(u8, bits, "64") or
+                std.mem.eql(u8, bits, "128") or
+                std.mem.eql(u8, bits, "256"))
+            {
+                return true;
+            }
+        }
+
+        if (self.lookupTypeValueItem(trimmed)) |_| return true;
+        return false;
+    }
+
+    fn lookupTypeValueItem(self: *const Resolver, name: []const u8) ?ast.ItemId {
+        const item_id = self.item_index.lookup(name) orelse return null;
+        return switch (self.file.item(item_id).*) {
+            .Contract, .Struct, .Bitfield, .Enum, .TypeAlias => item_id,
+            else => null,
+        };
     }
 };
