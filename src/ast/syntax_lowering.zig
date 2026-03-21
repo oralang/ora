@@ -951,7 +951,15 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerVariableDeclStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
-            const name_token = bindingIdentifierLikeToken(node) orelse return Lowering.malformedStmt(self, node, "missing variable name");
+            const name_token = bindingIdentifierLikeToken(node) orelse {
+                if (bindingReservedKeywordToken(node)) |reserved_token| {
+                    const detail = std.fmt.allocPrint(self.allocator, "'{s}' is a reserved keyword and cannot be used as a variable name", .{
+                        tokenText(reserved_token),
+                    }) catch "reserved keyword cannot be used as a variable name";
+                    return Lowering.malformedStmt(self, node, detail);
+                }
+                return Lowering.malformedStmt(self, node, "missing variable name");
+            };
             const pattern = try Support.pushPattern(self, .{ .Name = .{
                 .range = name_token.range(),
                 .name = tokenText(name_token),
@@ -2131,6 +2139,34 @@ fn bindingIdentifierLikeToken(node: SyntaxNode) ?SyntaxToken {
             .token => |token| switch (token.kind()) {
                 .Colon, .Equal, .Semicolon => return null,
                 else => if (isIdentifierLike(token.kind())) return token,
+            },
+        }
+    }
+    return null;
+}
+
+fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .node => |child_node| {
+                if (child_node.kind() == .NameExpr) {
+                    var child_it = child_node.children();
+                    while (child_it.next()) |name_child| {
+                        switch (name_child) {
+                            .node => {},
+                            .token => |token| {
+                                if (token.kind() == .Old) return token;
+                            },
+                        }
+                    }
+                }
+            },
+            .token => |token| switch (token.kind()) {
+                .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore => {},
+                .Colon, .Equal, .Semicolon, .RightBrace => return null,
+                .Old => return token,
+                else => {},
             },
         }
     }
