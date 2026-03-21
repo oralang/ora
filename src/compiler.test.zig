@@ -822,7 +822,7 @@ test "compiler rejects unknown error returns" {
         \\error Failure(code: u256);
         \\
         \\pub fn run() -> !u256 | Failure {
-        \\    return error.Nonexistent(7);
+        \\    return Nonexistent(7);
         \\}
     ;
 
@@ -838,7 +838,7 @@ test "compiler rejects error returns with wrong payload arity" {
         \\error Failure(code: u256);
         \\
         \\pub fn run() -> !u256 | Failure {
-        \\    return error.Failure(1, 2, 3);
+        \\    return Failure(1, 2, 3);
         \\}
     ;
 
@@ -855,7 +855,7 @@ test "compiler rejects error returns outside function return error set" {
         \\error ErrorB;
         \\
         \\pub fn run() -> !u256 | ErrorA {
-        \\    return error.ErrorB();
+        \\    return ErrorB();
         \\}
     ;
 
@@ -871,7 +871,7 @@ test "compiler rejects error returns with wrong payload types" {
         \\error Failure(code: u256, owner: address);
         \\
         \\pub fn run() -> !u256 | Failure {
-        \\    return error.Failure(true, 7);
+        \\    return Failure(true, 7);
         \\}
     ;
 
@@ -6735,7 +6735,7 @@ test "compiler render ladder step 7 add error constructor expression" {
         \\        false => 2,
         \\        else => 3,
         \\    };
-        \\    let problem = error.Failure(7);
+        \\    let problem = Failure(7);
         \\    return value;
         \\}
     ;
@@ -6764,7 +6764,7 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
         \\        false => 2,
         \\        else => 3,
         \\    };
-        \\    let problem = error.Failure(7);
+        \\    let problem = Failure(7);
         \\    return value;
         \\}
     ;
@@ -11947,7 +11947,7 @@ test "dispatcher translates public zero-payload error unions to ABI reverts" {
         \\
         \\contract Check {
         \\    pub fn run() -> !u256 | Failure {
-        \\        return error.Failure();
+        \\        return Failure();
         \\    }
         \\}
     ;
@@ -11976,7 +11976,7 @@ test "dispatcher translates public payload error unions to ABI reverts" {
         \\
         \\contract Check {
         \\    pub fn run() -> !u256 | Failure {
-        \\        return error.Failure(7);
+        \\        return Failure(7);
         \\    }
         \\}
     ;

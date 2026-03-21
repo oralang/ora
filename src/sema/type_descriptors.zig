@@ -248,11 +248,13 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     if (expected_unwrapped.kind() == .error_union) {
         const expected = expected_unwrapped.error_union;
         if (typesAssignable(expected.payload_type.*, actual_unwrapped)) return true;
+        if (expected.error_types.len == 0 and actual_unwrapped.kind() == .named) return true;
         if (errorSetContains(expected.error_types, actual_unwrapped)) return true;
         if (actual_unwrapped.kind() == .error_union) {
             const actual = actual_unwrapped.error_union;
             return typesAssignable(expected.payload_type.*, actual.payload_type.*) and
-                errorSetContainsAll(expected.error_types, actual.error_types);
+                (expected.error_types.len == 0 or
+                errorSetContainsAll(expected.error_types, actual.error_types));
         }
     }
     return typeEql(expected_unwrapped, actual_unwrapped);

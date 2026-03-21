@@ -269,6 +269,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 const placeholder = try self.createAggregatePlaceholder("ora.function_ref", name.range, &.{}, result_type);
                                 return appendValueOp(self.block, placeholder);
                             },
+                            .ErrorDecl => |error_decl| {
+                                if (error_decl.parameters.len == 0) {
+                                    const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
+                                    const op = mlir.oraErrorReturnOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(name.range),
+                                        strRef(error_decl.name),
+                                        null,
+                                        0,
+                                        result_type,
+                                    );
+                                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                                    return appendValueOp(self.block, op);
+                                }
+                            },
                             else => {},
                         }
                     },
@@ -2089,24 +2104,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             const path = try @This().fieldExprPath(self, expr_id);
-            if (std.mem.startsWith(u8, path, "error.")) {
-                const error_name = path["error.".len..];
-                const item_id = self.parent.item_index.lookup(error_name) orelse return null;
-                if (self.parent.file.item(item_id).* != .ErrorDecl) return null;
-                const error_decl = self.parent.file.item(item_id).ErrorDecl;
-                if (error_decl.parameters.len != 0) return null;
-                const lowered_result_type = self.return_type orelse result_type;
-                const op = mlir.oraErrorReturnOpCreate(
-                    self.parent.context,
-                    self.parent.location(field.range),
-                    strRef(error_name),
-                    null,
-                    0,
-                    lowered_result_type,
-                );
-                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                return appendValueOp(self.block, op);
-            }
             if (try @This().lowerBuiltinFieldCall(self, field, result_type, path)) |value| {
                 return value;
             }

@@ -305,7 +305,10 @@ const Resolver = struct {
             .Builtin => |builtin| {
                 for (builtin.args) |arg| try self.resolveExpr(arg, env);
             },
-            .Field => |field| try self.resolveExpr(field.base, env),
+            .Field => |field| {
+                if (self.emitDeprecatedErrorNamespace(expr_id, field)) return;
+                try self.resolveExpr(field.base, env);
+            },
             .Index => |index| {
                 try self.resolveExpr(index.base, env);
                 try self.resolveExpr(index.index, env);
@@ -356,5 +359,29 @@ const Resolver = struct {
         const item = self.file.item(item_id).*;
         if (item != .Trait) return null;
         return item.Trait.ghost_block;
+    }
+
+    fn emitDeprecatedErrorNamespace(self: *Resolver, expr_id: ast.ExprId, field: ast.FieldExpr) bool {
+        _ = expr_id;
+        const base_name = switch (self.file.expression(field.base).*) {
+            .Name => |name| name.name,
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Name => |name| name.name,
+                else => return false,
+            },
+            else => return false,
+        };
+        if (!std.mem.eql(u8, base_name, "error")) return false;
+        var buffer: [256]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, "use '{s}' or '{s}(...)' instead of 'error.{s}'", .{
+            field.name,
+            field.name,
+            field.name,
+        }) catch "error values use 'Name' or 'Name(...)', not 'error.Name'";
+        self.diagnostics.appendError(message, .{
+            .file_id = self.file_id,
+            .range = field.range,
+        }) catch {};
+        return true;
     }
 };
