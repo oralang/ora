@@ -951,13 +951,13 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerVariableDeclStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            if (bindingReservedKeywordToken(node)) |reserved_token| {
+                const detail = std.fmt.allocPrint(self.allocator, "'{s}' is a reserved keyword and cannot be used as a variable name", .{
+                    tokenText(reserved_token),
+                }) catch "reserved keyword cannot be used as a variable name";
+                return Lowering.malformedStmt(self, node, detail);
+            }
             const name_token = bindingIdentifierLikeToken(node) orelse {
-                if (bindingReservedKeywordToken(node)) |reserved_token| {
-                    const detail = std.fmt.allocPrint(self.allocator, "'{s}' is a reserved keyword and cannot be used as a variable name", .{
-                        tokenText(reserved_token),
-                    }) catch "reserved keyword cannot be used as a variable name";
-                    return Lowering.malformedStmt(self, node, detail);
-                }
                 return Lowering.malformedStmt(self, node, "missing variable name");
             };
             const pattern = try Support.pushPattern(self, .{ .Name = .{
@@ -2156,7 +2156,7 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
                         switch (name_child) {
                             .node => {},
                             .token => |token| {
-                                if (token.kind() == .Old) return token;
+                                if (isReservedBindingKeyword(token.kind())) return token;
                             },
                         }
                     }
@@ -2165,12 +2165,88 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
             .token => |token| switch (token.kind()) {
                 .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore => {},
                 .Colon, .Equal, .Semicolon, .RightBrace => return null,
-                .Old => return token,
-                else => {},
+                else => if (isReservedBindingKeyword(token.kind())) return token,
             },
         }
     }
     return null;
+}
+
+fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
+    return switch (kind) {
+        .Contract,
+        .Pub,
+        .Fn,
+        .Let,
+        .Var,
+        .Const,
+        .Immutable,
+        .Storage,
+        .Memory,
+        .Tstore,
+        .Init,
+        .Log,
+        .If,
+        .Else,
+        .While,
+        .For,
+        .Break,
+        .Continue,
+        .Return,
+        .Requires,
+        .Ensures,
+        .Invariant,
+        .Old,
+        .Result,
+        .Modifies,
+        .Decreases,
+        .Increases,
+        .Assume,
+        .Havoc,
+        .Comptime,
+        .As,
+        .Import,
+        .Struct,
+        .Bitfield,
+        .Enum,
+        .Extern,
+        .Trait,
+        .Impl,
+        .Call,
+        .Staticcall,
+        .Errors,
+        .True,
+        .False,
+        .Error,
+        .Try,
+        .Catch,
+        .Switch,
+        .Ghost,
+        .Assert,
+        .Void,
+        .From,
+        .To,
+        .Forall,
+        .Exists,
+        .Where,
+        .U8,
+        .U16,
+        .U32,
+        .U64,
+        .U128,
+        .U256,
+        .I8,
+        .I16,
+        .I32,
+        .I64,
+        .I128,
+        .I256,
+        .Bool,
+        .Address,
+        .String,
+        .Bytes => true,
+        else => false,
+    };
 }
 
 fn firstDirectIntegerToken(node: SyntaxNode) ?SyntaxToken {
