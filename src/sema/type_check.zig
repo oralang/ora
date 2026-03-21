@@ -991,7 +991,7 @@ const TypeChecker = struct {
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
                     if (decl.type_expr != null) {
-                        try self.contextualizeAnonymousStructLiteral(expr_id, self.pattern_types[decl.pattern.index()].type);
+                        try self.contextualizeLiteral(expr_id, self.pattern_types[decl.pattern.index()].type);
                     }
                     const actual_type = self.expr_types[expr_id.index()];
                     const actual_located = self.exprLocatedType(expr_id);
@@ -1027,9 +1027,9 @@ const TypeChecker = struct {
             },
             .Return => |ret| if (ret.value) |expr_id| {
                 try self.visitExpr(expr_id);
-                const actual_type = self.expr_types[expr_id.index()];
                 if (self.current_return_type) |expected_type| {
-                    try self.contextualizeAnonymousStructLiteral(expr_id, expected_type);
+                    try self.contextualizeLiteral(expr_id, expected_type);
+                    const actual_type = self.expr_types[expr_id.index()];
                     if (try self.emitIntegerOverflowIfNeeded(ret.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
@@ -2211,10 +2211,15 @@ const TypeChecker = struct {
         return .{ .named = .{ .name = name } };
     }
 
-    fn contextualizeAnonymousStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
+    fn contextualizeLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
         const expr = self.file.expression(expr_id).*;
         switch (expr) {
-            .Group => |group| return self.contextualizeAnonymousStructLiteral(group.expr, expected_type),
+            .Group => |group| return self.contextualizeLiteral(group.expr, expected_type),
+            .Tuple => |tuple| {
+                if (expected_type.kind() != .tuple) return;
+                if (tuple.elements.len != expected_type.tuple.len) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
             .StructLiteral => |struct_literal| {
                 if (struct_literal.type_expr != null or struct_literal.type_name.len != 0) return;
                 self.expr_types[expr_id.index()] = expected_type;

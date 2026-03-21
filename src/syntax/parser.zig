@@ -2451,6 +2451,11 @@ const Parser = struct {
 
         try children.append(self.allocator, .{ .node = base });
         try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+            const literal = [_]ChildRef{.{ .token = self.bump() }};
+            try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Literal, &literal) });
+            return try self.finishNode(SyntaxKind.IndexExpr, children.items);
+        }
         if (self.at(.Identifier) or self.at(.Error) or self.at(.From) or self.at(.To)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {

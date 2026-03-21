@@ -2689,6 +2689,62 @@ test "compiler parses and lowers structured top-level item forms" {
     try testing.expect(found_error);
 }
 
+test "compiler parses tuple dot access as index expressions" {
+    const source_text =
+        \\contract TupleDot {
+        \\    pub fn run() -> u256 {
+        \\        let t: (u256, bool) = (100, true);
+        \\        if (t.1) {
+        \\            return t.0;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+
+    const file = try compilation.db.astFile(module.file_id);
+    const contract = file.item(file.root_items[0]).Contract;
+    const run_fn = file.item(contract.members[0]).Function;
+    const body = file.body(run_fn.body).*;
+    const contract_node = nthChildNodeOfKind(root, .ContractItem, 0).?;
+    const function = nthChildNodeOfKind(contract_node, .FunctionItem, 0).?;
+    const syntax_body = nthChildNodeOfKind(function, .Body, 0).?;
+    try testing.expect(containsNodeOfKind(syntax_body, .IndexExpr));
+
+    const if_stmt = file.statement(body.statements[1]).If;
+    const if_condition = file.expression(if_stmt.condition).*;
+    try testing.expect(if_condition == .Index);
+
+    const then_body = file.body(if_stmt.then_body).*;
+    const ret_stmt = file.statement(then_body.statements[0]).Return;
+    try testing.expect(ret_stmt.value != null);
+    try testing.expect(file.expression(ret_stmt.value.?).* == .Index);
+}
+
+test "compiler contextualizes typed tuple literals with mixed element types" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn sender_and_amount() -> u256 {
+        \\    let t: (address, u256) = (std.msg.sender(), 500);
+        \\    return t.1;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.tuple<!ora.address, i256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+}
+
 test "compiler semantic queries index names and infer expression types" {
     const source_text =
         \\pub fn add(x: u256, y: u256) -> u256 {
