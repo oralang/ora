@@ -573,6 +573,21 @@ fn moveArtifactFile(
     try std.fs.cwd().rename(src_path, dst_path);
 }
 
+fn moveArtifactFileIfExists(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    file_name: []const u8,
+    target_dir: []const u8,
+) !void {
+    const src_path = try std.fs.path.join(allocator, &[_][]const u8{ root_dir, file_name });
+    defer allocator.free(src_path);
+    std.fs.cwd().access(src_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    try moveArtifactFile(allocator, root_dir, file_name, target_dir);
+}
+
 fn runBuildArtifacts(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -654,11 +669,11 @@ fn runBuildArtifacts(
 
     const smt_md_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{stem});
     defer allocator.free(smt_md_file);
-    try moveArtifactFile(allocator, artifact_root, smt_md_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, artifact_root, smt_md_file, verify_dir);
 
     const smt_json_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{stem});
     defer allocator.free(smt_json_file);
-    try moveArtifactFile(allocator, artifact_root, smt_json_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, artifact_root, smt_json_file, verify_dir);
 
     if (verification_failed) {
         return error.VerificationFailed;

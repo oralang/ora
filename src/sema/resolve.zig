@@ -30,6 +30,13 @@ pub fn resolveNames(
         if (std.mem.indexOfScalar(u8, entry.name, '.')) |_| continue;
         try root_env.bindings.put(entry.name, .{ .item = entry.item_id });
     }
+    for (file.root_items) |item_id| {
+        const item = file.item(item_id).*;
+        if (item != .Import) continue;
+        if (item.Import.alias) |alias| {
+            try root_env.bindings.put(alias, .{ .item = item_id });
+        }
+    }
 
     var resolver = Resolver{
         .arena = arena,
