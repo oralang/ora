@@ -567,96 +567,96 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .assign => try self.lowerExpr(assign.value, locals),
                         .add_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .wrapping_add_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraAddWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_and_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .sub_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .wrapping_sub_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraSubWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_or_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithOrIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .mul_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .wrapping_mul_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraMulWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_xor_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithXorIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .shl_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithShlIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .shr_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .pow_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             break :blk try @This().lowerCheckedPower(self, lhs, rhs, mlir.oraValueGetType(lhs), assign.range);
                         },
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
-                            const rhs = try self.lowerExpr(assign.value, locals);
+                            const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
