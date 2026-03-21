@@ -2745,6 +2745,30 @@ test "compiler contextualizes typed tuple literals with mixed element types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
 }
 
+test "compiler supports comptime while statements" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    var total: u256 = 0;
+        \\    comptime while (total < 5) {
+        \\        total = total + 1;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(ast_diags.isEmpty());
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+}
+
 test "compiler semantic queries index names and infer expression types" {
     const source_text =
         \\pub fn add(x: u256, y: u256) -> u256 {

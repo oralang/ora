@@ -1125,6 +1125,7 @@ const Parser = struct {
         if (self.looksLikeDirectiveStmt("lock")) return self.parseDirectiveStmtNode(SyntaxKind.LockStmt, "lock");
         if (self.looksLikeDirectiveStmt("unlock")) return self.parseDirectiveStmtNode(SyntaxKind.UnlockStmt, "unlock");
         return switch (self.current().kind) {
+            .Comptime => self.parseComptimeStmtNode(),
             .LeftBrace => self.parseBlockStmtNode(),
             .If => self.parseIfStmtNode(),
             .While => self.parseWhileStmtNode(),
@@ -1141,6 +1142,29 @@ const Parser = struct {
             .Storage, .Memory, .Tstore, .Let, .Var, .Const, .Immutable => self.parseVariableDeclStmtNode(),
             else => self.parseExprOrAssignStmtNode(),
         };
+    }
+
+    fn parseComptimeStmtNode(self: *Parser) anyerror!green.GreenNodeId {
+        var comptime_children: std.ArrayList(ChildRef) = .{};
+        defer comptime_children.deinit(self.allocator);
+
+        try comptime_children.append(self.allocator, .{ .token = self.bump() });
+
+        var body_children: std.ArrayList(ChildRef) = .{};
+        defer body_children.deinit(self.allocator);
+
+        if (self.at(.LeftBrace)) {
+            try comptime_children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        } else if (!self.at(.Eof) and !self.at(.RightBrace)) {
+            try body_children.append(self.allocator, .{ .node = try self.parseStatementNode() });
+            try comptime_children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Body, body_children.items) });
+        } else {
+            try self.reportHere("expected body or statement after comptime");
+        }
+
+        const comptime_expr = try self.finishNode(SyntaxKind.ComptimeExpr, comptime_children.items);
+        const stmt_children = [_]ChildRef{.{ .node = comptime_expr }};
+        return self.finishNode(SyntaxKind.ExprStmt, &stmt_children);
     }
 
     fn parseLabeledBlockStmtNode(self: *Parser) anyerror!green.GreenNodeId {
