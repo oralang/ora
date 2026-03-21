@@ -16,6 +16,9 @@ const Context = @import("context.zig").Context;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    const TupleValue = struct {
+        elements: []z3.Z3_ast,
+    };
     const CallSlotState = struct {
         name: []const u8,
         pre: z3.Z3_ast,
@@ -47,6 +50,8 @@ pub const Encoder = struct {
     value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Explicit MLIR value bindings (used for call summary argument substitution).
     value_bindings: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Local tuple element cache for ora.tuple_create / ora.tuple_extract.
+    tuple_values: std.AutoHashMap(u64, TupleValue),
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
@@ -90,6 +95,7 @@ pub const Encoder = struct {
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .tuple_values = std.AutoHashMap(u64, TupleValue).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
@@ -149,6 +155,11 @@ pub const Encoder = struct {
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
+        var tuple_it = self.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.elements);
+        }
+        self.tuple_values.clearRetainingCapacity();
         self.materialized_calls.clearRetainingCapacity();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -211,6 +222,11 @@ pub const Encoder = struct {
             self.allocator.free(binding.name);
         }
         self.quantified_bindings.deinit(self.allocator);
+        var tuple_it = self.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.elements);
+        }
+        self.tuple_values.deinit();
         self.value_map.deinit();
         self.value_map_old.deinit();
         self.value_bindings.deinit();
@@ -892,13 +908,14 @@ pub const Encoder = struct {
                 .Ge => z3.Z3_mk_str_le(self.context.ctx, rhs, lhs),
             };
         }
+        const coerced = self.coerceComparisonOperands(lhs, rhs);
         return switch (op) {
-            .Eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
-            .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
-            .Lt => z3.Z3_mk_bvult(self.context.ctx, lhs, rhs), // Unsigned less than
-            .Le => z3.Z3_mk_bvule(self.context.ctx, lhs, rhs), // Unsigned less than or equal
-            .Gt => z3.Z3_mk_bvugt(self.context.ctx, lhs, rhs), // Unsigned greater than
-            .Ge => z3.Z3_mk_bvuge(self.context.ctx, lhs, rhs), // Unsigned greater than or equal
+            .Eq => z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs)),
+            .Lt => z3.Z3_mk_bvult(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned less than
+            .Le => z3.Z3_mk_bvule(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned less than or equal
+            .Gt => z3.Z3_mk_bvugt(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than
+            .Ge => z3.Z3_mk_bvuge(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than or equal
         };
     }
 
@@ -1771,6 +1788,29 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "ora.tuple_create")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results < 1) return error.UnsupportedOperation;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_id = @intFromPtr(result_value.ptr);
+            const elements = try self.allocator.dupe(z3.Z3_ast, operands);
+            try self.tuple_values.put(result_id, .{ .elements = elements });
+            return if (operands.len > 0) operands[0] else self.encodeBoolConstant(true);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tuple_extract")) {
+            const tuple_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+            const tuple_id = @intFromPtr(tuple_operand.ptr);
+            if (self.tuple_values.get(tuple_id)) |tuple| {
+                const index_attr = mlir.oraOperationGetAttributeByName(mlir_op, .{ .data = "index".ptr, .length = 5 });
+                if (!mlir.oraAttributeIsNull(index_attr)) {
+                    const index: usize = @intCast(mlir.oraIntegerAttrGetValueSInt(index_attr));
+                    if (index < tuple.elements.len) return tuple.elements[index];
+                }
+            }
+            return error.UnsupportedOperation;
+        }
+
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
             if (operands.len >= 1) {
                 return operands[0];
@@ -1901,6 +1941,24 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 return try self.applyFieldFunction(field_name, struct_sort, result_sort, operands[0]);
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
+            if (operands.len >= 2 and mlir.oraOperationGetNumResults(mlir_op) >= 1) {
+                const field_name = self.getStringAttr(mlir_op, "field_name") orelse "field";
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_field_update_{d}", .{op_id});
+                defer self.allocator.free(struct_var_name);
+                const struct_val = try self.mkVariable(struct_var_name, result_sort);
+                const field_sort = z3.Z3_get_sort(self.context.ctx, operands[1]);
+                const accessor = try self.applyFieldFunction(field_name, result_sort, field_sort, struct_val);
+                const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operands[1]);
+                self.addConstraint(eq);
+                return struct_val;
             }
         }
 
@@ -3563,8 +3621,9 @@ pub const Encoder = struct {
             return error.InvalidOperandCount;
         }
 
-        const lhs = operands[0];
-        const rhs = operands[1];
+        const coerced = self.coerceComparisonOperands(operands[0], operands[1]);
+        const lhs = coerced.lhs;
+        const rhs = coerced.rhs;
 
         return switch (predicate) {
             0 => self.encodeComparisonOp(.Eq, lhs, rhs),
@@ -3578,6 +3637,29 @@ pub const Encoder = struct {
             8 => self.encodeComparisonOp(.Gt, lhs, rhs),
             9 => self.encodeComparisonOp(.Ge, lhs, rhs),
             else => return error.UnsupportedPredicate,
+        };
+    }
+
+    fn coerceComparisonOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
+        if (lhs_sort == rhs_sort) return .{ .lhs = lhs, .rhs = rhs };
+
+        const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
+        const rhs_kind = z3.Z3_get_sort_kind(self.context.ctx, rhs_sort);
+        if (lhs_kind == z3.Z3_BV_SORT and rhs_kind == z3.Z3_BV_SORT) {
+            const lhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
+            const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
+            const target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
+            return .{
+                .lhs = self.coerceAstToSort(lhs, target_sort),
+                .rhs = self.coerceAstToSort(rhs, target_sort),
+            };
+        }
+
+        return .{
+            .lhs = lhs,
+            .rhs = self.coerceAstToSort(rhs, lhs_sort),
         };
     }
 
