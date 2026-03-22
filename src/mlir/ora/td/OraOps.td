@@ -623,8 +623,8 @@ def Ora_PowerOp : Ora_PureOp<"power", [AllTypesMatch<["base", "exponent", "resul
     ```
   }];
   
-  let arguments = (ins Ora_IntegerValueType:$base, Ora_IntegerValueType:$exponent);
-  let results = (outs Ora_IntegerValueType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$base, Ora_IntegerLikeValueType:$exponent);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   
   let assemblyFormat = "$base `,` $exponent attr-dict `:` type($base) `,` type($exponent) `->` type($result)";
 }
