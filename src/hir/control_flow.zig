@@ -175,12 +175,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try_lowerer.deferred_return_carried_locals = carried_locals.items;
             }
             var try_locals = try self.cloneLocals(locals);
-            _ = try try_lowerer.lowerBody(try_stmt.try_body, &try_locals);
+            const try_terminated = try try_lowerer.lowerBody(try_stmt.try_body, &try_locals);
             if (!blockEndsWithTerminator(try_block)) {
                 try try_lowerer.appendOraYieldFromLocals(try_block, try_stmt.range, &try_locals, carried_locals.items);
             }
 
             var catch_locals = try self.cloneLocals(locals);
+            var catch_terminated = false;
             if (try_stmt.catch_clause) |catch_clause| {
                 var catch_lowerer = self.*;
                 catch_lowerer.block = catch_block;
@@ -198,7 +199,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const error_arg = mlir.mlirBlockAddArgument(catch_block, lowered_type, self.parent.location(catch_clause.range));
                     try catch_lowerer.bindPatternValue(pattern_id, error_arg, &catch_locals);
                 }
-                _ = try catch_lowerer.lowerBody(catch_clause.body, &catch_locals);
+                catch_terminated = try catch_lowerer.lowerBody(catch_clause.body, &catch_locals);
                 if (!blockEndsWithTerminator(catch_block)) {
                     try catch_lowerer.appendOraYieldFromLocals(catch_block, catch_clause.range, &catch_locals, carried_locals.items);
                 }
@@ -211,8 +212,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             if (created_deferred_return) {
                 try self.appendDeferredReturnCheck(try_stmt.range);
+                if (try_terminated and catch_terminated and !blockEndsWithTerminator(self.block)) {
+                    try self.appendDeferredReturnTerminator(try_stmt.range, locals);
+                }
             }
-            return false;
+            return try_terminated and catch_terminated;
         }
 
         pub fn lowerLabeledBlockStmt(self: *FunctionLowerer, block_stmt: ast.LabeledBlockStmt, locals: *LocalEnv) anyerror!bool {
