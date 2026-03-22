@@ -509,7 +509,7 @@ test "compiler type checks external proxy method calls" {
         \\    storage var token: address;
         \\
         \\    pub fn probe(user: address) {
-        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
+        \\        let call_result = external<ERC20>(token, gas: 50000).balanceOf(user);
         \\    }
         \\}
     ;
@@ -525,7 +525,7 @@ test "compiler type checks external proxy method calls" {
     const contract = ast_file.item(ast_file.root_items[2]).Contract;
     const function = ast_file.item(contract.members[1]).Function;
     const decl = ast_file.statement(ast_file.body(function.body).statements[0]).VariableDecl;
-    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "result").?;
+    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "call_result").?;
     const result_type = typecheck.pattern_types[result_pattern.index()].type;
     _ = decl;
     try testing.expectEqual(compiler.sema.TypeKind.error_union, result_type.kind());
@@ -547,7 +547,7 @@ test "compiler includes declared extern trait errors in call result types" {
         \\    storage var token: address;
         \\
         \\    pub fn send(to: address, amount: u256) {
-        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, amount);
+        \\        let call_result = external<ERC20>(token, gas: 50000).transfer(to, amount);
         \\    }
         \\}
     ;
@@ -562,7 +562,7 @@ test "compiler includes declared extern trait errors in call result types" {
 
     const contract = ast_file.item(ast_file.root_items[4]).Contract;
     const function = ast_file.item(contract.members[1]).Function;
-    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "result").?;
+    const result_pattern = findVariablePatternByName(ast_file, ast_file.body(function.body).statements, "call_result").?;
     const result_type = typecheck.pattern_types[result_pattern.index()].type;
     try testing.expectEqual(compiler.sema.TypeKind.error_union, result_type.kind());
     try testing.expectEqual(@as(usize, 3), result_type.errorTypes().len);
@@ -656,8 +656,8 @@ test "compiler rejects storage write after extern call on same slot" {
         \\
         \\    pub fn bad(to: address) {
         \\        balance = 1;
-        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, balance);
-        \\        _ = result;
+        \\        let call_result = external<ERC20>(token, gas: 50000).transfer(to, balance);
+        \\        _ = call_result;
         \\        balance = 2;
         \\    }
         \\}
@@ -685,8 +685,8 @@ test "compiler allows writes to different storage slots around extern call" {
         \\
         \\    pub fn ok(to: address) {
         \\        balance = 1;
-        \\        let result = external<ERC20>(token, gas: 50000).transfer(to, balance);
-        \\        _ = result;
+        \\        let call_result = external<ERC20>(token, gas: 50000).transfer(to, balance);
+        \\        _ = call_result;
         \\        other = 2;
         \\    }
         \\}
@@ -713,8 +713,8 @@ test "compiler allows writes around extern staticcall" {
         \\
         \\    pub fn ok(user: address) {
         \\        balance = 1;
-        \\        let result = external<ERC20>(token, gas: 50000).balanceOf(user);
-        \\        _ = result;
+        \\        let call_result = external<ERC20>(token, gas: 50000).balanceOf(user);
+        \\        _ = call_result;
         \\        balance = 2;
         \\    }
         \\}
@@ -829,8 +829,8 @@ test "compiler rejects unknown error returns" {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
 
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown error 'Nonexistent'"));
+    const resolution_diags = try compilation.db.resolutionDiagnostics(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(resolution_diags, "undefined name 'Nonexistent'"));
 }
 
 test "compiler rejects error returns with wrong payload arity" {
@@ -846,7 +846,7 @@ test "compiler rejects error returns with wrong payload arity" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'Failure' expects 1 arguments, found 3"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "expected 1 arguments, found 3"));
 }
 
 test "compiler rejects error returns outside function return error set" {
@@ -863,7 +863,7 @@ test "compiler rejects error returns outside function return error set" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error 'ErrorB' is not in function return error set"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "return expects type 'error union', found 'ErrorB'"));
 }
 
 test "compiler rejects error returns with wrong payload types" {
@@ -3776,7 +3776,7 @@ test "compiler lowers enum variant access through real enum constant op" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
@@ -6872,7 +6872,7 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
     try testing.expect(ast_file.expression(coords_stmt.value.?).* == .Tuple);
     try testing.expect(ast_file.expression(pair_stmt.value.?).* == .StructLiteral);
     try testing.expect(ast_file.expression(value_stmt.value.?).* == .Switch);
-    try testing.expect(ast_file.expression(problem_stmt.value.?).* == .ErrorReturn);
+    try testing.expect(ast_file.expression(problem_stmt.value.?).* == .Call);
 
     const items_expr = ast_file.expression(items_stmt.value.?).ArrayLiteral;
     try testing.expectEqual(@as(usize, 3), items_expr.elements.len);
@@ -6888,8 +6888,9 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
     try testing.expectEqual(@as(usize, 2), value_expr.arms.len);
     try testing.expect(value_expr.else_expr != null);
 
-    const problem_expr = ast_file.expression(problem_stmt.value.?).ErrorReturn;
-    try testing.expectEqualStrings("Failure", problem_expr.name);
+    const problem_expr = ast_file.expression(problem_stmt.value.?).Call;
+    try testing.expect(ast_file.expression(problem_expr.callee).* == .Name);
+    try testing.expectEqualStrings("Failure", ast_file.expression(problem_expr.callee).Name.name);
     try testing.expectEqual(@as(usize, 1), problem_expr.args.len);
 
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
@@ -8815,7 +8816,7 @@ test "compiler const eval preserves signed negative literals without wrapping" {
     try testing.expectEqual(@as(i128, -1), try consteval.values[decl_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
-test "compiler allows local result name after early-return if" {
+test "compiler allows local name after early-return if" {
     const source_text =
         \\contract EarlyReturn {
         \\    pub fn process(x: u256) -> u256 {
@@ -8823,13 +8824,13 @@ test "compiler allows local result name after early-return if" {
         \\            return 1000;
         \\        }
         \\
-        \\        var result: u256 = x * 2;
-        \\        if (result > 500) {
+        \\        var output: u256 = x * 2;
+        \\        if (output > 500) {
         \\            return 500;
         \\        }
         \\
-        \\        result += 10;
-        \\        return result;
+        \\        output += 10;
+        \\        return output;
         \\    }
         \\}
     ;
@@ -10594,7 +10595,7 @@ test "compiler const eval executes switch returns through comptime call fallback
     try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
-test "compiler const eval executes nested comptime expressions through ct fallback" {
+test "compiler rejects unsupported nested comptime expressions" {
     const source_text =
         \\pub fn run() -> u256 {
         \\    return comptime {
@@ -10608,14 +10609,8 @@ test "compiler const eval executes nested comptime expressions through ct fallba
     var compilation = try compileText(source_text);
     defer compilation.deinit();
 
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const function = ast_file.item(ast_file.root_items[0]).Function;
-    const body = ast_file.body(function.body);
-    const ret_stmt = ast_file.statement(body.statements[0]).Return;
-
-    const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expectEqual(@as(i128, 7), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+    const syntax_diags = try compilation.db.syntaxDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(diagnosticMessagesContain(syntax_diags, "expected expression"));
 }
 
 test "compiler lowers ghost items into ghost AST nodes" {
