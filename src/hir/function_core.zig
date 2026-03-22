@@ -1399,7 +1399,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const guarded_roots = self.parent.guarded_storage_roots orelse return;
             if (!guarded_roots.contains(field_name)) return;
 
-            const guard = mlir.oraTStoreGuardOpCreate(self.parent.context, self.parent.location(range), strRef(field_name));
+            const loc = self.parent.location(range);
+            const zero = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 0),
+            );
+            const guard = mlir.oraTStoreGuardOpCreateWithResource(self.parent.context, loc, zero, strRef(field_name));
             if (mlir.oraOperationIsNull(guard)) return error.MlirOperationCreationFailed;
             appendOp(self.block, guard);
         }
