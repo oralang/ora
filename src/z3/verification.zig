@@ -3877,13 +3877,21 @@ fn buildSmtlibForConstraints(
 }
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {
-    const last = std.mem.lastIndexOfScalar(u8, loc, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
-    const before_last = loc[0..last];
+    var text = std.mem.trim(u8, loc, " \t\n\r");
+    if (std.mem.startsWith(u8, text, "loc(")) {
+        text = text[4..];
+        if (text.len > 0 and text[text.len - 1] == ')') {
+            text = text[0 .. text.len - 1];
+        }
+    }
+
+    const last = std.mem.lastIndexOfScalar(u8, text, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
+    const before_last = text[0..last];
     const second_last = std.mem.lastIndexOfScalar(u8, before_last, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
 
-    const file = before_last[0..second_last];
+    const file = std.mem.trim(u8, before_last[0..second_last], " \t\n\r\"");
     const line_str = before_last[second_last + 1 ..];
-    const col_str = loc[last + 1 ..];
+    const col_str = text[last + 1 ..];
 
     const line = std.fmt.parseInt(u32, line_str, 10) catch 0;
     const column = std.fmt.parseInt(u32, col_str, 10) catch 0;
@@ -4921,4 +4929,11 @@ test "degraded SMT encoding fails closed" {
     try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "SMT encoding degraded"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "test degradation"));
+}
+
+test "parseLocationString strips mlir loc wrapper" {
+    const parsed = parseLocationString("loc(\"/tmp/example.ora\":42:7)");
+    try testing.expectEqualStrings("/tmp/example.ora", parsed.file);
+    try testing.expectEqual(@as(u32, 42), parsed.line);
+    try testing.expectEqual(@as(u32, 7), parsed.column);
 }

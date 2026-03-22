@@ -85,6 +85,8 @@ pub const Encoder = struct {
     function_ops: std.StringHashMap(mlir.MlirOperation),
     /// Map from struct symbol name to comma-separated field names in declaration order.
     struct_field_names_csv: std.StringHashMap([]u8),
+    /// Map from struct symbol name to its declaration op for field type lookup.
+    struct_decl_ops: std.StringHashMap(mlir.MlirOperation),
     /// Calls already materialized for current-state summary (avoid double state transitions).
     materialized_calls: std.AutoHashMap(u64, void),
     /// Active summary inlining stack for recursion guard.
@@ -124,6 +126,7 @@ pub const Encoder = struct {
             .tensor_dim_map = std.AutoHashMap(TensorDimKey, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .struct_field_names_csv = std.StringHashMap([]u8).init(allocator),
+            .struct_decl_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
@@ -247,6 +250,11 @@ pub const Encoder = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.struct_field_names_csv.deinit();
+        var struct_decl_it = self.struct_decl_ops.iterator();
+        while (struct_decl_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.struct_decl_ops.deinit();
         self.materialized_calls.deinit();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -305,6 +313,10 @@ pub const Encoder = struct {
         const value = try self.allocator.dupe(u8, csv_builder.items);
         errdefer self.allocator.free(value);
         try self.struct_field_names_csv.put(key, value);
+
+        const decl_key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(decl_key);
+        try self.struct_decl_ops.put(decl_key, struct_op);
     }
 
     fn copyFunctionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
@@ -325,6 +337,13 @@ pub const Encoder = struct {
             const key = try self.allocator.dupe(u8, name);
             const value = try self.allocator.dupe(u8, entry.value_ptr.*);
             try self.struct_field_names_csv.put(key, value);
+        }
+        var decl_it = other.struct_decl_ops.iterator();
+        while (decl_it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.struct_decl_ops.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.struct_decl_ops.put(key, entry.value_ptr.*);
         }
     }
 
@@ -2050,6 +2069,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
+                const source_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 const op_id = @intFromPtr(mlir_op.ptr);
                 const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_field_update_{d}", .{op_id});
                 defer self.allocator.free(struct_var_name);
@@ -2058,6 +2078,42 @@ pub const Encoder = struct {
                 const accessor = try self.applyFieldFunction(field_name, result_sort, field_sort, struct_val);
                 const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operands[1]);
                 self.addConstraint(eq);
+
+                const field_names_csv = self.lookupStructFieldNames(result_type) catch blk: {
+                    self.recordDegradation("failed to resolve struct field names for struct update");
+                    break :blk null;
+                };
+                if (field_names_csv) |csv| {
+                    var it = std.mem.splitScalar(u8, csv, ',');
+                    var field_index: usize = 0;
+                    while (it.next()) |part| : (field_index += 1) {
+                        const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, field_name)) continue;
+                        const unchanged_type = self.lookupStructFieldType(result_type, field_index) catch {
+                            self.recordDegradation("failed to resolve struct field type for struct update");
+                            continue;
+                        };
+                        if (mlir.oraTypeIsNull(unchanged_type)) {
+                            self.recordDegradation("missing struct field type metadata for struct update");
+                            continue;
+                        }
+                        const unchanged_sort = self.encodeMLIRType(unchanged_type) catch {
+                            self.recordDegradation("failed to encode unchanged struct field sort");
+                            continue;
+                        };
+                        const updated_accessor = self.applyFieldFunction(trimmed, result_sort, unchanged_sort, struct_val) catch {
+                            self.recordDegradation("failed to encode updated struct field accessor");
+                            continue;
+                        };
+                        const original_accessor = self.applyFieldFunction(trimmed, source_sort, unchanged_sort, operands[0]) catch {
+                            self.recordDegradation("failed to encode original struct field accessor");
+                            continue;
+                        };
+                        self.addConstraint(z3.Z3_mk_eq(self.context.ctx, updated_accessor, original_accessor));
+                    }
+                } else {
+                    self.recordDegradation("missing struct declaration metadata for struct update");
+                }
                 return struct_val;
             }
         }
@@ -3519,6 +3575,76 @@ pub const Encoder = struct {
         const value = mlir.oraStringAttrGetValue(attr);
         if (value.data == null or value.length == 0) return null;
         return value.data[0..value.length];
+    }
+
+    const MlirPrintCollector = struct {
+        allocator: std.mem.Allocator,
+        buffer: std.ArrayList(u8),
+    };
+
+    fn printMlirChunk(value: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
+        const collector: *MlirPrintCollector = @ptrCast(@alignCast(user_data orelse return));
+        if (value.data == null or value.length == 0) return;
+        collector.buffer.appendSlice(collector.allocator, value.data[0..value.length]) catch {};
+    }
+
+    fn printMlirTypeOwned(self: *Encoder, ty: mlir.MlirType) ![]u8 {
+        var collector = MlirPrintCollector{
+            .allocator = self.allocator,
+            .buffer = std.ArrayList(u8){},
+        };
+        errdefer collector.buffer.deinit(self.allocator);
+        mlir.mlirTypePrint(ty, printMlirChunk, &collector);
+        return try collector.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn printMlirAttributeOwned(self: *Encoder, attr: mlir.MlirAttribute) ![]u8 {
+        var collector = MlirPrintCollector{
+            .allocator = self.allocator,
+            .buffer = std.ArrayList(u8){},
+        };
+        errdefer collector.buffer.deinit(self.allocator);
+        mlir.mlirAttributePrint(attr, printMlirChunk, &collector);
+        return try collector.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn parseStructTypeName(type_text: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
+        const prefix = "!ora.struct<";
+        if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
+            return null;
+        }
+        const inner = std.mem.trim(u8, trimmed[prefix.len .. trimmed.len - 1], " \t\n\r\"");
+        if (inner.len == 0) return null;
+        return inner;
+    }
+
+    fn lookupStructFieldNames(self: *Encoder, ty: mlir.MlirType) !?[]const u8 {
+        const type_text = try self.printMlirTypeOwned(ty);
+        defer self.allocator.free(type_text);
+        const struct_name = parseStructTypeName(type_text) orelse return null;
+        return self.struct_field_names_csv.get(struct_name);
+    }
+
+    fn lookupStructFieldType(self: *Encoder, ty: mlir.MlirType, index: usize) !mlir.MlirType {
+        const type_text = try self.printMlirTypeOwned(ty);
+        defer self.allocator.free(type_text);
+        const struct_name = parseStructTypeName(type_text) orelse return .{ .ptr = null };
+        const struct_decl = self.struct_decl_ops.get(struct_name) orelse return .{ .ptr = null };
+        const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+        if (mlir.oraAttributeIsNull(field_types_attr)) return .{ .ptr = null };
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(field_types_attr));
+        if (index >= count) return .{ .ptr = null };
+        const field_type_attr = mlir.oraArrayAttrGetElement(field_types_attr, index);
+        if (mlir.oraAttributeIsNull(field_type_attr)) return .{ .ptr = null };
+        const field_type_text = try self.printMlirAttributeOwned(field_type_attr);
+        defer self.allocator.free(field_type_text);
+        var type_slice = std.mem.trim(u8, field_type_text, " \t\n\r");
+        const type_prefix = "type<";
+        if (std.mem.startsWith(u8, type_slice, type_prefix) and type_slice.len > type_prefix.len and type_slice[type_slice.len - 1] == '>') {
+            type_slice = type_slice[type_prefix.len .. type_slice.len - 1];
+        }
+        return mlir.mlirTypeParseGet(mlir.mlirTypeGetContext(ty), mlir.oraStringRefCreate(type_slice.ptr, type_slice.len));
     }
 
     fn resolveFieldNameForIndex(self: *Encoder, field_names_csv: ?[]const u8, index: usize) ![]u8 {
