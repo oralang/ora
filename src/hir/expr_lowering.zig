@@ -435,6 +435,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                     }
                 },
+                .add, .sub, .mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shl, .shr => {
+                    const lhs_type = mlir.oraValueGetType(lhs);
+                    const rhs_type = mlir.oraValueGetType(rhs);
+                    if (mlir.oraTypeIsAInteger(lhs_type) and mlir.oraTypeIsAInteger(rhs_type) and !mlir.oraTypeEqual(lhs_type, rhs_type)) {
+                        switch (self.parent.file.expression(binary.lhs).*) {
+                            .IntegerLiteral => lhs = try self.convertValueForFlow(lhs, rhs_type, binary.range),
+                            else => switch (self.parent.file.expression(binary.rhs).*) {
+                                .IntegerLiteral => rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range),
+                                else => {},
+                            },
+                        }
+                    }
+                },
                 else => {},
             }
 
@@ -1873,7 +1886,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
                 };
-                try operands.append(self.parent.allocator, try self.lowerExpr(init.value, locals));
+                const field_type = self.parent.lowerTypeExpr(decl_field.type_expr);
+                const raw_value = try self.lowerExpr(init.value, locals);
+                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                try operands.append(self.parent.allocator, value);
             }
 
             const op = mlir.oraStructInstantiateOpCreate(
@@ -1904,7 +1920,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
                 };
-                try operands.append(self.parent.allocator, try self.lowerExpr(init.value, locals));
+                const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
+                const raw_value = try self.lowerExpr(init.value, locals);
+                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInstantiateOpCreate(
                 self.parent.context,
@@ -1933,7 +1952,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.tuple.create", struct_literal.range, operands.items, result_type));
                 };
-                try operands.append(self.parent.allocator, try self.lowerExpr(init.value, locals));
+                const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
+                const raw_value = try self.lowerExpr(init.value, locals);
+                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraTupleCreateOpCreate(
                 self.parent.context,
@@ -2268,8 +2290,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const memref = appendValueOp(self.block, alloc);
+            const element_type = mlir.oraShapedTypeGetElementType(result_type);
             for (array.elements, 0..) |element, index| {
-                const element_value = try self.lowerExpr(element, locals);
+                const raw_element_value = try self.lowerExpr(element, locals);
+                const element_value = try self.convertValueForFlow(raw_element_value, element_type, array.range);
                 const raw_index = appendValueOp(
                     self.block,
                     createIntegerConstant(

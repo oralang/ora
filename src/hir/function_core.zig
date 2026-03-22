@@ -1341,7 +1341,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Index => |index| {
                     const base_value = try @This().lowerPatternValue(self, index.base, locals);
                     const base_type = mlir.oraValueGetType(base_value);
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
+                    const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
                         const key_value = try self.lowerExpr(index.index, locals);
@@ -1726,6 +1726,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                             break :blk2 self.parent.typecheck.pattern_types[pattern_id.index()].type;
                         },
+                        else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
+                    };
+                },
+                .Index => |index| blk: {
+                    const base_type = @This().patternType(self, index.base, locals);
+                    break :blk switch (base_type.kind()) {
+                        .array => base_type.array.element_type.*,
+                        .slice => base_type.slice.element_type.*,
+                        .map => if (base_type.map.value_type) |value_type|
+                            value_type.*
+                        else
+                            self.parent.typecheck.pattern_types[pattern_id.index()].type,
                         else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
                     };
                 },
