@@ -3,53 +3,49 @@
 // 1) @lock/@unlock lowering for identifier[index]
 // 2) runtime guard insertion on lock-participating roots
 // 3) writes happen outside lock regions
-
 contract LockRuntimeStorageMapGuard {
-
     storage var balances: map<address, u256>;
     storage var success_counter: u256 = 0;
     storage var newMap: map<address, u256>;
-
     fn write_balance(user: address, amount: u256) {
         balances[user] = amount;
     }
-
     // Reads under lock, writes after unlock.
     pub fn safe_different_slot(locked_user: address, target: address, amount: u256) -> bool {
         newMap[target] = amount;
         balances[locked_user] = 1;
-
-        @lock(balances[locked_user]);
+        @
+        lock(balances[locked_user]);
         let _current: u256 = balances[locked_user];
-        @unlock(balances[locked_user]);
-
+        @
+        unlock(balances[locked_user]);
         write_balance(target, amount);
         balances[locked_user] = 1;
         success_counter += 1;
         newMap[target] = amount;
         return true;
     }
-
     // Locks a slot, reads it, unlocks, then writes.
     pub fn safe_read_then_write(user: address, amount: u256) -> bool {
-        @lock(balances[user]);
+        @
+        lock(balances[user]);
         let _current: u256 = balances[user];
-        @unlock(balances[user]);
-
+        @
+        unlock(balances[user]);
         write_balance(user, amount);
         success_counter += 1;
         return true;
     }
-
     pub fn lock_and_read(user: address) -> u256 {
         write_balance(user, 1);
-        @lock(balances[user]);
+        @
+        lock(balances[user]);
         let val: u256 = balances[user];
-        @unlock(balances[user]);
+        @
+        unlock(balances[user]);
         write_balance(user, 1);
         return val;
     }
-
     pub fn successCount() -> u256 {
         return success_counter;
     }
