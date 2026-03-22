@@ -333,7 +333,6 @@ pub const ErrorRecovery = struct {
 
         const diagnostic = try LexerDiagnostic.createDetailed(self.allocator, error_type, range, source, message);
         try self.errors.append(self.allocator, diagnostic);
-
     }
 
     /// Record a detailed error with source context and suggestion

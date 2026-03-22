@@ -254,7 +254,7 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
             const actual = actual_unwrapped.error_union;
             return typesAssignable(expected.payload_type.*, actual.payload_type.*) and
                 (expected.error_types.len == 0 or
-                errorSetContainsAll(expected.error_types, actual.error_types));
+                    errorSetContainsAll(expected.error_types, actual.error_types));
         }
     }
     return typeEql(expected_unwrapped, actual_unwrapped);

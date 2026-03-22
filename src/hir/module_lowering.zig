@@ -116,7 +116,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{});
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
-
         }
 
         fn lowerImplGhostBlock(self: *Lowerer, impl_item: ast.ImplItem, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {

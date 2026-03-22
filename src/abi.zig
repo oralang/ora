@@ -1162,12 +1162,12 @@ const CompilerAbiGenerator = struct {
                 if (self.global_structs.contains(named.name)) return self.resolveNamedStructType(ctx, named.name);
                 if (self.global_bitfields.contains(named.name)) return self.resolveNamedBitfieldType(ctx, named.name);
                 if (self.global_enums.contains(named.name)) return self.resolveNamedEnumType(ctx, named.name);
-                if (std.mem.eql(u8, named.name, "bool")) return self.resolveSemaType(ctx, .bool, &.{} );
-                if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{} );
-                if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{} );
-                if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{} );
-                if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{} );
-                if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{} );
+                if (std.mem.eql(u8, named.name, "bool")) return self.resolveSemaType(ctx, .bool, &.{});
+                if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{});
+                if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{});
+                if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
+                if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{});
+                if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
                 return error.UnsupportedAbiType;
             },
             else => return error.UnsupportedAbiType,

@@ -387,8 +387,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lowerWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
             const has_return = bodyMayReturn(self.parent.file, while_stmt.body);
-            if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body))
-            {
+            if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body)) {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
                 return false;
             }

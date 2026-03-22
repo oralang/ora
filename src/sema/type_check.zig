@@ -4689,16 +4689,7 @@ const TypeChecker = struct {
             .Old => |old| self.exprLocatedType(old.expr),
             // Unlocated: stack-computed values, comptime constants, or verification constructs.
             // These have no storage region — the value exists on the EVM stack or in bytecode.
-            .IntegerLiteral,
-            .StringLiteral,
-            .BoolLiteral,
-            .AddressLiteral,
-            .BytesLiteral,
-            .TypeValue,
-            .Comptime,
-            .Unary,
-            .Binary,
-            .Call => if (self.externProxyMethodSignature(expr_id) != null)
+            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .TypeValue, .Comptime, .Unary, .Binary, .Call => if (self.externProxyMethodSignature(expr_id) != null)
                 LocatedType.withRegionAndProvenance(self.expr_types[expr_id.index()], .none, .external)
             else
                 LocatedType.unlocated(self.expr_types[expr_id.index()]),

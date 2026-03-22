@@ -475,9 +475,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk appendValueOp(self.block, alloc);
                         }
                         break :blk try self.defaultValue(lowered_type, decl.range);
-                    }
-                    else
-                        try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
+                    } else try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
                     try self.bindPatternValue(decl.pattern, value, locals);
                     return false;
                 },

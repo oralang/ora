@@ -240,7 +240,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_type = self.parent.typecheck.exprType(index.base);
                     if (base_type == .tuple) {
                         const tuple_index = @This().constTupleIndex(self, index.index) orelse {
-                            const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{base, key}, self.parent.lowerExprType(expr_id));
+                            const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{ base, key }, self.parent.lowerExprType(expr_id));
                             break :blk appendValueOp(self.block, op);
                         };
                         const result_type = self.parent.lowerExprType(expr_id);
@@ -293,14 +293,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 else
                                     self.parent.lowerExprType(expr_id);
                                 const op = switch (field.storage_class) {
-                                .storage => mlir.oraSLoadOpCreate(
-                                    self.parent.context,
-                                    self.parent.location(field.range),
-                                    strRef(field.name),
-                                    result_type,
-                                ),
-                                .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
-                                .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                                    .storage => mlir.oraSLoadOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(field.range),
+                                        strRef(field.name),
+                                        result_type,
+                                    ),
+                                    .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                                    .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
                                     .none => std.mem.zeroes(mlir.MlirOperation),
                                 };
                                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);

@@ -1352,7 +1352,6 @@ pub const Encoder = struct {
         }
     }
 
-
     fn encodeOperationResultWithMode(
         self: *Encoder,
         mlir_op: mlir.MlirOperation,

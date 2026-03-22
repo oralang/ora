@@ -54,7 +54,7 @@ pub const SemanticTokenModifier = enum(u5) {
     declaration = 0,
     definition = 1,
     readonly = 2,
-    @"static" = 3,
+    static = 3,
     defaultLibrary = 4,
 
     pub const legend = [_][]const u8{

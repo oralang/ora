@@ -2633,9 +2633,9 @@ const Parser = struct {
     fn looksLikeLabeledStmt(self: *const Parser) bool {
         return self.at(.Identifier) and self.peekKind(1) == .Colon and
             (self.peekKind(2) == .LeftBrace or
-            self.peekKind(2) == .While or
-            self.peekKind(2) == .For or
-            self.peekKind(2) == .Switch);
+                self.peekKind(2) == .While or
+                self.peekKind(2) == .For or
+                self.peekKind(2) == .Switch);
     }
 
     fn looksLikeDestructuringAssignStmt(self: *const Parser) bool {
