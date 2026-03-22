@@ -1,10 +1,7 @@
 DS_Store
-.zig-cache/
 zig-out/
 doc.md
-.kiro/
 code-bin/
-.vscode/
 .DS_Store
 
 # Build artifacts
@@ -35,9 +32,5 @@ docs/
 
 tmp/
 artifacts/
-.zig-cache/
-.zig-cache-global
 zig-out/
-.zig-global-cache
-
-.claude
+.*/
