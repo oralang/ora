@@ -117,7 +117,7 @@ namespace mlir
                     });
 
                     auto isSIRValueType = [](Type t) {
-                        if (isa<sir::U256Type, sir::PtrType>(t))
+                        if (isa<sir::U256Type, sir::PtrType, mlir::MemRefType, mlir::UnrankedMemRefType>(t))
                             return true;
                         if (isa<ora::StructType, ora::TupleType>(t))
                             return true;

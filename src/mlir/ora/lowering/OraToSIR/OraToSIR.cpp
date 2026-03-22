@@ -1483,15 +1483,23 @@ public:
             phase4Target.addDynamicallyLegalOp<mlir::func::FuncOp>(
                 [&](mlir::func::FuncOp funcOp)
                 {
+                    auto isSIRSignatureType = [](Type type) {
+                        if (llvm::isa<sir::U256Type, sir::PtrType, ora::StructType, ora::TupleType,
+                                      mlir::MemRefType, mlir::UnrankedMemRefType>(type))
+                            return true;
+                        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+                            return intType.getWidth() <= 256;
+                        return false;
+                    };
                     auto fnType = funcOp.getFunctionType();
                     for (Type inputType : fnType.getInputs())
                     {
-                        if (!typeConverter.isLegal(inputType))
+                        if (!isSIRSignatureType(inputType))
                             return false;
                     }
                     for (Type resultType : fnType.getResults())
                     {
-                        if (!typeConverter.isLegal(resultType))
+                        if (!isSIRSignatureType(resultType))
                             return false;
                     }
 
@@ -1501,7 +1509,7 @@ public:
                     {
                         for (BlockArgument arg : block.getArguments())
                         {
-                            if (!typeConverter.isLegal(arg.getType()))
+                            if (!isSIRSignatureType(arg.getType()))
                                 return false;
                         }
                     }

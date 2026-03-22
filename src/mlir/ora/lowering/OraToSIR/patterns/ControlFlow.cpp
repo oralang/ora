@@ -70,6 +70,32 @@ static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structNa
     return static_cast<uint64_t>(fieldTypesAttr.size());
 }
 
+static FailureOr<uint64_t> getStaticMemRefWordCount(Type type)
+{
+    auto memrefType = llvm::dyn_cast<mlir::MemRefType>(type);
+    if (!memrefType || !memrefType.hasStaticShape())
+        return failure();
+
+    uint64_t elementWords = 1;
+    Type elementType = memrefType.getElementType();
+    if (llvm::isa<mlir::MemRefType>(elementType))
+    {
+        auto nestedWords = getStaticMemRefWordCount(elementType);
+        if (failed(nestedWords))
+            return failure();
+        elementWords = *nestedWords;
+    }
+
+    uint64_t count = elementWords;
+    for (int64_t dim : memrefType.getShape())
+    {
+        if (dim < 0)
+            return failure();
+        count *= static_cast<uint64_t>(dim);
+    }
+    return count;
+}
+
 static FailureOr<Value> phase0ToI256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
@@ -2631,7 +2657,11 @@ static LogicalResult convertOraReturn(
     else
         origType = retVal.getType();
     const bool is_bytes_return = llvm::isa<ora::StringType, ora::BytesType>(origType);
-    const bool is_slice_return = llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(origType);
+    const bool is_static_memref_return = llvm::isa<mlir::MemRefType>(origType) &&
+                                         llvm::cast<mlir::MemRefType>(origType).hasStaticShape();
+    const bool is_slice_return = llvm::isa<mlir::UnrankedMemRefType>(origType) ||
+                                 (llvm::isa<mlir::MemRefType>(origType) &&
+                                  !llvm::cast<mlir::MemRefType>(origType).hasStaticShape());
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
         const bool useWideCarrier = !isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal);
@@ -2870,16 +2900,58 @@ static LogicalResult convertOraReturn(
         return success();
     }
 
+    if (is_static_memref_return)
+    {
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+        {
+            if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(retVal.getType()))
+            {
+                retVal = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, retVal).getResult(0);
+            }
+            else
+            {
+                if (!tc)
+                    return rewriter.notifyMatchFailure(op, "missing type converter");
+                Type convertedType = tc->convertType(retVal.getType());
+                if (convertedType && convertedType != retVal.getType())
+                {
+                    retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+                }
+            }
+        }
+
+        if (!llvm::isa<sir::PtrType>(retVal.getType()))
+            return rewriter.notifyMatchFailure(op, "static memref return expects SIR ptr value");
+
+        auto wordCount = getStaticMemRefWordCount(origType);
+        if (failed(wordCount))
+            return rewriter.notifyMatchFailure(op, "failed to resolve static memref return size");
+
+        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, (*wordCount) * 32ULL);
+        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+
+        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     if (is_slice_return)
     {
         if (!llvm::isa<sir::PtrType>(retVal.getType()))
         {
-            if (!tc)
-                return rewriter.notifyMatchFailure(op, "missing type converter");
-            Type convertedType = tc->convertType(retVal.getType());
-            if (convertedType && convertedType != retVal.getType())
+            if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(retVal.getType()))
             {
-                retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+                retVal = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, ptrType, retVal).getResult(0);
+            }
+            else
+            {
+                if (!tc)
+                    return rewriter.notifyMatchFailure(op, "missing type converter");
+                Type convertedType = tc->convertType(retVal.getType());
+                if (convertedType && convertedType != retVal.getType())
+                {
+                    retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
+                }
             }
         }
 
