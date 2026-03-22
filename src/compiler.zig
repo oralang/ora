@@ -25,6 +25,7 @@ pub const TypeExprId = ast.TypeExprId;
 pub const PatternId = ast.PatternId;
 pub const HirModuleHandle = hir.HirModuleHandle;
 pub const HirItemHandle = hir.HirItemHandle;
+pub const comptime_eval = @import("comptime/compiler_ast_eval.zig");
 pub const compilePackage = driver.compilePackage;
 pub const compilePackageWithResolverOptions = driver.compilePackageWithResolverOptions;
 pub const compileSource = driver.compileSource;

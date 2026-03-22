@@ -1080,7 +1080,7 @@ pub const VerificationPass = struct {
 
     fn encodeLoopExitCondition(self: *VerificationPass, invariant_op: mlir.MlirOperation) !?z3.Z3_ast {
         const continue_condition = try self.encodeLoopContinueCondition(invariant_op) orelse return null;
-        return z3.Z3_mk_not(self.context.ctx, continue_condition);
+        return z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(continue_condition));
     }
 
     fn findEnclosingLoopOp(self: *VerificationPass, op: mlir.MlirOperation) ?mlir.MlirOperation {
@@ -1318,7 +1318,7 @@ pub const VerificationPass = struct {
                 for (ann.extra_constraints) |cst| {
                     self.solver.assert(cst);
                 }
-                const negated = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 self.solver.assert(negated);
 
                 const obligation_label = obligationKindLabel(ann.kind);
@@ -1385,7 +1385,7 @@ pub const VerificationPass = struct {
                         if (ann.loop_step_condition) |step_cond| {
                             self.solver.assert(step_cond);
                         }
-                        self.solver.assert(z3.Z3_mk_not(self.context.ctx, ann.condition));
+                        self.solver.assert(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
 
                         self.traceSmt("{s} [invariant-step] check-start", .{fn_name});
                         self.traceCurrentSolverState("query");
@@ -1464,7 +1464,7 @@ pub const VerificationPass = struct {
                     }
 
                     self.solver.assert(exit_condition);
-                    self.solver.assert(z3.Z3_mk_not(self.context.ctx, ensure_ann.condition));
+                    self.solver.assert(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
 
                     self.traceSmt("{s} [invariant-post] check-start", .{fn_name});
                     self.traceCurrentSolverState("query");
@@ -1606,7 +1606,7 @@ pub const VerificationPass = struct {
                 for (ann.extra_constraints) |cst| {
                     self.solver.assert(cst);
                 }
-                const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 self.solver.assert(not_guard);
                 if (self.debug_z3) {
                     std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
@@ -2696,7 +2696,7 @@ pub const VerificationPass = struct {
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
-                const negated = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try obligation_constraints.append(negated);
 
                 const obligation_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items);
@@ -2732,7 +2732,7 @@ pub const VerificationPass = struct {
                         if (ann.loop_step_condition) |step_cond| {
                             try step_constraints.append(step_cond);
                         }
-                        try step_constraints.append(z3.Z3_mk_not(self.context.ctx, ann.condition));
+                        try step_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
 
                         const step_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
                         const step_log_prefix = try std.fmt.allocPrint(
@@ -2776,7 +2776,7 @@ pub const VerificationPass = struct {
                     }
 
                     try post_constraints.append(exit_condition);
-                    try post_constraints.append(z3.Z3_mk_not(self.context.ctx, ensure_ann.condition));
+                    try post_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
 
                     const post_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items);
                     const post_log_prefix = try std.fmt.allocPrint(
@@ -2850,7 +2850,7 @@ pub const VerificationPass = struct {
                 defer violate_constraints.deinit();
                 try addConstraintSlice(&violate_constraints, guard_base.items);
                 try addConstraintSlice(&violate_constraints, ann.extra_constraints);
-                const not_guard = z3.Z3_mk_not(self.context.ctx, ann.condition);
+                const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try violate_constraints.append(not_guard);
 
                 const violate_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items);

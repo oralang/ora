@@ -8,3 +8,7 @@ pub const definition = @import("definition.zig");
 pub const references = @import("references.zig");
 pub const rename = @import("rename.zig");
 pub const completion = @import("completion.zig");
+pub const semantic_tokens = @import("semantic_tokens.zig");
+pub const signature_help = @import("signature_help.zig");
+pub const code_lens = @import("code_lens.zig");
+pub const inlay_hints = @import("inlay_hints.zig");

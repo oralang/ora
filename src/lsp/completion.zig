@@ -33,6 +33,7 @@ pub const Item = struct {
 };
 
 const keyword_candidates = [_][]const u8{
+    // Declarations
     "contract",
     "struct",
     "enum",
@@ -43,23 +44,65 @@ const keyword_candidates = [_][]const u8{
     "var",
     "const",
     "storage",
+    "transient",
+    "memory",
+    "import",
+    "log",
+    "error",
+    "trait",
+    "impl",
+    "comptime",
+    // Control flow
     "if",
     "else",
     "while",
     "for",
+    "switch",
     "return",
-    "import",
-    "log",
-    "error",
+    "break",
+    "continue",
+    "try",
+    "catch",
+    // Literals
     "true",
     "false",
+    // Formal verification
+    "requires",
+    "ensures",
+    "invariant",
+    "ghost",
+    "assert",
+    "assume",
+    "havoc",
+    "old",
+    "result",
+    "forall",
+    "exists",
+    "where",
+    // Refinement types
+    "MinValue",
+    "MaxValue",
+    "InRange",
+    "NonZeroAddress",
+    // Builtins
+    "self",
+    "extern",
 };
 
 pub fn completionAt(
     allocator: Allocator,
     source: []const u8,
     position: frontend.Position,
+    trigger_char: ?[]const u8,
 ) ![]Item {
+    var index = try semantic_index.indexDocument(allocator, source);
+    defer index.deinit(allocator);
+
+    // Dot-triggered member completion.
+    if (isDotTrigger(trigger_char, source, position)) {
+        return memberCompletion(allocator, source, position, index);
+    }
+
     const prefix = identifierPrefixAtPosition(source, position);
 
     var seen = std.StringHashMap(void).init(allocator);
@@ -82,9 +125,6 @@ pub fn completionAt(
         });
     }
 
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
     for (index.symbols) |symbol| {
         if (!matchesPrefix(symbol.name, prefix)) continue;
         if (seen.contains(symbol.name)) continue;
@@ -100,6 +140,118 @@ pub fn completionAt(
     std.sort.heap(Item, items.items, {}, lessItemByLabel);
 
     return items.toOwnedSlice(allocator);
+}
+
+fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
+    if (trigger_char) |tc| {
+        if (std.mem.eql(u8, tc, ".")) return true;
+    }
+    // Also check if the character just before cursor is a dot.
+    const cursor = positionToByteOffsetOnLine(source, position);
+    if (cursor > 0 and source[cursor - 1] == '.') return true;
+    return false;
+}
+
+fn memberCompletion(
+    allocator: Allocator,
+    source: []const u8,
+    position: frontend.Position,
+    index: semantic_index.SemanticIndex,
+) ![]Item {
+    var items = std.ArrayList(Item){};
+    errdefer {
+        for (items.items) |*item| item.deinit(allocator);
+        items.deinit(allocator);
+    }
+
+    // Extract the base name before the dot.
+    const cursor = positionToByteOffsetOnLine(source, position);
+    const base_name = extractBaseBeforeDot(source, cursor) orelse return items.toOwnedSlice(allocator);
+
+    // Find the symbol matching the base name.
+    const base_idx = findSymbolByName(index.symbols, base_name) orelse return items.toOwnedSlice(allocator);
+
+    // Collect prefix after the dot for filtering.
+    const prefix = identifierPrefixAtPosition(source, position);
+
+    // If the base is a type (contract/struct/bitfield/enum), offer its children.
+    const base_symbol = index.symbols[base_idx];
+    switch (base_symbol.kind) {
+        .contract, .struct_decl, .bitfield_decl, .enum_decl => {
+            for (index.symbols, 0..) |symbol, i| {
+                _ = i;
+                if (symbol.parent == null or symbol.parent.? != base_idx) continue;
+                if (!matchesPrefix(symbol.name, prefix)) continue;
+
+                try items.append(allocator, .{
+                    .label = try allocator.dupe(u8, symbol.name),
+                    .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                    .kind = symbolKindToCompletionKind(symbol.kind),
+                });
+            }
+        },
+        // For variables/fields/params, try to resolve their type and offer that type's children.
+        .variable, .field, .parameter, .constant => {
+            if (base_symbol.detail) |type_name| {
+                const trimmed = std.mem.trim(u8, type_name, " ");
+                if (findSymbolByName(index.symbols, trimmed)) |type_idx| {
+                    for (index.symbols) |symbol| {
+                        if (symbol.parent == null or symbol.parent.? != type_idx) continue;
+                        if (!matchesPrefix(symbol.name, prefix)) continue;
+
+                        try items.append(allocator, .{
+                            .label = try allocator.dupe(u8, symbol.name),
+                            .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                            .kind = symbolKindToCompletionKind(symbol.kind),
+                        });
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+
+    std.sort.heap(Item, items.items, {}, lessItemByLabel);
+    return items.toOwnedSlice(allocator);
+}
+
+fn extractBaseBeforeDot(source: []const u8, cursor: usize) ?[]const u8 {
+    if (cursor == 0) return null;
+
+    // Walk back past the dot.
+    var pos = cursor;
+    // Skip any prefix typed after the dot.
+    while (pos > 0 and isIdentifierContinue(source[pos - 1])) : (pos -= 1) {}
+    // Now we should be at the dot.
+    if (pos == 0 or source[pos - 1] != '.') return null;
+    pos -= 1; // skip dot
+
+    // Extract the identifier before the dot.
+    var end = pos;
+    while (end > 0 and (source[end - 1] == ' ' or source[end - 1] == '\t')) : (end -= 1) {}
+    if (end == 0) return null;
+
+    var start = end;
+    while (start > 0 and isIdentifierContinue(source[start - 1])) : (start -= 1) {}
+
+    if (start == end) return null;
+    return source[start..end];
+}
+
+fn findSymbolByName(symbols: []const semantic_index.Symbol, name: []const u8) ?usize {
+    for (symbols, 0..) |symbol, i| {
+        if (std.mem.eql(u8, symbol.name, name)) {
+            // Prefer type declarations.
+            if (symbol.kind == .contract or symbol.kind == .struct_decl or
+                symbol.kind == .bitfield_decl or symbol.kind == .enum_decl or
+                symbol.kind == .event or symbol.kind == .error_decl) return i;
+        }
+    }
+    // Fallback: any symbol with matching name.
+    for (symbols, 0..) |symbol, i| {
+        if (std.mem.eql(u8, symbol.name, name)) return i;
+    }
+    return null;
 }
 
 pub fn deinitItems(allocator: Allocator, items: []Item) void {

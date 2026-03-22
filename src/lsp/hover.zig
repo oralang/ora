@@ -37,6 +37,10 @@ fn formatHoverValueAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![
     const signature = try formatSignatureAlloc(allocator, symbol);
     defer allocator.free(signature);
 
+    if (symbol.doc_comment) |doc| {
+        return std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ signature, doc });
+    }
+
     return std.fmt.allocPrint(allocator, "```ora\n{s}\n```", .{signature});
 }
 

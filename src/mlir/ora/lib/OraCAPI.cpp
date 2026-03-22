@@ -4351,6 +4351,7 @@ MlirOperation oraEnumDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringR
         StringRef nameRef = unwrap(name);
         auto nameAttr = StringAttr::get(context, nameRef);
         auto op = builder.create<ora::EnumDeclOp>(location, nameAttr, TypeAttr::get(reprTy));
+        op->setAttr("sym_name", nameAttr);
 
         // Keep declaration region empty unless explicitly populated.
         // Creating an empty block without terminator violates MLIR verifier.

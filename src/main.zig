@@ -48,7 +48,6 @@ const MlirOptions = struct {
     mlir_print_ir_pass: ?[]const u8 = null,
     mlir_crash_reproducer: ?[]const u8 = null,
     mlir_print_op_on_diagnostic: bool = false,
-    fail_on_verification_diagnostics: bool = false,
     cpp_lowering_stub: bool = false,
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
@@ -383,7 +382,6 @@ pub fn main() !void {
         .mlir_print_ir_pass = mlir_print_ir_pass,
         .mlir_crash_reproducer = mlir_crash_reproducer,
         .mlir_print_op_on_diagnostic = mlir_print_op_on_diagnostic,
-        .fail_on_verification_diagnostics = false,
         .cpp_lowering_stub = cpp_lowering_stub,
         .persist_ora_mlir = false,
         .persist_sir_mlir = false,
@@ -657,7 +655,6 @@ fn runBuildArtifacts(
     build_mlir_options.output_dir = artifact_root;
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
-    build_mlir_options.fail_on_verification_diagnostics = true;
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
     var verification_failed = false;
@@ -1175,6 +1172,185 @@ fn writeCompilerDiagnosticSnippet(
     try writer.writeByte('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Z3 verification output formatting
+// ---------------------------------------------------------------------------
+
+const z3_errors = @import("z3/errors.zig");
+
+/// Parse guard_id format: "guard:{path}:{line}:{col}:{len}:{refinement_kind}:{var_name}"
+const ParsedGuard = struct {
+    file_path: []const u8,
+    line: []const u8,
+    column: []const u8,
+    refinement_kind: []const u8,
+    variable_name: []const u8,
+};
+
+fn parseGuardId(guard_id: []const u8) ?ParsedGuard {
+    // Strip "guard:" prefix.
+    const rest = if (std.mem.startsWith(u8, guard_id, "guard:")) guard_id[6..] else return null;
+
+    // Split from the end — last field is var_name, second-last is refinement_kind, etc.
+    // Format: {path}:{line}:{col}:{len}:{kind}:{name}
+    // Path may contain colons (unlikely on unix but be safe) — parse from the right.
+    const name_sep = std.mem.lastIndexOfScalar(u8, rest, ':') orelse return null;
+    const variable_name = rest[name_sep + 1 ..];
+    const before_name = rest[0..name_sep];
+
+    const kind_sep = std.mem.lastIndexOfScalar(u8, before_name, ':') orelse return null;
+    const refinement_kind = before_name[kind_sep + 1 ..];
+    const before_kind = before_name[0..kind_sep];
+
+    const len_sep = std.mem.lastIndexOfScalar(u8, before_kind, ':') orelse return null;
+    const before_len = before_kind[0..len_sep];
+
+    const col_sep = std.mem.lastIndexOfScalar(u8, before_len, ':') orelse return null;
+    const column = before_len[col_sep + 1 ..];
+    const before_col = before_len[0..col_sep];
+
+    const line_sep = std.mem.lastIndexOfScalar(u8, before_col, ':') orelse return null;
+    const line = before_col[line_sep + 1 ..];
+    const file_path = before_col[0..line_sep];
+
+    return .{
+        .file_path = file_path,
+        .line = line,
+        .column = column,
+        .refinement_kind = refinement_kind,
+        .variable_name = variable_name,
+    };
+}
+
+fn shortPath(path: []const u8) []const u8 {
+    // Show just the filename, or last two components if nested.
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |last_slash| {
+        const parent = path[0..last_slash];
+        if (std.mem.lastIndexOfScalar(u8, parent, '/')) |prev_slash| {
+            return path[prev_slash + 1 ..];
+        }
+        return path[last_slash + 1 ..];
+    }
+    return path;
+}
+
+fn formatHexValue(raw: []const u8) []const u8 {
+    // Z3 outputs #x0000...0000 — show as 0x0, 0x1, or abbreviated.
+    if (!std.mem.startsWith(u8, raw, "#x")) return raw;
+    const hex = raw[2..];
+    // Strip leading zeros.
+    var i: usize = 0;
+    while (i < hex.len and hex[i] == '0') : (i += 1) {}
+    if (i == hex.len) return "0x0";
+    // If short enough, show full value.
+    const significant = hex[i..];
+    if (significant.len <= 10) return raw; // keep original
+    return raw; // keep full for now
+}
+
+fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+    // Group diagnostics by function name.
+    try stdout.print("\n", .{});
+    try stdout.print("Verification Report: {d} refinement guard{s} can be violated\n", .{
+        diagnostics.len,
+        if (diagnostics.len != 1) @as([]const u8, "s") else "",
+    });
+    try stdout.print("{s}\n", .{"=" ** 70});
+
+    for (diagnostics, 0..) |diag, idx| {
+        const parsed = parseGuardId(diag.guard_id);
+
+        if (parsed) |g| {
+            try stdout.print("\n  {d}. {s}({s}) in {s}  [{s}:{s}]\n", .{
+                idx + 1,
+                g.refinement_kind,
+                g.variable_name,
+                diag.function_name,
+                shortPath(g.file_path),
+                g.line,
+            });
+        } else {
+            try stdout.print("\n  {d}. {s} in {s}\n", .{ idx + 1, diag.guard_id, diag.function_name });
+        }
+
+        // Print counterexample values.
+        var it = diag.counterexample.variables.iterator();
+        var has_vars = false;
+        while (it.next()) |entry| {
+            if (!has_vars) {
+                try stdout.print("     counterexample:\n", .{});
+                has_vars = true;
+            }
+            try stdout.print("       {s} = {s}\n", .{ entry.key_ptr.*, formatHexValue(entry.value_ptr.*) });
+        }
+
+        // Print user-friendly explanation.
+        if (parsed) |g| {
+            if (std.mem.eql(u8, g.refinement_kind, "NonZeroAddress")) {
+                try stdout.print("     -> `{s}` can be the zero address\n", .{g.variable_name});
+            } else if (std.mem.eql(u8, g.refinement_kind, "MinValue")) {
+                try stdout.print("     -> `{s}` can be zero (below minimum)\n", .{g.variable_name});
+            } else if (std.mem.eql(u8, g.refinement_kind, "MaxValue")) {
+                try stdout.print("     -> `{s}` can exceed maximum value\n", .{g.variable_name});
+            } else if (std.mem.eql(u8, g.refinement_kind, "InRange")) {
+                try stdout.print("     -> `{s}` can be out of range\n", .{g.variable_name});
+            }
+        }
+    }
+
+    try stdout.print("\n{s}\n", .{"-" ** 70});
+    // Print raw guard IDs for debugging.
+    try stdout.print("debug: raw guard IDs:\n", .{});
+    for (diagnostics) |diag| {
+        try stdout.print("  {s}\n", .{diag.guard_id});
+    }
+}
+
+fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+    try stdout.print("\nRefinement guards: {d} kept as runtime check{s}\n", .{
+        diagnostics.len,
+        if (diagnostics.len != 1) @as([]const u8, "s") else "",
+    });
+    for (diagnostics) |diag| {
+        const parsed = parseGuardId(diag.guard_id);
+        if (parsed) |g| {
+            try stdout.print("  {s}({s}) in {s}  [{s}:{s}] — not statically provable, runtime check emitted\n", .{
+                g.refinement_kind,
+                g.variable_name,
+                diag.function_name,
+                shortPath(g.file_path),
+                g.line,
+            });
+        } else {
+            try stdout.print("  {s} in {s} — runtime check emitted\n", .{ diag.guard_id, diag.function_name });
+        }
+    }
+}
+
+fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.VerificationError) !void {
+    try stdout.print("\n❌ Verification failed with {d} error{s}:\n", .{
+        errors.len,
+        if (errors.len != 1) @as([]const u8, "s") else "",
+    });
+    try stdout.print("{s}\n", .{"=" ** 70});
+
+    for (errors, 0..) |err, idx| {
+        try stdout.print("\n  {d}. {s}\n", .{ idx + 1, err.message });
+        if (err.counterexample) |ce| {
+            var it = ce.variables.iterator();
+            var has_vars = false;
+            while (it.next()) |entry| {
+                if (!has_vars) {
+                    try stdout.print("     counterexample:\n", .{});
+                    has_vars = true;
+                }
+                try stdout.print("       {s} = {s}\n", .{ entry.key_ptr.*, formatHexValue(entry.value_ptr.*) });
+            }
+        }
+    }
+    try stdout.print("\n", .{});
+}
+
 fn verifyMlirModule(stdout: anytype, module: @import("mlir_c_api").c.MlirModule, stage: []const u8) !void {
     const mlir_c = @import("mlir_c_api").c;
     const module_op = mlir_c.oraModuleGetOperation(module);
@@ -1649,18 +1825,12 @@ fn runMlirEmitAdvanced(
         const verification_result = try verifier.runVerificationPass(final_module);
 
         if (verification_result.diagnostics.items.len > 0) {
-            try stdout.print("⚠ Z3 counterexamples ({d} guard(s) can be violated):\n", .{verification_result.diagnostics.items.len});
-            for (verification_result.diagnostics.items) |diag| {
-                try stdout.print("  {s} in {s}:\n", .{ diag.guard_id, diag.function_name });
-                var it = diag.counterexample.variables.iterator();
-                while (it.next()) |entry| {
-                    try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-                }
-            }
-            if (mlir_options.fail_on_verification_diagnostics) {
-                try stdout.print("❌ Z3 verification failed: {d} refinement guard(s) are violable.\n", .{verification_result.diagnostics.items.len});
-                try stdout.flush();
-                verification_failed = true;
+            // Refinement guards that SMT can't prove are lowered to runtime checks.
+            // These are not failures — the guard is kept. Show detail with --debug.
+            if (mlir_options.debug_enabled) {
+                try printVerificationDiagnostics(stdout, verification_result.diagnostics.items);
+            } else {
+                try printRuntimeGuardSummary(stdout, verification_result.diagnostics.items);
             }
         }
 
@@ -1669,16 +1839,7 @@ fn runMlirEmitAdvanced(
         }
 
         if (!verification_result.success) {
-            try stdout.print("❌ Z3 verification failed with {d} error(s):\n", .{verification_result.errors.items.len});
-            for (verification_result.errors.items) |err| {
-                try stdout.print("  - {s}\n", .{err.message});
-                if (err.counterexample) |ce| {
-                    var it = ce.variables.iterator();
-                    while (it.next()) |entry| {
-                        try stdout.print("    {s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-                    }
-                }
-            }
+            try printVerificationErrors(stdout, verification_result.errors.items);
             try stdout.flush();
             verification_failed = true;
         }
