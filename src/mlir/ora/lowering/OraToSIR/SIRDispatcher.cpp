@@ -618,9 +618,6 @@ namespace mlir
                         pubFuncs.push_back(info);
                     }
 
-                    if (pubFuncs.empty() && !userInit)
-                        return;
-
                     // Synthesize boilerplate init/main; user-defined versions are replaced.
                     if (auto sym = SymbolTable::lookupSymbolIn(module, StringRef("init")))
                         sym->erase();
