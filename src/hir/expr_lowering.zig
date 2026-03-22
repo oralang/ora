@@ -243,7 +243,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 if (field.binding_kind == .immutable) {
                                     if (field.value) |value| return self.lowerExpr(value, locals);
                                 }
-                                const result_type = if (field.type_expr) |type_expr| self.parent.lowerTypeExpr(type_expr) else self.parent.lowerExprType(expr_id);
+                                const result_type = self.parent.lowerExprType(expr_id);
                                 const op = switch (field.storage_class) {
                                     .storage => mlir.oraSLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
                                     .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
