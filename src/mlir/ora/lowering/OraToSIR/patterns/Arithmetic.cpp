@@ -298,6 +298,12 @@ LogicalResult ConvertConstOp::matchAndRewrite(
     typename ora::ConstOp::Adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    if (op.getResult().use_empty())
+    {
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     auto loc = op.getLoc();
     auto resultType = op.getResult().getType();
     auto valueAttr = op.getValueAttr();
