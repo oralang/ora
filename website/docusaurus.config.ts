@@ -39,6 +39,7 @@ const config: Config = {
     [
       'classic',
       {
+        debug: false,
         docs: {
           sidebarPath: './sidebars.ts',
           editUrl:
