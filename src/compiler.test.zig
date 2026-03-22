@@ -8255,6 +8255,29 @@ test "compiler lowers enum fields inside struct declarations to integer wire typ
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Status\">"));
 }
 
+test "compiler lowers std coinbase and msg value builtins" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Builtins {
+        \\    pub fn coinbase() -> address {
+        \\        return std.block.coinbase();
+        \\    }
+        \\
+        \\    pub fn value() -> u256 {
+        \\        return std.msg.value();
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.evm.coinbase : !ora.address"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.evm.callvalue : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c0_i256 : i256"));
+}
+
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {

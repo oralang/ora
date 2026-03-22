@@ -2196,17 +2196,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 "ora.evm.caller"
             else if (std.mem.eql(u8, path, "std.tx.origin"))
                 "ora.evm.origin"
+            else if (std.mem.eql(u8, path, "std.msg.value"))
+                "ora.evm.callvalue"
             else if (std.mem.eql(u8, path, "std.transaction.gasprice"))
                 "ora.evm.gasprice"
             else if (std.mem.eql(u8, path, "std.block.timestamp"))
                 "ora.evm.timestamp"
             else if (std.mem.eql(u8, path, "std.block.number"))
                 "ora.evm.number"
+            else if (std.mem.eql(u8, path, "std.block.coinbase"))
+                "ora.evm.coinbase"
             else
                 return null;
 
             const builtin_result_type =
-                if (std.mem.eql(u8, opcode_name, "ora.evm.caller") or std.mem.eql(u8, opcode_name, "ora.evm.origin"))
+                if (std.mem.eql(u8, opcode_name, "ora.evm.caller") or
+                std.mem.eql(u8, opcode_name, "ora.evm.origin") or
+                std.mem.eql(u8, opcode_name, "ora.evm.coinbase"))
                     addressType(self.parent.context)
                 else
                     result_type;
