@@ -11318,6 +11318,26 @@ test "compiler lowers address-typed storage reads with address result types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"address_value\" : !ora.address"));
 }
 
+test "compiler lowers enum-typed storage reads with lowered integer result types" {
+    const source_text =
+        \\enum Status { A, B }
+        \\
+        \\contract C {
+        \\    storage var status: Status;
+        \\
+        \\    pub fn read() -> Status {
+        \\        return status;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.global \"status\" : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"status\" : i256"));
+}
+
 test "compiler skips unknown carried locals in while lowering" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {
