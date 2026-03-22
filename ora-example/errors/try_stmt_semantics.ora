@@ -16,13 +16,14 @@ contract TryStmtSemantics {
         return x + 1;
     }
 
-    // try/catch with error payload
+    // try/catch with explicit fallback
     fn handleWithCatch(x: u256) -> u256 {
         try {
             let y: u256 = try mayFail(x);
             return y;
         } catch (e) {
-            return e;
+            let _err = e;
+            return 0;
         }
     }
 

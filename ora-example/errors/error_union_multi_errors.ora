@@ -30,7 +30,8 @@ contract ErrorUnionMultiErrors {
             let y: u256 = try mayFail(x);
             return y;
         } catch (e) {
-            return e;
+            let _err = e;
+            return 0;
         }
     }
 }

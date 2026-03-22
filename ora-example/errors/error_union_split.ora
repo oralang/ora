@@ -38,14 +38,14 @@ contract ErrorUnionSplit {
         return y + 2;
     }
 
-    // Forces ora.error.get_error for payload union
+    // Catch binding is the error value, not the payload.
     pub fn catchPayload(x: u256) -> u256 {
         try {
             let y: u256 = try mayFailPayload(x);
             return y;
         } catch (e) {
-            let code: u256 = e;
-            return code;
+            let _err = e;
+            return 0;
         }
     }
 }
