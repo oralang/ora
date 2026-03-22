@@ -354,6 +354,10 @@ pub fn cmpPredicate(predicate: []const u8) i64 {
     if (std.mem.eql(u8, predicate, "sle")) return 3;
     if (std.mem.eql(u8, predicate, "sgt")) return 4;
     if (std.mem.eql(u8, predicate, "sge")) return 5;
+    if (std.mem.eql(u8, predicate, "ult")) return 6;
+    if (std.mem.eql(u8, predicate, "ule")) return 7;
+    if (std.mem.eql(u8, predicate, "ugt")) return 8;
+    if (std.mem.eql(u8, predicate, "uge")) return 9;
     return 0;
 }
 

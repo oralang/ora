@@ -34,6 +34,10 @@ const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 
+fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     return struct {
         pub fn init(parent: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, op: mlir.MlirOperation, return_type: ?mlir.MlirType) FunctionLowerer {
@@ -322,12 +326,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn comparePredicateForBase(base_type: sema.Type, lower_bound: bool) i64 {
-            const is_signed = switch (base_type) {
+            const is_signed = switch (unwrapRefinementSemaType(base_type)) {
                 .integer => |integer| integer.signed orelse false,
                 else => false,
             };
             if (lower_bound) return if (is_signed) cmpPredicate("sge") else 9;
             return if (is_signed) cmpPredicate("sle") else 7;
+        }
+
+        fn patternIntegerIsSigned(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            const ty = unwrapRefinementSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type);
+            return switch (ty) {
+                .integer => |integer| integer.signed orelse false,
+                else => false,
+            };
         }
 
         fn patternName(file: *const ast.AstFile, pattern_id: ast.PatternId) ?[]const u8 {
@@ -671,7 +683,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .shr_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                                mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
+                            else
+                                mlir.oraArithShrUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
@@ -683,14 +698,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                                mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
+                            else
+                                mlir.oraArithDivUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
+                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                                mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
+                            else
+                                mlir.oraArithRemUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },

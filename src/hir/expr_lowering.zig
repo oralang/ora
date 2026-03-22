@@ -26,9 +26,46 @@ const strRef = support.strRef;
 const stringType = support.stringType;
 const LocalEnv = hir_locals.LocalEnv;
 
+fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
     return struct {
+        fn isSignedIntegerExpr(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            const ty = unwrapRefinementSemaType(self.parent.typecheck.expr_types[expr_id.index()]);
+            return switch (ty) {
+                .integer => |integer| integer.signed orelse false,
+                else => false,
+            };
+        }
+
+        fn signednessForBinaryIntegerOp(self: *FunctionLowerer, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) bool {
+            const lhs_node = self.parent.file.expression(lhs_expr).*;
+            const rhs_node = self.parent.file.expression(rhs_expr).*;
+            if (lhs_node == .IntegerLiteral and rhs_node != .IntegerLiteral) {
+                return @This().isSignedIntegerExpr(self, rhs_expr);
+            }
+            if (rhs_node == .IntegerLiteral and lhs_node != .IntegerLiteral) {
+                return @This().isSignedIntegerExpr(self, lhs_expr);
+            }
+            return @This().isSignedIntegerExpr(self, lhs_expr);
+        }
+
+        fn predicateForBinaryCompare(self: *FunctionLowerer, op: ast.BinaryOp, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) []const u8 {
+            const is_signed = @This().signednessForBinaryIntegerOp(self, lhs_expr, rhs_expr);
+            return switch (op) {
+                .lt => if (is_signed) "slt" else "ult",
+                .le => if (is_signed) "sle" else "ule",
+                .gt => if (is_signed) "sgt" else "ugt",
+                .ge => if (is_signed) "sge" else "uge",
+                .eq => "eq",
+                .ne => "ne",
+                else => unreachable,
+            };
+        }
+
         pub fn lowerExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *LocalEnv) anyerror!mlir.MlirValue {
             const expr = self.parent.file.expression(expr_id).*;
             const loc = self.parent.location(exprRange(self.parent.file, expr_id));
@@ -433,6 +470,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var rhs = try self.lowerExpr(binary.rhs, locals);
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
+            const is_signed_int_op = @This().signednessForBinaryIntegerOp(self, binary.lhs, binary.rhs);
 
             lhs = try @This().unwrapRefinementForCast(self, lhs, binary.range);
             rhs = try @This().unwrapRefinementForCast(self, rhs, binary.range);
@@ -499,22 +537,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .wrapping_sub => mlir.oraSubWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .mul => mlir.oraArithMulIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_mul => mlir.oraMulWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
-                .div => mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs),
-                .mod => mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs),
+                .div => if (is_signed_int_op) mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs),
+                .mod => if (is_signed_int_op) mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_pow => mlir.oraPowerOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .bit_and, .and_and => mlir.oraArithAndIOpCreate(self.parent.context, loc, lhs, rhs),
                 .bit_or, .or_or => mlir.oraArithOrIOpCreate(self.parent.context, loc, lhs, rhs),
                 .bit_xor => mlir.oraArithXorIOpCreate(self.parent.context, loc, lhs, rhs),
                 .shl => mlir.oraArithShlIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_shl => mlir.oraShlWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
-                .shr => mlir.oraArithShrSIOpCreate(self.parent.context, loc, lhs, rhs),
+                .shr => if (is_signed_int_op) mlir.oraArithShrSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithShrUIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_shr => mlir.oraShrWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .eq => self.createCompareOp(loc, "eq", lhs, rhs),
                 .ne => self.createCompareOp(loc, "ne", lhs, rhs),
-                .lt => self.createCompareOp(loc, "slt", lhs, rhs),
-                .le => self.createCompareOp(loc, "sle", lhs, rhs),
-                .gt => self.createCompareOp(loc, "sgt", lhs, rhs),
-                .ge => self.createCompareOp(loc, "sge", lhs, rhs),
+                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(self, binary.op, binary.lhs, binary.rhs), lhs, rhs),
                 .pow => unreachable,
             };
 

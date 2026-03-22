@@ -4902,7 +4902,7 @@ test "compiler lowers bitfield field reads and writes through bit ops" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.andi"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.ori"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
@@ -7350,6 +7350,32 @@ test "compiler lowers named contract invariants through ora.invariant" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.call\""));
 }
 
+test "compiler lowers unsigned requires comparisons with unsigned predicates" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Counter {
+        \\    storage var value: u256;
+        \\
+        \\    pub fn bump()
+        \\        requires (value < std.constants.U256_MAX)
+        \\    {
+        \\        value = value + 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi ult"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi slt"));
+}
+
 test "compiler lowers for loops with early return without placeholders" {
     const source_text =
         \\pub fn scan(values: slice[u256], stop_at: u256) -> u256 {
@@ -7657,7 +7683,7 @@ test "compiler lowers shift compound assignment" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
 }
 
 test "compiler lowers power and wrapping compound assignment" {
@@ -7709,8 +7735,8 @@ test "compiler lowers checked arithmetic compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.subi"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divsi"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remui"));
 }
 
 test "compiler rethreads nested map assignment to outer map" {
