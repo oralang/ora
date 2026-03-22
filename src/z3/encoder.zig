@@ -1342,7 +1342,7 @@ pub const Encoder = struct {
             return try self.encodeScfIfResult(mlir_op, result_index, mode);
         }
 
-        if (std.mem.eql(u8, op_name, "ora.switch_expr")) {
+        if (std.mem.eql(u8, op_name, "ora.switch_expr") or std.mem.eql(u8, op_name, "ora.switch")) {
             return try self.encodeOraSwitchExprResult(mlir_op, result_index, mode);
         }
 
