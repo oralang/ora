@@ -2350,6 +2350,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
             if (mlir.oraTypeIsNull(ty)) return error.MlirOperationCreationFailed;
+            if (self.typeIsVoid(ty)) {
+                const seed = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, self.parent.location(range), boolType(self.parent.context), 0),
+                );
+                const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
+                    self.parent.context,
+                    self.parent.location(range),
+                    seed,
+                    ty,
+                );
+                if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, none_cast);
+            }
 
             if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ty))) {
                 const payload_type = mlir.oraErrorUnionTypeGetSuccessType(ty);

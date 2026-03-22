@@ -1545,13 +1545,19 @@ public:
                 auto u256Ty = sir::U256Type::get(ctx);
                 auto isNarrowErr = [&](ora::ErrorUnionType errType) {
                     auto successType = errType.getSuccessType();
-                    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+                    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
                 };
                 auto asU256 = [&](Value value) -> Value {
                     if (llvm::isa<sir::U256Type>(value.getType()))
                         return value;
                     return b.create<sir::BitcastOp>(loc, u256Ty, value);
                 };
+
+                if (llvm::all_of(castOp.getResults(), [](Value result) { return result.use_empty(); }))
+                {
+                    b.eraseOp(castOp);
+                    continue;
+                }
 
                 if (castOp.getNumOperands() == 1 && castOp.getNumResults() == 1)
                 {

@@ -32,7 +32,7 @@ static bool isNarrowErrorUnionType(Type type)
     if (!errType)
         return false;
     auto successType = errType.getSuccessType();
-    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
 }
 
 static mlir::MemRefType remapMemRefElementType(mlir::MemRefType type, Type elementType)
@@ -184,6 +184,17 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     packedValue = unwrapPackedErrorUnionCarrier(packedValue);
     if (Operation *def = packedValue.getDefiningOp())
     {
+        if (auto okOp = llvm::dyn_cast<ora::ErrorOkOp>(def))
+        {
+            if (llvm::isa<mlir::NoneType>(okOp.getValue().getType()))
+            {
+                packedValue = rewriter.create<mlir::arith::ConstantOp>(
+                    loc,
+                    i256Type,
+                    mlir::IntegerAttr::get(i256Type, 0)
+                );
+            }
+        }
         if (def->getName().getStringRef() == "ora.error.return")
         {
             auto sym = def->getAttrOfType<mlir::StringAttr>("sym_name");

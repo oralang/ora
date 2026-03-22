@@ -126,10 +126,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, ret);
                         } else {
-                            const value = appendValueOp(
-                                self.block,
-                                try self.createAggregatePlaceholder("ora.default_value", function.range, &.{}, return_type),
-                            );
+                            const value = try self.defaultValue(return_type, function.range);
                             const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
                             if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, ret);
@@ -489,6 +486,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, op);
+                            } else if (self.return_type) |return_type| {
+                                const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+                                if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
+                                    const value = try self.defaultValue(return_type, ret.range);
+                                    const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
+                                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                                    appendOp(self.block, op);
+                                } else {
+                                    const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
+                                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                                    appendOp(self.block, op);
+                                }
                             } else {
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
                                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -556,6 +565,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, op);
+                    } else if (self.return_type) |return_type| {
+                        const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+                        if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
+                            const value = try self.defaultValue(return_type, ret.range);
+                            const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, op);
+                        } else {
+                            const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, op);
+                        }
                     } else {
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;

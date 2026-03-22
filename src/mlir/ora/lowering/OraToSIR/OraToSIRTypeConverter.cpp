@@ -23,6 +23,8 @@ namespace
     {
         if (!type)
             return std::nullopt;
+        if (llvm::isa<mlir::NoneType>(type))
+            return 0u;
 
         if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
             return builtinInt.getWidth();

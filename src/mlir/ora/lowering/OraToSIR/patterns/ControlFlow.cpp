@@ -73,6 +73,8 @@ static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structNa
 static FailureOr<Value> phase0ToI256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
+    if (llvm::isa<mlir::NoneType>(value.getType()))
+        return rewriter.create<arith::ConstantOp>(loc, i256Type, rewriter.getIntegerAttr(i256Type, 0)).getResult();
     if (auto intType = llvm::dyn_cast<mlir::IntegerType>(value.getType()))
     {
         if (intType.getWidth() == 256)
@@ -264,6 +266,8 @@ static std::optional<unsigned> getOraBitWidth(Type type)
 {
     if (!type)
         return std::nullopt;
+    if (llvm::isa<mlir::NoneType>(type))
+        return 0u;
     if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
         return builtinInt.getWidth();
     if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
@@ -1197,7 +1201,15 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
                         shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
     if (!isWide && resultTypes.size() == 1)
     {
-        Value value = ensureU256(rewriter, loc, adaptor.getValue());
+        Value value = adaptor.getValue();
+        if (llvm::isa<mlir::NoneType>(value.getType()))
+        {
+            value = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, 0));
+        }
+        else
+        {
+            value = ensureU256(rewriter, loc, value);
+        }
         if (auto cst = value.getDefiningOp<sir::ConstOp>())
             cst->setAttr("ora.error_id", rewriter.getUnitAttr());
         auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
@@ -3522,6 +3534,12 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     mlir::UnrealizedConversionCastOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
+    if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
+    {
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     // Handle 1->1, 1->2 (split), and 2->1 (pack) casts.
     if (op.getNumOperands() < 1 || op.getNumOperands() > 2 ||
         op.getNumResults() < 1 || op.getNumResults() > 2)
