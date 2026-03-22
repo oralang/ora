@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_support = @import("abi.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
@@ -698,7 +699,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const field_types = try self.allocator.alloc(mlir.MlirAttribute, struct_item.fields.len);
                 for (struct_item.fields, 0..) |field, index| {
                     field_names[index] = mlir.oraStringAttrCreate(self.context, strRef(field.name));
-                    field_types[index] = mlir.oraTypeAttrCreateFromType(self.lowerTypeExpr(field.type_expr));
+                    field_types[index] = mlir.oraTypeAttrCreateFromType(
+                        self.lowerSemaType(
+                            type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch .{ .unknown = {} },
+                            field.range,
+                        ),
+                    );
                 }
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.field_names"), mlir.oraArrayAttrCreate(self.context, @intCast(field_names.len), field_names.ptr));
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.field_types"), mlir.oraArrayAttrCreate(self.context, @intCast(field_types.len), field_types.ptr));

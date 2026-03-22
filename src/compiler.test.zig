@@ -8229,6 +8229,32 @@ test "compiler contextualizes nested array literals to their declared element ty
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca() : memref<2xmemref<2xi256>>"));
 }
 
+test "compiler lowers enum fields inside struct declarations to integer wire types" {
+    const source_text =
+        \\enum Status { A, B }
+        \\
+        \\struct Entry {
+        \\    status: Status,
+        \\    amount: u256,
+        \\}
+        \\
+        \\contract C {
+        \\    storage var entry: Entry;
+        \\
+        \\    pub fn update(status: Status) {
+        \\        let next: Entry = .{ .status = status, .amount = 1 };
+        \\        entry = next;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.field_types = [i256, i256]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Status\">"));
+}
+
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
