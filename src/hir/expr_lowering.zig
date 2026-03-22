@@ -245,9 +245,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 }
                                 const result_type = self.parent.lowerExprType(expr_id);
                                 const op = switch (field.storage_class) {
-                                    .storage => mlir.oraSLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
-                                    .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
-                                    .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                                .storage => mlir.oraSLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(field.range),
+                                    strRef(field.name),
+                                    if (field.type_expr) |type_expr| self.parent.lowerTypeExpr(type_expr) else result_type,
+                                ),
+                                .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                                .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
                                     .none => std.mem.zeroes(mlir.MlirOperation),
                                 };
                                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
