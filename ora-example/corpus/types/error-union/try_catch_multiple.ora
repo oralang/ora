@@ -5,6 +5,7 @@ error NotFound;
 error AccessDenied;
 error Expired;
 
+comptime const std = @import("std");
 contract TryCatchMultiple {
     storage var items: map<u256, u256>;
     storage var owners: map<u256, address>;

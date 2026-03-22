@@ -1,6 +1,7 @@
 // Level 2: Owner-approval allowance pattern
 // Tests: nested map<address, map<address, u256>>, approve/spend
 
+comptime const std = @import("std");
 contract AllowancePattern {
     storage var allowances: map<address, map<address, u256>>;
 

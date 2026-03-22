@@ -6,6 +6,7 @@ error InsufficientAllowance(required: u256, available: u256);
 error ZeroAmount;
 error ZeroAddress;
 
+comptime const std = @import("std");
 contract TokenWithErrors {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

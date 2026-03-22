@@ -1,5 +1,6 @@
 // MinValue<u256, 100> — larger minimum bound
 
+comptime const std = @import("std");
 contract MinValueLarge {
     storage var minStake: MinValue<u256, 100>;
     storage var totalStaked: u256 = 0;

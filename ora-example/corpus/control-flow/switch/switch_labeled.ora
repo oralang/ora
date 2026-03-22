@@ -40,26 +40,26 @@ contract SwitchLabeled {
     // Labeled switch as state dispatcher
     pub fn test_state_dispatch() -> u256 {
         var state: u256 = 0;
-        var result: u256 = 0;
+        var res: u256 = 0;
 
         dispatch: switch (state) {
             0 => {
-                result += 1;
+                res += 1;
                 continue :dispatch (1);
             }
             1 => {
-                result += 10;
+                res += 10;
                 continue :dispatch (2);
             }
             2 => {
-                result += 100;
+                res += 100;
                 // fall through to end
             }
             else => {
-                result = 999;
+                res = 999;
             }
         }
-        return result; // 111
+        return res; // 111
     }
 
     // Labeled switch with conditional continue

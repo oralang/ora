@@ -1,0 +1,22 @@
+// @divmod returns a (quotient, remainder) tuple.
+
+contract TupleFromDivmod {
+    pub fn basic_divmod() -> u256 {
+        let res: (u256, u256) = @divmod(10, 3);
+        return res.0;
+    }
+
+    pub fn get_remainder() -> u256 {
+        let res: (u256, u256) = @divmod(10, 3);
+        return res.1;
+    }
+
+    pub fn destructure_divmod() -> u256 {
+        let (q, r): (u256, u256) = @divmod(17, 5);
+        return q * 5 + r;
+    }
+
+    pub fn divmod_runtime(a: u256, b: u256) -> (u256, u256) {
+        return @divmod(a, b);
+    }
+}

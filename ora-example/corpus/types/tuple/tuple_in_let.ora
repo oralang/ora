@@ -1,0 +1,30 @@
+// Tuple destructuring in let bindings.
+
+contract TupleInLet {
+    pub fn basic_destructure() -> u256 {
+        let (a, b): (u256, u256) = (3, 7);
+        return a + b;
+    }
+
+    pub fn destructure_from_fn() -> u256 {
+        let (x, y): (u256, u256) = get_pair();
+        return x * y;
+    }
+
+    pub fn destructure_three() -> u256 {
+        let (a, b, c): (u256, u256, u256) = (10, 20, 30);
+        return a + b + c;
+    }
+
+    pub fn destructure_mixed() -> u256 {
+        let (val, flag): (u256, bool) = (100, true);
+        if (flag) {
+            return val;
+        }
+        return 0;
+    }
+
+    fn get_pair() -> (u256, u256) {
+        return (5, 6);
+    }
+}

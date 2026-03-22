@@ -4,6 +4,7 @@
 // Tests that functions record comprehensive effect summaries
 // ============================================================================
 
+comptime const std = @import("std");
 contract FunctionEffectSummary {
     storage var counter: u256;
     storage balances: map<address, u256>;

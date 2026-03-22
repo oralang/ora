@@ -4,6 +4,7 @@
 // - NonZeroAddress / MinValue / MaxValue / InRange
 // - storage map + basic arithmetic
 
+comptime const std = @import("std");
 contract RefinementDispatcherE2E {
     storage owner: NonZeroAddress;
     storage limit: MaxValue<u256, 1_000_000>;

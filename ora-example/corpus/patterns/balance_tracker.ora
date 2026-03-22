@@ -1,6 +1,7 @@
 // Level 2: Per-address balance tracker
 // Tests: map<address, u256>, deposit/withdraw with underflow guard
 
+comptime const std = @import("std");
 contract BalanceTracker {
     storage var balances: map<address, u256>;
     storage var totalBalance: u256 = 0;

@@ -15,9 +15,9 @@ contract TryCatchBasic {
 
     pub fn safe_divide(a: u256, b: u256) -> u256 {
         try {
-            let result: u256 = divide(a, b);
-            last_result = result;
-            return result;
+            let res: u256 = divide(a, b);
+            last_result = res;
+            return res;
         } catch |e| {
             last_result = 0;
             return 0;
@@ -26,8 +26,8 @@ contract TryCatchBasic {
 
     pub fn divide_with_default(a: u256, b: u256, default_val: u256) -> u256 {
         try {
-            let result: u256 = divide(a, b);
-            return result;
+            let res: u256 = divide(a, b);
+            return res;
         } catch |e| {
             return default_val;
         }

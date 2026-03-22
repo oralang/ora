@@ -1,6 +1,7 @@
 // Level 3: Mintable ERC20 token
 // Tests: ERC20 + owner-only mint function
 
+comptime const std = @import("std");
 contract MintableToken {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

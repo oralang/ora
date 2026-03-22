@@ -12,11 +12,11 @@ contract BoolU256 {
     }
 
     pub fn conditional_add(x: u256, should_add: bool) -> u256 {
-        let result: u256 = value;
+        let res: u256 = value;
         if should_add {
-            result = result + x;
+            res = res + x;
         }
-        return result;
+        return res;
     }
 
     pub fn compare_and_flag(x: u256, threshold: u256) -> bool {
@@ -28,14 +28,14 @@ contract BoolU256 {
     pub fn double_condition(a: u256, b: u256) -> u256 {
         let gt: bool = a > b;
         let eq: bool = a == b;
-        let result: u256 = 0;
+        let res: u256 = 0;
         if gt {
-            result = a - b;
+            res = a - b;
         }
         if eq {
-            result = a;
+            res = a;
         }
-        return result;
+        return res;
     }
 
     pub fn bool_storage_with_arithmetic(x: u256) -> u256 {

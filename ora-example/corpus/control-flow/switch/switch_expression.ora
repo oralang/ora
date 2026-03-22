@@ -5,13 +5,13 @@
 contract SwitchExpression {
     // Switch expression assigned to variable
     pub fn test_assign(x: u256) -> u256 {
-        var result: u256 = switch (x) {
+        var res: u256 = switch (x) {
             0 => 10,
             1 => 20,
             2 => 30,
             else => 0
         };
-        return result;
+        return res;
     }
 
     // Switch expression in return

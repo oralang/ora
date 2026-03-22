@@ -54,16 +54,16 @@ contract WhileNested {
 
     // Inner loop modifying outer variable
     pub fn test_inner_modifies_outer() -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         var i: u256 = 0;
         while (i < 3) {
             var j: u256 = 0;
             while (j < 3) {
-                result = result + i + j;
+                res = res + i + j;
                 j += 1;
             }
             i += 1;
         }
-        return result;
+        return res;
     }
 }

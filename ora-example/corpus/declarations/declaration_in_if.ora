@@ -7,12 +7,12 @@ contract DeclarationInIf {
 
     // Let inside if body
     pub fn let_in_if(x: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (x > 10) {
             let bonus: u256 = x * 2;
-            result = bonus;
+            res = bonus;
         }
-        return result;
+        return res;
     }
 
     // Let in both branches
@@ -28,46 +28,46 @@ contract DeclarationInIf {
 
     // Var inside if, modified before scope ends
     pub fn var_in_if(x: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (x > 0) {
             var temp: u256 = x;
             temp += 10;
             temp *= 2;
-            result = temp;
+            res = temp;
         }
-        return result;
+        return res;
     }
 
     // Multiple declarations in if
     pub fn multi_decl_in_if(a: u256, b: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (a > b) {
             let diff: u256 = a - b;
             let scaled: u256 = diff * 100;
             let ratio: u256 = scaled / a;
-            result = ratio;
+            res = ratio;
         }
-        return result;
+        return res;
     }
 
     // Nested if with declarations at each level
     pub fn nested_if_decl(x: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (x > 0) {
             let level1: u256 = x + 1;
             if (level1 > 10) {
                 let level2: u256 = level1 * 2;
                 if (level2 > 50) {
                     let level3: u256 = level2 + 100;
-                    result = level3;
+                    res = level3;
                 } else {
-                    result = level2;
+                    res = level2;
                 }
             } else {
-                result = level1;
+                res = level1;
             }
         }
-        return result;
+        return res;
     }
 
     // Declaration inside if used with storage

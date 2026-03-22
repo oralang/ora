@@ -2,6 +2,7 @@
 // VAR MUTATIONS — mutable declarations with reassignment
 // ==========================================
 
+comptime const std = @import("std");
 contract VarMutations {
     // Increment and decrement u256
     pub fn increment_decrement() -> u256 {

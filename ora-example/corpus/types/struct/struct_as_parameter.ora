@@ -1,0 +1,32 @@
+// Pass struct to function, return struct from function.
+
+struct Vec2 {
+    x: u256;
+    y: u256;
+}
+
+contract StructAsParameter {
+    pub fn magnitude_squared(v: Vec2) -> u256 {
+        return v.x * v.x + v.y * v.y;
+    }
+
+    pub fn add(a: Vec2, b: Vec2) -> Vec2 {
+        return Vec2 { x: a.x + b.x, y: a.y + b.y };
+    }
+
+    pub fn make_vec(x: u256, y: u256) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+
+    pub fn test_roundtrip() -> u256 {
+        let v: Vec2 = make_vec(3, 4);
+        return magnitude_squared(v);
+    }
+
+    pub fn test_add() -> u256 {
+        let a: Vec2 = Vec2 { x: 1, y: 2 };
+        let b: Vec2 = Vec2 { x: 3, y: 4 };
+        let c: Vec2 = add(a, b);
+        return c.x + c.y;
+    }
+}

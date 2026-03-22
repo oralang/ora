@@ -1,5 +1,6 @@
 // Realistic ERC20 using MinValue on amounts and NonZeroAddress on all address params
 
+comptime const std = @import("std");
 contract ERC20AllRefinements {
     storage var name_: u256;
     storage var totalSupply: u256;

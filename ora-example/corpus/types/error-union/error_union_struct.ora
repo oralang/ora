@@ -10,6 +10,7 @@ struct TokenBalance {
 error TokenNotFound;
 error InsufficientTokenBalance(needed: u256, have: u256);
 
+comptime const std = @import("std");
 contract ErrorUnionStruct {
     storage var balances: map<u256, u256>;
     storage var update_times: map<u256, u256>;

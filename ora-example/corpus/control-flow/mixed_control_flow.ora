@@ -18,17 +18,17 @@ contract MixedControlFlow {
 
     // While inside if
     pub fn test_while_in_if(should_loop: bool) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (should_loop) {
             var i: u256 = 0;
             while (i < 5) {
-                result += i;
+                res += i;
                 i += 1;
             }
         } else {
-            result = 99;
+            res = 99;
         }
-        return result;
+        return res;
     }
 
     // Switch inside while
@@ -49,27 +49,27 @@ contract MixedControlFlow {
 
     // While inside switch
     pub fn test_while_in_switch(mode: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         switch (mode) {
             0 => {
                 var i: u256 = 0;
                 while (i < 5) {
-                    result += 1;
+                    res += 1;
                     i += 1;
                 }
             }
             1 => {
                 var i: u256 = 0;
                 while (i < 10) {
-                    result += 2;
+                    res += 2;
                     i += 1;
                 }
             }
             else => {
-                result = 42;
+                res = 42;
             }
         }
-        return result;
+        return res;
     }
 
     // If inside switch inside while
@@ -100,26 +100,26 @@ contract MixedControlFlow {
 
     // For inside if inside switch
     pub fn test_for_in_if_in_switch(category: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         switch (category) {
             0 => {
                 if (true) {
                     for (0..5) |i, _| {
-                        result += i;
+                        res += i;
                     }
                 }
             }
             1 => {
                 for (0..10) |i, _| {
                     if (i % 2 == 0) {
-                        result += i;
+                        res += i;
                     }
                 }
             }
             else => {
-                result = 999;
+                res = 999;
             }
         }
-        return result;
+        return res;
     }
 }

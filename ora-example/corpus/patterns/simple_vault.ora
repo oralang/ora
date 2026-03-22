@@ -1,6 +1,7 @@
 // Level 5: Simple DeFi vault
 // Tests: deposit/withdraw with totalDeposits tracking, share accounting
 
+comptime const std = @import("std");
 contract SimpleVault {
     storage var totalDeposits: u256 = 0;
     storage var deposits: map<address, u256>;

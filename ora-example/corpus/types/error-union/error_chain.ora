@@ -17,11 +17,11 @@ contract ErrorChain {
     // Level B: intermediate computation, calls C
     pub fn compute(x: u256) -> !u256 | InputTooLarge | ComputationFailed {
         let valid: u256 = try validate_input(x);
-        let result: u256 = valid * valid;
-        if (result == 0) {
+        let res: u256 = valid * valid;
+        if (res == 0) {
             return error ComputationFailed;
         }
-        return result;
+        return res;
     }
 
     // Level A: top-level, calls B which calls C
@@ -36,8 +36,8 @@ contract ErrorChain {
     // Entry point: catches everything at the top
     pub fn safe_process(x: u256) -> u256 {
         try {
-            let result: u256 = process(x);
-            return result;
+            let res: u256 = process(x);
+            return res;
         } catch |e| {
             return 0;
         }

@@ -2,6 +2,7 @@
 // Error Union Split (tag + payload) regression
 // ============================================================================
 
+comptime const std = @import("std");
 contract ErrorUnionSplit {
     error E1;
     error E2(code: u256);

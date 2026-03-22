@@ -5,6 +5,7 @@
 // No runtime guard needed - this is pure subtyping
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementToBase {
     // ============================================================================
     // MinValue to Base Type

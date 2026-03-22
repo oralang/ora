@@ -28,7 +28,7 @@ contract SwitchNested {
 
     // Nested switch in expression position
     pub fn test_nested_expression(a: u256, b: u256) -> u256 {
-        var result: u256 = switch (a) {
+        var res: u256 = switch (a) {
             0 => switch (b) {
                 0 => 0,
                 1 => 1,
@@ -40,7 +40,7 @@ contract SwitchNested {
             },
             else => 99
         };
-        return result;
+        return res;
     }
 
     // Three levels of nesting

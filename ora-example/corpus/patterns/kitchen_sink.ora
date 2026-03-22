@@ -76,6 +76,7 @@ impl Describable for Position {
 
 // --- Main contract ---
 
+comptime const std = @import("std");
 contract KitchenSink {
     // --- Storage: primitives ---
     storage var owner: address;
@@ -193,10 +194,10 @@ contract KitchenSink {
     {
         let f: VaultFlags = flags;
         if (f.paused) {
-            return error.VaultPaused;
+            return VaultPaused;
         }
         if (!f.allowDeposits) {
-            return error.VaultPaused;
+            return VaultPaused;
         }
 
         let sender: NonZeroAddress = std.msg.sender();
@@ -244,7 +245,7 @@ contract KitchenSink {
     {
         let f: VaultFlags = flags;
         if (f.paused || !f.allowWithdrawals) {
-            return error.VaultPaused;
+            return VaultPaused;
         }
 
         let sender: NonZeroAddress = std.msg.sender();
@@ -274,12 +275,12 @@ contract KitchenSink {
         requires(nextPositionId < std.constants.U256_MAX)
     {
         if (amount == 0) {
-            return error.ZeroAmount;
+            return ZeroAmount;
         }
 
         let f: VaultFlags = flags;
         if (f.paused) {
-            return error.VaultPaused;
+            return VaultPaused;
         }
 
         let sender: NonZeroAddress = std.msg.sender();
@@ -311,14 +312,14 @@ contract KitchenSink {
     {
         let state: u8 = positionStates[positionId];
         if (state != 0) {
-            return error.PositionNotFound;
+            return PositionNotFound;
         }
 
         let pos: Position = positions[positionId];
         let sender: address = std.msg.sender();
 
         if (pos.owner != sender) {
-            return error.Unauthorized;
+            return Unauthorized;
         }
 
         positionStates[positionId] = 1;  // Closed
@@ -352,8 +353,8 @@ contract KitchenSink {
 
     pub fn safeDeposit(amount: u256) -> bool {
         try {
-            let result: !bool = deposit(amount);
-            return result;
+            let res: !bool = deposit(amount);
+            return res;
         } catch (e) {
             return false;
         }
@@ -446,28 +447,28 @@ contract KitchenSink {
     // --- Labeled block ---
 
     pub fn findFirstLargeDeposit() -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
 
         search: {
             if (recentDeposits[0] > MAX_DEPOSIT) {
-                result = recentDeposits[0];
+                res = recentDeposits[0];
                 break :search;
             }
             if (recentDeposits[1] > MAX_DEPOSIT) {
-                result = recentDeposits[1];
+                res = recentDeposits[1];
                 break :search;
             }
             if (recentDeposits[2] > MAX_DEPOSIT) {
-                result = recentDeposits[2];
+                res = recentDeposits[2];
                 break :search;
             }
             if (recentDeposits[3] > MAX_DEPOSIT) {
-                result = recentDeposits[3];
+                res = recentDeposits[3];
                 break :search;
             }
         }
 
-        return result;
+        return res;
     }
 
     // --- View functions ---

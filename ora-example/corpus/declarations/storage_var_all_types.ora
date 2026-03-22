@@ -2,6 +2,7 @@
 // STORAGE VAR ALL TYPES — storage vars for every scalar type
 // ==========================================
 
+comptime const std = @import("std");
 contract StorageVarAllTypes {
     storage var val_u8: u8;
     storage var val_u16: u16;

@@ -1,6 +1,7 @@
 // Level 6: ERC20 with comprehensive event logging
 // Tests: log declarations with indexed parameters, emit on every state change
 
+comptime const std = @import("std");
 contract TokenWithEvents {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

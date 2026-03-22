@@ -5,6 +5,7 @@
 // NonZeroAddress is a subtype of address (refinement is subtype of base type)
 // ============================================================================
 
+comptime const std = @import("std");
 contract NonZeroAddressSubtyping {
     // ============================================================================
     // Valid: NonZeroAddress to address (subtyping)

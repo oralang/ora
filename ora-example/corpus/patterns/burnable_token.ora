@@ -1,6 +1,7 @@
 // Level 3: Burnable ERC20 token
 // Tests: ERC20 + burn (anyone can burn their own tokens)
 
+comptime const std = @import("std");
 contract BurnableToken {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

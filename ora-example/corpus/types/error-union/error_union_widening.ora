@@ -34,14 +34,14 @@ contract ErrorUnionWidening {
 
     // Widening through assignment: narrow result stored in wider-typed context
     pub fn widen_assignment(x: u256) -> !u256 | ErrorA | ErrorB {
-        let result: u256 = try may_fail_a(x);
-        return result;
+        let res: u256 = try may_fail_a(x);
+        return res;
     }
 
     pub fn safe_combined(x: u256) -> u256 {
         try {
-            let result: u256 = combined(x);
-            return result;
+            let res: u256 = combined(x);
+            return res;
         } catch |e| {
             return 0;
         }

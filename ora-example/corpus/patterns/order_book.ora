@@ -8,6 +8,7 @@ struct Order {
     active: bool;
 }
 
+comptime const std = @import("std");
 contract OrderBook {
     storage var orders: map<u256, Order>;
     storage var nextOrderId: u256 = 1;

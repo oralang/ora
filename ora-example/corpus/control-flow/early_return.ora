@@ -72,13 +72,13 @@ contract EarlyReturn {
             return 1000; // cap
         }
 
-        var result: u256 = x * 2;
-        if (result > 500) {
+        var res: u256 = x * 2;
+        if (res > 500) {
             return 500; // secondary cap
         }
 
-        result += 10;
-        return result;
+        res += 10;
+        return res;
     }
 
     // Return in nested control flow

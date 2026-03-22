@@ -1,6 +1,7 @@
 // Level 2: Address-to-string registry
 // Tests: map<address, string>, register/lookup/update pattern
 
+comptime const std = @import("std");
 contract Registry {
     storage var names: map<address, string>;
     storage var registered: map<address, bool>;

@@ -1,6 +1,7 @@
 // Level 5: Staking contract with rewards
 // Tests: stake/unstake/claim with time-based reward calculation
 
+comptime const std = @import("std");
 contract Staking {
     storage var totalStaked: u256 = 0;
     storage var rewardRate: u256 = 100;  // reward per second per 10000 staked (basis points)

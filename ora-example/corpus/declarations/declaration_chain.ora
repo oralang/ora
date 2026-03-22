@@ -53,8 +53,8 @@ contract DeclarationChain {
         let y: u256 = x * 2;
         let sum: u256 = x + y;
         let product: u256 = x * y;
-        let result: u256 = sum + product;
-        return result;
+        let res: u256 = sum + product;
+        return res;
     }
 
     // Fibonacci-like chain

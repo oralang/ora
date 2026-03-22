@@ -2,6 +2,8 @@
 // CHECKED DIVISION GUARDS
 // ==========================================
 // Division and modulo emit both div-by-zero and MIN_INT/-1 guards.
+comptime const std = @import("std");
+
 contract CheckedDivGuards {
     // Reverts if b == 0 or (a == MIN_INT && b == -1)
     pub fn safe_div(a: i256, b: i256) -> i256

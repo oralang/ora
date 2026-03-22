@@ -2,6 +2,7 @@
 // Error Union + Try/Catch Smoke Tests
 // ============================================================================
 
+comptime const std = @import("std");
 contract TryErrorUnionSmoke {
     error E1;
 

@@ -9,6 +9,7 @@ bitfield TokenConfig : u256 {
     version: u8;
 }
 
+comptime const std = @import("std");
 contract TokenWithBitfield {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

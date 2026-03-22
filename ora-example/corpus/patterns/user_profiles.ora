@@ -8,6 +8,7 @@ struct Profile {
     active: bool;
 }
 
+comptime const std = @import("std");
 contract UserProfiles {
     storage var profiles: map<address, Profile>;
     storage var exists: map<address, bool>;

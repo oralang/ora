@@ -46,11 +46,11 @@ contract SwitchElse {
 
     // Else as expression
     pub fn test_else_expression(x: u256) -> u256 {
-        var result: u256 = switch (x) {
+        var res: u256 = switch (x) {
             0 => 999,
             else => x
         };
-        return result;
+        return res;
     }
 
     // Only else arm (matches everything)

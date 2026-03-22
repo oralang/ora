@@ -1,4 +1,6 @@
 // Test contract for std.constants integer min/max bounds.
+comptime const std = @import("std");
+
 contract StdConstantsBoundsTest {
     // Unsigned bounds
     pub fn getU8Min() -> u8 {

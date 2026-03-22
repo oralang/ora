@@ -4,6 +4,7 @@
 // Tests refinement type subtyping rules
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementSubtyping {
     // MinValue subtyping: More restrictive is subtype
     pub fn testMinValueSubtyping() {

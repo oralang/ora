@@ -31,7 +31,7 @@ contract U8U256 {
         let small: u8 = 255;
         let big: u256 = 1000000;
         let widened: u256 = small;
-        let result: u256 = widened + big;
-        return result;
+        let res: u256 = widened + big;
+        return res;
     }
 }

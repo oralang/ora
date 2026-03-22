@@ -1,0 +1,26 @@
+// Store struct in storage, load it back, read fields.
+
+struct Position {
+    x: u256;
+    y: u256;
+}
+
+contract StructInStorage {
+    storage var pos: Position;
+
+    pub fn store_position() {
+        pos = Position { x: 42, y: 99 };
+    }
+
+    pub fn load_x() -> u256 {
+        return pos.x;
+    }
+
+    pub fn load_y() -> u256 {
+        return pos.y;
+    }
+
+    pub fn load_sum() -> u256 {
+        return pos.x + pos.y;
+    }
+}

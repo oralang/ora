@@ -4,6 +4,7 @@
 
 error InsufficientBalance(required: u256, available: u256);
 
+comptime const std = @import("std");
 contract Vault {
     storage var totalDeposits: u256 = 0;
     storage var balances: map<address, u256>;

@@ -4,6 +4,7 @@
 // Tests ghost variables (specification-only, not in bytecode)
 // ============================================================================
 
+comptime const std = @import("std");
 contract GhostVariables {
     storage var balance: u256 = 0;
     storage var max_balance: u256 = 1000;

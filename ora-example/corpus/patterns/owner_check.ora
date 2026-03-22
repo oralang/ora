@@ -1,6 +1,7 @@
 // Level 1: Owner-only access pattern
 // Tests: address storage, msg.sender, conditional guard
 
+comptime const std = @import("std");
 contract OwnerCheck {
     storage var owner: address;
 

@@ -4,6 +4,7 @@
   // Tests ghost functions and variables working together
   // ============================================================================
 
+comptime const std = @import("std");
   contract GhostCombined {
     storage var balance: u256 = 0;
     storage var max_balance: u256 = 1000;

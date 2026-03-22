@@ -15,6 +15,7 @@
 //   • Exact<T> - Ensures exact division (no rounding errors)
 // ============================================================================
 
+comptime const std = @import("std");
 contract ERC20Token {
     // ============================================================================
     // State Variables with Refined Types

@@ -5,11 +5,11 @@
 contract ComptimeLet {
     // Basic comptime block with let
     pub fn basic_comptime() -> u256 {
-        const result: u256 = comptime {
+        const res: u256 = comptime {
             let x: u256 = 42;
             return x;
         };
-        return result;
+        return res;
     }
 
     // Comptime with arithmetic
@@ -25,14 +25,14 @@ contract ComptimeLet {
 
     // Comptime with multiple declarations
     pub fn comptime_multi_decl() -> u256 {
-        const result: u256 = comptime {
+        const res: u256 = comptime {
             let base: u256 = 100;
             let factor: u256 = 3;
             let offset: u256 = 7;
             let computed: u256 = base * factor + offset;
             return computed;
         };
-        return result;
+        return res;
     }
 
     // Multiple comptime blocks in one function

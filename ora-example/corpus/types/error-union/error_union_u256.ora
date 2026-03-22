@@ -4,6 +4,7 @@
 error Underflow;
 error Overflow;
 
+comptime const std = @import("std");
 contract ErrorUnionU256 {
     storage var value: u256 = 0;
 

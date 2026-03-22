@@ -1,0 +1,44 @@
+// Struct containing another struct.
+
+struct Inner {
+    value: u256;
+    flag: bool;
+}
+
+struct Outer {
+    id: u256;
+    data: Inner;
+}
+
+contract StructNested {
+    storage var item: Outer;
+
+    pub fn create_nested() -> u256 {
+        let inner: Inner = Inner { value: 42, flag: true };
+        let outer: Outer = Outer { id: 1, data: inner };
+        return outer.data.value;
+    }
+
+    pub fn create_inline() -> u256 {
+        let o: Outer = Outer {
+            id: 2,
+            data: Inner { value: 100, flag: false }
+        };
+        return o.id + o.data.value;
+    }
+
+    pub fn store_nested() {
+        item = Outer {
+            id: 10,
+            data: Inner { value: 999, flag: true }
+        };
+    }
+
+    pub fn read_nested() -> u256 {
+        return item.data.value;
+    }
+
+    pub fn read_nested_flag() -> bool {
+        return item.data.flag;
+    }
+}

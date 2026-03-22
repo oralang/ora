@@ -1,0 +1,49 @@
+// Struct with u8, u16, u32, u64, u128, u256 fields.
+
+struct AllInts {
+    a: u8;
+    b: u16;
+    c: u32;
+    d: u64;
+    e: u128;
+    f: u256;
+}
+
+contract StructWithIntegers {
+    storage var data: AllInts;
+
+    pub fn create() -> u256 {
+        let ints: AllInts = AllInts {
+            a: 1,
+            b: 2,
+            c: 3,
+            d: 4,
+            e: 5,
+            f: 6
+        };
+        return ints.f;
+    }
+
+    pub fn store_all() {
+        data = AllInts {
+            a: 255,
+            b: 1000,
+            c: 100000,
+            d: 1000000,
+            e: 10000000,
+            f: 100000000
+        };
+    }
+
+    pub fn read_small() -> u8 {
+        return data.a;
+    }
+
+    pub fn read_medium() -> u64 {
+        return data.d;
+    }
+
+    pub fn read_large() -> u256 {
+        return data.f;
+    }
+}

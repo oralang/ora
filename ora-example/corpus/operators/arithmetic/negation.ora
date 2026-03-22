@@ -1,36 +1,36 @@
 contract Negation {
     pub fn negate_i8(x: i8) -> i8 {
-        let result: i8 = -x;
-        return result;
+        let res: i8 = -x;
+        return res;
     }
 
     pub fn negate_i16(x: i16) -> i16 {
-        let result: i16 = -x;
-        return result;
+        let res: i16 = -x;
+        return res;
     }
 
     pub fn negate_i32(x: i32) -> i32 {
-        let result: i32 = -x;
-        return result;
+        let res: i32 = -x;
+        return res;
     }
 
     pub fn negate_i64(x: i64) -> i64 {
-        let result: i64 = -x;
-        return result;
+        let res: i64 = -x;
+        return res;
     }
 
     pub fn negate_i128(x: i128) -> i128 {
-        let result: i128 = -x;
-        return result;
+        let res: i128 = -x;
+        return res;
     }
 
     pub fn negate_i256(x: i256) -> i256 {
-        let result: i256 = -x;
-        return result;
+        let res: i256 = -x;
+        return res;
     }
 
     pub fn double_negate_i256(x: i256) -> i256 {
-        let result: i256 = -(-x);
-        return result;
+        let res: i256 = -(-x);
+        return res;
     }
 }

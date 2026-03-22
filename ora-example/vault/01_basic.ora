@@ -1,6 +1,7 @@
 // Vault — Tier 1: Basic storage and functions
 // Core deposit/withdraw logic with explicit storage variables.
 
+comptime const std = @import("std");
 contract Vault {
     storage var totalDeposits: u256 = 0;
     storage var balances: map<address, u256>;

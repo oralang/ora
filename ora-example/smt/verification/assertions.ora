@@ -4,6 +4,7 @@
 // Tests runtime and ghost assertions
 // ============================================================================
 
+comptime const std = @import("std");
 contract Assertions {
     storage var balance: u256 = 0;
 

@@ -1,0 +1,26 @@
+// Map from address to struct: store and load.
+
+struct UserInfo {
+    balance: u256;
+    registered: bool;
+}
+
+contract StructInMap {
+    storage users: map<address, UserInfo>;
+
+    pub fn register(addr: address, amount: u256) {
+        users[addr] = UserInfo { balance: amount, registered: true };
+    }
+
+    pub fn get_balance(addr: address) -> u256 {
+        return users[addr].balance;
+    }
+
+    pub fn is_registered(addr: address) -> bool {
+        return users[addr].registered;
+    }
+
+    pub fn update_balance(addr: address, new_balance: u256) {
+        users[addr].balance = new_balance;
+    }
+}

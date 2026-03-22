@@ -5,6 +5,7 @@ const MAX_DEPOSIT: u256 = 1000000;
 const MIN_DEPOSIT: u256 = 1;
 const VERSION: u256 = comptime { 1 + 2 };
 
+comptime const std = @import("std");
 contract Vault {
     storage var totalDeposits: u256 = 0;
     storage var balances: map<address, u256>;

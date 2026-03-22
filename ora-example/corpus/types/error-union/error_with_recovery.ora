@@ -4,6 +4,7 @@
 error LookupFailed;
 error StaleData;
 
+comptime const std = @import("std");
 contract ErrorWithRecovery {
     storage var cache: map<u256, u256>;
     storage var timestamps: map<u256, u256>;

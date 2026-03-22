@@ -1,6 +1,7 @@
 // Level 5: Simple AMM pool (x*y=k constant product)
 // Tests: deposit liquidity, swap, price calculation
 
+comptime const std = @import("std");
 contract AmmPool {
     storage var reserveA: u256 = 0;
     storage var reserveB: u256 = 0;

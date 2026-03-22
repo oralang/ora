@@ -4,6 +4,7 @@
 // Tests loop invariants for formal verification
 // ============================================================================
 
+comptime const std = @import("std");
 contract LoopInvariants {
     // Simple loop invariant
     pub fn sumToN(n: u256) -> u256

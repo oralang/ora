@@ -4,6 +4,7 @@
 // Tests primitive types in storage region
 // ============================================================================
 
+comptime const std = @import("std");
 contract StoragePrimitive {
     // u256 in storage
     storage var counter: u256;

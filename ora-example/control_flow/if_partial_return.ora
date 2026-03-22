@@ -8,7 +8,7 @@ error E1;
 contract PartialReturnInTry {
     pub fn mayFail(x: u256) -> !u256 | E1 {
         if (x == 0) {
-            return error.E1;
+            return E1;
         }
         return x;
     }

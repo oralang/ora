@@ -1,0 +1,30 @@
+// Load struct from storage, modify one field, store back.
+
+struct Config {
+    threshold: u256;
+    enabled: bool;
+}
+
+contract StructFieldUpdate {
+    storage var config: Config;
+
+    pub fn initialize() {
+        config = Config { threshold: 100, enabled: true };
+    }
+
+    pub fn update_threshold(new_threshold: u256) {
+        config.threshold = new_threshold;
+    }
+
+    pub fn disable() {
+        config.enabled = false;
+    }
+
+    pub fn get_threshold() -> u256 {
+        return config.threshold;
+    }
+
+    pub fn is_enabled() -> bool {
+        return config.enabled;
+    }
+}

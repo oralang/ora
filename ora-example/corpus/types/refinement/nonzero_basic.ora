@@ -1,5 +1,6 @@
 // NonZeroAddress — parameter, comparison, storage
 
+comptime const std = @import("std");
 contract NonZeroBasic {
     storage var owner: NonZeroAddress;
     storage var admin: NonZeroAddress;

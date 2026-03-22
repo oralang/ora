@@ -5,11 +5,11 @@
 contract IfBasic {
     // Simple if with no else
     pub fn test_if_only(x: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (x > 10) {
-            result = 1;
+            res = 1;
         }
-        return result;
+        return res;
     }
 
     // If-else

@@ -1,0 +1,28 @@
+// Generic struct with comptime type parameter.
+
+struct Pair(comptime T: type) {
+    first: T;
+    second: T;
+}
+
+comptime const std = @import("std");
+
+contract StructGeneric {
+    pub fn u256_pair() -> u256 {
+        let p: Pair(u256) = Pair(u256) { first: 10, second: 20 };
+        return p.first + p.second;
+    }
+
+    pub fn bool_pair() -> bool {
+        let p: Pair(bool) = Pair(bool) { first: true, second: false };
+        return p.first;
+    }
+
+    pub fn address_pair() -> address {
+        let p: Pair(address) = Pair(address) {
+            first: std.msg.sender(),
+            second: std.msg.sender()
+        };
+        return p.first;
+    }
+}

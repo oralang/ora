@@ -1,6 +1,7 @@
 // Level 5: Lending pool with collateral
 // Tests: deposit/borrow/repay, collateral tracking, health factor
 
+comptime const std = @import("std");
 contract LendingPool {
     storage var totalDeposits: u256 = 0;
     storage var totalBorrows: u256 = 0;

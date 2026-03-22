@@ -8,8 +8,8 @@ contract ComptimeConst {
         const scale: u256 = comptime {
             let base: u256 = 10;
             let exp: u256 = 18;
-            let result: u256 = base ** exp;
-            return result;
+            let res: u256 = base ** exp;
+            return res;
         };
         let amount: u256 = 100;
         let scaled: u256 = amount * scale;

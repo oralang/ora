@@ -16,13 +16,13 @@ contract StateMachine {
     // Simple state machine using labeled switch
     pub fn run_machine(input: u256) -> u256 {
         var state: u256 = 0;
-        var result: u256 = 0;
+        var res: u256 = 0;
         var fuel: u256 = input;
 
         machine: switch (state) {
             0 => {
                 // INIT: set up
-                result = 0;
+                res = 0;
                 continue :machine (1);
             }
             1 => {
@@ -30,7 +30,7 @@ contract StateMachine {
                 if (fuel == 0) {
                     continue :machine (3); // done
                 }
-                result += fuel;
+                res += fuel;
                 fuel -= 1;
                 continue :machine (1); // keep running
             }
@@ -40,13 +40,13 @@ contract StateMachine {
             }
             3 => {
                 // DONE: finalize
-                result = result * 2;
+                res = res * 2;
             }
             else => {
-                result = 999; // error state
+                res = 999; // error state
             }
         }
-        return result;
+        return res;
     }
 
     // Two-phase processor

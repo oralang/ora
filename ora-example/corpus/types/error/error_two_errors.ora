@@ -1,0 +1,25 @@
+// Function returning two possible errors.
+
+error Unauthorized;
+error InvalidAmount;
+
+comptime const std = @import("std");
+
+contract ErrorTwoErrors {
+    storage owner: address;
+    storage balance: u256;
+
+    pub fn admin_withdraw(amount: u256) -> !u256 | Unauthorized | InvalidAmount {
+        if (std.msg.sender() != owner) {
+            return Unauthorized;
+        }
+        if (amount == 0) {
+            return InvalidAmount;
+        }
+        if (amount > balance) {
+            return InvalidAmount;
+        }
+        balance = balance - amount;
+        return balance;
+    }
+}

@@ -40,15 +40,15 @@ contract ForNested {
 
     // Labeled nested for with break
     pub fn test_labeled_nested() -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         outer: for (0..10) |i, _| {
             for (0..10) |j, _| {
                 if (i + j > 8) {
                     break :outer;
                 }
-                result += 1;
+                res += 1;
             }
         }
-        return result;
+        return res;
     }
 }

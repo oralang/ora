@@ -8,6 +8,7 @@
 //
 // ============================================================================
 
+comptime const std = @import("std");
 contract GuardShowcase {
     // NonZeroAddress
     pub fn provenNonZero(addr: NonZeroAddress)

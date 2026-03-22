@@ -4,6 +4,7 @@
 // Tests ensures clauses using old() to reference pre-state
 // ============================================================================
 
+comptime const std = @import("std");
 contract FunctionContractsOld {
     storage var counter: u256 = 0;
     storage var total: u256 = 0;

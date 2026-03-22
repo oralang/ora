@@ -1,4 +1,6 @@
 // Test contract for standard library builtins
+comptime const std = @import("std");
+
 contract StdBuiltinsTest {
     storage lastCaller: address;
     storage lastTimestamp: u256;

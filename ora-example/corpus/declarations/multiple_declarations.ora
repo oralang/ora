@@ -2,6 +2,7 @@
 // MULTIPLE DECLARATIONS — multiple let/var, shadowing, sequential use
 // ==========================================
 
+comptime const std = @import("std");
 contract MultipleDeclarations {
     // Multiple let in same function
     pub fn multiple_lets() -> u256 {
@@ -39,19 +40,19 @@ contract MultipleDeclarations {
         let doubled: u256 = base * 2;
         let tripled: u256 = base * 3;
         let sum: u256 = doubled + tripled;
-        let result: u256 = sum + base;
-        return result;
+        let res: u256 = sum + base;
+        return res;
     }
 
     // Shadowing in nested scope (if block)
     pub fn shadowing_in_scope() -> u256 {
         let x: u256 = 10;
-        var result: u256 = x;
+        var res: u256 = x;
         if (x > 5) {
             let x: u256 = 20;
-            result = x;
+            res = x;
         }
-        return result;
+        return res;
     }
 
     // Many declarations of different types

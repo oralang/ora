@@ -29,9 +29,9 @@ contract InitFromExpression {
     }
 
     pub fn function_call_init() -> u256 {
-        let result: u256 = helper(21);
+        let res: u256 = helper(21);
         let chained: u256 = helper(helper(5));
-        return result + chained;
+        return res + chained;
     }
 
     // Init from field access
@@ -71,8 +71,8 @@ contract InitFromExpression {
 
     // Init from nested expressions
     pub fn nested_expression_init(a: u256, b: u256) -> u256 {
-        let result: u256 = ((a + b) * (a - b)) / (a + 1);
-        return result;
+        let res: u256 = ((a + b) * (a - b)) / (a + 1);
+        return res;
     }
 
     // Init from struct constructor
@@ -84,8 +84,8 @@ contract InitFromExpression {
 
     // Var from complex expression, then mutate
     pub fn var_from_expression(x: u256) -> u256 {
-        var result: u256 = x * x + x + 1;
-        result += helper(x);
-        return result;
+        var res: u256 = x * x + x + 1;
+        res += helper(x);
+        return res;
     }
 }

@@ -61,14 +61,14 @@ contract DeclarationsVar {
 
     // Var modified in branches
     pub fn test_var_in_branches(x: u256) -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         if (x > 100) {
-            result = 3;
+            res = 3;
         } else if (x > 50) {
-            result = 2;
+            res = 2;
         } else {
-            result = 1;
+            res = 1;
         }
-        return result;
+        return res;
     }
 }

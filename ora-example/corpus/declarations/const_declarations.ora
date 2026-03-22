@@ -60,8 +60,8 @@ contract ConstDeclarations {
     pub fn local_const() -> u256 {
         const LOCAL_FACTOR: u256 = 42;
         const LOCAL_OFFSET: u256 = 10;
-        let result: u256 = LOCAL_FACTOR * LOCAL_OFFSET;
-        return result;
+        let res: u256 = LOCAL_FACTOR * LOCAL_OFFSET;
+        return res;
     }
 
     // Bool constant usage

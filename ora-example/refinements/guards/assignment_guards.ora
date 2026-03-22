@@ -4,6 +4,7 @@
 // Tests when guards are generated for variable assignments
 // ============================================================================
 
+comptime const std = @import("std");
 contract AssignmentGuards {
     // ============================================================================
     // Storage Variable Assignments

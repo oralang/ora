@@ -5,6 +5,7 @@
 // Exception: Trusted builtins (std.transaction.sender, std.msg.sender) don't need guards
 // ============================================================================
 
+comptime const std = @import("std");
 contract BaseToRefinement {
     // ============================================================================
     // Base Type to MinValue (Guard Required)

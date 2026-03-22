@@ -11,6 +11,7 @@ error InvalidAmount(amount: u256);
 error ZeroValueNotAllowed;
 error ValueTooLarge;
 
+comptime const std = @import("std");
 contract ErrorHandlingTest {
     storage var owner: address;
     storage var balance: u256;
@@ -26,7 +27,7 @@ contract ErrorHandlingTest {
     {
         // Check for zero address
         if (recipient == 0x0000000000000000000000000000000000000000) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         
         // Check balance
@@ -115,11 +116,11 @@ contract ErrorHandlingTest {
     // Function with inline error creation
     pub fn verify_operation(value: u256) -> !bool {
         if (value == 0) {
-            return error.ZeroValueNotAllowed;
+            return ZeroValueNotAllowed;
         }
         
         if (value > 1000) {
-            return error.ValueTooLarge;
+            return ValueTooLarge;
         }
         
         return true;

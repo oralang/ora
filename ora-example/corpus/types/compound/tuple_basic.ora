@@ -1,5 +1,5 @@
 contract TupleBasic {
-    storage var result: u256;
+    storage var res: u256;
 
     pub fn create() -> u256 {
         let t: (u256, u256) = (10, 20);
@@ -31,7 +31,7 @@ contract TupleBasic {
 
     pub fn store_from_tuple() {
         let (a, b): (u256, u256) = (42, 58);
-        result = a + b;
+        res = a + b;
     }
 
     pub fn swap(x: u256, y: u256) -> u256 {

@@ -5,6 +5,7 @@ error InsufficientFunds(required: u256, available: u256);
 error Unauthorized;
 error ZeroAmount;
 
+comptime const std = @import("std");
 contract ErrorMultiple {
     storage var owner: address;
     storage var balance: u256 = 0;

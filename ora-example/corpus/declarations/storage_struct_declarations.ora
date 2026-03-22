@@ -19,6 +19,7 @@ struct Pair {
     y: u256;
 }
 
+comptime const std = @import("std");
 contract StorageStructDeclarations {
     storage var config: TokenConfig;
     storage var owner_info: UserInfo;

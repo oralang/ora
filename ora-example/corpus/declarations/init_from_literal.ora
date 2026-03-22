@@ -2,6 +2,7 @@
 // INIT FROM LITERAL — every literal form
 // ==========================================
 
+comptime const std = @import("std");
 contract InitFromLiteral {
     // Integer literals
     pub fn integer_literals() -> u256 {

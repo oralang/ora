@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract ComptimeParamProbe {
     fn align_up(comptime alignment: u256, value: u256) -> u256
         requires(alignment > 0)

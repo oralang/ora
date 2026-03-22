@@ -1,21 +1,21 @@
 contract WrappingAddSub {
     pub fn wrapping_add_u8(a: u8, b: u8) -> u8 {
-        let result: u8 = a +% b;
-        return result;
+        let res: u8 = a +% b;
+        return res;
     }
 
     pub fn wrapping_sub_u8(a: u8, b: u8) -> u8 {
-        let result: u8 = a -% b;
-        return result;
+        let res: u8 = a -% b;
+        return res;
     }
 
     pub fn wrapping_add_u256(a: u256, b: u256) -> u256 {
-        let result: u256 = a +% b;
-        return result;
+        let res: u256 = a +% b;
+        return res;
     }
 
     pub fn wrapping_sub_u256(a: u256, b: u256) -> u256 {
-        let result: u256 = a -% b;
-        return result;
+        let res: u256 = a -% b;
+        return res;
     }
 }

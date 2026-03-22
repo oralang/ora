@@ -1,6 +1,7 @@
 // Level 4: Multi-asset (ERC1155-style) token registry
 // Tests: map<u256, map<address, u256>> (tokenId -> owner -> balance)
 
+comptime const std = @import("std");
 contract MultiAsset {
     storage var balances: map<u256, map<address, u256>>;
     storage var totalSupplies: map<u256, u256>;

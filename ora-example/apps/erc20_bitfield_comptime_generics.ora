@@ -19,6 +19,7 @@ bitfield AccountFlags : u256 {
     nonce: u16;
 }
 
+comptime const std = @import("std");
 contract ERC20BitfieldComptimeGenerics {
     struct TransferBook(comptime T: type) {
         amount: T;

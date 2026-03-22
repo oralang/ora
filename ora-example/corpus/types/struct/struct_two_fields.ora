@@ -1,0 +1,20 @@
+// Struct with two fields: create, read both.
+
+struct Pair {
+    a: u256;
+    b: u256;
+}
+
+contract StructTwoFields {
+    pub fn create_and_read() -> u256 {
+        let p: Pair = Pair { a: 10, b: 20 };
+        return p.a + p.b;
+    }
+
+    pub fn read_individual() -> u256 {
+        let p: Pair = Pair { a: 100, b: 200 };
+        let first: u256 = p.a;
+        let second: u256 = p.b;
+        return first * second;
+    }
+}

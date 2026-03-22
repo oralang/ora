@@ -60,7 +60,7 @@ contract WhileBreakContinue {
 
     // Multiple continues and a single break
     pub fn test_multi_continue_single_break() -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         var i: u256 = 0;
         while (i < 100) {
             i += 1;
@@ -73,8 +73,8 @@ contract WhileBreakContinue {
             if (i > 30) {
                 break;
             }
-            result += i;
+            res += i;
         }
-        return result;
+        return res;
     }
 }

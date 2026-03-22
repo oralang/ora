@@ -1,6 +1,7 @@
 // Level 6: ERC20 with refinement types on all parameters
 // Tests: MinValue, NonZeroAddress, BasisPoints on function signatures
 
+comptime const std = @import("std");
 contract TokenWithRefinements {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

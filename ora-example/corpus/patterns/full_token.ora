@@ -1,6 +1,7 @@
 // Level 3: Full ERC20 token
 // Tests: transfer, transferFrom, approve, allowance, balanceOf, totalSupply
 
+comptime const std = @import("std");
 contract FullToken {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

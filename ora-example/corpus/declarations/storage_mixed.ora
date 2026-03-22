@@ -8,6 +8,7 @@ struct AccountData {
     active: bool;
 }
 
+comptime const std = @import("std");
 contract StorageMixed {
     // Primitives
     storage var totalAccounts: u256 = 0;

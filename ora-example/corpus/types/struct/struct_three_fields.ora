@@ -1,0 +1,38 @@
+// Struct with three fields of different types: u256, bool, address.
+
+struct Account {
+    balance: u256;
+    active: bool;
+    owner: address;
+}
+
+comptime const std = @import("std");
+
+contract StructThreeFields {
+    pub fn create() -> u256 {
+        let acc: Account = Account {
+            balance: 1000,
+            active: true,
+            owner: std.msg.sender()
+        };
+        return acc.balance;
+    }
+
+    pub fn check_active() -> bool {
+        let acc: Account = Account {
+            balance: 0,
+            active: false,
+            owner: std.msg.sender()
+        };
+        return acc.active;
+    }
+
+    pub fn get_owner() -> address {
+        let acc: Account = Account {
+            balance: 500,
+            active: true,
+            owner: std.msg.sender()
+        };
+        return acc.owner;
+    }
+}

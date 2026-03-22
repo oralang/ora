@@ -4,6 +4,7 @@
 // Tests multiple refinement types and constraints together
 // ============================================================================
 
+comptime const std = @import("std");
 contract MultipleConstraints {
     // Multiple refinement parameters
     pub fn multipleRefinements(

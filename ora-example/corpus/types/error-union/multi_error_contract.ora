@@ -16,6 +16,7 @@ struct Item {
     deadline: u256;
 }
 
+comptime const std = @import("std");
 contract MultiErrorContract {
     storage var owner: address;
     storage var operators: map<address, bool>;

@@ -1,0 +1,18 @@
+// Error with fields (payload error).
+
+error InsufficientBalance(required: u256, available: u256);
+
+comptime const std = @import("std");
+
+contract ErrorPayload {
+    storage balances: map<address, u256>;
+
+    pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
+        let balance: u256 = balances[std.msg.sender()];
+        if (balance < amount) {
+            return InsufficientBalance(amount, balance);
+        }
+        balances[std.msg.sender()] = balance - amount;
+        return true;
+    }
+}

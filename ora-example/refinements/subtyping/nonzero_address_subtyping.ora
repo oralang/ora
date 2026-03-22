@@ -4,6 +4,7 @@
 // Tests that NonZeroAddress is a subtype of address
 // ============================================================================
 
+comptime const std = @import("std");
 contract NonZeroAddressSubtyping {
     // ============================================================================
     // Valid Subtyping (NonZeroAddress -> address)

@@ -23,6 +23,8 @@ enum Status: u256 { Idle, Running, Done }
 
 log Transfer(indexed source: address, indexed dest: address, amount: u256);
 // Example contract using a wide range of language features
+comptime const std = @import("std");
+
 contract FeatureMaximizer {
     // Contract-level constants and variables
     const MAX_VALUE: u256 = 1000;
@@ -146,7 +148,7 @@ contract FeatureMaximizer {
 
     fn may_fail() -> !u256 {
         if (threshold > MAX_VALUE) {
-            return error.ParseError;
+            return ParseError;
         }
         return 0;
     }

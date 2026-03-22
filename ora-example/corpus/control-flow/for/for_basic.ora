@@ -23,11 +23,11 @@ contract ForBasic {
 
     // Single iteration range
     pub fn test_single_iteration() -> u256 {
-        var result: u256 = 0;
+        var res: u256 = 0;
         for (0..1) |i, _| {
-            result = 42;
+            res = 42;
         }
-        return result;
+        return res;
     }
 
     // For loop with body that uses index

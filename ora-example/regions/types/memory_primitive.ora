@@ -4,6 +4,7 @@
 // Tests primitive types in memory region
 // ============================================================================
 
+comptime const std = @import("std");
 contract MemoryPrimitive {
     pub fn testMemoryPrimitives() {
         // u256 in memory

@@ -4,6 +4,7 @@
 error NotAuthorized;
 error InvalidState;
 
+comptime const std = @import("std");
 contract ErrorUnionVoid {
     storage var owner: address;
     storage var paused: bool = false;

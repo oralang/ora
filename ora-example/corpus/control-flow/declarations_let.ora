@@ -49,7 +49,7 @@ contract DeclarationsLet {
     }
 
     pub fn test_let_from_call() {
-        let result: u256 = helper();
+        let res: u256 = helper();
     }
 
     // Let is immutable — cannot reassign (this is a compile-time guarantee)

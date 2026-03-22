@@ -5,6 +5,7 @@ error InvalidAmount;
 error InsufficientBalance(needed: u256, have: u256);
 error NotOwner;
 
+comptime const std = @import("std");
 contract ErrorGuardPattern {
     storage var owner: address;
     storage var balance: u256 = 0;

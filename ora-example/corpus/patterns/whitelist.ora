@@ -1,6 +1,7 @@
 // Level 2: Address whitelist
 // Tests: map<address, bool>, add/remove/check pattern
 
+comptime const std = @import("std");
 contract Whitelist {
     storage var owner: address;
     storage var whitelist: map<address, bool>;

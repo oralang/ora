@@ -16,8 +16,8 @@ contract ErrorNullary {
 
     pub fn find_and_handle(id: u256) -> u256 {
         try {
-            let result: u256 = find(id);
-            return result;
+            let res: u256 = find(id);
+            return res;
         } catch |e| {
             return 0;
         }

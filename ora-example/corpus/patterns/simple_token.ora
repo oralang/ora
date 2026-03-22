@@ -1,6 +1,7 @@
 // Level 3: Simple token (transfer only, no approvals)
 // Tests: totalSupply, balanceOf, transfer with balance checks
 
+comptime const std = @import("std");
 contract SimpleToken {
     storage var totalSupply: u256;
     storage var balances: map<address, u256>;

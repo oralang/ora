@@ -13,6 +13,7 @@
 // Expected: verification succeeds.
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementFactProven {
     pub fn fromBuiltinSender() {
         let caller: NonZeroAddress = std.msg.sender();

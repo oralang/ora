@@ -2,6 +2,7 @@
 // LET ALL TYPES — let bindings for every scalar type
 // ==========================================
 
+comptime const std = @import("std");
 contract LetAllTypes {
     pub fn unsigned_integers() -> u256 {
         let a: u8 = 255;

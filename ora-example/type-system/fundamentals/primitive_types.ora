@@ -4,6 +4,7 @@
 // Tests all primitive types in Ora's type system
 // ============================================================================
 
+comptime const std = @import("std");
 contract PrimitiveTypes {
     // u256 - 256-bit unsigned integer
     pub fn testU256() {

@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract Test {
     pub fn test(b: u256) -> u256
         requires(b < std.constants.U256_MAX)

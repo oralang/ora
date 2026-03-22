@@ -1,0 +1,12 @@
+// Struct with a single field: create and read.
+
+struct Wrapper {
+    value: u256;
+}
+
+contract StructEmpty {
+    pub fn create_and_read() -> u256 {
+        let w: Wrapper = Wrapper { value: 42 };
+        return w.value;
+    }
+}

@@ -9,6 +9,7 @@
 //
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementGuardSMT {
     // SMT can prove this guard (requires implies non-zero)
     pub fn provenNonZero(addr: NonZeroAddress)

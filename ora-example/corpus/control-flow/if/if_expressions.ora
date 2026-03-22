@@ -5,8 +5,8 @@
 contract IfExpressions {
     // If-else as expression assigned to variable
     pub fn test_if_expr_basic(x: u256) -> u256 {
-        var result: u256 = if (x > 10) 1 else 0;
-        return result;
+        var res: u256 = if (x > 10) 1 else 0;
+        return res;
     }
 
     // If-else expression in return
@@ -16,18 +16,18 @@ contract IfExpressions {
 
     // Nested if expressions
     pub fn test_if_expr_nested(x: u256) -> u256 {
-        var result: u256 = if (x > 100) 3 else if (x > 50) 2 else if (x > 0) 1 else 0;
-        return result;
+        var res: u256 = if (x > 100) 3 else if (x > 50) 2 else if (x > 0) 1 else 0;
+        return res;
     }
 
     // If expression with block bodies
     pub fn test_if_expr_blocks(x: u256, y: u256) -> u256 {
-        var result: u256 = if (x > y) {
+        var res: u256 = if (x > y) {
             x - y
         } else {
             y - x
         };
-        return result;
+        return res;
     }
 
     // If expression with boolean result

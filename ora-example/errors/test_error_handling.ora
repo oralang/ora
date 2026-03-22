@@ -1,4 +1,6 @@
 // Minimal test contract to reproduce error handling issues
+comptime const std = @import("std");
+
 contract ErrorHandlingTest {
     storage balances: map<address, u256>;
     

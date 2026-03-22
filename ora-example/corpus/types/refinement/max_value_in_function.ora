@@ -13,8 +13,8 @@ contract MaxValueInFunction {
 
     pub fn asLocal() -> u256 {
         let bounded: MaxValue<u256, 500> = limit;
-        let result: u256 = bounded * 2;
-        return result;
+        let res: u256 = bounded * 2;
+        return res;
     }
 
     pub fn setLimit(val: MaxValue<u256, 500>) {

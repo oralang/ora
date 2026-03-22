@@ -48,8 +48,8 @@ contract SwitchLiteral {
     pub fn test_block_bodies(x: u256) -> u256 {
         switch (x) {
             0 => {
-                var result: u256 = 10 + 20;
-                return result;
+                var res: u256 = 10 + 20;
+                return res;
             }
             1 => {
                 var a: u256 = 5;

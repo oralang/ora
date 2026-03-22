@@ -1,6 +1,7 @@
 // Level 2: Simple voting contract
 // Tests: map<address, bool> for voted tracking, u256 vote count
 
+comptime const std = @import("std");
 contract Voting {
     storage var hasVoted: map<address, bool>;
     storage var yesVotes: u256 = 0;

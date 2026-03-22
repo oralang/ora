@@ -15,11 +15,11 @@ contract ForIndex {
     // Use both value and index
     pub fn test_value_and_index() -> u256 {
         var arr: [4]u256 = [10, 20, 30, 40];
-        var result: u256 = 0;
+        var res: u256 = 0;
         for (arr) |val, idx| {
-            result += val + idx;
+            res += val + idx;
         }
-        return result; // (10+0)+(20+1)+(30+2)+(40+3) = 106
+        return res; // (10+0)+(20+1)+(30+2)+(40+3) = 106
     }
 
     // Index-only iteration (ignore value with _)
