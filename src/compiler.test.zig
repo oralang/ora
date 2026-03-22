@@ -8222,6 +8222,86 @@ test "compiler rejects array length mismatches in assignments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
 }
 
+test "compiler rejects log statements with wrong arity" {
+    const source_text =
+        \\contract C {
+        \\    log Transfer(from: address, amount: u256);
+        \\
+        \\    pub fn run(addr: address) {
+        \\        log Transfer(addr);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "log 'Transfer' expects 2 arguments, found 1"));
+}
+
+test "compiler rejects log declarations with more than three indexed fields" {
+    const source_text =
+        \\contract C {
+        \\    log TooMany(indexed a: address, indexed b: address, indexed c: address, indexed d: address);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "log declarations support at most 3 indexed fields"));
+}
+
+test "compiler rejects struct-typed indexed log fields" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256;
+        \\    right: u256;
+        \\}
+        \\
+        \\contract C {
+        \\    log Bad(indexed p: Pair);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "indexed log field 'p' has unsupported type 'Pair'"));
+}
+
+test "compiler rejects lock and unlock builtins in expression position" {
+    const source_text =
+        \\contract Locked {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn bad_lock(user: address) -> u256 {
+        \\        let tmp = @lock(balances[user]);
+        \\        return tmp;
+        \\    }
+        \\
+        \\    pub fn bad_unlock(user: address) -> bool {
+        \\        @lock(balances[user]);
+        \\        return @unlock(balances[user]);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@lock is statement-only and cannot be used in expression position"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@unlock is statement-only and cannot be used in expression position"));
+}
+
 test "compiler contextualizes nested array literals to their declared element types" {
     const source_text =
         \\pub fn nested() -> [[u256; 2]; 2] {

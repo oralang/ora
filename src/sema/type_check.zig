@@ -469,6 +469,23 @@ const TypeChecker = struct {
                 for (contract.invariants) |expr_id| try self.visitExpr(expr_id);
                 for (contract.members) |member_id| try self.visitItem(member_id);
             },
+            .LogDecl => |log_decl| {
+                var indexed_count: usize = 0;
+                for (log_decl.fields) |field| {
+                    const field_type = try self.resolveTypeExpr(field.type_expr);
+                    if (!field.indexed) continue;
+                    indexed_count += 1;
+                    if (indexed_count > 3) {
+                        try self.emitRangeError(field.range, "log declarations support at most 3 indexed fields", .{});
+                    }
+                    if (!self.logIndexedFieldTypeSupported(field_type)) {
+                        try self.emitRangeError(field.range, "indexed log field '{s}' has unsupported type '{s}'", .{
+                            field.name,
+                            typeDisplayName(field_type),
+                        });
+                    }
+                }
+            },
             .Function => |function| {
                 try self.validateConstructorFunction(function);
                 const previous_return_type = self.current_return_type;
@@ -1094,7 +1111,7 @@ const TypeChecker = struct {
                 }
             },
             .Log => |log_stmt| {
-                for (log_stmt.args) |arg| try self.visitExpr(arg);
+                try self.checkLogStatement(log_stmt);
             },
             .Lock => |lock_stmt| try self.visitExpr(lock_stmt.path),
             .Unlock => |unlock_stmt| try self.visitExpr(unlock_stmt.path),
@@ -1373,6 +1390,13 @@ const TypeChecker = struct {
             },
             .Builtin => |builtin| {
                 for (builtin.args) |arg| try self.visitExpr(arg);
+                if (std.mem.eql(u8, builtin.name, "lock") or std.mem.eql(u8, builtin.name, "unlock")) {
+                    try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
+                        builtin.name,
+                    });
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return;
+                }
                 const result_type = self.builtinReturnType(builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
@@ -1441,6 +1465,55 @@ const TypeChecker = struct {
             };
         }
         return LocatedType.unlocated(.{ .unknown = {} });
+    }
+
+    fn checkLogStatement(self: *TypeChecker, log_stmt: ast.LogStmt) !void {
+        for (log_stmt.args) |arg| try self.visitExpr(arg);
+
+        const log_item_id = self.item_index.lookup(log_stmt.name) orelse {
+            try self.emitRangeError(log_stmt.range, "undefined log '{s}'", .{log_stmt.name});
+            return;
+        };
+        const log_decl = switch (self.file.item(log_item_id).*) {
+            .LogDecl => |log_decl| log_decl,
+            else => {
+                try self.emitRangeError(log_stmt.range, "'{s}' is not a log declaration", .{log_stmt.name});
+                return;
+            },
+        };
+
+        if (log_stmt.args.len != log_decl.fields.len) {
+            try self.emitRangeError(log_stmt.range, "log '{s}' expects {d} arguments, found {d}", .{
+                log_stmt.name,
+                log_decl.fields.len,
+                log_stmt.args.len,
+            });
+            return;
+        }
+
+        for (log_stmt.args, log_decl.fields) |arg, field| {
+            const expected_type = try self.resolveTypeExpr(field.type_expr);
+            try self.contextualizeLiteral(arg, expected_type);
+            const actual_type = self.expr_types[arg.index()];
+            if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, expected_type)) {
+                continue;
+            }
+            if (actual_type.kind() != .unknown and expected_type.kind() != .unknown and !typesAssignable(expected_type, actual_type)) {
+                try self.emitRangeError(self.exprRange(arg), "log field '{s}' expects type '{s}', found '{s}'", .{
+                    field.name,
+                    typeDisplayName(expected_type),
+                    typeDisplayName(actual_type),
+                });
+            }
+        }
+    }
+
+    fn logIndexedFieldTypeSupported(self: *const TypeChecker, ty: Type) bool {
+        _ = self;
+        return switch (unwrapRefinement(ty).kind()) {
+            .struct_, .tuple, .array, .slice, .map => false,
+            else => true,
+        };
     }
 
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
