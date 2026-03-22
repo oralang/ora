@@ -34,6 +34,28 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertTupleCreateOp : public OpConversionPattern<ora::TupleCreateOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TupleCreateOp op,
+                typename ora::TupleCreateOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertTupleExtractOp : public OpConversionPattern<ora::TupleExtractOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::TupleExtractOp op,
+                typename ora::TupleExtractOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertStructFieldExtractOp : public OpConversionPattern<ora::StructFieldExtractOp>
         {
         public:

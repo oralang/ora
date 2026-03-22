@@ -878,6 +878,8 @@ public:
             patterns.add<ConvertHavocOp>(typeConverter, ctx);
             patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
         }
+        patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
+        patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
         if (enable_struct)
         {
             patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
@@ -1457,6 +1459,8 @@ public:
             phase4Patterns.add<ConvertRefinementToBaseOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructInitOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldUpdateOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructDeclOp>(typeConverter, ctx);
