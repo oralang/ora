@@ -6,43 +6,64 @@
 
 Ora is a smart-contract language and compiler for EVM with explicit semantics, verification-aware IR, and a strict MLIR-based pipeline.
 
-## Overview
+> **Pre-release (Asuka track).** Breaking changes are expected. Not production-ready.
 
-Ora is designed for teams that want compiler visibility and formal reasoning without hiding execution details. The toolchain is structured around explicit region/effect semantics, a strongly typed frontend, deterministic Ora MLIR → SIR → EVM lowering, and Z3-backed verification.
+## What Ora does
 
-### Language features at a glance
+```ora
+error InsufficientBalance(required: u256, available: u256);
+
+comptime const std = @import("std");
+
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    log Deposit(account: address, amount: u256);
+
+    pub fn deposit(amount: MinValue<u256, 1>)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        ensures(totalDeposits == old(totalDeposits) + amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
+        let sender: NonZeroAddress = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) { return InsufficientBalance(amount, current); }
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+}
+```
+
+This contract uses refinement types (`MinValue`, `NonZeroAddress`), error unions (`!bool | InsufficientBalance`), specification clauses (`requires`/`ensures`/`old()`), events (`log`), and explicit storage regions — all checked by the compiler and Z3 SMT solver.
+
+## Language features
 
 | Area | Features |
 |------|----------|
-| **Types** | Unsigned/signed ints (u8–u256, i8–i256), bool, address, string, bytes; structs, enums, tuples, anonymous structs (`.{ ... }`). |
-| **Refinement types** | Subtypes with constraints: `NonZero`, `InRange`, `MinValue`, `MaxValue`, `Scaled`, `Exact`, `BasisPoints`, `NonZeroAddress`; compile-time and optional runtime guards. |
-| **Abstraction** | **Generics** (`comptime T: type`), generic functions and structs; **comptime** evaluation and constant folding. |
-| **Control flow** | **Switch** (expressions and statements; cases, ranges, `default`); loops with **termination** (e.g. `decreases`, invariants); **labels**, `break`/`continue` to labels. |
-| **Bit-level** | **Bitfields** with packed fields, optional `@at`/`@bits` layout. |
-| **Errors** | **Error unions** and errors-as-values (`!T`), `try`/`catch`-style handling. |
-| **Imports** | Namespace-qualified imports (`const math = @import("./math.ora")`); dot-qualified access (`math.add()`); relative and package specifiers; `ora.toml` project configuration. |
-| **Verification** | **SMT** (Z3); `requires`/`ensures`/`invariant`/`assume`; path-sensitive reasoning; refinement guards. |
-| **Memory** | Explicit regions: `storage`, `memory`, `transient`, `stack`. |
+| **Types** | `u8`–`u256`, `i8`–`i256`, `bool`, `address`, `string`, `bytes`; structs, enums, tuples, arrays, maps, anonymous structs, bitfields |
+| **Refinement types** | `NonZero`, `NonZeroAddress`, `MinValue`, `MaxValue`, `InRange`, `BasisPoints`, `Scaled`; compile-time proof or runtime guard |
+| **Error handling** | Error unions (`!T \| E1 \| E2`), `try`/`catch`, error propagation, `errors` clause |
+| **Regions** | Explicit data location: `storage`, `memory`, `calldata`, `transient`; compile-time coercion checks |
+| **Control flow** | `if`/`else`, `while`, `for` (ranges, iterators), `switch` (expressions/statements, range patterns, `else`), labeled blocks, `break`/`continue` |
+| **Abstraction** | Generics (`comptime T: type`), traits and `impl`, extern traits (`call`/`staticcall`), comptime evaluation |
+| **Verification** | Z3 SMT: `requires`/`ensures`/`invariant`/`assume`/`assert`, `old()`, `ghost` state, `forall`/`exists`, path-sensitive reasoning |
+| **Events** | `log` declarations with `indexed` fields |
+| **Safety** | `@lock`/`@unlock` reentrancy guards, overflow builtins (`@addWithOverflow`, etc.), wrapping arithmetic (`+%`, `*%`) |
+| **Imports** | `@import("./path.ora")`, namespace-qualified access, `ora.toml` project config |
 
-## Release Track: Asuka (Pre-Release)
-
-Asuka is the current hardening milestone. The goal is production-grade correctness of the end-to-end pipeline and verification behavior, with clear semantics and predictable outputs.
-
-## Current Capabilities
-
-- **Frontend:** Lexer, parser, typed AST, Ora MLIR emission.
-- **Backend:** Ora MLIR → SIR MLIR / SIR text → EVM bytecode.
-- **Verification:** SMT (Z3) with `requires`/`ensures`/`invariant`/`assume`, refinement guards, path-sensitive assumptions.
-- See the **Language features** table above for types, generics, comptime, switch, loops, bitfields, error unions, and verification.
-
-## Current Focus
-
-- Lowering and backend correctness hardening for full Ora -> SIR -> EVM parity.
-- Advanced verification precision (interprocedural summaries, loop inductiveness flow, quantified/state reasoning).
-- Expanded end-to-end and golden coverage for compiler + verifier regressions.
-- ABI and developer tooling stabilization for Asuka release quality.
-
-## Installation and build
+## Installation
 
 **Prerequisites:** Zig 0.15.x, CMake, Git, Z3, MLIR
 
@@ -50,10 +71,6 @@ Asuka is the current hardening milestone. The goal is production-grade correctne
 git clone https://github.com/oralang/Ora.git
 cd Ora
 ./setup.sh
-```
-
-Build the compiler:
-```bash
 zig build
 ```
 
@@ -62,19 +79,14 @@ Run tests:
 zig build test
 ```
 
-## Docker (no local compiler build)
+## Docker
 
-Pull the prebuilt image:
 ```bash
 docker pull oralang/ora:latest
-```
-
-Sanity check:
-```bash
 docker run --rm oralang/ora:latest --help
 ```
 
-Run Ora against files in your current directory:
+Run against local files:
 ```bash
 docker run --rm -it \
   -u "$(id -u):$(id -g)" \
@@ -89,16 +101,10 @@ chmod +x scripts/ora-docker scripts/install-ora-docker.sh
 ./scripts/install-ora-docker.sh
 ```
 
-Use a specific image tag when needed:
+Use a specific image tag:
 ```bash
 ORA_IMAGE=oralang/ora:v0.1.0 ora build ora-example/apps/erc20.ora
-ORA_IMAGE=oralang/ora:v0.1.0 ora fmt ora-example/apps/erc20.ora
 ```
-
-Image contents:
-- `ora` at `/usr/local/bin/ora`
-- `ora-lsp` at `/usr/local/bin/ora-lsp`
-- `sir` at `/usr/local/bin/sir`
 
 ### Build image locally
 
@@ -107,63 +113,55 @@ docker build -t oralang/ora:local .
 docker run --rm oralang/ora:local --help
 ```
 
-### Publish to Docker Hub
-
-```bash
-docker login
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t oralang/ora:latest \
-  -t oralang/ora:v0.1.0 \
-  --push .
-```
-
-Or use the helper script:
-```bash
-./scripts/publish-docker.sh oralang/ora v0.1.0
-```
-
-## Documentation
-
-- **Language & specs:** [website/docs](website/docs) — structs, refinement types, generics, comptime, imports, ABI, formal verification.
-- **Imports & config:** [docs/ora-cli-imports-config-reference.md](docs/ora-cli-imports-config-reference.md) — full CLI, import system, and `ora.toml` reference.
-- **Generics (style guide):** [website/docs/generics.md](website/docs/generics.md) — `comptime T: type`, generic functions/structs, monomorphization.
-- **Examples:** [ora-example](ora-example) — apps, comptime, and [examples/imports_simple](examples/imports_simple) for import examples.
-
 ## Using the compiler
 
 Scaffold a new project:
 ```bash
 ./zig-out/bin/ora init my-project
-cd my-project
 ```
 
-Run the compiler directly:
+Build a contract:
 ```bash
-./zig-out/bin/ora <file.ora>
+./zig-out/bin/ora build contracts/main.ora
 ```
 
-Explicit build command:
+Format source:
 ```bash
-./zig-out/bin/ora build [options] <file.ora>
+./zig-out/bin/ora fmt file.ora          # single file
+./zig-out/bin/ora fmt contracts/        # directory (recursive)
+./zig-out/bin/ora fmt --check file.ora  # CI check
 ```
 
-Emit/debug command (IR-focused):
+Emit intermediate representations:
 ```bash
-./zig-out/bin/ora emit [emit-options] <file.ora>
+./zig-out/bin/ora emit --emit-mlir file.ora              # Ora MLIR (default)
+./zig-out/bin/ora emit --emit-mlir=sir file.ora           # SIR MLIR
+./zig-out/bin/ora emit --emit-mlir=both file.ora          # Ora + SIR MLIR
+./zig-out/bin/ora emit --emit-sir-text file.ora           # Sensei text IR
+./zig-out/bin/ora emit --emit-bytecode file.ora           # EVM bytecode
+./zig-out/bin/ora emit --emit-ast file.ora                # Parsed AST
+./zig-out/bin/ora emit --emit-cfg file.ora                # Control flow graph
+./zig-out/bin/ora emit --emit-smt-report file.ora         # SMT verification report
 ```
 
-See available commands and flags:
-```bash
-./zig-out/bin/ora
+### Build artifacts
+
+`ora build` writes to `artifacts/<name>/`:
+
+```
+artifacts/<name>/abi/<name>.abi.json          # Ora ABI
+artifacts/<name>/abi/<name>.abi.sol.json       # Solidity-compatible ABI
+artifacts/<name>/abi/<name>.abi.extras.json    # Extended ABI metadata
+artifacts/<name>/bin/<name>.hex               # EVM bytecode
+artifacts/<name>/sir/<name>.sir               # Sensei IR
+artifacts/<name>/verify/<name>.smt.report.md  # SMT report (markdown)
+artifacts/<name>/verify/<name>.smt.report.json # SMT report (JSON)
 ```
 
 ## Imports and multi-file projects
 
-Ora supports namespace-qualified imports for splitting code across files.
-
 ```ora
-const math = @import("./math.ora");
+comptime const math = @import("./math.ora");
 
 contract Calculator {
     pub fn run() -> u256 {
@@ -172,20 +170,9 @@ contract Calculator {
 }
 ```
 
-Imported members are always accessed through the alias (`math.add`); they are never injected into local scope. This prevents shadowing bugs and keeps module boundaries explicit.
+Imported members are always accessed through the alias (`math.add`); they are never injected into local scope.
 
-Import specifiers:
-- **Relative:** `./math.ora`, `../lib/utils.ora` (`.ora` extension required)
-- **Package:** `acme/math` (resolved via `include_paths` in `ora.toml`)
-
-The resolver enforces:
-- unique aliases per file (duplicate alias → different module is an error),
-- cycle detection,
-- deterministic dependency ordering.
-
-### `ora.toml`
-
-Multi-target projects use `ora.toml` for configuration:
+### ora.toml
 
 ```toml
 schema_version = "0.1"
@@ -195,88 +182,81 @@ output_dir = "./artifacts"
 
 [[targets]]
 name = "Main"
+kind = "contract"
 root = "contracts/main.ora"
 include_paths = ["contracts", "lib"]
 ```
 
-See [`docs/ora-cli-imports-config-reference.md`](docs/ora-cli-imports-config-reference.md) for the full CLI, import system, and config schema reference.
+See [`docs/ora-cli-imports-config-reference.md`](docs/ora-cli-imports-config-reference.md) for the full config schema.
 
-## Common workflows
+## Verification
 
-- **Format:** `./zig-out/bin/ora fmt <file.ora>` — format source; use `--check` for CI.
-- **Build artifacts (default):** `./zig-out/bin/ora <file.ora>` (same as `build`) writes:
-  - `artifacts/<name>/abi/<name>.abi.json`
-  - `artifacts/<name>/abi/<name>.abi.sol.json`
-  - `artifacts/<name>/abi/<name>.abi.extras.json`
-  - `artifacts/<name>/bin/<name>.hex`
-  - `artifacts/<name>/sir/<name>.sir`
-  - `artifacts/<name>/verify/<name>.smt.report.md`
-  - `artifacts/<name>/verify/<name>.smt.report.json`
-- **Emit MLIR/SIR for debugging:** `./zig-out/bin/ora emit --emit-mlir[=ora|sir|both] <file.ora>`, `./zig-out/bin/ora emit --emit-sir-text <file.ora>`.
-- **MLIR output modes:**
-  - Ora MLIR: `./zig-out/bin/ora emit --emit-mlir=ora <file.ora>`
-  - SIR MLIR (after Ora->SIR): `./zig-out/bin/ora emit --emit-mlir=sir <file.ora>`
-  - Both Ora + SIR MLIR: `./zig-out/bin/ora emit --emit-mlir=both <file.ora>`
-  - SIR text (Sensei text IR): `./zig-out/bin/ora emit --emit-sir-text <file.ora>`
-- **Emit specific outputs:** `./zig-out/bin/ora emit --emit-bytecode`, `--emit-abi`, `--emit-abi-solidity`, `--emit-abi-extras`.
-- **CFG generation:** `./zig-out/bin/ora emit --emit-cfg <file.ora>` (defaults to Ora MLIR), or explicitly `--emit-cfg=ora` / `--emit-cfg=sir`.
-- **Verify:** `--verify` (default), `--verify=full` for untagged asserts.
-- **SMT report in emit mode:** `./zig-out/bin/ora emit --emit-smt-report <file.ora>`.
-- **Tests:** `zig build test` — run the test suite. `./scripts/validate-examples.sh` — validate example fixtures.
-- **CLI command matrix:** `./scripts/run-cli-command-checks.sh` — run end-to-end checks for build/emit/fmt/verification/advanced MLIR flags. Useful options: `--quiet`, `--out /tmp/ora-cli-cmd-tests`, `--file <path.ora>`, `--compiler <path-to-ora>`.
+Z3 verification runs by default on `ora build`. Control it with:
+
+```bash
+./zig-out/bin/ora build --verify file.ora          # default
+./zig-out/bin/ora build --verify=full file.ora      # include untagged asserts
+./zig-out/bin/ora build --no-verify file.ora        # skip verification
+```
+
+Environment variables for tuning:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ORA_Z3_TIMEOUT_MS` | `60000` | Per-query timeout (ms) |
+| `ORA_Z3_PARALLEL` | `1` | Parallel query execution |
+| `ORA_Z3_WORKERS` | CPU count | Worker thread count |
+| `ORA_VERIFY_MODE` | `full` | `basic` or `full` |
+| `ORA_VERIFY_CALLS` | `1` | Interprocedural call summaries |
+| `ORA_VERIFY_STATE` | `1` | Storage state tracking |
+| `ORA_VERIFY_STATS` | `0` | Print query statistics |
+| `ORA_Z3_DEBUG` | unset | Verbose Z3 debug output |
 
 ## Advanced MLIR controls
 
-- Run a custom MLIR pipeline:
-  - `./zig-out/bin/ora emit --mlir-pass-pipeline "builtin.module(canonicalize,cse)" --emit-mlir=ora <file.ora>`
-- Verify each pass in that pipeline:
-  - `--mlir-verify-each-pass` (requires `--mlir-pass-pipeline`)
-- Enable pass timing for that pipeline:
-  - `--mlir-pass-timing` (requires `--mlir-pass-pipeline`)
-- Print stage snapshots:
-  - `--mlir-print-ir=before|after|before-after|all`
-  - Optional stage filter: `--mlir-print-ir-pass <filter>`
-  - Current stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-legalize`
-- Save MLIR when a stage fails:
-  - `--mlir-crash-reproducer <path>`
-- Print module snapshot on MLIR diagnostics:
-  - `--mlir-print-op-on-diagnostic`
-- Print operation-count stats across stages:
-  - `--mlir-pass-statistics`
-
-## Verification timeout and tuning
-
-Z3 verification timeout is controlled via `ORA_Z3_TIMEOUT_MS` (milliseconds):
-
 ```bash
-# 5 minutes
-ORA_Z3_TIMEOUT_MS=300000 ./zig-out/bin/ora emit --verify --emit-mlir ora-example/apps/defi_lending_pool.ora
+# Custom pass pipeline
+./zig-out/bin/ora emit --mlir-pass-pipeline "builtin.module(canonicalize,cse)" --emit-mlir=ora file.ora
+
+# Pipeline diagnostics
+--mlir-verify-each-pass          # verify after each pass
+--mlir-pass-timing               # pass timing
+--mlir-pass-statistics           # operation count stats
+--mlir-print-ir=before|after|all # print IR at stages
+--mlir-print-ir-pass <filter>    # filter by stage name
+--mlir-crash-reproducer <path>   # save MLIR on failure
+--mlir-print-op-on-diagnostic    # print module on diagnostic
 ```
 
-Optional verifier env toggles:
-- `ORA_Z3_PARALLEL=0|1`
-- `ORA_Z3_WORKERS=<n>`
-- `ORA_Z3_DEBUG=1`
-- `ORA_VERIFY_MODE=basic|full`
-- `ORA_VERIFY_CALLS=0|1`
-- `ORA_VERIFY_STATE=0|1`
-- `ORA_VERIFY_STATS=0|1`
+Stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-legalize`.
 
-## Verification assumptions model
+## Documentation
 
-- User-authored `assume(...)` statements are treated as function-level verification assumptions.
-- Compiler-injected branch assumptions (from path conditions) are tracked as path-scoped assumptions.
-- Base assumption-consistency checks use `requires(...)` + user `assume(...)`, while path assumptions are applied only in path-scoped obligation proving.
+- **[The Ora Little Book](website/docs/book/)** — 20-chapter progressive guide from first contract to production vault
+- **[Language reference](website/docs/)** — feature docs: types, regions, error unions, traits, verification, comptime
+- **[Compiler Field Guide](website/docs/compiler/field-guide/)** — contributor onboarding (14 chapters)
+- **[Formal specification](docs/formal-specs/ora-2.md)** — type system calculus
+- **[CLI and config reference](docs/ora-cli-imports-config-reference.md)** — full CLI, import system, and `ora.toml` schema
+- **[Examples](ora-example/)** — apps, vault tiers, and feature demos
 
 ## Development
 
-Generate the Ora → SIR coverage report:
+Run tests:
+```bash
+zig build test
+```
+
+Validate examples:
+```bash
+./scripts/validate-examples.sh
+```
+
+End-to-end CLI checks:
+```bash
+./scripts/run-cli-command-checks.sh
+```
+
+Generate Ora-to-SIR coverage report:
 ```bash
 python3 scripts/generate_ora_to_sir_coverage.py
 ```
-
-## Notes
-
-- Asuka is pre-release; breaking changes are expected.
-- Ora → SIR parity is the primary milestone for Asuka.
-- Generic style (syntax and semantics) is defined in [website/docs/generics.md](website/docs/generics.md).
