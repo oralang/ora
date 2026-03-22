@@ -979,6 +979,9 @@ const TypeChecker = struct {
     fn visitStmt(self: *TypeChecker, statement_id: ast.StmtId) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| {
+                if (decl.storage_class == .storage) {
+                    try self.emitRangeError(decl.range, "storage declarations are only allowed at contract scope", .{});
+                }
                 if (decl.type_expr) |type_expr| {
                     if (self.pattern_types[decl.pattern.index()].type.kind() == .unknown) {
                         self.pattern_types[decl.pattern.index()] = LocatedType.withRegionAndProvenance(

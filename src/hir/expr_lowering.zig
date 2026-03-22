@@ -2159,6 +2159,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         createIntegerConstant(self.parent.context, self.parent.location(field.range), result_type, value),
                     );
                 }
+                if (std.mem.startsWith(u8, path, "std.constants.I") and mlir.oraTypeIsAInteger(result_type)) {
+                    const width = mlir.oraIntegerTypeGetWidth(result_type);
+                    const max_u256 = (@as(u256, 1) << @intCast(width - 1)) - 1;
+                    const min_u256_abs = @as(u256, 1) << @intCast(width - 1);
+                    return if (std.mem.endsWith(u8, path, "_MIN"))
+                        try @This().createWideIntegerConstant(self, result_type, min_u256_abs, true, field.range)
+                    else
+                        try @This().createWideIntegerConstant(self, result_type, max_u256, false, field.range);
+                }
             }
 
             return null;
