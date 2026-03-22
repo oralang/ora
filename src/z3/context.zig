@@ -16,7 +16,7 @@ fn z3ErrorHandler(ctx: c.Z3_context, code: c.Z3_error_code) callconv(.c) void {
     if (builtin.mode != .Debug) return;
     const msg_ptr = c.Z3_get_error_msg(ctx, code);
     const msg = if (msg_ptr == null) "<unknown>" else std.mem.span(msg_ptr);
-    std.log.err("Z3 API error: {s}", .{msg});
+    std.debug.print("[z3] API error: {s}\n", .{msg});
 }
 
 fn createContext(cfg: c.Z3_config) !c.Z3_context {
@@ -99,5 +99,5 @@ test "Context initWithConfig registers a valid context" {
     defer ctx.deinit();
 
     try testing.expect(ctx.ctx != null);
-    try testing.expectEqual(c.Z3_OK, ctx.lastErrorCode());
+    try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), ctx.lastErrorCode());
 }
