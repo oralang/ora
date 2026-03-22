@@ -451,8 +451,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .VariableDecl => |decl| {
                     const value = if (decl.value) |expr_id|
                         try self.lowerExpr(expr_id, locals)
-                    else if (decl.type_expr) |type_expr|
-                        try self.defaultValue(self.parent.lowerTypeExpr(type_expr), decl.range)
+                    else if (decl.type_expr) |type_expr| blk: {
+                        const lowered_type = self.parent.lowerTypeExpr(type_expr);
+                        if (decl.storage_class == .memory and mlir.oraTypeIsAMemRef(lowered_type)) {
+                            const alloc = mlir.oraMemrefAllocaOpCreate(
+                                self.parent.context,
+                                self.parent.location(decl.range),
+                                lowered_type,
+                            );
+                            if (mlir.oraOperationIsNull(alloc)) return error.MlirOperationCreationFailed;
+                            break :blk appendValueOp(self.block, alloc);
+                        }
+                        break :blk try self.defaultValue(lowered_type, decl.range);
+                    }
                     else
                         try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
                     try self.bindPatternValue(decl.pattern, value, locals);
