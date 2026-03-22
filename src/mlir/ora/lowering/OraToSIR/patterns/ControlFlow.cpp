@@ -51,7 +51,7 @@ static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structNa
     ora::StructDeclOp structDecl = nullptr;
     module.walk([&](ora::StructDeclOp declOp)
                 {
-                    auto nameAttr = declOp->getAttrOfType<StringAttr>("name");
+                    auto nameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
                     if (nameAttr && nameAttr.getValue() == structName)
                     {
                         structDecl = declOp;
@@ -2937,6 +2937,8 @@ LogicalResult ConvertReturnOp::matchAndRewrite(
 {
     SmallVector<Value> operands;
     operands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
+    if (operands.empty() && op.getNumOperands() != 0)
+        operands.append(op.getOperands().begin(), op.getOperands().end());
     auto result = convertOraReturn(op, operands, getTypeConverter(), rewriter);
     return result;
 }
@@ -2949,6 +2951,8 @@ LogicalResult ConvertReturnOp::matchAndRewrite(
     SmallVector<Value> flatOperands;
     for (ValueRange range : adaptor.getOperands())
         flatOperands.append(range.begin(), range.end());
+    if (flatOperands.empty() && op.getNumOperands() != 0)
+        flatOperands.append(op.getOperands().begin(), op.getOperands().end());
     auto result = convertOraReturn(op, flatOperands, getTypeConverter(), rewriter);
     return result;
 }
@@ -2960,6 +2964,15 @@ LogicalResult ConvertReturnOpPre::matchAndRewrite(
     // Skip returns whose operand comes from an scf.if (needs conversion framework).
     if (op.getNumOperands() == 1 && op.getOperand(0).getDefiningOp<scf::IfOp>())
         return failure();
+
+    // Aggregate returns are lowered later under the conversion framework.
+    // The pre-pass is only meant for straightforward "safe" cases.
+    if (op.getNumOperands() == 1)
+    {
+        Type origType = op.getOperand(0).getType();
+        if (llvm::isa<ora::StructType, ora::TupleType>(origType))
+            return failure();
+    }
 
     SmallVector<Value> operands;
     operands.append(op.getOperands().begin(), op.getOperands().end());

@@ -7,6 +7,7 @@
 
 #include "OraToSIR.h"
 
+#include "OraDialect.h"
 #include "SIR/SIRDialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -118,7 +119,9 @@ namespace mlir
                     auto isSIRValueType = [](Type t) {
                         if (isa<sir::U256Type, sir::PtrType>(t))
                             return true;
-                        if (auto intTy = dyn_cast<IntegerType>(t))
+                        if (isa<ora::StructType, ora::TupleType>(t))
+                            return true;
+                        if (auto intTy = dyn_cast<mlir::IntegerType>(t))
                         {
                             return intTy.getWidth() <= 256;
                         }
@@ -501,7 +504,7 @@ namespace mlir
                             {
                                 OpBuilder b(op);
                                 auto u256 = sir::U256Type::get(op.getContext());
-                                auto ui256 = IntegerType::get(op.getContext(), 256, IntegerType::Unsigned);
+                                auto ui256 = mlir::IntegerType::get(op.getContext(), 256, mlir::IntegerType::Unsigned);
                                 auto idConst = b.create<sir::ConstOp>(
                                     op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
                                 for (unsigned i = 0; i < op.getNumResults(); ++i)

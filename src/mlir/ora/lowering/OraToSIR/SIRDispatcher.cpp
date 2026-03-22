@@ -304,6 +304,7 @@ namespace mlir
                 unsigned retCount = 0;
                 bool returnsErrorUnion = false;
                 SmallVector<AbiType, 8> abiParams;
+                SmallVector<std::string, 8> abiParamLayouts;
                 AbiType abiReturn;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
@@ -551,6 +552,7 @@ namespace mlir
                                     return;
                                 }
                                 info.abiParams.push_back(abi);
+                                info.abiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
 
@@ -592,6 +594,17 @@ namespace mlir
                             else
                             {
                                 int64_t slots = abi.headSlots();
+                                if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
+                                {
+                                    AbiLayout layout;
+                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout))
+                                    {
+                                        func.emitError("invalid tuple ABI param layout");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    slots = layout.isDynamic() ? 1 : layout.headSlots();
+                                }
                                 if (slots < 0)
                                 {
                                     func.emitError("unsupported ABI type for head sizing");
@@ -1072,6 +1085,33 @@ namespace mlir
                                 int64_t elemCount = abi.dims.front();
                                 int64_t totalBytes = elemCount * 32;
                                 Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
+                                builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
+                                argVal = buf;
+                            }
+                            else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
+                            {
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                {
+                                    info.func.emitError("invalid tuple ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                if (layout.isDynamic())
+                                {
+                                    module.emitError("unsupported dynamic ABI type for dispatcher");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                int64_t words = layout.headSlots();
+                                if (words <= 0)
+                                {
+                                    module.emitError("unsupported tuple ABI type for dispatcher");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, words * 32));
                                 Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
                                 argVal = buf;
