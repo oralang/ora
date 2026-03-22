@@ -5,6 +5,56 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   tutorialSidebar: [
     'intro',
+    {
+      type: 'category',
+      label: 'The Ora Little Book',
+      items: [
+        'book/01-hello-ora',
+        'book/02-types-and-variables',
+        'book/03-functions-and-operators',
+        'book/04-control-flow',
+        'book/05-composite-types',
+        {
+          type: 'category',
+          label: 'Part II: Safety First',
+          items: [
+            'book/06-error-unions',
+            'book/07-memory-regions',
+            'book/08-refinement-types',
+            'book/09-logs-and-events',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Part III: Verification',
+          items: [
+            'book/10-specification-clauses',
+            'book/11-ghost-state',
+            'book/12-locks',
+            'book/13-standard-library',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Part IV: Abstraction',
+          items: [
+            'book/14-traits',
+            'book/15-generics',
+            'book/16-comptime',
+            'book/17-extern-traits',
+            'book/18-bitfields',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Part V: Real-World Ora',
+          items: [
+            'book/19-projects',
+            'book/20-full-vault',
+          ],
+        },
+      ],
+    },
     'getting-started',
     'language-basics',
     'imports',
