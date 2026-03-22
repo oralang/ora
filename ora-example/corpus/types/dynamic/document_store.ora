@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract DocumentStore {
     struct Document {
         title: string,
@@ -14,8 +16,8 @@ contract DocumentStore {
         documents[id] = Document {
             title: title,
             content: content,
-            author: msg.sender,
-            timestamp: block.timestamp,
+            author: std.msg.sender,
+            timestamp: std.block.timestamp,
         };
         doc_count = id + 1;
         return id;

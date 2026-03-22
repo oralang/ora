@@ -22,7 +22,7 @@ contract AddressBool {
 
     pub fn check_and_update(account: address) -> bool {
         let allowed: bool = whitelist[account];
-        if allowed {
+        if (allowed) {
             whitelist[account] = false;
         }
         return allowed;

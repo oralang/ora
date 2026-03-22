@@ -29,7 +29,7 @@ contract DeclarationsStorage {
 
     // Storage and local interaction
     pub fn add_to_counter(amount: u256) -> u256 {
-        let old: u256 = counter;
+        let prev: u256 = counter;
         counter += amount;
         return counter;
     }

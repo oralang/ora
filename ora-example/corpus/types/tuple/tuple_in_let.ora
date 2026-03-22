@@ -1,25 +1,25 @@
-// Tuple destructuring in let bindings.
+// Tuple in let bindings (no destructuring — use field access).
 
 contract TupleInLet {
     pub fn basic_destructure() -> u256 {
-        let (a, b): (u256, u256) = (3, 7);
-        return a + b;
+        let t: (u256, u256) = (3, 7);
+        return t.0 + t.1;
     }
 
     pub fn destructure_from_fn() -> u256 {
-        let (x, y): (u256, u256) = get_pair();
-        return x * y;
+        let t: (u256, u256) = get_pair();
+        return t.0 * t.1;
     }
 
     pub fn destructure_three() -> u256 {
-        let (a, b, c): (u256, u256, u256) = (10, 20, 30);
-        return a + b + c;
+        let t: (u256, u256, u256) = (10, 20, 30);
+        return t.0 + t.1 + t.2;
     }
 
     pub fn destructure_mixed() -> u256 {
-        let (val, flag): (u256, bool) = (100, true);
-        if (flag) {
-            return val;
+        let t: (u256, bool) = (100, true);
+        if (t.1) {
+            return t.0;
         }
         return 0;
     }

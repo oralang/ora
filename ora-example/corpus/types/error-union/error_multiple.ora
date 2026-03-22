@@ -16,14 +16,14 @@ contract ErrorMultiple {
 
     pub fn transfer(to: address, amount: u256) -> !bool | InsufficientFunds | Unauthorized | ZeroAmount {
         if (std.msg.sender() != owner) {
-            return error Unauthorized;
+            return Unauthorized;
         }
         if (amount == 0) {
-            return error ZeroAmount;
+            return ZeroAmount;
         }
         let current: u256 = balance;
         if (amount > current) {
-            return error InsufficientFunds(amount, current);
+            return InsufficientFunds(amount, current);
         }
         balance = current - amount;
         return true;
@@ -31,7 +31,7 @@ contract ErrorMultiple {
 
     pub fn deposit(amount: u256) -> !bool | ZeroAmount {
         if (amount == 0) {
-            return error ZeroAmount;
+            return ZeroAmount;
         }
         balance += amount;
         return true;

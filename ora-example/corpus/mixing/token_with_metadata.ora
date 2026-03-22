@@ -38,12 +38,12 @@ contract TokenWithMetadata {
 
     pub fn transfer(from: address, to: address, amount: u256) -> bool {
         let i: TokenInfo = info;
-        if i.paused {
+        if (i.paused) {
             return false;
         }
         let from_bal: u256 = balances[from];
         let enough: bool = from_bal >= amount;
-        if enough {
+        if (enough) {
             balances[from] = from_bal - amount;
             let to_bal: u256 = balances[to];
             balances[to] = to_bal + amount;
@@ -63,9 +63,9 @@ contract TokenWithMetadata {
     pub fn transfer_from(spender: address, from: address, to: address, amount: u256) -> bool {
         let allowed: u256 = allowances[from][spender];
         let enough_allowance: bool = allowed >= amount;
-        if enough_allowance {
+        if (enough_allowance) {
             let success: bool = transfer(from, to, amount);
-            if success {
+            if (success) {
                 allowances[from][spender] = allowed - amount;
                 return true;
             }

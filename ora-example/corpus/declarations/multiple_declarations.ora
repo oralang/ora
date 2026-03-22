@@ -27,9 +27,9 @@ contract MultipleDeclarations {
 
     // Mixed let and var
     pub fn mixed_let_var() -> u256 {
-        let immutable: u256 = 100;
+        let fixed_val: u256 = 100;
         var mutable: u256 = 0;
-        mutable = immutable + 50;
+        mutable = fixed_val + 50;
         let captured: u256 = mutable;
         return captured;
     }

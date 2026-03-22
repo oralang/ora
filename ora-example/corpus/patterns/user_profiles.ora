@@ -11,7 +11,7 @@ struct Profile {
 comptime const std = @import("std");
 contract UserProfiles {
     storage var profiles: map<address, Profile>;
-    storage var exists: map<address, bool>;
+    storage var registered: map<address, bool>;
     storage var userCount: u256 = 0;
 
     log ProfileCreated(user: address, username: string);
@@ -23,7 +23,7 @@ contract UserProfiles {
     {
         let sender: address = std.msg.sender();
 
-        if (exists[sender]) {
+        if (registered[sender]) {
             return false;
         }
 
@@ -34,7 +34,7 @@ contract UserProfiles {
             active: true,
         };
         profiles[sender] = profile;
-        exists[sender] = true;
+        registered[sender] = true;
         userCount += 1;
 
         log ProfileCreated(sender, username);
@@ -44,7 +44,7 @@ contract UserProfiles {
     pub fn updateUsername(newUsername: string) -> bool {
         let sender: address = std.msg.sender();
 
-        if (!exists[sender]) {
+        if (!registered[sender]) {
             return false;
         }
 
@@ -62,7 +62,7 @@ contract UserProfiles {
     }
 
     pub fn addReputation(user: address, points: u256) -> bool {
-        if (!exists[user]) {
+        if (!registered[user]) {
             return false;
         }
 
@@ -80,7 +80,7 @@ contract UserProfiles {
     pub fn deactivate() -> bool {
         let sender: address = std.msg.sender();
 
-        if (!exists[sender]) {
+        if (!registered[sender]) {
             return false;
         }
 

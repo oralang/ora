@@ -10,7 +10,7 @@ contract Vault {
     storage var balances: map<address, u256>;
 
     pub fn deposit(amount: u256) -> !bool | ZeroAmount {
-        if (amount == 0) return error ZeroAmount;
+        if (amount == 0) { return ZeroAmount; }
         let sender: address = std.msg.sender();
         balances[sender] += amount;
         totalDeposits += amount;
@@ -20,7 +20,7 @@ contract Vault {
     pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
         let sender: address = std.msg.sender();
         let current: u256 = balances[sender];
-        if (current < amount) return error InsufficientBalance(amount, current);
+        if (current < amount) { return InsufficientBalance(amount, current); }
         balances[sender] = current - amount;
         totalDeposits -= amount;
         return true;

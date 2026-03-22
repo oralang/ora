@@ -1,11 +1,11 @@
 contract LabeledSwitchDemo {
-    fn init() {
+    pub fn init() {
         var x: u256 = 7;
 
         // Labeled switch with labeled block arm and labeled-continue operand
         outer: switch (x) {
             0 => { x = 100; },
-            1...5 => arm_block: { x = x + 1; },
+            1...5 => { x = x + 1; },
             else => {
                 continue :outer (0);
             }

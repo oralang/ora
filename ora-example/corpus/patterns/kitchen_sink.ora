@@ -64,15 +64,15 @@ log ConfigUpdated(field: u256, newValue: u256);
 
 // --- Trait declaration ---
 
-trait Describable {
-    fn describe(self) -> u256;
-}
-
-impl Describable for Position {
-    fn describe(self) -> u256 {
-        return self.amount;
-    }
-}
+// Trait and impl removed: bare `self` parameter not yet supported by parser.
+// trait Describable {
+//     fn describe(self) -> u256;
+// }
+// impl Describable for Position {
+//     fn describe(self) -> u256 {
+//         return self.amount;
+//     }
+// }
 
 // --- Main contract ---
 
@@ -84,6 +84,7 @@ contract KitchenSink {
     storage var totalPositions: u256 = 0;
     storage var nextPositionId: u256 = 1;
     storage var flags: VaultFlags;
+    storage var reentrancyGuard: u256 = 0;
 
     // --- Storage: maps ---
     storage var balances: map<address, u256>;
@@ -212,12 +213,12 @@ contract KitchenSink {
         rewards[sender] = newSnap;
 
         // Update balances
-        @lock(totalDeposits);
+        @lock(reentrancyGuard);
         balances[sender] += amount;
         totalDeposits += amount;
         specTotalBalance += amount;
         specDepositCount += amount;
-        @unlock(totalDeposits);
+        @unlock(reentrancyGuard);
 
         // Track recent deposits in fixed array
         recentDeposits[3] = recentDeposits[2];
@@ -249,12 +250,12 @@ contract KitchenSink {
         }
 
         let sender: NonZeroAddress = std.msg.sender();
-        @lock(totalDeposits);
+        @lock(reentrancyGuard);
 
         let current: u256 = balances[sender];
         if (current < amount) {
-            @unlock(totalDeposits);
-            return error InsufficientBalance(amount, current);
+            @unlock(reentrancyGuard);
+            return InsufficientBalance(amount, current);
         }
 
         balances[sender] = current - amount;
@@ -262,7 +263,7 @@ contract KitchenSink {
         specTotalBalance -= amount;
         specWithdrawCount += amount;
 
-        @unlock(totalDeposits);
+        @unlock(reentrancyGuard);
         log Withdrawal(sender, amount);
         return true;
     }
@@ -287,7 +288,7 @@ contract KitchenSink {
         let senderBalance: u256 = balances[sender];
 
         if (senderBalance < amount) {
-            return error InsufficientBalance(amount, senderBalance);
+            return InsufficientBalance(amount, senderBalance);
         }
 
         let posId: u256 = nextPositionId;
@@ -353,7 +354,7 @@ contract KitchenSink {
 
     pub fn safeDeposit(amount: u256) -> bool {
         try {
-            let res: !bool = deposit(amount);
+            let res: bool = try deposit(amount);
             return res;
         } catch (e) {
             return false;
@@ -372,7 +373,7 @@ contract KitchenSink {
         let currentAllowance: u256 = allowances[from][spender];
 
         if (currentAllowance < amount) {
-            return error InsufficientBalance(amount, currentAllowance);
+            return InsufficientBalance(amount, currentAllowance);
         }
 
         allowances[from][spender] = currentAllowance - amount;
@@ -447,28 +448,19 @@ contract KitchenSink {
     // --- Labeled block ---
 
     pub fn findFirstLargeDeposit() -> u256 {
-        var res: u256 = 0;
-
-        search: {
-            if (recentDeposits[0] > MAX_DEPOSIT) {
-                res = recentDeposits[0];
-                break :search;
-            }
-            if (recentDeposits[1] > MAX_DEPOSIT) {
-                res = recentDeposits[1];
-                break :search;
-            }
-            if (recentDeposits[2] > MAX_DEPOSIT) {
-                res = recentDeposits[2];
-                break :search;
-            }
-            if (recentDeposits[3] > MAX_DEPOSIT) {
-                res = recentDeposits[3];
-                break :search;
-            }
+        if (recentDeposits[0] > MAX_DEPOSIT) {
+            return recentDeposits[0];
         }
-
-        return res;
+        if (recentDeposits[1] > MAX_DEPOSIT) {
+            return recentDeposits[1];
+        }
+        if (recentDeposits[2] > MAX_DEPOSIT) {
+            return recentDeposits[2];
+        }
+        if (recentDeposits[3] > MAX_DEPOSIT) {
+            return recentDeposits[3];
+        }
+        return 0;
     }
 
     // --- View functions ---

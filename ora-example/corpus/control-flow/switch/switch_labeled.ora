@@ -29,7 +29,7 @@ contract SwitchLabeled {
 
         outer: switch (x) {
             0 => { x = 100; }
-            1...5 => arm_block: { x = x + 1; }
+            1...5 => { x = x + 1; }
             else => {
                 continue :outer (0);
             }

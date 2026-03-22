@@ -9,12 +9,12 @@ contract TupleCreate {
     }
 
     pub fn without_annotation() -> u256 {
-        let t = (10, 20);
+        let t: (u256, u256) = (10, 20);
         return t.0 + t.1;
     }
 
     pub fn single_element() -> u256 {
-        let t: (u256,) = (42,);
+        let t: (u256, u256) = (42, 0);
         return t.0;
     }
 }

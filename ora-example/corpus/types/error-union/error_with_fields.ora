@@ -10,7 +10,7 @@ contract ErrorWithFields {
     pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance {
         let current: u256 = balance;
         if (amount > current) {
-            return error InsufficientBalance(amount, current);
+            return InsufficientBalance(amount, current);
         }
         balance = current - amount;
         return balance;
@@ -18,9 +18,9 @@ contract ErrorWithFields {
 
     pub fn safe_withdraw(amount: u256) -> u256 {
         try {
-            let remaining: u256 = withdraw(amount);
+            let remaining: u256 = try withdraw(amount);
             return remaining;
-        } catch |e| {
+        } catch (e) {
             return balance;
         }
     }

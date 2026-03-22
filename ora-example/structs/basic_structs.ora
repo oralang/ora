@@ -3,6 +3,8 @@
 // ==========================================
 // This file tests struct declarations syntax
 
+contract BasicStructs {
+
 // Basic struct with simple fields
 struct Point {
     x: u256;
@@ -30,4 +32,6 @@ struct AccountData {
     profile: UserProfile;
     balance: u256;
     last_login: u256;
+}
+
 }

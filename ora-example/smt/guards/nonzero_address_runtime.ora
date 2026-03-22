@@ -17,14 +17,14 @@ contract NonZeroAddressRuntime {
 
     // SMT cannot prove NonZeroAddress from storage
     pub fn runtimeNonZeroFromStorage() {
-        storage var stored_addr: address;
+        var stored_addr: address;
         // Guard should remain - storage value unknown at compile time
         let owner: NonZeroAddress = stored_addr;
     }
 
     // SMT cannot prove NonZeroAddress from function call
     pub fn getAddress() -> address {
-        storage var addr: address;
+        var addr: address;
         return addr;
     }
 

@@ -20,7 +20,7 @@ contract MemoryDeclarationTest {
         const MIN_VALUE: u256 = 0;
         
         // Memory arrays
-        let numbers: slice[u256] = [1, 2, 3, 4, 5];
+        let numbers: [u256; 5] = [1, 2, 3, 4, 5];
 
         // return a value so we can observe folding vs DCE
         return sum;
@@ -44,7 +44,7 @@ contract MemoryDeclarationTest {
         const MAX_VALUE: u256 = 1000;
         const MIN_VALUE: u256 = 0;
 
-        let numbers: slice[u256] = [1, 2, 3, 4, 5];
+        let numbers: [u256; 5] = [1, 2, 3, 4, 5];
 
         // make side effects explicit
         dummy = sum;
@@ -65,7 +65,7 @@ contract MemoryDeclarationTest {
         const MAX_VALUE: u256 = 1000;
         const MIN_VALUE: u256 = 0;
 
-        let numbers: slice[u256] = [1, 2, 3, 4, 5];
+        let numbers: [u256; 5] = [1, 2, 3, 4, 5];
 
         dummy = sum;
         dummy = product + MAX_VALUE + MIN_VALUE;

@@ -14,7 +14,7 @@ contract ForIndex {
 
     // Use both value and index
     pub fn test_value_and_index() -> u256 {
-        var arr: [4]u256 = [10, 20, 30, 40];
+        var arr: [u256; 4] = [10, 20, 30, 40];
         var res: u256 = 0;
         for (arr) |val, idx| {
             res += val + idx;
@@ -24,7 +24,7 @@ contract ForIndex {
 
     // Index-only iteration (ignore value with _)
     pub fn test_index_only() -> u256 {
-        var arr: [5]u256 = [100, 200, 300, 400, 500];
+        var arr: [u256; 5] = [100, 200, 300, 400, 500];
         var last_idx: u256 = 0;
         for (arr) |_, idx| {
             last_idx = idx;
@@ -34,7 +34,7 @@ contract ForIndex {
 
     // Index-based conditional
     pub fn test_index_conditional() -> u256 {
-        var arr: [6]u256 = [1, 2, 3, 4, 5, 6];
+        var arr: [u256; 6] = [1, 2, 3, 4, 5, 6];
         var even_index_sum: u256 = 0;
         for (arr) |val, idx| {
             if (idx % 2 == 0) {
@@ -46,7 +46,7 @@ contract ForIndex {
 
     // Both captures used for weighted sum
     pub fn test_weighted_positions() -> u256 {
-        var arr: [3]u256 = [5, 10, 15];
+        var arr: [u256; 3] = [5, 10, 15];
         var weighted: u256 = 0;
         for (arr) |val, idx| {
             weighted += val * (idx + 1);

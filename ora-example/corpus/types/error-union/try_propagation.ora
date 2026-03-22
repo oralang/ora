@@ -8,14 +8,14 @@ comptime const std = @import("std");
 contract TryPropagation {
     pub fn validate(x: u256) -> !u256 | InvalidInput {
         if (x == 0) {
-            return error InvalidInput;
+            return InvalidInput;
         }
         return x;
     }
 
     pub fn double(x: u256) -> !u256 | Overflow {
         if (x > std.constants.U256_MAX / 2) {
-            return error Overflow;
+            return Overflow;
         }
         return x * 2;
     }

@@ -33,9 +33,9 @@ contract TupleMulti {
     }
 
     pub fn destructure_mixed() -> u256 {
-        let (val, flag): (u256, bool) = (100, true);
-        if (flag) {
-            return val;
+        let t: (u256, bool) = (100, true);
+        if (t.1) {
+            return t.0;
         }
         return 0;
     }
@@ -46,8 +46,8 @@ contract TupleMulti {
     }
 
     pub fn tuple_in_computation(a: u256, b: u256) -> u256 {
-        let (sum, diff): (u256, u256) = (a + b, a - b);
-        saved = sum;
-        return diff;
+        let t: (u256, u256) = (a + b, a - b);
+        saved = t.0;
+        return t.1;
     }
 }

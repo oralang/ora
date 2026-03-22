@@ -56,7 +56,7 @@ contract BitfieldInMap {
 
     pub fn can_transfer(account: address) -> bool {
         let tf: TokenFlags = flags[account];
-        let ok: bool = tf.transferable & !tf.frozen;
+        let ok: bool = tf.transferable && !tf.frozen;
         return ok;
     }
 

@@ -17,7 +17,7 @@ contract StorageTest3 {
     const INITIAL_BALANCE: u256 = 1000;
     
     // Initialize contract
-    fn init() {
+    pub fn init() {
         owner = OWNER_ADDRESS;
         total_users = 0;
         

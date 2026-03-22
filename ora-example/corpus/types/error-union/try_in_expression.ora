@@ -8,14 +8,14 @@ error ValidationError;
 contract TryInExpression {
     pub fn parse_amount(raw: u256) -> !u256 | ParseError {
         if (raw > 1000000) {
-            return error ParseError;
+            return ParseError;
         }
         return raw;
     }
 
     pub fn validate_amount(amount: u256) -> !u256 | ValidationError {
         if (amount == 0) {
-            return error ValidationError;
+            return ValidationError;
         }
         return amount;
     }

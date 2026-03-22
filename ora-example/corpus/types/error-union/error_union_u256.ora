@@ -11,7 +11,7 @@ contract ErrorUnionU256 {
     pub fn add(x: u256) -> !u256 | Overflow {
         let current: u256 = value;
         if (x > std.constants.U256_MAX - current) {
-            return error Overflow;
+            return Overflow;
         }
         value = current + x;
         return value;
@@ -20,7 +20,7 @@ contract ErrorUnionU256 {
     pub fn sub(x: u256) -> !u256 | Underflow {
         let current: u256 = value;
         if (x > current) {
-            return error Underflow;
+            return Underflow;
         }
         value = current - x;
         return value;

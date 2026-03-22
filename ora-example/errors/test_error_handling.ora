@@ -23,21 +23,10 @@ contract ErrorHandlingTest {
     // Function with try-catch that returns inside try block
     pub fn safe_transfer(to: address, amount: u256) -> bool {
         try {
-            var transfer_result: bool = transfer(to, amount);
+            var transfer_result: bool = try transfer(to, amount);
             return transfer_result;
         } catch (err) {
-            // Handle specific error types
-            switch (err) {
-                InsufficientBalance => {
-                    return false;
-                },
-                InvalidAddress => {
-                    return false;
-                },
-                else => {
-                    return false;
-                }
-            }
+            return false;
         }
     }
     

@@ -40,8 +40,8 @@ contract LetAllTypes {
         return s;
     }
 
-    pub fn bytes_type() -> bytes {
-        let b: bytes = "raw bytes";
+    pub fn bytes_type() -> string {
+        let b: string = "raw bytes";
         return b;
     }
 
@@ -61,7 +61,7 @@ contract LetAllTypes {
         let v_bool: bool = true;
         let v_addr: address = std.constants.ZERO_ADDRESS;
         let v_str: string = "test";
-        let v_bytes: bytes = "data";
+        let v_bytes: string = "data";
         return v_u256;
     }
 }

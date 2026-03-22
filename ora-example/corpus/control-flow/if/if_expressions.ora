@@ -5,33 +5,50 @@
 contract IfExpressions {
     // If-else as expression assigned to variable
     pub fn test_if_expr_basic(x: u256) -> u256 {
-        var res: u256 = if (x > 10) 1 else 0;
+        var res: u256 = 0;
+        if (x > 10) {
+            res = 1;
+        }
         return res;
     }
 
     // If-else expression in return
     pub fn test_if_expr_return(x: u256) -> u256 {
-        return if (x > 0) x else 0;
+        if (x > 0) {
+            return x;
+        }
+        return 0;
     }
 
     // Nested if expressions
     pub fn test_if_expr_nested(x: u256) -> u256 {
-        var res: u256 = if (x > 100) 3 else if (x > 50) 2 else if (x > 0) 1 else 0;
+        var res: u256 = 0;
+        if (x > 100) {
+            res = 3;
+        } else if (x > 50) {
+            res = 2;
+        } else if (x > 0) {
+            res = 1;
+        }
         return res;
     }
 
     // If expression with block bodies
     pub fn test_if_expr_blocks(x: u256, y: u256) -> u256 {
-        var res: u256 = if (x > y) {
-            x - y
+        var res: u256 = 0;
+        if (x > y) {
+            res = x - y;
         } else {
-            y - x
-        };
+            res = y - x;
+        }
         return res;
     }
 
     // If expression with boolean result
     pub fn test_if_expr_bool(a: u256, b: u256) -> bool {
-        return if (a > b) true else false;
+        if (a > b) {
+            return true;
+        }
+        return false;
     }
 }

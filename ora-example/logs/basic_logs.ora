@@ -3,6 +3,8 @@
 // ==========================================
 // This file tests log declarations syntax
 
+contract BasicLogs {
+
 // Basic log declaration with parameters
 log Transfer(sender: address, recipient: address, amount: u256);
 
@@ -17,3 +19,5 @@ log TokenLocked(token_id: u256, until: u256);
 
 // Log with mixed types
 log MixedEvent(id: u256, name: string, active: bool, data: bytes);
+
+}

@@ -41,7 +41,7 @@ contract ErrorUnionSplit {
     // Forces ora.error.get_error for payload union
     pub fn catchPayload(x: u256) -> u256 {
         try {
-            let y: u256 = mayFailPayload(x);
+            let y: u256 = try mayFailPayload(x);
             return y;
         } catch (e) {
             let code: u256 = e;

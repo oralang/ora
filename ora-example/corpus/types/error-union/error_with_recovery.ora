@@ -13,7 +13,7 @@ contract ErrorWithRecovery {
     pub fn lookup(key: u256) -> !u256 | LookupFailed {
         let val: u256 = cache[key];
         if (val == 0) {
-            return error LookupFailed;
+            return LookupFailed;
         }
         return val;
     }
@@ -22,7 +22,7 @@ contract ErrorWithRecovery {
         let val: u256 = try lookup(key);
         let ts: u256 = timestamps[key];
         if (ts > 0 and std.block.timestamp() - ts > 3600) {
-            return error StaleData;
+            return StaleData;
         }
         return val;
     }
@@ -30,9 +30,9 @@ contract ErrorWithRecovery {
     // Recovery: fallback to default_value on any error
     pub fn lookup_or_default(key: u256) -> u256 {
         try {
-            let val: u256 = lookup(key);
+            let val: u256 = try lookup(key);
             return val;
-        } catch |e| {
+        } catch (e) {
             return default_value;
         }
     }
@@ -40,9 +40,9 @@ contract ErrorWithRecovery {
     // Recovery: fallback to a computed value
     pub fn lookup_or_compute(key: u256) -> u256 {
         try {
-            let val: u256 = fresh_lookup(key);
+            let val: u256 = try fresh_lookup(key);
             return val;
-        } catch |e| {
+        } catch (e) {
             return key * 2 + 1;
         }
     }

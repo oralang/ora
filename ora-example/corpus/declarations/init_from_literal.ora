@@ -20,7 +20,7 @@ contract InitFromLiteral {
         let word_val: u256 = 0xFFFF;
         let selector: u32 = 0xA9059CBB;
         let mask: u256 = 0xFFFFFFFFFFFFFFFF;
-        let addr_sized: u256 = 0x0000000000000000000000000000000000000001;
+        let addr_sized: u256 = 0x00000000000000000000000000000000000000000000000000000001;
         return byte_val;
     }
 

@@ -58,7 +58,7 @@ contract ForBreak {
     // Early exit search pattern
     pub fn test_search_pattern() -> u256 {
         var found: u256 = 0;
-        var arr: [5]u256 = [10, 20, 42, 50, 60];
+        var arr: [u256; 5] = [10, 20, 42, 50, 60];
         for (arr) |val, _| {
             if (val == 42) {
                 found = 1;

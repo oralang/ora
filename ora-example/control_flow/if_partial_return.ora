@@ -15,7 +15,7 @@ contract PartialReturnInTry {
 
     pub fn partial_return(x: u256) -> u256 {
         try {
-            var y: u256 = mayFail(x);
+            var y: u256 = try mayFail(x);
             if (y == 0) {
                 return 1;
             }

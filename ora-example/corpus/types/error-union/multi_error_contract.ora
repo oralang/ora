@@ -35,19 +35,19 @@ contract MultiErrorContract {
 
     fn require_owner() -> !void | NotOwner {
         if (std.msg.sender() != owner) {
-            return error NotOwner;
+            return NotOwner;
         }
     }
 
     fn require_operator() -> !void | NotOperator {
         if (!operators[std.msg.sender()]) {
-            return error NotOperator;
+            return NotOperator;
         }
     }
 
     fn require_not_paused() -> !void | Paused {
         if (is_paused) {
-            return error Paused;
+            return Paused;
         }
     }
 
@@ -75,10 +75,10 @@ contract MultiErrorContract {
         try require_not_paused();
 
         if (id == 0) {
-            return error InvalidId;
+            return InvalidId;
         }
         if (items[id] != 0) {
-            return error AlreadyExists;
+            return AlreadyExists;
         }
 
         items[id] = value;
@@ -92,13 +92,13 @@ contract MultiErrorContract {
     pub fn get_item(id: u256) -> !u256 | NotFound | Expired {
         let value: u256 = items[id];
         if (value == 0) {
-            return error NotFound;
+            return NotFound;
         }
 
         let dl: u256 = item_deadlines[id];
         let now: u256 = std.block.timestamp();
         if (dl > 0 and now > dl) {
-            return error Expired(dl, now);
+            return Expired(dl, now);
         }
 
         return value;
@@ -119,7 +119,7 @@ contract MultiErrorContract {
 
         let value: u256 = items[id];
         if (value == 0) {
-            return error NotFound;
+            return NotFound;
         }
 
         items[id] = 0;
@@ -148,18 +148,18 @@ contract MultiErrorContract {
 
     pub fn safe_get_item(id: u256) -> u256 {
         try {
-            let value: u256 = get_item(id);
+            let value: u256 = try get_item(id);
             return value;
-        } catch |e| {
+        } catch (e) {
             return 0;
         }
     }
 
     pub fn safe_create_item(id: u256, value: u256, deadline: u256) -> bool {
         try {
-            let _count: u256 = create_item(id, value, deadline);
+            let _count: u256 = try create_item(id, value, deadline);
             return true;
-        } catch |e| {
+        } catch (e) {
             return false;
         }
     }

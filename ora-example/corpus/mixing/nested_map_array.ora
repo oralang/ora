@@ -27,14 +27,14 @@ contract NestedMapArray {
     pub fn count_granted(account: address, role: u256) -> u256 {
         let flags: [bool; 8] = permissions[account][role];
         let count: u256 = 0;
-        if flags[0] { count = count + 1; }
-        if flags[1] { count = count + 1; }
-        if flags[2] { count = count + 1; }
-        if flags[3] { count = count + 1; }
-        if flags[4] { count = count + 1; }
-        if flags[5] { count = count + 1; }
-        if flags[6] { count = count + 1; }
-        if flags[7] { count = count + 1; }
+        if (flags[0]) { count = count + 1; }
+        if (flags[1]) { count = count + 1; }
+        if (flags[2]) { count = count + 1; }
+        if (flags[3]) { count = count + 1; }
+        if (flags[4]) { count = count + 1; }
+        if (flags[5]) { count = count + 1; }
+        if (flags[6]) { count = count + 1; }
+        if (flags[7]) { count = count + 1; }
         return count;
     }
 }

@@ -18,7 +18,7 @@ contract ErrorUnionStruct {
     pub fn get_token_balance(token_id: u256) -> !TokenBalance | TokenNotFound {
         let amount: u256 = balances[token_id];
         if (amount == 0) {
-            return error TokenNotFound;
+            return TokenNotFound;
         }
         let tb: TokenBalance = TokenBalance {
             token_id: token_id,
@@ -31,7 +31,7 @@ contract ErrorUnionStruct {
     pub fn withdraw_token(token_id: u256, amount: u256) -> !TokenBalance | TokenNotFound | InsufficientTokenBalance {
         let tb: TokenBalance = try get_token_balance(token_id);
         if (amount > tb.amount) {
-            return error InsufficientTokenBalance(amount, tb.amount);
+            return InsufficientTokenBalance(amount, tb.amount);
         }
         let new_amount: u256 = tb.amount - amount;
         balances[token_id] = new_amount;
@@ -51,9 +51,9 @@ contract ErrorUnionStruct {
 
     pub fn safe_get_amount(token_id: u256) -> u256 {
         try {
-            let tb: TokenBalance = get_token_balance(token_id);
+            let tb: TokenBalance = try get_token_balance(token_id);
             return tb.amount;
-        } catch |e| {
+        } catch (e) {
             return 0;
         }
     }

@@ -1,9 +1,11 @@
+comptime const std = @import("std");
+
 contract NameRegistry {
     storage var names: map<address, string>;
     storage var owner: address;
 
     pub fn register(name: string) {
-        names[msg.sender] = name;
+        names[std.msg.sender] = name;
     }
 
     pub fn lookup(addr: address) -> string {
@@ -11,10 +13,10 @@ contract NameRegistry {
     }
 
     pub fn update(name: string) {
-        names[msg.sender] = name;
+        names[std.msg.sender] = name;
     }
 
     pub fn myName() -> string {
-        return names[msg.sender];
+        return names[std.msg.sender];
     }
 }

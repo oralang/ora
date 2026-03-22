@@ -14,17 +14,17 @@ contract TryCatchMultiple {
     pub fn get_item(id: u256) -> !u256 | NotFound | AccessDenied | Expired {
         let value: u256 = items[id];
         if (value == 0) {
-            return error NotFound;
+            return NotFound;
         }
 
         let item_owner: address = owners[id];
         if (item_owner != std.msg.sender()) {
-            return error AccessDenied;
+            return AccessDenied;
         }
 
         let exp: u256 = expiry[id];
         if (exp > 0 and exp < std.block.timestamp()) {
-            return error Expired;
+            return Expired;
         }
 
         return value;
@@ -32,9 +32,9 @@ contract TryCatchMultiple {
 
     pub fn safe_get_item(id: u256) -> u256 {
         try {
-            let value: u256 = get_item(id);
+            let value: u256 = try get_item(id);
             return value;
-        } catch |e| {
+        } catch (e) {
             // All errors handled uniformly here
             return 0;
         }

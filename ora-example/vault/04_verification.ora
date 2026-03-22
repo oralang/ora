@@ -37,7 +37,7 @@ contract Vault {
     {
         let sender: NonZeroAddress = std.msg.sender();
         let current: u256 = balances[sender];
-        if (current < amount) return error InsufficientBalance(amount, current);
+        if (current < amount) { return InsufficientBalance(amount, current); }
         balances[sender] = current - amount;
         totalDeposits -= amount;
         spec_sum -= amount;

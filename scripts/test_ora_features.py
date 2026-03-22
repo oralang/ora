@@ -143,6 +143,11 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     if return_code is not None and return_code != 0:
         has_error = True
 
+    # Files without a contract declaration will fail at ABI generation (MissingContract)
+    # even if --emit-mlir succeeds. Detect this for expected-failure files.
+    if not has_error and not has_contract_decl and expected_failure:
+        has_error = True
+
     # Allow empty-module outputs (no contracts/functions) as success only when
     # compilation succeeded and the file is not an expected-fail fixture.
     if has_error and return_code == 0 and not expected_failure:

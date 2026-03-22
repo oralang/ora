@@ -34,7 +34,7 @@ contract RegionAsTypeAttribute {
 
     // Type system distinguishes between same base type, different regions
     pub fn testRegionDistinction() {
-        storage var storage_val: u256 = 100;
+        storage_counter = 100;
         memory var memory_val: u256 = 200;
         
         // These are different types even though base type is same

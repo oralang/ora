@@ -45,7 +45,7 @@ contract MixedWidthComparison {
         let wy: u256 = y;
         let c1: bool = wx < wy;
         let c2: bool = wy < z;
-        let res: bool = c1 & c2;
+        let res: bool = c1 && c2;
         return res;
     }
 

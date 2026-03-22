@@ -11,7 +11,7 @@ contract ErrorInLoop {
     pub fn validate_entry(id: u256) -> !u256 | InvalidEntry {
         let val: u256 = entries[id];
         if (val == 0) {
-            return error InvalidEntry;
+            return InvalidEntry;
         }
         return val;
     }
@@ -24,10 +24,10 @@ contract ErrorInLoop {
 
         while (i < count) {
             try {
-                let val: u256 = validate_entry(i);
+                let val: u256 = try validate_entry(i);
                 sum += val;
                 valid += 1;
-            } catch |e| {
+            } catch (e) {
                 // Skip invalid entries
             }
             i += 1;

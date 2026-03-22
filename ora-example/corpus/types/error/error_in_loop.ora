@@ -3,7 +3,7 @@
 error ProcessingError;
 
 contract ErrorInLoop {
-    storage results: map<u256, u256>;
+    storage var results: map<u256, u256>;
 
     pub fn validate_item(id: u256) -> !u256 | ProcessingError {
         if (id == 0) {
@@ -13,8 +13,8 @@ contract ErrorInLoop {
     }
 
     pub fn process_range(count: u256) -> !u256 | ProcessingError {
-        let mut i: u256 = 1;
-        let mut total: u256 = 0;
+        var i: u256 = 1;
+        var total: u256 = 0;
         while (i <= count) {
             let val: u256 = try validate_item(i);
             results[i] = val;

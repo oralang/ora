@@ -60,24 +60,10 @@ contract ErrorHandlingTest {
     pub fn safe_transfer(to: address, amount: u256) -> bool {
         try {
             // Attempt transfer
-            var transfer_result: bool = transfer(to, amount);
+            var transfer_result: bool = try transfer(to, amount);
             return transfer_result;
-        } catch (error) {
-            // Handle specific error types
-            switch (error) {
-                InsufficientBalance => {
-                    // Log insufficient balance
-                    return false;
-                },
-                InvalidAddress => {
-                    // Log invalid address
-                    return false;
-                },
-                else => {
-                    // Handle any other errors
-                    return false;
-                }
-            }
+        } catch (err) {
+            return false;
         }
     }
     
@@ -91,13 +77,12 @@ contract ErrorHandlingTest {
     pub fn batch_transfer(recipients: [address; 5], amounts: [u256; 5]) -> u256 {
         var success_count: u256 = 0;
         var failed_count: u256 = 0;
-        
-        for (recipients) |recipient, i| {
-            var amount: u256 = amounts[i];
-            
+        var i: u256 = 0;
+
+        while (i < 5) {
             // Try transfer and handle errors
             try {
-                var transfer_result: bool = transfer(recipient, amount);
+                var transfer_result: bool = try transfer(recipients[i], amounts[i]);
                 if (transfer_result) {
                     success_count += 1;
                 } else {
@@ -105,10 +90,10 @@ contract ErrorHandlingTest {
                 }
             } catch (err) {
                 failed_count += 1;
-                continue; // Skip to next iteration
             }
+            i += 1;
         }
-        
+
         // ABI return types are limited; return success_count for now.
         return success_count;
     }

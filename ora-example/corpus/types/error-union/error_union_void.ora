@@ -16,33 +16,33 @@ contract ErrorUnionVoid {
 
     pub fn pause() -> !void | NotAuthorized {
         if (std.msg.sender() != owner) {
-            return error NotAuthorized;
+            return NotAuthorized;
         }
         paused = true;
     }
 
     pub fn unpause() -> !void | NotAuthorized {
         if (std.msg.sender() != owner) {
-            return error NotAuthorized;
+            return NotAuthorized;
         }
         paused = false;
     }
 
     pub fn set_value(v: u256) -> !void | NotAuthorized | InvalidState {
         if (std.msg.sender() != owner) {
-            return error NotAuthorized;
+            return NotAuthorized;
         }
         if (paused) {
-            return error InvalidState;
+            return InvalidState;
         }
         value = v;
     }
 
     pub fn try_set_value(v: u256) -> bool {
         try {
-            set_value(v);
+            try set_value(v);
             return true;
-        } catch |e| {
+        } catch (e) {
             return false;
         }
     }

@@ -15,10 +15,10 @@ contract ErrorUnionBool {
 
     pub fn register(account: address) -> !bool | PermissionDenied | AlreadyExists {
         if (std.msg.sender() != owner) {
-            return error PermissionDenied;
+            return PermissionDenied;
         }
         if (registered[account]) {
-            return error AlreadyExists;
+            return AlreadyExists;
         }
         registered[account] = true;
         return true;
@@ -26,16 +26,16 @@ contract ErrorUnionBool {
 
     pub fn is_registered(account: address) -> !bool | PermissionDenied {
         if (std.msg.sender() != owner) {
-            return error PermissionDenied;
+            return PermissionDenied;
         }
         return registered[account];
     }
 
     pub fn safe_register(account: address) -> bool {
         try {
-            let res: bool = register(account);
+            let res: bool = try register(account);
             return res;
-        } catch |e| {
+        } catch (e) {
             return false;
         }
     }

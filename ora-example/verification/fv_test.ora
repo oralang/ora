@@ -61,7 +61,6 @@ contract FVTest {
             invariant(i >= 1)
             invariant(i <= n + 1)
             invariant(sum <= 5050)
-            decreases(n + 1 - i)
         {
             sum = sum + i;
             i = i + 1;

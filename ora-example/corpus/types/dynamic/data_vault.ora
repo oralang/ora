@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract DataVault {
     storage var entries: map<u256, bytes>;
     storage var owners: map<u256, address>;
@@ -6,7 +8,7 @@ contract DataVault {
     pub fn store(data: bytes) -> u256 {
         let id: u256 = next_id;
         entries[id] = data;
-        owners[id] = msg.sender;
+        owners[id] = std.msg.sender;
         next_id = id + 1;
         return id;
     }

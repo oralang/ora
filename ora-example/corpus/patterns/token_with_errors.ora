@@ -15,16 +15,11 @@ contract TokenWithErrors {
     log Transfer(from: address, to: address, amount: u256);
     log Approval(owner: address, spender: address, amount: u256);
 
-    pub fn init(initialSupply: u256) -> !bool | ZeroAmount {
-        if (initialSupply == 0) {
-            return error ZeroAmount;
-        }
-
+    pub fn init(initialSupply: u256) {
         let deployer: NonZeroAddress = std.msg.sender();
         totalSupply = initialSupply;
         balances[deployer] = initialSupply;
         log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
-        return true;
     }
 
     pub fn getTotalSupply() -> u256 {
@@ -39,14 +34,14 @@ contract TokenWithErrors {
         requires(balances[to] <= std.constants.U256_MAX - amount)
     {
         if (amount == 0) {
-            return error ZeroAmount;
+            return ZeroAmount;
         }
 
         let sender: NonZeroAddress = std.msg.sender();
         let senderBalance: u256 = balances[sender];
 
         if (senderBalance < amount) {
-            return error InsufficientBalance(amount, senderBalance);
+            return InsufficientBalance(amount, senderBalance);
         }
 
         balances[sender] = senderBalance - amount;
@@ -67,19 +62,19 @@ contract TokenWithErrors {
         requires(balances[to] <= std.constants.U256_MAX - amount)
     {
         if (amount == 0) {
-            return error ZeroAmount;
+            return ZeroAmount;
         }
 
         let spender: NonZeroAddress = std.msg.sender();
 
         let currentAllowance: u256 = allowances[from][spender];
         if (currentAllowance < amount) {
-            return error InsufficientAllowance(amount, currentAllowance);
+            return InsufficientAllowance(amount, currentAllowance);
         }
 
         let senderBalance: u256 = balances[from];
         if (senderBalance < amount) {
-            return error InsufficientBalance(amount, senderBalance);
+            return InsufficientBalance(amount, senderBalance);
         }
 
         allowances[from][spender] = currentAllowance - amount;

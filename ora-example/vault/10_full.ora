@@ -8,6 +8,7 @@ comptime const std = @import("std");
 contract Vault {
     storage var totalDeposits: u256 = 0;
     storage var balances: map<address, u256>;
+    storage var reentrancyGuard: u256 = 0;
 
     ghost storage spec_sum: u256 = 0;
 
@@ -22,11 +23,11 @@ contract Vault {
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
-        @lock(totalDeposits);
+        @lock(reentrancyGuard);
         balances[sender] += amount;
         totalDeposits += amount;
         spec_sum += amount;
-        @unlock(totalDeposits);
+        @unlock(reentrancyGuard);
         log Deposit(sender, amount);
     }
 
@@ -37,16 +38,16 @@ contract Vault {
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
-        @lock(totalDeposits);
+        @lock(reentrancyGuard);
         let current: u256 = balances[sender];
         if (current < amount) {
-            @unlock(totalDeposits);
-            return error InsufficientBalance(amount, current);
+            @unlock(reentrancyGuard);
+            return InsufficientBalance(amount, current);
         }
         balances[sender] = current - amount;
         totalDeposits -= amount;
         spec_sum -= amount;
-        @unlock(totalDeposits);
+        @unlock(reentrancyGuard);
         log Withdrawal(sender, amount);
         return true;
     }

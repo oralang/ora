@@ -46,7 +46,7 @@ contract FeatureMaximizer {
     // Use named struct for now to proceed with AST
     storage let config: Config = Config { fee: 1, enabled: true };
 
-    fn init() {
+    pub fn init() {
         // Basic assignments and lvalues
         var i: u256 = 0;
         balances[OWNER] = 100;
@@ -91,8 +91,8 @@ contract FeatureMaximizer {
         counter += val;
 
         // Try/catch statement  
-        try { 
-            let try_result: !u256 = may_fail();
+        try {
+            let try_result: u256 = try may_fail();
             counter += try_result;
         } catch (e) {
             counter += 1;

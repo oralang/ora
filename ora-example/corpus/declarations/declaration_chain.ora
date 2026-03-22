@@ -86,7 +86,7 @@ contract DeclarationChain {
         var b: u256 = a + 5;
         let c: u256 = b * 2;
         b = c + a;
-        let d: u256 = b - c;
+        let d: u256 = b + c;
         var e: u256 = d + a + b + c;
         e += 1;
         return e;

@@ -5,7 +5,7 @@
 contract ForArray {
     // Iterate over array elements
     pub fn test_array_sum() -> u256 {
-        var arr: [5]u256 = [1, 2, 3, 4, 5];
+        var arr: [u256; 5] = [1, 2, 3, 4, 5];
         var sum: u256 = 0;
         for (arr) |val, _| {
             sum += val;
@@ -15,7 +15,7 @@ contract ForArray {
 
     // Iterate with index capture
     pub fn test_array_with_index() -> u256 {
-        var arr: [4]u256 = [10, 20, 30, 40];
+        var arr: [u256; 4] = [10, 20, 30, 40];
         var weighted_sum: u256 = 0;
         for (arr) |val, idx| {
             weighted_sum += val * idx;
@@ -25,7 +25,7 @@ contract ForArray {
 
     // Find max in array
     pub fn test_find_max() -> u256 {
-        var arr: [5]u256 = [3, 7, 2, 9, 4];
+        var arr: [u256; 5] = [3, 7, 2, 9, 4];
         var max: u256 = 0;
         for (arr) |val, _| {
             if (val > max) {
@@ -37,7 +37,7 @@ contract ForArray {
 
     // Count elements matching condition
     pub fn test_count_matching() -> u256 {
-        var arr: [6]u256 = [1, 5, 3, 8, 2, 7];
+        var arr: [u256; 6] = [1, 5, 3, 8, 2, 7];
         var count: u256 = 0;
         for (arr) |val, _| {
             if (val > 4) {

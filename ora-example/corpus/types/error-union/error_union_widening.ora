@@ -8,14 +8,14 @@ error ErrorC;
 contract ErrorUnionWidening {
     pub fn may_fail_a(x: u256) -> !u256 | ErrorA {
         if (x == 0) {
-            return error ErrorA;
+            return ErrorA;
         }
         return x;
     }
 
     pub fn may_fail_b(x: u256) -> !u256 | ErrorB {
         if (x > 1000) {
-            return error ErrorB;
+            return ErrorB;
         }
         return x;
     }
@@ -27,7 +27,7 @@ contract ErrorUnionWidening {
         let a: u256 = try may_fail_a(x);
         let b: u256 = try may_fail_b(a);
         if (b > 500) {
-            return error ErrorC;
+            return ErrorC;
         }
         return b;
     }
@@ -40,9 +40,9 @@ contract ErrorUnionWidening {
 
     pub fn safe_combined(x: u256) -> u256 {
         try {
-            let res: u256 = combined(x);
+            let res: u256 = try combined(x);
             return res;
-        } catch |e| {
+        } catch (e) {
             return 0;
         }
     }
