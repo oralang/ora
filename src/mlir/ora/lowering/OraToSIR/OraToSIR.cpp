@@ -1595,6 +1595,23 @@ public:
                         continue;
                     }
 
+                    if (llvm::isa<sir::PtrType>(resultType) &&
+                        llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+                    {
+                        Value repl = b.create<sir::BitcastOp>(loc, resultType, input);
+                        castOp.getResult(0).replaceAllUsesWith(repl);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
+                        llvm::isa<sir::PtrType>(input.getType()))
+                    {
+                        castOp.getResult(0).replaceAllUsesWith(input);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
                     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
                     {
                         if (isNarrowErr(errType) && llvm::isa<mlir::IntegerType>(input.getType()))
