@@ -701,6 +701,7 @@ const CompilerAbiGenerator = struct {
     callable_ids: std.StringHashMap(void),
 
     global_structs: std.StringHashMap(CompilerNamedTypeRef),
+    global_bitfields: std.StringHashMap(CompilerNamedTypeRef),
     global_enums: std.StringHashMap(CompilerNamedTypeRef),
 
     contract_count: usize,
@@ -715,6 +716,7 @@ const CompilerAbiGenerator = struct {
             .type_lookup = std.StringHashMap(usize).init(allocator),
             .callable_ids = std.StringHashMap(void).init(allocator),
             .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
+            .global_bitfields = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_enums = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .contract_count = 0,
             .primary_contract_name = null,
@@ -735,6 +737,7 @@ const CompilerAbiGenerator = struct {
         self.type_lookup.deinit();
         self.callable_ids.deinit();
         self.global_structs.deinit();
+        self.global_bitfields.deinit();
         self.global_enums.deinit();
     }
 
@@ -798,6 +801,11 @@ const CompilerAbiGenerator = struct {
                     .Struct => |struct_item| {
                         if (!self.global_structs.contains(struct_item.name)) {
                             try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = item_id });
+                        }
+                    },
+                    .Bitfield => |bitfield_item| {
+                        if (!self.global_bitfields.contains(bitfield_item.name)) {
+                            try self.global_bitfields.put(bitfield_item.name, .{ .module_id = module_id, .item_id = item_id });
                         }
                     },
                     .Enum => |enum_item| {
@@ -1147,10 +1155,12 @@ const CompilerAbiGenerator = struct {
                 return self.resolveTupleType(ctx, elements);
             },
             .struct_ => |named| return self.resolveNamedStructType(ctx, named.name),
+            .bitfield => |named| return self.resolveNamedBitfieldType(ctx, named.name),
             .enum_ => |named| return self.resolveNamedEnumType(ctx, named.name),
             .error_union => |error_union| return self.resolveSemaType(ctx, error_union.payload_type.*, &.{}),
             .named => |named| {
                 if (self.global_structs.contains(named.name)) return self.resolveNamedStructType(ctx, named.name);
+                if (self.global_bitfields.contains(named.name)) return self.resolveNamedBitfieldType(ctx, named.name);
                 if (self.global_enums.contains(named.name)) return self.resolveNamedEnumType(ctx, named.name);
                 if (std.mem.eql(u8, named.name, "bool")) return self.resolveSemaType(ctx, .bool, &.{} );
                 if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{} );
@@ -1363,6 +1373,46 @@ const CompilerAbiGenerator = struct {
         const type_id = try self.ensureTypeNode(&node);
         const idx = self.type_lookup.get(type_id).?;
         return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveNamedBitfieldType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        name: []const u8,
+    ) anyerror!ResolvedType {
+        const base = try self.resolveBitfieldBaseType(ctx, name);
+
+        var node = AbiTypeNode{
+            .kind = .primitive,
+            .allocator = self.allocator,
+            .name = name,
+            .wire_type = try self.allocator.dupe(u8, base.wire_type),
+            .ui_label = name,
+            .ui_widget = defaultWidgetForWireType(base.wire_type),
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveBitfieldBaseType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        name: []const u8,
+    ) anyerror!ResolvedType {
+        if (ctx.typecheck.instantiatedBitfieldByName(name)) |instantiated| {
+            if (instantiated.base_type) |base_type| return self.resolveSemaType(ctx, base_type, &.{});
+            return self.resolveSemaType(ctx, .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, &.{});
+        }
+
+        const ref = self.global_bitfields.get(name) orelse return error.UnknownStructType;
+        const owner_ctx = try self.moduleContext(ref.module_id);
+        const bitfield_item = owner_ctx.file.item(ref.item_id).Bitfield;
+        if (bitfield_item.base_type) |type_expr| {
+            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, type_expr);
+            return self.resolveSemaType(owner_ctx, field_type, &.{});
+        }
+        return self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, &.{});
     }
 
     fn resolveRefinementType(

@@ -901,7 +901,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
             return switch (ty) {
-                .bool, .address, .integer, .enum_ => 1,
+                .bool, .address, .integer, .enum_, .bitfield => 1,
                 .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
                 .tuple => |elements| blk: {
                     var total: usize = 0;
@@ -937,6 +937,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             return switch (ty) {
                 .bool, .address, .string, .bytes, .integer, .enum_ => abi_support.canonicalAbiType(self.allocator, ty),
+                .bitfield => |named| @This().abiLayoutForNamedBitfield(self, named.name),
                 .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
                 .array => |array| blk: {
                     const element = try @This().abiLayoutForType(self, array.element_type.*);
@@ -971,11 +972,29 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (self.typecheck.instantiatedEnumByName(name)) |_| {
                 return self.allocator.dupe(u8, "uint32");
             }
+            if (self.typecheck.instantiatedBitfieldByName(name)) |bitfield| {
+                return @This().abiLayoutForBitfieldBaseType(self, bitfield.base_type);
+            }
             const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
             return switch (self.file.item(item_id).*) {
                 .Enum => self.allocator.dupe(u8, "uint32"),
+                .Bitfield => |bitfield| @This().abiLayoutForBitfieldBaseTypeExpr(self, bitfield.base_type),
                 else => @This().abiLayoutForNamedStruct(self, name),
             };
+        }
+
+        fn abiLayoutForNamedBitfield(self: *Lowerer, name: []const u8) anyerror![]const u8 {
+            return @This().abiLayoutForNamedType(self, name);
+        }
+
+        fn abiLayoutForBitfieldBaseType(self: *Lowerer, base_type: ?sema.Type) anyerror![]const u8 {
+            if (base_type) |resolved| return @This().abiLayoutForType(self, resolved);
+            return self.allocator.dupe(u8, "uint256");
+        }
+
+        fn abiLayoutForBitfieldBaseTypeExpr(self: *Lowerer, base_type: ?ast.TypeExprId) anyerror![]const u8 {
+            if (base_type) |type_expr| return @This().abiLayoutForTypeExpr(self, type_expr);
+            return self.allocator.dupe(u8, "uint256");
         }
 
         fn abiLayoutForNamedStruct(self: *Lowerer, name: []const u8) anyerror![]const u8 {
@@ -1010,9 +1029,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn staticAbiWordCountForNamedType(self: *Lowerer, name: []const u8) ?usize {
             if (self.typecheck.instantiatedEnumByName(name)) |_| return 1;
+            if (self.typecheck.instantiatedBitfieldByName(name)) |_| return 1;
             const item_id = self.item_index.lookup(name) orelse return null;
             return switch (self.file.item(item_id).*) {
                 .Enum => 1,
+                .Bitfield => 1,
                 else => @This().staticAbiWordCountForNamedStruct(self, name),
             };
         }

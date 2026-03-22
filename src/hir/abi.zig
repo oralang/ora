@@ -9,6 +9,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
         .string => allocator.dupe(u8, "string"),
         .bytes => allocator.dupe(u8, "bytes"),
         .enum_ => allocator.dupe(u8, "uint32"),
+        .bitfield => allocator.dupe(u8, "uint256"),
         .integer => |integer| blk: {
             const spelling = integer.spelling orelse "u256";
             if (std.mem.eql(u8, spelling, "u256")) break :blk allocator.dupe(u8, "uint256");
@@ -50,6 +51,7 @@ pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const
     return switch (ty) {
         .tuple => allocator.dupe(u8, "tuple"),
         .anonymous_struct => allocator.dupe(u8, "tuple"),
+        .bitfield => allocator.dupe(u8, "uint256"),
         .struct_, .contract => allocator.dupe(u8, "tuple"),
         else => canonicalAbiType(allocator, ty),
     };
@@ -57,7 +59,7 @@ pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const
 
 pub fn staticAbiWordCount(ty: sema.Type) ?usize {
     return switch (ty) {
-        .bool, .address, .integer, .enum_ => 1,
+        .bool, .address, .integer, .enum_, .bitfield => 1,
         .refinement => |refinement| staticAbiWordCount(refinement.base_type.*),
         .tuple => |elements| blk: {
             var total: usize = 0;
