@@ -198,6 +198,39 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAbiEncodeOp : public OpConversionPattern<ora::AbiEncodeOp>
+        {
+        public:
+            using OpConversionPattern<ora::AbiEncodeOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AbiEncodeOp op,
+                typename ora::AbiEncodeOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertExternalCallOp : public OpConversionPattern<ora::ExternalCallOp>
+        {
+        public:
+            using OpConversionPattern<ora::ExternalCallOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::ExternalCallOp op,
+                typename ora::ExternalCallOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertAbiDecodeOp : public OpConversionPattern<ora::AbiDecodeOp>
+        {
+        public:
+            using OpConversionPattern<ora::AbiDecodeOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AbiDecodeOp op,
+                typename ora::AbiDecodeOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertContractOp : public OpConversionPattern<ora::ContractOp>
         {
         public:
@@ -220,14 +253,14 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        class ConvertWhileOp : public OpConversionPattern<ora::WhileOp>
+        class ConvertErrorReturnOp : public OpConversionPattern<ora::ErrorReturnOp>
         {
         public:
             using OpConversionPattern::OpConversionPattern;
 
             LogicalResult matchAndRewrite(
-                ora::WhileOp op,
-                typename ora::WhileOp::Adaptor adaptor,
+                ora::ErrorReturnOp op,
+                typename ora::ErrorReturnOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 
@@ -239,17 +272,6 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::IfOp op,
                 typename ora::IfOp::Adaptor adaptor,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class ConvertIsolatedIfOp : public OpConversionPattern<ora::IsolatedIfOp>
-        {
-        public:
-            using OpConversionPattern::OpConversionPattern;
-
-            LogicalResult matchAndRewrite(
-                ora::IsolatedIfOp op,
-                typename ora::IsolatedIfOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

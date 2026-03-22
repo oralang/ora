@@ -1,0 +1,40 @@
+// NonZeroAddress — parameter, comparison, storage
+
+comptime const std = @import("std");
+contract NonZeroBasic {
+    storage var owner: NonZeroAddress;
+    storage var admin: NonZeroAddress;
+
+    pub fn setOwner(addr: NonZeroAddress) {
+        owner = addr;
+    }
+
+    pub fn getOwner() -> NonZeroAddress {
+        return owner;
+    }
+
+    pub fn setAdmin(addr: NonZeroAddress) {
+        admin = addr;
+    }
+
+    pub fn getAdmin() -> NonZeroAddress {
+        return admin;
+    }
+
+    pub fn isOwner(addr: NonZeroAddress) -> bool {
+        return addr == owner;
+    }
+
+    pub fn isAdmin(addr: NonZeroAddress) -> bool {
+        return addr == admin;
+    }
+
+    pub fn ownerEqualsAdmin() -> bool {
+        return owner == admin;
+    }
+
+    pub fn senderIsOwner() -> bool {
+        let sender: NonZeroAddress = std.msg.sender();
+        return sender == owner;
+    }
+}

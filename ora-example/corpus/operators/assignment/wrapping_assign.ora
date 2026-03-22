@@ -1,0 +1,35 @@
+contract WrappingAssign {
+    storage var val: u256;
+    storage var small: u8;
+
+    pub fn wrapping_add_assign_u256(x: u256) {
+        val +%= x;
+    }
+
+    pub fn wrapping_sub_assign_u256(x: u256) {
+        val -%= x;
+    }
+
+    pub fn wrapping_mul_assign_u256(x: u256) {
+        val *%= x;
+    }
+
+    pub fn wrapping_add_assign_u8(x: u8) {
+        small +%= x;
+    }
+
+    pub fn wrapping_sub_assign_u8(x: u8) {
+        small -%= x;
+    }
+
+    pub fn wrapping_mul_assign_u8(x: u8) {
+        small *%= x;
+    }
+
+    pub fn all_wrapping_sequence() {
+        val = 1;
+        val +%= 2;
+        val -%= 1;
+        val *%= 3;
+    }
+}

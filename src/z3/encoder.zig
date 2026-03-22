@@ -13,9 +13,28 @@ const std = @import("std");
 const z3 = @import("c.zig");
 const mlir = @import("mlir_c_api").c;
 const Context = @import("context.zig").Context;
+const mlir_helpers = @import("mlir_helpers.zig");
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    const SwitchCaseMetadata = struct {
+        case_kinds: []i64,
+        case_values: []i64,
+        range_starts: []i64,
+        range_ends: []i64,
+        default_case_index: ?i64,
+
+        fn deinit(self: *SwitchCaseMetadata, allocator: std.mem.Allocator) void {
+            allocator.free(self.case_kinds);
+            allocator.free(self.case_values);
+            allocator.free(self.range_starts);
+            allocator.free(self.range_ends);
+        }
+    };
+
+    const TupleValue = struct {
+        elements: []z3.Z3_ast,
+    };
     const CallSlotState = struct {
         name: []const u8,
         pre: z3.Z3_ast,
@@ -47,6 +66,8 @@ pub const Encoder = struct {
     value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Explicit MLIR value bindings (used for call summary argument substitution).
     value_bindings: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Local tuple element cache for ora.tuple_create / ora.tuple_extract.
+    tuple_values: std.AutoHashMap(u64, TupleValue),
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
@@ -65,6 +86,8 @@ pub const Encoder = struct {
     function_ops: std.StringHashMap(mlir.MlirOperation),
     /// Map from struct symbol name to comma-separated field names in declaration order.
     struct_field_names_csv: std.StringHashMap([]u8),
+    /// Map from struct symbol name to its declaration op for field type lookup.
+    struct_decl_ops: std.StringHashMap(mlir.MlirOperation),
     /// Calls already materialized for current-state summary (avoid double state transitions).
     materialized_calls: std.AutoHashMap(u64, void),
     /// Active summary inlining stack for recursion guard.
@@ -75,6 +98,10 @@ pub const Encoder = struct {
     pending_constraints: std.ArrayList(z3.Z3_ast),
     /// Pending safety obligations emitted during encoding (e.g., div-by-zero, overflow).
     pending_obligations: std.ArrayList(z3.Z3_ast),
+    /// Set once encoding drops or skips any verification-relevant information.
+    encoding_degraded: bool,
+    /// Human-readable reason for the first degradation encountered.
+    encoding_degraded_reason: ?[]const u8,
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Stack of active quantified variable bindings (innermost binding last).
@@ -90,6 +117,7 @@ pub const Encoder = struct {
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .tuple_values = std.AutoHashMap(u64, TupleValue).init(allocator),
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
@@ -99,11 +127,14 @@ pub const Encoder = struct {
             .tensor_dim_map = std.AutoHashMap(TensorDimKey, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .struct_field_names_csv = std.StringHashMap([]u8).init(allocator),
+            .struct_decl_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
             .pending_constraints = std.ArrayList(z3.Z3_ast){},
             .pending_obligations = std.ArrayList(z3.Z3_ast){},
+            .encoding_degraded = false,
+            .encoding_degraded_reason = null,
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
         };
@@ -115,6 +146,26 @@ pub const Encoder = struct {
 
     pub fn setVerifyState(self: *Encoder, enabled: bool) void {
         self.verify_state = enabled;
+    }
+
+    pub fn clearDegradation(self: *Encoder) void {
+        self.encoding_degraded = false;
+        self.encoding_degraded_reason = null;
+    }
+
+    pub fn isDegraded(self: *const Encoder) bool {
+        return self.encoding_degraded;
+    }
+
+    pub fn degradationReason(self: *const Encoder) ?[]const u8 {
+        return self.encoding_degraded_reason;
+    }
+
+    fn recordDegradation(self: *Encoder, reason: []const u8) void {
+        self.encoding_degraded = true;
+        if (self.encoding_degraded_reason == null) {
+            self.encoding_degraded_reason = reason;
+        }
     }
 
     pub fn resetFunctionState(self: *Encoder) void {
@@ -149,6 +200,11 @@ pub const Encoder = struct {
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
+        var tuple_it = self.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.elements);
+        }
+        self.tuple_values.clearRetainingCapacity();
         self.materialized_calls.clearRetainingCapacity();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -195,6 +251,11 @@ pub const Encoder = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.struct_field_names_csv.deinit();
+        var struct_decl_it = self.struct_decl_ops.iterator();
+        while (struct_decl_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.struct_decl_ops.deinit();
         self.materialized_calls.deinit();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -211,6 +272,11 @@ pub const Encoder = struct {
             self.allocator.free(binding.name);
         }
         self.quantified_bindings.deinit(self.allocator);
+        var tuple_it = self.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.elements);
+        }
+        self.tuple_values.deinit();
         self.value_map.deinit();
         self.value_map_old.deinit();
         self.value_bindings.deinit();
@@ -248,6 +314,10 @@ pub const Encoder = struct {
         const value = try self.allocator.dupe(u8, csv_builder.items);
         errdefer self.allocator.free(value);
         try self.struct_field_names_csv.put(key, value);
+
+        const decl_key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(decl_key);
+        try self.struct_decl_ops.put(decl_key, struct_op);
     }
 
     fn copyFunctionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
@@ -268,6 +338,13 @@ pub const Encoder = struct {
             const key = try self.allocator.dupe(u8, name);
             const value = try self.allocator.dupe(u8, entry.value_ptr.*);
             try self.struct_field_names_csv.put(key, value);
+        }
+        var decl_it = other.struct_decl_ops.iterator();
+        while (decl_it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (self.struct_decl_ops.contains(name)) continue;
+            const key = try self.allocator.dupe(u8, name);
+            try self.struct_decl_ops.put(key, entry.value_ptr.*);
         }
     }
 
@@ -554,11 +631,15 @@ pub const Encoder = struct {
     }
 
     fn addConstraint(self: *Encoder, constraint: z3.Z3_ast) void {
-        self.pending_constraints.append(self.allocator, constraint) catch {};
+        self.pending_constraints.append(self.allocator, constraint) catch {
+            self.recordDegradation("failed to record SMT constraint");
+        };
     }
 
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
-        self.pending_obligations.append(self.allocator, obligation) catch {};
+        self.pending_obligations.append(self.allocator, obligation) catch {
+            self.recordDegradation("failed to record SMT obligation");
+        };
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
@@ -892,13 +973,14 @@ pub const Encoder = struct {
                 .Ge => z3.Z3_mk_str_le(self.context.ctx, rhs, lhs),
             };
         }
+        const coerced = self.coerceComparisonOperands(lhs, rhs);
         return switch (op) {
-            .Eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
-            .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
-            .Lt => z3.Z3_mk_bvult(self.context.ctx, lhs, rhs), // Unsigned less than
-            .Le => z3.Z3_mk_bvule(self.context.ctx, lhs, rhs), // Unsigned less than or equal
-            .Gt => z3.Z3_mk_bvugt(self.context.ctx, lhs, rhs), // Unsigned greater than
-            .Ge => z3.Z3_mk_bvuge(self.context.ctx, lhs, rhs), // Unsigned greater than or equal
+            .Eq => z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs)),
+            .Lt => z3.Z3_mk_bvult(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned less than
+            .Le => z3.Z3_mk_bvule(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned less than or equal
+            .Gt => z3.Z3_mk_bvugt(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than
+            .Ge => z3.Z3_mk_bvuge(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than or equal
         };
     }
 
@@ -1256,7 +1338,7 @@ pub const Encoder = struct {
 
             const lb_ast = try self.encodeValueWithMode(lower_bound, mode);
             const ub_ast = try self.encodeValueWithMode(upper_bound, mode);
-            const unsigned_cmp = self.getScfForUnsignedCmp(parent_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(parent_op);
             const lower_ok = if (unsigned_cmp)
                 z3.Z3_mk_bvuge(self.context.ctx, ast, lb_ast)
             else
@@ -1270,28 +1352,6 @@ pub const Encoder = struct {
         }
     }
 
-    fn getScfForUnsignedCmp(self: *Encoder, loop_op: mlir.MlirOperation) bool {
-        const printed = mlir.oraOperationPrintToString(loop_op);
-        defer if (printed.data != null) {
-            const mlir_c = @import("mlir_c_api");
-            mlir_c.freeStringRef(printed);
-        };
-
-        if (printed.data != null and printed.length > 0) {
-            const text = printed.data[0..printed.length];
-            if (std.mem.indexOf(u8, text, "unsignedCmp = true") != null) return true;
-            if (std.mem.indexOf(u8, text, "unsignedCmp = false") != null) return false;
-        }
-
-        const unsigned_attr = mlir.oraOperationGetAttributeByName(
-            loop_op,
-            mlir.oraStringRefCreate("unsignedCmp".ptr, "unsignedCmp".len),
-        );
-        if (mlir.oraAttributeIsNull(unsigned_attr)) return false;
-
-        _ = self;
-        return mlir.oraIntegerAttrGetValueSInt(unsigned_attr) != 0;
-    }
 
     fn encodeOperationResultWithMode(
         self: *Encoder,
@@ -1308,6 +1368,10 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "scf.if")) {
             return try self.encodeScfIfResult(mlir_op, result_index, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.switch_expr") or std.mem.eql(u8, op_name, "ora.switch")) {
+            return try self.encodeOraSwitchExprResult(mlir_op, result_index, mode);
         }
 
         if (std.mem.eql(u8, op_name, "scf.while") or
@@ -1345,9 +1409,58 @@ pub const Encoder = struct {
         if (num_operands < 1) return error.InvalidOperandCount;
         const condition_value = mlir.oraOperationGetOperand(mlir_op, 0);
         const condition = try self.encodeValueWithMode(condition_value, mode);
-        const then_expr = try self.extractIfYield(mlir_op, 0, result_index, mode);
-        const else_expr = try self.extractIfYield(mlir_op, 1, result_index, mode);
+        const then_expr = try self.extractRegionYield(mlir_op, 0, result_index, mode);
+        const else_expr = try self.extractRegionYield(mlir_op, 1, result_index, mode);
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
+    }
+
+    fn encodeOraSwitchExprResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        if (num_operands < 1) return error.InvalidOperandCount;
+
+        const scrutinee_value = mlir.oraOperationGetOperand(mlir_op, 0);
+        const scrutinee = try self.encodeValueWithMode(scrutinee_value, mode);
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(mlir_op));
+        var metadata = try self.getSwitchCaseMetadata(mlir_op, num_regions);
+        defer metadata.deinit(self.allocator);
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        const op_id = @intFromPtr(mlir_op.ptr);
+        var merged = try self.mkUndefValue(result_sort, "switch_expr", op_id);
+        var remaining = self.encodeBoolConstant(true);
+
+        var region_index = num_regions;
+        while (region_index > 0) {
+            region_index -= 1;
+
+            const branch_expr = (try self.extractRegionYield(mlir_op, @intCast(region_index), result_index, mode)) orelse merged;
+            const raw_predicate = try self.buildOraSwitchCasePredicate(
+                scrutinee,
+                metadata.case_kinds,
+                metadata.case_values,
+                metadata.range_starts,
+                metadata.range_ends,
+                region_index,
+            );
+            const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                remaining
+            else
+                self.encodeAnd(&.{ remaining, raw_predicate });
+            merged = self.encodeIte(effective_predicate, branch_expr, merged);
+
+            if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+            }
+        }
+
+        return merged;
     }
 
     fn encodeOperationOperandsWithMode(
@@ -1644,6 +1757,30 @@ pub const Encoder = struct {
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.add_wrapping") or
+            std.mem.eql(u8, op_name, "ora.sub_wrapping") or
+            std.mem.eql(u8, op_name, "ora.mul_wrapping"))
+        {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const arith_op = if (std.mem.eql(u8, op_name, "ora.add_wrapping"))
+                ArithmeticOp.Add
+            else if (std.mem.eql(u8, op_name, "ora.sub_wrapping"))
+                ArithmeticOp.Sub
+            else
+                ArithmeticOp.Mul;
+            return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.shl_wrapping") or
+            std.mem.eql(u8, op_name, "ora.shr_wrapping"))
+        {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            return if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
+                z3.Z3_mk_bvshl(self.context.ctx, operands[0], operands[1])
+            else
+                z3.Z3_mk_bvlshr(self.context.ctx, operands[0], operands[1]);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.power")) {
             if (operands.len < 2) return error.InvalidOperandCount;
             return try self.encodePowerOp(operands[0], operands[1]);
@@ -1721,7 +1858,9 @@ pub const Encoder = struct {
                 const value = self.coerceAstToSort(operands[2], value_sort);
                 const stored = self.encodeStore(operands[0], key, value);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {};
+                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {
+                    self.recordDegradation("failed to encode map store frame constraint");
+                };
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
                     const map_operand_id = @intFromPtr(map_operand.ptr);
@@ -1745,6 +1884,29 @@ pub const Encoder = struct {
                 if (num_results > 0) return stored;
                 return self.encodeBoolConstant(true);
             }
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tuple_create")) {
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results < 1) return error.UnsupportedOperation;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_id = @intFromPtr(result_value.ptr);
+            const elements = try self.allocator.dupe(z3.Z3_ast, operands);
+            try self.tuple_values.put(result_id, .{ .elements = elements });
+            return if (operands.len > 0) operands[0] else self.encodeBoolConstant(true);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tuple_extract")) {
+            const tuple_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+            const tuple_id = @intFromPtr(tuple_operand.ptr);
+            if (self.tuple_values.get(tuple_id)) |tuple| {
+                const index_attr = mlir.oraOperationGetAttributeByName(mlir_op, .{ .data = "index".ptr, .length = 5 });
+                if (!mlir.oraAttributeIsNull(index_attr)) {
+                    const index: usize = @intCast(mlir.oraIntegerAttrGetValueSInt(index_attr));
+                    if (index < tuple.elements.len) return tuple.elements[index];
+                }
+            }
+            return error.UnsupportedOperation;
         }
 
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
@@ -1844,6 +2006,10 @@ pub const Encoder = struct {
             return try self.encodeFuncCall(mlir_op, operands, mode);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.error.return")) {
+            return try self.encodeErrorReturnOp(operands, mlir_op);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.error.unwrap") or
             std.mem.eql(u8, op_name, "ora.error.ok") or
             std.mem.eql(u8, op_name, "ora.error.err") or
@@ -1876,12 +2042,67 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
+            if (operands.len >= 2 and mlir.oraOperationGetNumResults(mlir_op) >= 1) {
+                const field_name = self.getStringAttr(mlir_op, "field_name") orelse "field";
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_type = mlir.oraValueGetType(result_value);
+                const result_sort = try self.encodeMLIRType(result_type);
+                const source_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
+                const op_id = @intFromPtr(mlir_op.ptr);
+                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_field_update_{d}", .{op_id});
+                defer self.allocator.free(struct_var_name);
+                const struct_val = try self.mkVariable(struct_var_name, result_sort);
+                const field_sort = z3.Z3_get_sort(self.context.ctx, operands[1]);
+                const accessor = try self.applyFieldFunction(field_name, result_sort, field_sort, struct_val);
+                const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operands[1]);
+                self.addConstraint(eq);
+
+                const field_names_csv = self.lookupStructFieldNames(result_type) catch blk: {
+                    self.recordDegradation("failed to resolve struct field names for struct update");
+                    break :blk null;
+                };
+                if (field_names_csv) |csv| {
+                    var it = std.mem.splitScalar(u8, csv, ',');
+                    var field_index: usize = 0;
+                    while (it.next()) |part| : (field_index += 1) {
+                        const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, field_name)) continue;
+                        const unchanged_type = self.lookupStructFieldType(result_type, field_index) catch {
+                            self.recordDegradation("failed to resolve struct field type for struct update");
+                            continue;
+                        };
+                        if (mlir.oraTypeIsNull(unchanged_type)) {
+                            self.recordDegradation("missing struct field type metadata for struct update");
+                            continue;
+                        }
+                        const unchanged_sort = self.encodeMLIRType(unchanged_type) catch {
+                            self.recordDegradation("failed to encode unchanged struct field sort");
+                            continue;
+                        };
+                        const updated_accessor = self.applyFieldFunction(trimmed, result_sort, unchanged_sort, struct_val) catch {
+                            self.recordDegradation("failed to encode updated struct field accessor");
+                            continue;
+                        };
+                        const original_accessor = self.applyFieldFunction(trimmed, source_sort, unchanged_sort, operands[0]) catch {
+                            self.recordDegradation("failed to encode original struct field accessor");
+                            continue;
+                        };
+                        self.addConstraint(z3.Z3_mk_eq(self.context.ctx, updated_accessor, original_accessor));
+                    }
+                } else {
+                    self.recordDegradation("missing struct declaration metadata for struct update");
+                }
+                return struct_val;
+            }
+        }
+
         // control flow
         if (std.mem.eql(u8, op_name, "scf.if")) {
             if (operands.len >= 1) {
                 const condition = operands[0];
-                const then_expr = try self.extractIfYield(mlir_op, 0, 0, mode);
-                const else_expr = try self.extractIfYield(mlir_op, 1, 0, mode);
+                const then_expr = try self.extractRegionYield(mlir_op, 0, 0, mode);
+                const else_expr = try self.extractRegionYield(mlir_op, 1, 0, mode);
                 return try self.encodeControlFlow(op_name, condition, then_expr, else_expr);
             }
         }
@@ -2131,6 +2352,84 @@ pub const Encoder = struct {
         }
 
         return error.UnsupportedOperation;
+    }
+
+    fn encodeErrorReturnOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const success_type = mlir.oraErrorUnionTypeGetSuccessType(result_type);
+        const op_id = @intFromPtr(mlir_op.ptr);
+
+        if (!mlir.oraTypeIsNull(success_type)) {
+            const eu = try self.getErrorUnionSort(result_type, success_type);
+            const is_err = self.encodeBoolConstant(true);
+            const ok_val = try self.mkUndefValue(eu.ok_sort, "ok", op_id);
+            const err_val = if (operands.len >= 1)
+                try self.coerceAstToSortOrUndef(operands[0], eu.err_sort, "error_return", op_id)
+            else
+                try self.encodeErrorIdValue(mlir_op, eu.err_sort, op_id);
+            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, err_val });
+        }
+
+        const result_sort = try self.encodeMLIRType(result_type);
+        if (operands.len >= 1) {
+            return try self.coerceAstToSortOrUndef(operands[0], result_sort, "error_return", op_id);
+        }
+        return try self.encodeErrorIdValue(mlir_op, result_sort, op_id);
+    }
+
+    fn coerceAstToSortOrUndef(self: *Encoder, value: z3.Z3_ast, target_sort: z3.Z3_sort, prefix: []const u8, op_id: usize) EncodeError!z3.Z3_ast {
+        const value_sort = z3.Z3_get_sort(self.context.ctx, value);
+        if (value_sort == target_sort) return value;
+        return try self.mkUndefValue(target_sort, prefix, op_id);
+    }
+
+    fn encodeErrorIdValue(self: *Encoder, mlir_op: mlir.MlirOperation, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
+        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
+        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
+        if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) == z3.Z3_BV_SORT) {
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
+            return try self.encodeIntegerConstant(error_id, width);
+        }
+        return try self.mkUndefValue(target_sort, "error_id", op_id);
+    }
+
+    fn lookupErrorDeclId(self: *Encoder, op: mlir.MlirOperation, sym_name: []const u8) ?u256 {
+        var current_block = mlir.mlirOperationGetBlock(op);
+        while (!mlir.oraBlockIsNull(current_block)) {
+            const parent_op = mlir.mlirBlockGetParentOperation(current_block);
+            if (mlir.oraOperationIsNull(parent_op)) break;
+            const parent_block = mlir.mlirOperationGetBlock(parent_op);
+            if (mlir.oraBlockIsNull(parent_block)) {
+                current_block = current_block;
+                break;
+            }
+            current_block = parent_block;
+        }
+
+        var current = mlir.oraBlockGetFirstOperation(current_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const op_name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "ora.error.decl")) {
+                const candidate_name = self.getStringAttr(current, "sym_name") orelse "";
+                if (std.mem.eql(u8, candidate_name, sym_name)) {
+                    const attr = mlir.oraOperationGetAttributeByName(current, mlir.oraStringRefCreate("ora.error_id".ptr, "ora.error_id".len));
+                    if (!mlir.oraAttributeIsNull(attr)) {
+                        return @intCast(mlir.oraIntegerAttrGetValueSInt(attr));
+                    }
+                }
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
     }
 
     fn encodeFuncCall(self: *Encoder, mlir_op: mlir.MlirOperation, operands: []const z3.Z3_ast, mode: EncodeMode) EncodeError!z3.Z3_ast {
@@ -2802,7 +3101,9 @@ pub const Encoder = struct {
                 std.mem.eql(u8, op_name, "call") or
                 std.mem.eql(u8, op_name, "ora.assert"))
             {
-                _ = self.encodeOperation(op) catch {};
+                _ = self.encodeOperation(op) catch {
+                    self.recordDegradation("failed to encode state effect operation");
+                };
             }
         }
 
@@ -2904,7 +3205,9 @@ pub const Encoder = struct {
                     if (self.isArraySort(slot_sort)) {
                         const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));
                         const frame_id = @as(u64, @intCast(slot_idx)) ^ (call_id_u64 << 8);
-                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {};
+                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {
+                            self.recordDegradation("failed to encode call-state frame constraint");
+                        };
                     }
                 }
 
@@ -3067,7 +3370,9 @@ pub const Encoder = struct {
                 parent_key,
                 updated,
                 op_id +% @as(u64, @intCast(depth + 1)),
-            ) catch {};
+            ) catch {
+                self.recordDegradation("failed to encode nested map-store frame constraint");
+            };
         }
 
         if (self.global_map.getPtr(global_name)) |existing| {
@@ -3078,7 +3383,7 @@ pub const Encoder = struct {
         }
     }
 
-    fn extractIfYield(
+    fn extractRegionYield(
         self: *Encoder,
         mlir_op: mlir.MlirOperation,
         region_index: u32,
@@ -3098,7 +3403,7 @@ pub const Encoder = struct {
                 ""
             else
                 name_ref.data[0..name_ref.length];
-            if (std.mem.eql(u8, name, "scf.yield")) {
+            if (std.mem.eql(u8, name, "scf.yield") or std.mem.eql(u8, name, "ora.yield")) {
                 const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
                 if (num_operands > result_index) {
                     const value = mlir.oraOperationGetOperand(current, result_index);
@@ -3109,6 +3414,133 @@ pub const Encoder = struct {
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
+    }
+
+    fn getSwitchCaseAttrValues(self: *Encoder, op: mlir.MlirOperation, name: []const u8) EncodeError![]i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return try self.allocator.alloc(i64, 0);
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        var values = try self.allocator.alloc(i64, count);
+        for (0..count) |i| {
+            values[i] = mlir.oraIntegerAttrGetValueSInt(mlir.oraArrayAttrGetElement(attr, i));
+        }
+        return values;
+    }
+
+    fn getSwitchDefaultCaseIndex(_: *Encoder, op: mlir.MlirOperation) ?i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("default_case_index".ptr, "default_case_index".len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraIntegerAttrGetValueSInt(attr);
+    }
+
+    fn getSwitchCaseMetadata(self: *Encoder, op: mlir.MlirOperation, num_regions: usize) EncodeError!SwitchCaseMetadata {
+        var metadata = SwitchCaseMetadata{
+            .case_kinds = try self.allocator.alloc(i64, num_regions),
+            .case_values = try self.allocator.alloc(i64, num_regions),
+            .range_starts = try self.allocator.alloc(i64, num_regions),
+            .range_ends = try self.allocator.alloc(i64, num_regions),
+            .default_case_index = null,
+        };
+        errdefer metadata.deinit(self.allocator);
+
+        @memset(metadata.case_kinds, 0);
+        @memset(metadata.case_values, 0);
+        @memset(metadata.range_starts, 0);
+        @memset(metadata.range_ends, 0);
+
+        const attr_case_kinds = try self.getSwitchCaseAttrValues(op, "case_kinds");
+        defer self.allocator.free(attr_case_kinds);
+        const attr_case_values = try self.getSwitchCaseAttrValues(op, "case_values");
+        defer self.allocator.free(attr_case_values);
+        const attr_range_starts = try self.getSwitchCaseAttrValues(op, "range_starts");
+        defer self.allocator.free(attr_range_starts);
+        const attr_range_ends = try self.getSwitchCaseAttrValues(op, "range_ends");
+        defer self.allocator.free(attr_range_ends);
+        const attr_default = self.getSwitchDefaultCaseIndex(op);
+
+        if (attr_case_kinds.len >= num_regions) {
+            @memcpy(metadata.case_kinds, attr_case_kinds[0..num_regions]);
+            if (attr_case_values.len >= num_regions) @memcpy(metadata.case_values, attr_case_values[0..num_regions]);
+            if (attr_range_starts.len >= num_regions) @memcpy(metadata.range_starts, attr_range_starts[0..num_regions]);
+            if (attr_range_ends.len >= num_regions) @memcpy(metadata.range_ends, attr_range_ends[0..num_regions]);
+            metadata.default_case_index = attr_default;
+            return metadata;
+        }
+
+        try self.parseSwitchCaseMetadataFromPrint(op, &metadata);
+        return metadata;
+    }
+
+    fn parseSwitchCaseMetadataFromPrint(self: *Encoder, op: mlir.MlirOperation, metadata: *SwitchCaseMetadata) EncodeError!void {
+        const printed = mlir.oraOperationPrintToString(op);
+        defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
+        if (printed.data == null or printed.length == 0) return error.UnsupportedOperation;
+
+        var case_index: usize = 0;
+        var lines = std.mem.splitScalar(u8, printed.data[0..printed.length], '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "case ")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                const body = trimmed["case ".len..];
+                const arrow_index = std.mem.indexOf(u8, body, "=>") orelse continue;
+                const pattern = std.mem.trim(u8, body[0..arrow_index], " \t");
+                if (std.mem.indexOf(u8, pattern, "...")) |range_index| {
+                    metadata.case_kinds[case_index] = 1;
+                    metadata.range_starts[case_index] = try self.parseSwitchPatternInt(pattern[0..range_index]);
+                    metadata.range_ends[case_index] = try self.parseSwitchPatternInt(pattern[range_index + 3 ..]);
+                } else {
+                    metadata.case_kinds[case_index] = 0;
+                    metadata.case_values[case_index] = try self.parseSwitchPatternInt(pattern);
+                }
+                case_index += 1;
+            } else if (std.mem.startsWith(u8, trimmed, "else =>")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                metadata.case_kinds[case_index] = 2;
+                metadata.default_case_index = @intCast(case_index);
+                case_index += 1;
+            }
+        }
+
+        if (case_index < metadata.case_kinds.len) return error.UnsupportedOperation;
+    }
+
+    fn parseSwitchPatternInt(_: *Encoder, text: []const u8) EncodeError!i64 {
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (std.mem.eql(u8, trimmed, "true")) return 1;
+        if (std.mem.eql(u8, trimmed, "false")) return 0;
+        return std.fmt.parseInt(i64, trimmed, 10) catch error.UnsupportedOperation;
+    }
+
+    fn buildOraSwitchCasePredicate(
+        self: *Encoder,
+        scrutinee: z3.Z3_ast,
+        case_kinds: []const i64,
+        case_values: []const i64,
+        range_starts: []const i64,
+        range_ends: []const i64,
+        case_index: usize,
+    ) EncodeError!z3.Z3_ast {
+        if (case_index >= case_kinds.len) return error.UnsupportedOperation;
+        const sort = z3.Z3_get_sort(self.context.ctx, scrutinee);
+        return switch (case_kinds[case_index]) {
+            0 => blk: {
+                if (case_index >= case_values.len) return error.UnsupportedOperation;
+                const case_value = try self.encodeScalarValueForSort(case_values[case_index], sort);
+                break :blk self.encodeComparisonOp(.Eq, scrutinee, case_value);
+            },
+            1 => blk: {
+                if (case_index >= range_starts.len or case_index >= range_ends.len) return error.UnsupportedOperation;
+                const start_value = try self.encodeScalarValueForSort(range_starts[case_index], sort);
+                const end_value = try self.encodeScalarValueForSort(range_ends[case_index], sort);
+                const lower = self.encodeComparisonOp(.Ge, scrutinee, start_value);
+                const upper = self.encodeComparisonOp(.Le, scrutinee, end_value);
+                break :blk self.encodeAnd(&.{ lower, upper });
+            },
+            2 => self.encodeBoolConstant(true),
+            else => error.UnsupportedOperation,
+        };
     }
 
     fn getOperationName(_: *Encoder, op: mlir.MlirOperation) mlir.MlirStringRef {
@@ -3122,6 +3554,76 @@ pub const Encoder = struct {
         const value = mlir.oraStringAttrGetValue(attr);
         if (value.data == null or value.length == 0) return null;
         return value.data[0..value.length];
+    }
+
+    const MlirPrintCollector = struct {
+        allocator: std.mem.Allocator,
+        buffer: std.ArrayList(u8),
+    };
+
+    fn printMlirChunk(value: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
+        const collector: *MlirPrintCollector = @ptrCast(@alignCast(user_data orelse return));
+        if (value.data == null or value.length == 0) return;
+        collector.buffer.appendSlice(collector.allocator, value.data[0..value.length]) catch {};
+    }
+
+    fn printMlirTypeOwned(self: *Encoder, ty: mlir.MlirType) ![]u8 {
+        var collector = MlirPrintCollector{
+            .allocator = self.allocator,
+            .buffer = std.ArrayList(u8){},
+        };
+        errdefer collector.buffer.deinit(self.allocator);
+        mlir.mlirTypePrint(ty, printMlirChunk, &collector);
+        return try collector.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn printMlirAttributeOwned(self: *Encoder, attr: mlir.MlirAttribute) ![]u8 {
+        var collector = MlirPrintCollector{
+            .allocator = self.allocator,
+            .buffer = std.ArrayList(u8){},
+        };
+        errdefer collector.buffer.deinit(self.allocator);
+        mlir.mlirAttributePrint(attr, printMlirChunk, &collector);
+        return try collector.buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn parseStructTypeName(type_text: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
+        const prefix = "!ora.struct<";
+        if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
+            return null;
+        }
+        const inner = std.mem.trim(u8, trimmed[prefix.len .. trimmed.len - 1], " \t\n\r\"");
+        if (inner.len == 0) return null;
+        return inner;
+    }
+
+    fn lookupStructFieldNames(self: *Encoder, ty: mlir.MlirType) !?[]const u8 {
+        const type_text = try self.printMlirTypeOwned(ty);
+        defer self.allocator.free(type_text);
+        const struct_name = parseStructTypeName(type_text) orelse return null;
+        return self.struct_field_names_csv.get(struct_name);
+    }
+
+    fn lookupStructFieldType(self: *Encoder, ty: mlir.MlirType, index: usize) !mlir.MlirType {
+        const type_text = try self.printMlirTypeOwned(ty);
+        defer self.allocator.free(type_text);
+        const struct_name = parseStructTypeName(type_text) orelse return .{ .ptr = null };
+        const struct_decl = self.struct_decl_ops.get(struct_name) orelse return .{ .ptr = null };
+        const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+        if (mlir.oraAttributeIsNull(field_types_attr)) return .{ .ptr = null };
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(field_types_attr));
+        if (index >= count) return .{ .ptr = null };
+        const field_type_attr = mlir.oraArrayAttrGetElement(field_types_attr, index);
+        if (mlir.oraAttributeIsNull(field_type_attr)) return .{ .ptr = null };
+        const field_type_text = try self.printMlirAttributeOwned(field_type_attr);
+        defer self.allocator.free(field_type_text);
+        var type_slice = std.mem.trim(u8, field_type_text, " \t\n\r");
+        const type_prefix = "type<";
+        if (std.mem.startsWith(u8, type_slice, type_prefix) and type_slice.len > type_prefix.len and type_slice[type_slice.len - 1] == '>') {
+            type_slice = type_slice[type_prefix.len .. type_slice.len - 1];
+        }
+        return mlir.mlirTypeParseGet(mlir.mlirTypeGetContext(ty), mlir.oraStringRefCreate(type_slice.ptr, type_slice.len));
     }
 
     fn resolveFieldNameForIndex(self: *Encoder, field_names_csv: ?[]const u8, index: usize) ![]u8 {
@@ -3155,6 +3657,18 @@ pub const Encoder = struct {
 
     pub fn coerceBoolean(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {
         return self.coerceToBool(ast);
+    }
+
+    pub fn encodeScalarValueForSort(self: *Encoder, value: i64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (kind == z3.Z3_BOOL_SORT) {
+            return self.encodeBoolConstant(value != 0);
+        }
+        if (kind == z3.Z3_BV_SORT) {
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+            return self.encodeIntegerConstant(self.normalizeSignedIntToWidth(value, width), width);
+        }
+        return error.UnsupportedOperation;
     }
 
     fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) z3.Z3_sort {
@@ -3457,8 +3971,9 @@ pub const Encoder = struct {
             return error.InvalidOperandCount;
         }
 
-        const lhs = operands[0];
-        const rhs = operands[1];
+        const coerced = self.coerceComparisonOperands(operands[0], operands[1]);
+        const lhs = coerced.lhs;
+        const rhs = coerced.rhs;
 
         return switch (predicate) {
             0 => self.encodeComparisonOp(.Eq, lhs, rhs),
@@ -3472,6 +3987,29 @@ pub const Encoder = struct {
             8 => self.encodeComparisonOp(.Gt, lhs, rhs),
             9 => self.encodeComparisonOp(.Ge, lhs, rhs),
             else => return error.UnsupportedPredicate,
+        };
+    }
+
+    fn coerceComparisonOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
+        if (lhs_sort == rhs_sort) return .{ .lhs = lhs, .rhs = rhs };
+
+        const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
+        const rhs_kind = z3.Z3_get_sort_kind(self.context.ctx, rhs_sort);
+        if (lhs_kind == z3.Z3_BV_SORT and rhs_kind == z3.Z3_BV_SORT) {
+            const lhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
+            const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
+            const target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
+            return .{
+                .lhs = self.coerceAstToSort(lhs, target_sort),
+                .rhs = self.coerceAstToSort(rhs, target_sort),
+            };
+        }
+
+        return .{
+            .lhs = lhs,
+            .rhs = self.coerceAstToSort(rhs, lhs_sort),
         };
     }
 

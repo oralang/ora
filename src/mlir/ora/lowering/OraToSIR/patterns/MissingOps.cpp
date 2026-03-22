@@ -189,9 +189,8 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
 
 // ---------------------------------------------------------------------------
 // ora.enum_constant → sir.const
-// The variant ordinal is encoded as a u256 constant. We hash the variant
-// name to produce a deterministic integer (using the same scheme the
-// frontend uses for enum discriminants).
+// The variant value comes from the matching ora.enum.decl metadata so runtime
+// enum comparisons use the same discriminants that HIR switch lowering emits.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     ora::EnumConstantOp op,
@@ -201,15 +200,38 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+    int64_t discriminant = -1;
 
-    // Use the variant name hash as the enum discriminant value.
-    StringRef variant = op.getVariantName();
-    uint64_t hash = 0;
-    for (char c : variant)
-        hash = hash * 31 + static_cast<uint64_t>(c);
+    Operation *moduleOp = op->getParentOfType<mlir::ModuleOp>();
+    if (!moduleOp)
+        moduleOp = op->getParentWithTrait<mlir::OpTrait::SymbolTable>();
+    if (moduleOp)
+    {
+        moduleOp->walk([&](ora::EnumDeclOp decl) {
+            if (discriminant >= 0 || decl.getName() != op.getEnumName())
+                return;
+
+            auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
+            auto variantValues = decl->getAttrOfType<mlir::DenseI64ArrayAttr>("ora.variant_values");
+            if (!variantNames || !variantValues)
+                return;
+
+            const size_t count = std::min<size_t>(variantNames.size(), variantValues.size());
+            for (size_t i = 0; i < count; ++i)
+            {
+                auto nameAttr = llvm::dyn_cast<mlir::StringAttr>(variantNames[i]);
+                if (!nameAttr || nameAttr.getValue() != op.getVariantName())
+                    continue;
+                discriminant = variantValues[i];
+                return;
+            }
+        });
+    }
+    if (discriminant < 0)
+        return rewriter.notifyMatchFailure(op, "missing enum discriminant metadata");
 
     Value result = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, hash));
+        mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(discriminant)));
     rewriter.replaceOp(op, result);
     return success();
 }

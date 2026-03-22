@@ -1,0 +1,72 @@
+// Level 4: Multi-asset (ERC1155-style) token registry
+// Tests: map<u256, map<address, u256>> (tokenId -> owner -> balance)
+
+comptime const std = @import("std");
+contract MultiAsset {
+    storage var balances: map<u256, map<address, u256>>;
+    storage var totalSupplies: map<u256, u256>;
+    storage var owner: address;
+
+    log TransferSingle(operator: address, from: address, to: address, tokenId: u256, amount: u256);
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn balanceOf(account: address, tokenId: u256) -> u256 {
+        return balances[tokenId][account];
+    }
+
+    pub fn totalSupply(tokenId: u256) -> u256 {
+        return totalSupplies[tokenId];
+    }
+
+    pub fn mint(to: address, tokenId: u256, amount: u256) -> bool
+        requires(amount > 0)
+        requires(balances[tokenId][to] <= std.constants.U256_MAX - amount)
+        requires(totalSupplies[tokenId] <= std.constants.U256_MAX - amount)
+    {
+        let caller: address = std.msg.sender();
+        if (caller != owner) {
+            return false;
+        }
+
+        balances[tokenId][to] += amount;
+        totalSupplies[tokenId] += amount;
+
+        log TransferSingle(caller, std.constants.ZERO_ADDRESS, to, tokenId, amount);
+        return true;
+    }
+
+    pub fn transfer(to: address, tokenId: u256, amount: u256) -> bool
+        requires(balances[tokenId][to] <= std.constants.U256_MAX - amount)
+    {
+        let sender: address = std.msg.sender();
+        let senderBalance: u256 = balances[tokenId][sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[tokenId][sender] = senderBalance - amount;
+        balances[tokenId][to] += amount;
+
+        log TransferSingle(sender, sender, to, tokenId, amount);
+        return true;
+    }
+
+    pub fn burn(tokenId: u256, amount: u256) -> bool {
+        let sender: address = std.msg.sender();
+        let senderBalance: u256 = balances[tokenId][sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[tokenId][sender] = senderBalance - amount;
+        totalSupplies[tokenId] -= amount;
+
+        log TransferSingle(sender, sender, std.constants.ZERO_ADDRESS, tokenId, amount);
+        return true;
+    }
+}

@@ -1,0 +1,51 @@
+contract LogicalOps {
+    pub fn and_op(a: bool, b: bool) -> bool {
+        let res: bool = a && b;
+        return res;
+    }
+
+    pub fn or_op(a: bool, b: bool) -> bool {
+        let res: bool = a || b;
+        return res;
+    }
+
+    pub fn not_op(a: bool) -> bool {
+        let res: bool = !a;
+        return res;
+    }
+
+    pub fn and_short_circuit(a: bool, b: bool) -> bool {
+        let res: bool = a && b;
+        return res;
+    }
+
+    pub fn or_short_circuit(a: bool, b: bool) -> bool {
+        let res: bool = a || b;
+        return res;
+    }
+
+    pub fn double_negation(a: bool) -> bool {
+        let res: bool = !(!a);
+        return res;
+    }
+
+    pub fn chained_and(a: bool, b: bool, c: bool) -> bool {
+        let res: bool = a && b && c;
+        return res;
+    }
+
+    pub fn chained_or(a: bool, b: bool, c: bool) -> bool {
+        let res: bool = a || b || c;
+        return res;
+    }
+
+    pub fn mixed_and_or(a: bool, b: bool, c: bool) -> bool {
+        let res: bool = a && b || c;
+        return res;
+    }
+
+    pub fn mixed_with_not(a: bool, b: bool, c: bool) -> bool {
+        let res: bool = !a && b || !c;
+        return res;
+    }
+}

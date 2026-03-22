@@ -1,0 +1,27 @@
+// Function returning three possible errors.
+
+error NotFound;
+error Unauthorized;
+error Expired;
+
+comptime const std = @import("std");
+
+contract ErrorThreeErrors {
+    storage owner: address;
+    storage items: map<u256, u256>;
+    storage deadline: u256;
+
+    pub fn claim(id: u256, block_number: u256) -> !u256 | NotFound | Unauthorized | Expired {
+        if (std.msg.sender() != owner) {
+            return Unauthorized;
+        }
+        if (block_number > deadline) {
+            return Expired;
+        }
+        let value: u256 = items[id];
+        if (value == 0) {
+            return NotFound;
+        }
+        return value;
+    }
+}

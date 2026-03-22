@@ -1,0 +1,20 @@
+// Test: fixed-size array of dynamic strings.
+// This exercises ABI encoding of arrays containing dynamic elements.
+
+contract ArrayOfStrings {
+    storage var tags: [string; 3];
+
+    pub fn setTag(index: u256, tag: string) {
+        tags[index] = tag;
+    }
+
+    pub fn getTag(index: u256) -> string {
+        return tags[index];
+    }
+
+    pub fn setAllTags(a: string, b: string, c: string) {
+        tags[0] = a;
+        tags[1] = b;
+        tags[2] = c;
+    }
+}

@@ -1,0 +1,25 @@
+// Three-element tuples.
+
+contract TupleThree {
+    pub fn create_three() -> u256 {
+        let t: (u256, u256, u256) = (10, 20, 30);
+        return t.0 + t.1 + t.2;
+    }
+
+    pub fn mixed_three() -> u256 {
+        let t: (u256, bool, u256) = (42, true, 58);
+        if (t.1) {
+            return t.0 + t.2;
+        }
+        return 0;
+    }
+
+    pub fn return_three() -> (u256, u256, u256) {
+        return (1, 2, 3);
+    }
+
+    pub fn use_three() -> u256 {
+        let t: (u256, u256, u256) = return_three();
+        return t.0 * t.1 * t.2;
+    }
+}

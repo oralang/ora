@@ -4,6 +4,7 @@
 // Tests that regions are part of function parameter and return types
 // ============================================================================
 
+comptime const std = @import("std");
 contract RegionFunctionSignatures {
     storage var stored_value: u256;
 

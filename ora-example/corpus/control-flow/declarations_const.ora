@@ -1,0 +1,54 @@
+// ==========================================
+// DECLARATIONS CONST — const declarations
+// ==========================================
+
+contract DeclarationsConst {
+    // Integer constants
+    const MAX_SUPPLY: u256 = 1000000;
+    const MIN_AMOUNT: u256 = 1;
+    const DECIMALS: u8 = 18;
+
+    // Address constant
+    const ZERO_ADDRESS: address = 0x0000000000000000000000000000000000000000;
+    const TREASURY: address = 0xABCDEF1234567890ABCDEF1234567890ABCDEF12;
+
+    // Boolean constant
+    const IS_MAINNET: bool = true;
+
+    // String constant
+    const CONTRACT_NAME: string = "TestToken";
+
+    // Computed constant
+    const HALF_SUPPLY: u256 = 1000000 / 2;
+
+    // Use constants in functions
+    pub fn get_max_supply() -> u256 {
+        return MAX_SUPPLY;
+    }
+
+    pub fn is_valid_amount(amount: u256) -> bool {
+        if (amount < MIN_AMOUNT) {
+            return false;
+        }
+        if (amount > MAX_SUPPLY) {
+            return false;
+        }
+        return true;
+    }
+
+    pub fn is_zero_address(addr: address) -> bool {
+        return addr == ZERO_ADDRESS;
+    }
+
+    // Constants in expressions
+    pub fn remaining_supply(minted: u256) -> u256 {
+        if (minted > MAX_SUPPLY) {
+            return 0;
+        }
+        return MAX_SUPPLY - minted;
+    }
+
+    pub fn get_name() -> string {
+        return CONTRACT_NAME;
+    }
+}

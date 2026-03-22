@@ -1,0 +1,59 @@
+{
+  "name": "ora-lang",
+  "displayName": "Ora Language",
+  "description": "Language support for the Ora smart contract language",
+  "version": "0.1.0",
+  "publisher": "oralang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:ora"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ora",
+        "aliases": [
+          "Ora",
+          "ora"
+        ],
+        "extensions": [
+          ".ora"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ora",
+        "scopeName": "source.ora",
+        "path": "./syntaxes/ora.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Ora",
+      "properties": {
+        "ora.lsp.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the ora-lsp binary. If empty, uses 'ora-lsp' from PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

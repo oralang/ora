@@ -1,0 +1,20 @@
+// Create tuples with and without type annotations.
+// NOTE: `let t: (u256, u256) = (10, 20);` may fail with
+// "expects type 'tuple', found 'tuple'" — also try without annotation.
+
+contract TupleCreate {
+    pub fn with_annotation() -> u256 {
+        let t: (u256, u256) = (10, 20);
+        return t.0 + t.1;
+    }
+
+    pub fn without_annotation() -> u256 {
+        let t: (u256, u256) = (10, 20);
+        return t.0 + t.1;
+    }
+
+    pub fn single_element() -> u256 {
+        let t: (u256, u256) = (42, 0);
+        return t.0;
+    }
+}

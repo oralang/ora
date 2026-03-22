@@ -1,0 +1,41 @@
+// Level 2: Owner-approval allowance pattern
+// Tests: nested map<address, map<address, u256>>, approve/spend
+
+comptime const std = @import("std");
+contract AllowancePattern {
+    storage var allowances: map<address, map<address, u256>>;
+
+    pub fn approve(spender: address, amount: u256) {
+        let owner: address = std.msg.sender();
+        allowances[owner][spender] = amount;
+    }
+
+    pub fn increaseAllowance(spender: address, added: u256) {
+        let owner: address = std.msg.sender();
+        allowances[owner][spender] += added;
+    }
+
+    pub fn decreaseAllowance(spender: address, subtracted: u256) {
+        let owner: address = std.msg.sender();
+        let current: u256 = allowances[owner][spender];
+        if (current >= subtracted) {
+            allowances[owner][spender] = current - subtracted;
+        } else {
+            allowances[owner][spender] = 0;
+        }
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+
+    pub fn spend(owner: address, amount: u256) -> bool {
+        let spender: address = std.msg.sender();
+        let current: u256 = allowances[owner][spender];
+        if (current >= amount) {
+            allowances[owner][spender] = current - amount;
+            return true;
+        }
+        return false;
+    }
+}

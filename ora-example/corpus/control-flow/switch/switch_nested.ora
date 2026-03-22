@@ -1,0 +1,90 @@
+// ==========================================
+// SWITCH NESTED — switch inside switch
+// ==========================================
+
+contract SwitchNested {
+    // Simple nested switch
+    pub fn test_basic_nested(category: u256, item: u256) -> u256 {
+        switch (category) {
+            0 => {
+                switch (item) {
+                    0 => { return 100; }
+                    1 => { return 101; }
+                    else => { return 199; }
+                }
+            }
+            1 => {
+                switch (item) {
+                    0 => { return 200; }
+                    1 => { return 201; }
+                    else => { return 299; }
+                }
+            }
+            else => {
+                return 0;
+            }
+        }
+    }
+
+    // Nested switch in expression position
+    pub fn test_nested_expression(a: u256, b: u256) -> u256 {
+        var res: u256 = switch (a) {
+            0 => switch (b) {
+                0 => 0,
+                1 => 1,
+                else => 2
+            },
+            1 => switch (b) {
+                0 => 10,
+                else => 11
+            },
+            else => 99
+        };
+        return res;
+    }
+
+    // Three levels of nesting
+    pub fn test_triple_nested(a: u256, b: u256, c: u256) -> u256 {
+        switch (a) {
+            0 => {
+                switch (b) {
+                    0 => {
+                        switch (c) {
+                            0 => { return 0; }
+                            else => { return 1; }
+                        }
+                    }
+                    else => { return 2; }
+                }
+            }
+            else => { return 3; }
+        }
+    }
+
+    // Switch inside switch arm with computation
+    pub fn test_nested_with_compute(op: u256, x: u256) -> u256 {
+        switch (op) {
+            0 => {
+                // Unary operations
+                switch (x) {
+                    0 => { return 0; }
+                    else => {
+                        var doubled: u256 = x * 2;
+                        return doubled;
+                    }
+                }
+            }
+            1 => {
+                // Classification
+                switch (x) {
+                    0...9 => { return 1; }
+                    10...99 => { return 2; }
+                    else => { return 3; }
+                }
+            }
+            else => {
+                return x;
+            }
+        }
+    }
+}

@@ -14,6 +14,10 @@ const definition_api = ora_root.lsp.definition;
 const references_api = ora_root.lsp.references;
 const rename_api = ora_root.lsp.rename;
 const completion_api = ora_root.lsp.completion;
+const semantic_tokens_api = ora_root.lsp.semantic_tokens;
+const signature_help_api = ora_root.lsp.signature_help;
+const code_lens_api = ora_root.lsp.code_lens;
+const inlay_hints_api = ora_root.lsp.inlay_hints;
 const formatting_api = @import("formatting.zig");
 const Allocator = std.mem.Allocator;
 
@@ -114,6 +118,21 @@ pub const Handler = struct {
             },
             .renameProvider = .{ .RenameOptions = .{ .prepareProvider = true } },
             .documentFormattingProvider = .{ .bool = true },
+            .inlayHintProvider = .{ .InlayHintOptions = .{ .resolveProvider = false } },
+            .codeLensProvider = .{ .resolveProvider = false },
+            .signatureHelpProvider = .{
+                .triggerCharacters = &[_][]const u8{ "(", "," },
+                .retriggerCharacters = &[_][]const u8{","},
+            },
+            .semanticTokensProvider = .{
+                .SemanticTokensOptions = .{
+                    .legend = .{
+                        .tokenTypes = &semantic_tokens_api.SemanticTokenKind.legend,
+                        .tokenModifiers = &semantic_tokens_api.SemanticTokenModifier.legend,
+                    },
+                    .full = .{ .bool = true },
+                },
+            },
         };
 
         if (@import("builtin").mode == .Debug) {
@@ -327,7 +346,8 @@ pub const Handler = struct {
             .character = params.position.character,
         };
 
-        const completion_items = try completion_api.completionAt(self.allocator, source, position);
+        const trigger_char: ?[]const u8 = if (params.context) |ctx| ctx.triggerCharacter else null;
+        const completion_items = try completion_api.completionAt(self.allocator, source, position, trigger_char);
         defer completion_api.deinitItems(self.allocator, completion_items);
 
         const result = try arena.alloc(types.CompletionItem, completion_items.len);
@@ -393,6 +413,103 @@ pub const Handler = struct {
         }
 
         return .{ .changes = changes };
+    }
+
+    pub fn @"textDocument/inlayHint"(self: *Handler, arena: Allocator, params: types.InlayHintParams) !lsp.ResultType("textDocument/inlayHint") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+        const range: frontend.Range = .{
+            .start = .{ .line = params.range.start.line, .character = params.range.start.character },
+            .end = .{ .line = params.range.end.line, .character = params.range.end.character },
+        };
+
+        const hints = try inlay_hints_api.hintsInRange(self.allocator, source, range);
+        defer inlay_hints_api.deinitHints(self.allocator, hints);
+
+        if (hints.len == 0) return null;
+
+        const result = try arena.alloc(types.InlayHint, hints.len);
+        for (hints, 0..) |hint, i| {
+            result[i] = .{
+                .position = toLspPosition(hint.position),
+                .label = .{ .string = try arena.dupe(u8, hint.label) },
+                .kind = switch (hint.kind) {
+                    .type_hint => .Type,
+                    .parameter_hint => .Parameter,
+                },
+                .paddingLeft = hint.padding_left,
+                .paddingRight = hint.padding_right,
+            };
+        }
+
+        return result;
+    }
+
+    pub fn @"textDocument/codeLens"(self: *Handler, arena: Allocator, params: types.CodeLensParams) !lsp.ResultType("textDocument/codeLens") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+
+        const lenses = try code_lens_api.findVerificationLenses(self.allocator, source);
+        defer code_lens_api.deinitLenses(self.allocator, lenses);
+
+        if (lenses.len == 0) return null;
+
+        const result = try arena.alloc(types.CodeLens, lenses.len);
+        for (lenses, 0..) |lens, i| {
+            result[i] = .{
+                .range = toLspRange(lens.range),
+                .command = .{
+                    .title = try arena.dupe(u8, lens.title),
+                    .command = "ora.verify",
+                },
+            };
+        }
+
+        return result;
+    }
+
+    pub fn @"textDocument/signatureHelp"(self: *Handler, arena: Allocator, params: types.SignatureHelpParams) !?types.SignatureHelp {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+        const position: frontend.Position = .{
+            .line = params.position.line,
+            .character = params.position.character,
+        };
+
+        var sig_val = (signature_help_api.signatureAt(self.allocator, source, position) catch return null) orelse return null;
+        defer sig_val.deinit(self.allocator);
+
+        const param_infos = try arena.alloc(types.ParameterInformation, sig_val.parameters.len);
+        for (sig_val.parameters, 0..) |param, i| {
+            param_infos[i] = .{
+                .label = .{ .string = try arena.dupe(u8, param.label) },
+                .documentation = null,
+            };
+        }
+
+        const sig_info: types.SignatureInformation = .{
+            .label = try arena.dupe(u8, sig_val.label),
+            .documentation = if (sig_val.documentation) |doc| .{ .MarkupContent = .{
+                .kind = .markdown,
+                .value = try arena.dupe(u8, doc),
+            } } else null,
+            .parameters = param_infos,
+            .activeParameter = sig_val.active_parameter,
+        };
+
+        return .{
+            .signatures = &[_]types.SignatureInformation{sig_info},
+            .activeSignature = 0,
+            .activeParameter = sig_val.active_parameter,
+        };
+    }
+
+    pub fn @"textDocument/semanticTokens/full"(self: *Handler, arena: Allocator, params: types.SemanticTokensParams) !lsp.ResultType("textDocument/semanticTokens/full") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+
+        const tokens = try semantic_tokens_api.tokenize(self.allocator, source);
+        defer self.allocator.free(tokens);
+
+        const data = try semantic_tokens_api.encodeTokens(arena, tokens);
+
+        return .{ .data = data };
     }
 
     pub fn @"textDocument/formatting"(self: *Handler, arena: Allocator, params: types.DocumentFormattingParams) !lsp.ResultType("textDocument/formatting") {
@@ -692,6 +809,7 @@ fn diagnosticSourceName(source: frontend.DiagnosticSource) []const u8 {
     return switch (source) {
         .lexer => "ora-lexer",
         .parser => "ora-parser",
+        .sema => "ora-sema",
     };
 }
 

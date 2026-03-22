@@ -29,7 +29,7 @@ contract RegionVariableDeclarations {
 
     // Region is part of type - same base type, different regions
     pub fn testRegionInType() {
-        storage var storage_val: u256 = 100;  // u256 @storage
+        storage_counter = 1;
         memory var memory_val: u256 = 200;     // u256 @memory
         var stack_val: u256 = 300;             // u256 @stack
         

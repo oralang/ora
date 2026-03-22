@@ -4,6 +4,7 @@
 // Tests how constraints propagate through function calls
 // ============================================================================
 
+comptime const std = @import("std");
 contract FunctionParametersPropagation {
     // Constraints propagate from parameter to local
     pub fn propagateMinValue(value: MinValue<u256, 100>)

@@ -1,0 +1,37 @@
+contract StructMixedDynamic {
+    struct Record {
+        label: string,
+        payload: bytes,
+        value: u256,
+    }
+
+    storage var record: Record;
+
+    pub fn setRecord(l: string, p: bytes, v: u256) {
+        record = Record { label: l, payload: p, value: v };
+    }
+
+    pub fn getLabel() -> string {
+        return record.label;
+    }
+
+    pub fn getPayload() -> bytes {
+        return record.payload;
+    }
+
+    pub fn getValue() -> u256 {
+        return record.value;
+    }
+
+    pub fn updateLabel(l: string) {
+        record.label = l;
+    }
+
+    pub fn updatePayload(p: bytes) {
+        record.payload = p;
+    }
+
+    pub fn updateValue(v: u256) {
+        record.value = v;
+    }
+}

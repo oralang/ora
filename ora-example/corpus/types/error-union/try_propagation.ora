@@ -1,0 +1,35 @@
+// Try expression for error propagation.
+// Tests: `try expr` propagates errors to caller without explicit catch.
+
+error InvalidInput;
+error Overflow;
+
+comptime const std = @import("std");
+contract TryPropagation {
+    pub fn validate(x: u256) -> !u256 | InvalidInput {
+        if (x == 0) {
+            return InvalidInput;
+        }
+        return x;
+    }
+
+    pub fn double(x: u256) -> !u256 | Overflow {
+        if (x > std.constants.U256_MAX / 2) {
+            return Overflow;
+        }
+        return x * 2;
+    }
+
+    // try propagates InvalidInput from validate
+    pub fn validate_and_double(x: u256) -> !u256 | InvalidInput | Overflow {
+        let valid: u256 = try validate(x);
+        let res: u256 = try double(valid);
+        return res;
+    }
+
+    // Nested propagation: caller of validate_and_double also uses try
+    pub fn process(x: u256) -> !u256 | InvalidInput | Overflow {
+        let res: u256 = try validate_and_double(x);
+        return res + 1;
+    }
+}

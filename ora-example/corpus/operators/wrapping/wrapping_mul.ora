@@ -1,0 +1,11 @@
+contract WrappingMul {
+    pub fn wrapping_mul_u8(a: u8, b: u8) -> u8 {
+        let res: u8 = a *% b;
+        return res;
+    }
+
+    pub fn wrapping_mul_u256(a: u256, b: u256) -> u256 {
+        let res: u256 = a *% b;
+        return res;
+    }
+}

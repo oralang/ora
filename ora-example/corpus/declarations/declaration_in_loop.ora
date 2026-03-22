@@ -1,0 +1,117 @@
+// ==========================================
+// DECLARATION IN LOOP — declarations inside loop bodies
+// ==========================================
+
+contract DeclarationInLoop {
+    storage var data: [u256; 4];
+
+    // Let inside while loop (re-created each iteration)
+    pub fn let_in_while() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            let squared: u256 = i * i;
+            total += squared;
+            i += 1;
+        }
+        return total;
+    }
+
+    // Var inside while loop (re-created each iteration)
+    pub fn var_in_while() -> u256 {
+        var res: u256 = 0;
+        var i: u256 = 0;
+        while (i < 5) {
+            var temp: u256 = i * 10;
+            temp += 5;
+            res += temp;
+            i += 1;
+        }
+        return res;
+    }
+
+    // Multiple declarations per iteration
+    pub fn multi_decl_in_loop() -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        while (i <= 5) {
+            let doubled: u256 = i * 2;
+            let tripled: u256 = i * 3;
+            let combined: u256 = doubled + tripled;
+            sum += combined;
+            i += 1;
+        }
+        return sum;
+    }
+
+    // Declaration depends on loop variable
+    pub fn dependent_decl() -> u256 {
+        var max: u256 = 0;
+        var i: u256 = 0;
+        while (i < 4) {
+            let val: u256 = data[i];
+            if (val > max) {
+                max = val;
+            }
+            i += 1;
+        }
+        return max;
+    }
+
+    // Nested loops with declarations
+    pub fn nested_loop_decl() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 3) {
+            let row_base: u256 = i * 10;
+            var j: u256 = 0;
+            while (j < 3) {
+                let cell: u256 = row_base + j;
+                total += cell;
+                j += 1;
+            }
+            i += 1;
+        }
+        return total;
+    }
+
+    // For loop with declarations
+    pub fn for_loop_decl() -> u256 {
+        var total: u256 = 0;
+        for (0..10) |value, _| {
+            let doubled: u256 = value * 2;
+            total += doubled;
+        }
+        return total;
+    }
+
+    // Declaration inside loop with break
+    pub fn decl_with_break() -> u256 {
+        var res: u256 = 0;
+        var i: u256 = 0;
+        while (i < 100) {
+            let candidate: u256 = i * i;
+            if (candidate > 50) {
+                res = candidate;
+                break;
+            }
+            i += 1;
+        }
+        return res;
+    }
+
+    // Declaration inside loop with continue
+    pub fn decl_with_continue() -> u256 {
+        var total: u256 = 0;
+        var i: u256 = 0;
+        while (i < 10) {
+            i += 1;
+            if (i % 2 == 0) {
+                continue;
+            }
+            let odd_val: u256 = i;
+            total += odd_val;
+        }
+        return total;
+    }
+}

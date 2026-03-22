@@ -8,6 +8,7 @@
 // Expected: Guards remain in MLIR output (runtime check required)
 // ============================================================================
 
+comptime const std = @import("std");
 contract MinValueRuntime {
     storage var stored_value: u256;
 

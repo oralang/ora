@@ -1,0 +1,47 @@
+// Level 2: Compound + scalar mixing — struct containing [u256; 4]
+// Tests struct with an array field.
+contract StructWithArray {
+    struct Vault {
+        owner: address;
+        amounts: [u256; 4];
+        locked: bool;
+    }
+
+    storage var vault: Vault;
+
+    pub fn init_vault(owner_addr: address) {
+        let amounts: [u256; 4] = [0, 0, 0, 0];
+        let v: Vault = Vault { owner: owner_addr, amounts: amounts, locked: false };
+        vault = v;
+    }
+
+    pub fn deposit(slot: u256, amount: u256) {
+        let v: Vault = vault;
+        let a: [u256; 4] = v.amounts;
+        a[slot] = a[slot] + amount;
+        vault = Vault { owner: v.owner, amounts: a, locked: v.locked };
+    }
+
+    pub fn get_amount(slot: u256) -> u256 {
+        let v: Vault = vault;
+        let a: [u256; 4] = v.amounts;
+        return a[slot];
+    }
+
+    pub fn lock() {
+        let v: Vault = vault;
+        vault = Vault { owner: v.owner, amounts: v.amounts, locked: true };
+    }
+
+    pub fn is_locked() -> bool {
+        let v: Vault = vault;
+        return v.locked;
+    }
+
+    pub fn total() -> u256 {
+        let v: Vault = vault;
+        let a: [u256; 4] = v.amounts;
+        let sum: u256 = a[0] + a[1] + a[2] + a[3];
+        return sum;
+    }
+}

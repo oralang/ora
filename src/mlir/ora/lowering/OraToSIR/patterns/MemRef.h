@@ -23,6 +23,16 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class NormalizeNarrowErrorUnionMemRefLoadOp : public OpRewritePattern<mlir::memref::LoadOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::memref::LoadOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class ConvertMemRefStoreOp : public OpConversionPattern<mlir::memref::StoreOp>
         {
         public:
@@ -32,6 +42,16 @@ namespace mlir
                 mlir::memref::StoreOp op,
                 typename mlir::memref::StoreOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeNarrowErrorUnionMemRefStoreOp : public OpRewritePattern<mlir::memref::StoreOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::memref::StoreOp op,
+                PatternRewriter &rewriter) const override;
         };
 
         class ConvertMemRefAllocOp : public OpConversionPattern<mlir::memref::AllocaOp>
@@ -61,4 +81,3 @@ namespace mlir
 
 /// Clear the static helper map between pass invocations.
 void clearMemRefHelperMap();
-

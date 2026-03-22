@@ -4,6 +4,7 @@
 // Tests primitive types in memory region
 // ============================================================================
 
+comptime const std = @import("std");
 contract MemoryPrimitive {
     pub fn testMemoryPrimitives() {
         // u256 in memory
@@ -22,8 +23,8 @@ contract MemoryPrimitive {
         memory var name: string = "Token";
         memory var symbol: string = "TKN";
 
-        // bytes in memory
-        memory var data: bytes = 0xdeadbeef;
+        // u256 in memory (hex literal)
+        memory var data: u256 = 0xdeadbeef;
 
         // Use memory values
         let sum: u256 = counter + balance;

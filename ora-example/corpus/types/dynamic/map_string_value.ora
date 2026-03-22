@@ -1,0 +1,21 @@
+comptime const std = @import("std");
+
+contract MapStringValue {
+    storage var names: map<address, string>;
+
+    pub fn setName(addr: address, n: string) {
+        names[addr] = n;
+    }
+
+    pub fn getName(addr: address) -> string {
+        return names[addr];
+    }
+
+    pub fn setSelfName(n: string) {
+        names[std.msg.sender] = n;
+    }
+
+    pub fn getSelfName() -> string {
+        return names[std.msg.sender];
+    }
+}

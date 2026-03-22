@@ -1,0 +1,96 @@
+// Level 4: Order book with structs
+// Tests: struct Order, map<u256, Order>, CRUD on struct storage
+
+struct Order {
+    amount: u256;
+    price: u256;
+    maker: address;
+    active: bool;
+}
+
+comptime const std = @import("std");
+contract OrderBook {
+    storage var orders: map<u256, Order>;
+    storage var nextOrderId: u256 = 1;
+    storage var orderCount: u256 = 0;
+
+    log OrderPlaced(orderId: u256, maker: address, amount: u256, price: u256);
+    log OrderCancelled(orderId: u256);
+    log OrderFilled(orderId: u256, taker: address);
+
+    pub fn placeOrder(amount: u256, price: u256) -> u256
+        requires(amount > 0)
+        requires(price > 0)
+        requires(nextOrderId < std.constants.U256_MAX)
+    {
+        let maker: address = std.msg.sender();
+        let orderId: u256 = nextOrderId;
+
+        let order: Order = Order {
+            amount: amount,
+            price: price,
+            maker: maker,
+            active: true,
+        };
+        orders[orderId] = order;
+
+        nextOrderId += 1;
+        orderCount += 1;
+
+        log OrderPlaced(orderId, maker, amount, price);
+        return orderId;
+    }
+
+    pub fn cancelOrder(orderId: u256) -> bool {
+        let caller: address = std.msg.sender();
+        let order: Order = orders[orderId];
+
+        if (!order.active) {
+            return false;
+        }
+        if (order.maker != caller) {
+            return false;
+        }
+
+        let cancelled: Order = Order {
+            amount: order.amount,
+            price: order.price,
+            maker: order.maker,
+            active: false,
+        };
+        orders[orderId] = cancelled;
+        orderCount -= 1;
+
+        log OrderCancelled(orderId);
+        return true;
+    }
+
+    pub fn fillOrder(orderId: u256) -> bool {
+        let taker: address = std.msg.sender();
+        let order: Order = orders[orderId];
+
+        if (!order.active) {
+            return false;
+        }
+
+        let filled: Order = Order {
+            amount: order.amount,
+            price: order.price,
+            maker: order.maker,
+            active: false,
+        };
+        orders[orderId] = filled;
+        orderCount -= 1;
+
+        log OrderFilled(orderId, taker);
+        return true;
+    }
+
+    pub fn getOrder(orderId: u256) -> Order {
+        return orders[orderId];
+    }
+
+    pub fn getOrderCount() -> u256 {
+        return orderCount;
+    }
+}

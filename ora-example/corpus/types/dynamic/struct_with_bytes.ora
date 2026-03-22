@@ -1,0 +1,24 @@
+contract StructWithBytes {
+    struct Blob {
+        data: bytes,
+        size: u256,
+    }
+
+    storage var blob: Blob;
+
+    pub fn setBlob(d: bytes, s: u256) {
+        blob = Blob { data: d, size: s };
+    }
+
+    pub fn getData() -> bytes {
+        return blob.data;
+    }
+
+    pub fn getSize() -> u256 {
+        return blob.size;
+    }
+
+    pub fn updateData(d: bytes) {
+        blob.data = d;
+    }
+}

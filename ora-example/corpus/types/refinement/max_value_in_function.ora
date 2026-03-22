@@ -1,0 +1,32 @@
+// MaxValue as return type, local variable, function parameter
+
+contract MaxValueInFunction {
+    storage var limit: MaxValue<u256, 500>;
+
+    pub fn asParameter(val: MaxValue<u256, 500>) -> u256 {
+        return val + 1;
+    }
+
+    pub fn asReturnType() -> MaxValue<u256, 500> {
+        return limit;
+    }
+
+    pub fn asLocal() -> u256 {
+        let bounded: MaxValue<u256, 500> = limit;
+        let res: u256 = bounded * 2;
+        return res;
+    }
+
+    pub fn setLimit(val: MaxValue<u256, 500>) {
+        limit = val;
+    }
+
+    pub fn paramAndReturn(val: MaxValue<u256, 500>) -> MaxValue<u256, 500> {
+        limit = val;
+        return limit;
+    }
+
+    pub fn multipleParams(a: MaxValue<u256, 500>, b: MaxValue<u256, 500>) -> u256 {
+        return a + b;
+    }
+}

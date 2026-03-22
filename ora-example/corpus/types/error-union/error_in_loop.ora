@@ -1,0 +1,66 @@
+// Try/catch inside a loop.
+// Tests: error handling within loop bodies, continue-on-error patterns.
+
+error InvalidEntry;
+
+contract ErrorInLoop {
+    storage var entries: map<u256, u256>;
+    storage var valid_count: u256 = 0;
+    storage var total_sum: u256 = 0;
+
+    pub fn validate_entry(id: u256) -> !u256 | InvalidEntry {
+        let val: u256 = entries[id];
+        if (val == 0) {
+            return InvalidEntry;
+        }
+        return val;
+    }
+
+    // Process entries 0..count, skip invalid ones
+    pub fn process_entries(count: u256) -> u256 {
+        let sum: u256 = 0;
+        let valid: u256 = 0;
+        let i: u256 = 0;
+
+        while (i < count) {
+            try {
+                let val: u256 = try validate_entry(i);
+                sum += val;
+                valid += 1;
+            } catch (e) {
+                // Skip invalid entries
+            }
+            i += 1;
+        }
+
+        valid_count = valid;
+        total_sum = sum;
+        return sum;
+    }
+
+    // Process entries, but stop on first error
+    pub fn process_strict(count: u256) -> !u256 | InvalidEntry {
+        let sum: u256 = 0;
+        let i: u256 = 0;
+
+        while (i < count) {
+            let val: u256 = try validate_entry(i);
+            sum += val;
+            i += 1;
+        }
+
+        return sum;
+    }
+
+    pub fn set_entry(id: u256, value: u256) {
+        entries[id] = value;
+    }
+
+    pub fn get_valid_count() -> u256 {
+        return valid_count;
+    }
+
+    pub fn get_total_sum() -> u256 {
+        return total_sum;
+    }
+}

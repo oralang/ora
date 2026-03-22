@@ -3,6 +3,7 @@
 // reachable public entrypoints, not as standalone unconstrained helpers.
 // ============================================================================
 
+comptime const std = @import("std");
 contract PrivateGenericCheckedVsWrapping {
     fn add(comptime T: type, a: T, b: T) -> T {
         return a + b;

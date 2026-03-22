@@ -1,0 +1,40 @@
+// Assign refinement type to base type and vice versa
+
+contract RefinementAssignment {
+    storage var stored: u256 = 0;
+
+    pub fn refinedToPlain(val: MinValue<u256, 1>) -> u256 {
+        let plain: u256 = val;
+        return plain;
+    }
+
+    pub fn refinedToStorage(val: MinValue<u256, 1>) {
+        stored = val;
+    }
+
+    pub fn maxToPlain(val: MaxValue<u256, 1000>) -> u256 {
+        let plain: u256 = val;
+        return plain;
+    }
+
+    pub fn rangeToPlain(val: InRange<u256, 1, 100>) -> u256 {
+        let plain: u256 = val;
+        return plain;
+    }
+
+    pub fn nonzeroToPlain(val: NonZeroAddress) -> address {
+        let plain: address = val;
+        return plain;
+    }
+
+    pub fn refinedInArithmetic(a: MinValue<u256, 1>, b: u256) -> u256 {
+        let res: u256 = a + b;
+        return res;
+    }
+
+    pub fn chainedAssignment(val: MinValue<u256, 1>) -> u256 {
+        let a: u256 = val;
+        let b: u256 = a + 1;
+        return b;
+    }
+}

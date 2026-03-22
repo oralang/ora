@@ -42,18 +42,25 @@ pub const Z3_func_decl = c.Z3_func_decl;
 pub const Z3_model = c.Z3_model;
 pub const Z3_lbool = c.Z3_lbool;
 pub const Z3_config = c.Z3_config;
+pub const Z3_error_code = c.Z3_error_code;
+pub const Z3_error_handler = c.Z3_error_handler;
 
 // Re-export Z3_lbool enum values
 pub const Z3_L_FALSE = c.Z3_L_FALSE;
 pub const Z3_L_UNDEF = c.Z3_L_UNDEF;
 pub const Z3_L_TRUE = c.Z3_L_TRUE;
+pub const Z3_OK = c.Z3_OK;
 
 // Re-export commonly used Z3 functions
 pub const Z3_mk_config = c.Z3_mk_config;
 pub const Z3_del_config = c.Z3_del_config;
 pub const Z3_mk_context = c.Z3_mk_context;
 pub const Z3_del_context = c.Z3_del_context;
+pub const Z3_get_error_code = c.Z3_get_error_code;
+pub const Z3_get_error_msg = c.Z3_get_error_msg;
 pub const Z3_mk_solver = c.Z3_mk_solver;
+pub const Z3_set_error = c.Z3_set_error;
+pub const Z3_set_error_handler = c.Z3_set_error_handler;
 pub const Z3_solver_inc_ref = c.Z3_solver_inc_ref;
 pub const Z3_solver_dec_ref = c.Z3_solver_dec_ref;
 pub const Z3_solver_assert = c.Z3_solver_assert;

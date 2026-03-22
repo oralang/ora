@@ -89,23 +89,8 @@ pub const Evaluator = @import("eval.zig").Evaluator;
 pub const BinaryOp = @import("eval.zig").BinaryOp;
 pub const UnaryOp = @import("eval.zig").UnaryOp;
 
-// Re-export AST evaluator (expressions)
-pub const ast_eval = @import("ast_eval.zig");
-pub const AstEvaluator = ast_eval.AstEvaluator;
-pub const AstEvalResult = ast_eval.AstEvalResult;
-pub const InternResult = ast_eval.AstEvaluator.InternResult;
-pub const IdentifierLookup = ast_eval.IdentifierLookup;
-pub const FunctionLookup = ast_eval.FunctionLookup;
-pub const ComptimeFnInfo = ast_eval.ComptimeFnInfo;
-pub const evaluateExpr = ast_eval.evaluateExpr;
-pub const evaluateToInteger = ast_eval.evaluateToInteger;
-pub const evaluateAndIntern = ast_eval.evaluateAndIntern;
-
-// Re-export statement evaluator (loops, conditionals, blocks)
-pub const StmtEvaluator = ast_eval.StmtEvaluator;
-pub const AstStmtResult = ast_eval.AstStmtResult;
-pub const evaluateBlock = ast_eval.evaluateBlock;
-pub const evaluateBlockWithEnv = ast_eval.evaluateBlockWithEnv;
+// Refactored compiler AST evaluator (migration path for src/compiler/)
+pub const compiler_ast_eval = @import("compiler_ast_eval.zig");
 
 // Re-export evaluation mode and result from eval.zig
 pub const EvalMode = @import("eval.zig").EvalMode;
@@ -124,5 +109,4 @@ test {
     _ = @import("heap.zig");
     _ = @import("env.zig");
     _ = @import("eval.zig");
-    _ = @import("ast_eval.zig");
 }

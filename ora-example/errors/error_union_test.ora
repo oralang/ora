@@ -13,7 +13,7 @@ contract Test {
     // Function returning error union with multiple errors
     fn test2() -> !bool | InsufficientBalance | InvalidAddress {
         // Return error - should be valid
-        return error.InvalidAddress;
+        return InvalidAddress;
     }
     
     // Function returning error with parameters
@@ -25,7 +25,7 @@ contract Test {
     // Function that can return different errors
     fn test4(condition: bool) -> !bool | InsufficientBalance | InvalidAddress {
         if (condition) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         } else {
             return InsufficientBalance(100, 50);
         }

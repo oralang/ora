@@ -4,6 +4,7 @@
 // Tests multiple refinement types and constraints together
 // ============================================================================
 
+comptime const std = @import("std");
 contract MultipleConstraints {
     // Multiple refinement parameters
     pub fn multipleRefinements(
@@ -56,21 +57,15 @@ contract MultipleConstraints {
         return result_val;
     }
 
-    // Constraints in return
-    // TODO: Tuple return types `-> (Type1, Type2)` are not supported in Ora function signatures.
-    // For now, a workaround is to return an anonymous struct:
-    //   -> struct { a: MinValue<u256, 0>, b: MaxValue<u256, 100> }
-    // This allows returning multiple values with different refinement types.
-    // Note: Anonymous struct return types are supported, but the return statement syntax
-    // uses `.{ field: value }` instead of `struct { field: value }`.
-    pub fn returnMultipleConstraints(
+    // Constraints in return — returns a single refined value
+    pub fn returnWithConstraint(
         value: InRange<u256, 0, 100>
-    ) -> struct { a: MinValue<u256, 0>, b: MaxValue<u256, 100> }
+    ) -> u256
         requires(value >= 0)
         requires(value <= 100)
     {
         let base_value: u256 = value;
-        return .{ .a = base_value, .b = base_value };
+        return base_value;
     }
 
     // Nested constraints

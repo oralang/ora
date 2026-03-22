@@ -1,11 +1,8 @@
 const std = @import("std");
-const lexer = @import("ora_lexer");
-const parser = @import("../parser.zig");
-const ast = @import("ora_ast");
+const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
 
 const Allocator = std.mem.Allocator;
-const ResolveError = Allocator.Error;
 
 pub const Definition = struct {
     uri: ?[]const u8 = null,
@@ -22,6 +19,567 @@ pub const CrossFileContext = struct {
     bindings: []const ImportBinding,
 };
 
+const file_origin: frontend.Range = .{
+    .start = .{ .line = 0, .character = 0 },
+    .end = .{ .line = 0, .character = 0 },
+};
+
+const Analysis = struct {
+    sources: compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    module_id: compiler.ModuleId,
+    parse_result: compiler.syntax.ParseResult,
+    lower_result: compiler.ast.LowerResult,
+    item_index: compiler.sema.ItemIndexResult,
+    resolution: compiler.sema.NameResolutionResult,
+    source_text: []const u8,
+
+    fn init(allocator: Allocator, source_text: []const u8) !?Analysis {
+        var sources = compiler.source.SourceStore.init(allocator);
+        errdefer sources.deinit();
+        const file_id = try sources.addFile("<lsp>", source_text);
+        const package_id = try sources.addPackage("main");
+        const module_id = try sources.addModule(package_id, file_id, "lsp");
+
+        var parse_result = try compiler.syntax.parse(allocator, file_id, source_text);
+        errdefer parse_result.deinit();
+
+        var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
+        errdefer lower_result.deinit();
+
+        var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
+        errdefer item_index.deinit();
+        var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
+        errdefer resolution.deinit();
+
+        return .{
+            .sources = sources,
+            .file_id = file_id,
+            .module_id = module_id,
+            .parse_result = parse_result,
+            .lower_result = lower_result,
+            .item_index = item_index,
+            .resolution = resolution,
+            .source_text = source_text,
+        };
+    }
+
+    fn deinit(self: *Analysis) void {
+        self.resolution.deinit();
+        self.item_index.deinit();
+        self.lower_result.deinit();
+        self.parse_result.deinit();
+        self.sources.deinit();
+    }
+
+    fn textRangeToRange(self: *const Analysis, range: compiler.TextRange) frontend.Range {
+        const start = self.sources.lineColumn(.{
+            .file_id = self.file_id,
+            .range = .{ .start = range.start, .end = range.start },
+        });
+        const end = self.sources.lineColumn(.{
+            .file_id = self.file_id,
+            .range = .{ .start = range.end, .end = range.end },
+        });
+        return .{
+            .start = .{
+                .line = if (start.line > 0) start.line - 1 else 0,
+                .character = if (start.column > 0) start.column - 1 else 0,
+            },
+            .end = .{
+                .line = if (end.line > 0) end.line - 1 else 0,
+                .character = if (end.column > 0) end.column - 1 else 0,
+            },
+        };
+    }
+
+    fn file(self: *const Analysis) *const compiler.ast.AstFile {
+        return &self.lower_result.file;
+    }
+
+    fn selectionRange(self: *const Analysis, range: compiler.TextRange, name: []const u8) frontend.Range {
+        var name_start = range.start;
+        const start: usize = @intCast(@min(range.start, self.source_text.len));
+        const end: usize = @intCast(@min(range.end, self.source_text.len));
+        if (start <= end and end <= self.source_text.len) {
+            if (std.mem.indexOf(u8, self.source_text[start..end], name)) |relative| {
+                const relative_u32 = std.math.cast(u32, relative) orelse 0;
+                name_start = std.math.add(u32, range.start, relative_u32) catch range.start;
+            }
+        }
+        return self.textRangeToRange(.{
+            .start = name_start,
+            .end = name_start + @as(u32, @intCast(name.len)),
+        });
+    }
+};
+
+const Resolver = struct {
+    analysis: *const Analysis,
+    query_position: frontend.Position,
+    cross_file: ?CrossFileContext,
+    found: ?Definition = null,
+
+    fn run(self: *Resolver) anyerror!?Definition {
+        for (self.analysis.file().root_items) |item_id| {
+            if (try self.visitItem(item_id)) break;
+        }
+        return self.found;
+    }
+
+    fn visitItem(self: *Resolver, item_id: compiler.ast.ItemId) anyerror!bool {
+        if (self.found != null) return true;
+        const item = self.analysis.file().item(item_id).*;
+
+        if (self.matchItemDeclaration(item_id)) return true;
+
+        switch (item) {
+            .Contract => |contract_decl| {
+                for (contract_decl.invariants) |expr_id| {
+                    if (try self.visitExpr(expr_id)) return true;
+                }
+                for (contract_decl.members) |member_id| {
+                    if (try self.visitItem(member_id)) return true;
+                }
+            },
+            .Function => |function_decl| {
+                for (function_decl.parameters) |parameter| {
+                    if (self.matchPatternDeclaration(parameter.pattern)) return true;
+                }
+                for (function_decl.clauses) |clause| {
+                    if (try self.visitExpr(clause.expr)) return true;
+                }
+                if (try self.visitBody(function_decl.body)) return true;
+            },
+            .Field => |field_decl| {
+                if (field_decl.value) |value| {
+                    if (try self.visitExpr(value)) return true;
+                }
+            },
+            .Constant => |constant_decl| {
+                if (try self.visitExpr(constant_decl.value)) return true;
+            },
+            .Trait => |trait_decl| {
+                for (trait_decl.methods) |method| {
+                    if (self.matchNameRange(method.range, method.name)) return true;
+                    for (method.parameters) |parameter| {
+                        if (self.matchPatternDeclaration(parameter.pattern)) return true;
+                    }
+                    for (method.clauses) |clause| {
+                        if (try self.visitExpr(clause.expr)) return true;
+                    }
+                }
+                if (trait_decl.ghost_block) |ghost_id| {
+                    if (try self.visitItem(ghost_id)) return true;
+                }
+            },
+            .GhostBlock => |ghost_block| {
+                if (try self.visitBody(ghost_block.body)) return true;
+            },
+            .Struct => |struct_decl| {
+                for (struct_decl.fields) |field| {
+                    if (self.matchNameRange(field.range, field.name)) return true;
+                }
+            },
+            .Bitfield => |bitfield_decl| {
+                for (bitfield_decl.fields) |field| {
+                    if (self.matchNameRange(field.range, field.name)) return true;
+                }
+            },
+            .Enum => |enum_decl| {
+                for (enum_decl.variants) |variant| {
+                    if (self.matchNameRange(variant.range, variant.name)) return true;
+                }
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.fields) |field| {
+                    if (self.matchNameRange(field.range, field.name)) return true;
+                }
+            },
+            .ErrorDecl => |error_decl| {
+                for (error_decl.parameters) |parameter| {
+                    if (self.matchPatternDeclaration(parameter.pattern)) return true;
+                }
+            },
+            .Impl => |impl_decl| {
+                for (impl_decl.methods) |method_id| {
+                    if (try self.visitItem(method_id)) return true;
+                }
+            },
+            else => {},
+        }
+
+        return false;
+    }
+
+    fn visitBody(self: *Resolver, body_id: compiler.ast.BodyId) anyerror!bool {
+        const body = self.analysis.file().body(body_id).*;
+        for (body.statements) |stmt_id| {
+            if (try self.visitStmt(stmt_id)) return true;
+        }
+        return false;
+    }
+
+    fn visitStmt(self: *Resolver, stmt_id: compiler.ast.StmtId) anyerror!bool {
+        if (self.found != null) return true;
+        switch (self.analysis.file().statement(stmt_id).*) {
+            .VariableDecl => |decl| {
+                if (decl.value) |expr_id| {
+                    if (try self.visitExpr(expr_id)) return true;
+                }
+                if (self.matchPatternDeclaration(decl.pattern)) return true;
+            },
+            .Return => |ret| if (ret.value) |expr_id| {
+                if (try self.visitExpr(expr_id)) return true;
+            },
+            .If => |if_stmt| {
+                if (try self.visitExpr(if_stmt.condition)) return true;
+                if (try self.visitBody(if_stmt.then_body)) return true;
+                if (if_stmt.else_body) |else_body| {
+                    if (try self.visitBody(else_body)) return true;
+                }
+            },
+            .While => |while_stmt| {
+                if (try self.visitExpr(while_stmt.condition)) return true;
+                for (while_stmt.invariants) |expr_id| {
+                    if (try self.visitExpr(expr_id)) return true;
+                }
+                if (try self.visitBody(while_stmt.body)) return true;
+            },
+            .For => |for_stmt| {
+                if (try self.visitExpr(for_stmt.iterable)) return true;
+                if (self.matchPatternDeclaration(for_stmt.item_pattern)) return true;
+                if (for_stmt.index_pattern) |index_pattern| {
+                    if (self.matchPatternDeclaration(index_pattern)) return true;
+                }
+                for (for_stmt.invariants) |expr_id| {
+                    if (try self.visitExpr(expr_id)) return true;
+                }
+                if (try self.visitBody(for_stmt.body)) return true;
+            },
+            .Switch => |switch_stmt| {
+                if (try self.visitExpr(switch_stmt.condition)) return true;
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| if (try self.visitExpr(expr_id)) return true,
+                        .Range => |range_pattern| {
+                            if (try self.visitExpr(range_pattern.start)) return true;
+                            if (try self.visitExpr(range_pattern.end)) return true;
+                        },
+                        .Else => {},
+                    }
+                    if (try self.visitBody(arm.body)) return true;
+                }
+                if (switch_stmt.else_body) |else_body| {
+                    if (try self.visitBody(else_body)) return true;
+                }
+            },
+            .Try => |try_stmt| {
+                if (try self.visitBody(try_stmt.try_body)) return true;
+                if (try_stmt.catch_clause) |catch_clause| {
+                    if (catch_clause.error_pattern) |pattern_id| {
+                        if (self.matchPatternDeclaration(pattern_id)) return true;
+                    }
+                    if (try self.visitBody(catch_clause.body)) return true;
+                }
+            },
+            .Log => |log_stmt| {
+                for (log_stmt.args) |arg| {
+                    if (try self.visitExpr(arg)) return true;
+                }
+            },
+            .Lock => |lock_stmt| if (try self.visitExpr(lock_stmt.path)) return true,
+            .Unlock => |unlock_stmt| if (try self.visitExpr(unlock_stmt.path)) return true,
+            .Assert => |assert_stmt| if (try self.visitExpr(assert_stmt.condition)) return true,
+            .Assume => |assume_stmt| if (try self.visitExpr(assume_stmt.condition)) return true,
+            .Break => |jump| if (jump.value) |expr_id| {
+                if (try self.visitExpr(expr_id)) return true;
+            },
+            .Continue => |jump| if (jump.value) |expr_id| {
+                if (try self.visitExpr(expr_id)) return true;
+            },
+            .Assign => |assign| {
+                if (self.matchPatternDeclaration(assign.target)) return true;
+                if (try self.visitPatternUses(assign.target)) return true;
+                if (try self.visitExpr(assign.value)) return true;
+            },
+            .Expr => |expr_stmt| if (try self.visitExpr(expr_stmt.expr)) return true,
+            .Block => |block| if (try self.visitBody(block.body)) return true,
+            .LabeledBlock => |block| if (try self.visitBody(block.body)) return true,
+            else => {},
+        }
+        return false;
+    }
+
+    fn visitPatternUses(self: *Resolver, pattern_id: compiler.ast.PatternId) anyerror!bool {
+        switch (self.analysis.file().pattern(pattern_id).*) {
+            .Field => |field| return self.visitPatternUses(field.base),
+            .Index => |index| {
+                if (try self.visitPatternUses(index.base)) return true;
+                if (try self.visitExpr(index.index)) return true;
+            },
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    if (self.matchNameRange(field.range, field.name)) return true;
+                    if (try self.visitPatternUses(field.binding)) return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn visitExpr(self: *Resolver, expr_id: compiler.ast.ExprId) anyerror!bool {
+        if (self.found != null) return true;
+        const expr = self.analysis.file().expression(expr_id).*;
+        switch (expr) {
+            .Name => |name| {
+                if (self.touchesNameRange(name.range, name.name)) {
+                    if (self.resolveImportAliasName(name.name)) return true;
+                    return try self.resolveExprBinding(expr_id);
+                }
+            },
+            .Unary => |unary| if (try self.visitExpr(unary.operand)) return true,
+            .Binary => |binary| {
+                if (try self.visitExpr(binary.lhs)) return true;
+                if (try self.visitExpr(binary.rhs)) return true;
+            },
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| {
+                    if (try self.visitExpr(element)) return true;
+                }
+            },
+            .ArrayLiteral => |array| {
+                for (array.elements) |element| {
+                    if (try self.visitExpr(element)) return true;
+                }
+            },
+            .StructLiteral => |struct_literal| {
+                for (struct_literal.fields) |field| {
+                    if (self.matchNameRange(field.range, field.name)) return true;
+                    if (try self.visitExpr(field.value)) return true;
+                }
+            },
+            .Switch => |switch_expr| {
+                if (try self.visitExpr(switch_expr.condition)) return true;
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| if (try self.visitExpr(pattern_expr)) return true,
+                        .Range => |range_pattern| {
+                            if (try self.visitExpr(range_pattern.start)) return true;
+                            if (try self.visitExpr(range_pattern.end)) return true;
+                        },
+                        .Else => {},
+                    }
+                    if (try self.visitExpr(arm.value)) return true;
+                }
+                if (switch_expr.else_expr) |else_expr| {
+                    if (try self.visitExpr(else_expr)) return true;
+                }
+            },
+            .Comptime => |comptime_expr| if (try self.visitBody(comptime_expr.body)) return true,
+            .ErrorReturn => |error_return| {
+                if (self.touchesNameRange(error_return.range, error_return.name)) return false;
+                for (error_return.args) |arg| {
+                    if (try self.visitExpr(arg)) return true;
+                }
+            },
+            .Call => |call| {
+                if (try self.visitExpr(call.callee)) return true;
+                for (call.args) |arg| {
+                    if (try self.visitExpr(arg)) return true;
+                }
+            },
+            .Builtin => |builtin| {
+                if (self.touchesNameRange(builtin.range, builtin.name)) return false;
+                for (builtin.args) |arg| {
+                    if (try self.visitExpr(arg)) return true;
+                }
+            },
+            .Field => |field| {
+                if (self.touchesNameRange(field.range, field.name)) {
+                    if (try self.resolveCrossFileField(expr_id, field)) return true;
+                }
+                if (try self.visitExpr(field.base)) return true;
+            },
+            .Index => |index| {
+                if (try self.visitExpr(index.base)) return true;
+                if (try self.visitExpr(index.index)) return true;
+            },
+            .Group => |group| if (try self.visitExpr(group.expr)) return true,
+            .Old => |old| if (try self.visitExpr(old.expr)) return true,
+            .Quantified => |quantified| {
+                if (self.matchPatternDeclaration(quantified.pattern)) return true;
+                if (quantified.condition) |condition| {
+                    if (try self.visitExpr(condition)) return true;
+                }
+                if (try self.visitExpr(quantified.body)) return true;
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn resolveExprBinding(self: *Resolver, expr_id: compiler.ast.ExprId) anyerror!bool {
+        const binding = self.analysis.resolution.expr_bindings[expr_id.index()] orelse return false;
+        self.found = try self.definitionForBinding(binding);
+        return self.found != null;
+    }
+
+    fn resolveImportAliasName(self: *Resolver, name: []const u8) bool {
+        const item_id = self.importAliasItemByName(name) orelse return false;
+        self.found = self.definitionForItem(item_id) catch null;
+        return self.found != null;
+    }
+
+    fn definitionForBinding(self: *Resolver, binding: compiler.sema.ResolvedBinding) anyerror!?Definition {
+        return switch (binding) {
+            .item => |item_id| try self.definitionForItem(item_id),
+            .pattern => |pattern_id| self.definitionForPattern(pattern_id),
+        };
+    }
+
+    fn definitionForItem(self: *Resolver, item_id: compiler.ast.ItemId) anyerror!?Definition {
+        if (self.itemImportAliasName(item_id)) |alias| {
+            if (findImportBinding(self.cross_file, alias)) |binding| {
+                return .{ .uri = binding.target_uri, .range = file_origin };
+            }
+        }
+
+        const range = self.itemSelectionRange(item_id) orelse return null;
+        return .{ .range = range };
+    }
+
+    fn importAliasItemByName(self: *Resolver, alias: []const u8) ?compiler.ast.ItemId {
+        for (self.analysis.file().root_items) |item_id| {
+            const item_alias = self.itemImportAliasName(item_id) orelse continue;
+            if (std.mem.eql(u8, item_alias, alias)) return item_id;
+        }
+        return null;
+    }
+
+    fn itemImportAliasName(self: *Resolver, item_id: compiler.ast.ItemId) ?[]const u8 {
+        const item = self.analysis.file().item(item_id).*;
+        return switch (item) {
+            .Import => |import_item| import_item.alias,
+            .Constant => |constant_item| blk: {
+                switch (self.analysis.file().expression(constant_item.value).*) {
+                    .Builtin => |builtin| if (std.mem.eql(u8, builtin.name, "import")) break :blk constant_item.name,
+                    else => {},
+                }
+                const start: usize = @intCast(@min(constant_item.range.start, self.analysis.source_text.len));
+                const end: usize = @intCast(@min(constant_item.range.end, self.analysis.source_text.len));
+                if (start <= end and end <= self.analysis.source_text.len and std.mem.indexOf(u8, self.analysis.source_text[start..end], "@import(") != null) {
+                    break :blk constant_item.name;
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    fn definitionForPattern(self: *Resolver, pattern_id: compiler.ast.PatternId) ?Definition {
+        const range = self.patternSelectionRange(pattern_id) orelse return null;
+        return .{ .range = range };
+    }
+
+    fn resolveCrossFileField(self: *Resolver, expr_id: compiler.ast.ExprId, field: compiler.ast.FieldExpr) anyerror!bool {
+        const binding = switch (self.analysis.file().expression(field.base).*) {
+            .Name => self.analysis.resolution.expr_bindings[field.base.index()],
+            .Group => |group| switch (self.analysis.file().expression(group.expr).*) {
+                .Name => self.analysis.resolution.expr_bindings[group.expr.index()],
+                else => null,
+            },
+            else => null,
+        } orelse return false;
+
+        const item_id = switch (binding) {
+            .item => |item_id| item_id,
+            .pattern => return false,
+        };
+        const item = self.analysis.file().item(item_id).*;
+        if (item != .Import) return false;
+
+        const alias = item.Import.alias orelse return false;
+        const import_binding = findImportBinding(self.cross_file, alias) orelse return false;
+
+        if (import_binding.target_source) |target_source| {
+            if (try findTopLevelDeclarationInSource(self.analysis.sources.allocator, target_source, field.name)) |range| {
+                self.found = .{
+                    .uri = import_binding.target_uri,
+                    .range = range,
+                };
+                return true;
+            }
+        }
+
+        self.found = .{
+            .uri = import_binding.target_uri,
+            .range = file_origin,
+        };
+        _ = expr_id;
+        return true;
+    }
+
+    fn matchItemDeclaration(self: *Resolver, item_id: compiler.ast.ItemId) bool {
+        const range = self.itemSelectionRange(item_id) orelse return false;
+        if (!rangeContainsPosition(range, self.query_position)) return false;
+        self.found = .{ .range = range };
+        return true;
+    }
+
+    fn matchPatternDeclaration(self: *Resolver, pattern_id: compiler.ast.PatternId) bool {
+        const range = self.patternSelectionRange(pattern_id) orelse return false;
+        if (!rangeContainsPosition(range, self.query_position)) return false;
+        self.found = .{ .range = range };
+        return true;
+    }
+
+    fn matchNameRange(self: *Resolver, range: compiler.TextRange, name: []const u8) bool {
+        const selection = self.analysis.selectionRange(range, name);
+        if (!rangeContainsPosition(selection, self.query_position)) return false;
+        self.found = .{ .range = selection };
+        return true;
+    }
+
+    fn touchesNameRange(self: *Resolver, range: compiler.TextRange, name: []const u8) bool {
+        return rangeContainsPosition(self.analysis.selectionRange(range, name), self.query_position);
+    }
+
+    fn itemSelectionRange(self: *Resolver, item_id: compiler.ast.ItemId) ?frontend.Range {
+        const item = self.analysis.file().item(item_id).*;
+        const pair: ?struct { range: compiler.TextRange, name: []const u8 } = switch (item) {
+            .Import => |import_item| if (import_item.alias) |alias|
+                .{ .range = import_item.range, .name = alias }
+            else
+                null,
+            .Contract => |contract_decl| .{ .range = contract_decl.range, .name = contract_decl.name },
+            .Function => |function_decl| .{ .range = function_decl.range, .name = function_decl.name },
+            .Struct => |struct_decl| .{ .range = struct_decl.range, .name = struct_decl.name },
+            .Bitfield => |bitfield_decl| .{ .range = bitfield_decl.range, .name = bitfield_decl.name },
+            .Enum => |enum_decl| .{ .range = enum_decl.range, .name = enum_decl.name },
+            .Trait => |trait_decl| .{ .range = trait_decl.range, .name = trait_decl.name },
+            .TypeAlias => |alias_decl| .{ .range = alias_decl.range, .name = alias_decl.name },
+            .LogDecl => |log_decl| .{ .range = log_decl.range, .name = log_decl.name },
+            .ErrorDecl => |error_decl| .{ .range = error_decl.range, .name = error_decl.name },
+            .Field => |field_decl| .{ .range = field_decl.range, .name = field_decl.name },
+            .Constant => |constant_decl| .{ .range = constant_decl.range, .name = constant_decl.name },
+            else => null,
+        };
+        if (pair) |p| return self.analysis.selectionRange(p.range, p.name);
+        return null;
+    }
+
+    fn patternSelectionRange(self: *Resolver, pattern_id: compiler.ast.PatternId) ?frontend.Range {
+        const pattern = self.analysis.file().pattern(pattern_id).*;
+        return switch (pattern) {
+            .Name => |name| self.analysis.selectionRange(name.range, name.name),
+            .StructDestructure => |destructure| self.analysis.textRangeToRange(destructure.range),
+            else => null,
+        };
+    }
+};
+
 pub fn definitionAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Definition {
     return definitionAtImpl(allocator, source, position, null);
 }
@@ -31,35 +589,47 @@ pub fn definitionAtCrossFile(allocator: Allocator, source: []const u8, position:
 }
 
 fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
-    defer lex.deinit();
+    var analysis = (try Analysis.init(allocator, source)) orelse return null;
+    defer analysis.deinit();
 
-    const tokens = lex.scanTokens() catch return null;
-    defer allocator.free(tokens);
+    if (identifierAtPosition(source, position)) |name| {
+        if (findImportBinding(cross_file, name)) |binding| {
+            if (hasTopLevelDeclarationNamed(&analysis, name)) {
+                if (binding.target_source) |target_source| {
+                    if (nextFieldIdentifier(source, position)) |member_name| {
+                        if (try findTopLevelDeclarationInSource(allocator, target_source, member_name)) |range| {
+                            return .{
+                                .uri = binding.target_uri,
+                                .range = range,
+                            };
+                        }
+                    }
+                }
+                return .{
+                    .uri = binding.target_uri,
+                    .range = file_origin,
+                };
+            }
+        }
 
-    const previous_parser_stderr = parser.diagnostics.enable_stderr_diagnostics;
-    parser.diagnostics.enable_stderr_diagnostics = false;
-    defer parser.diagnostics.enable_stderr_diagnostics = previous_parser_stderr;
-
-    var parse_result = parser.parseRaw(allocator, tokens) catch return null;
-    defer parse_result.arena.deinit();
-
-    var ctx = Context{
-        .allocator = allocator,
-        .query_position = position,
-        .cross_file = cross_file,
-    };
-    defer ctx.deinit();
-
-    try collectDeclarations(&ctx, parse_result.nodes);
-
-    for (parse_result.nodes) |node| {
-        if (try resolveNode(&ctx, node, null)) {
-            return .{ .uri = ctx.found_uri, .range = ctx.found_range.? };
+        for (analysis.file().root_items) |item_id| {
+            var alias_resolver = Resolver{
+                .analysis = &analysis,
+                .query_position = position,
+                .cross_file = cross_file,
+            };
+            const alias = alias_resolver.itemImportAliasName(item_id) orelse continue;
+            if (!std.mem.eql(u8, alias, name)) continue;
+            return try alias_resolver.definitionForItem(item_id);
         }
     }
 
-    return null;
+    var resolver = Resolver{
+        .analysis = &analysis,
+        .query_position = position,
+        .cross_file = cross_file,
+    };
+    return resolver.run();
 }
 
 fn findImportBinding(cross_file: ?CrossFileContext, name: []const u8) ?ImportBinding {
@@ -70,693 +640,34 @@ fn findImportBinding(cross_file: ?CrossFileContext, name: []const u8) ?ImportBin
     return null;
 }
 
-fn findTopLevelDeclarationInSource(allocator: Allocator, source: []const u8, name: []const u8) !?frontend.Range {
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
-    defer lex.deinit();
+fn findTopLevelDeclarationInSource(allocator: Allocator, source_text: []const u8, name: []const u8) !?frontend.Range {
+    var analysis = (try Analysis.init(allocator, source_text)) orelse return null;
+    defer analysis.deinit();
 
-    const tokens = lex.scanTokens() catch return null;
-    defer allocator.free(tokens);
-
-    const prev_stderr = parser.diagnostics.enable_stderr_diagnostics;
-    parser.diagnostics.enable_stderr_diagnostics = false;
-    defer parser.diagnostics.enable_stderr_diagnostics = prev_stderr;
-
-    var result = parser.parseRaw(allocator, tokens) catch return null;
-    defer result.arena.deinit();
-
-    for (result.nodes) |node| {
-        const decl_name: ?[]const u8 = switch (node) {
-            .Contract => |d| d.name,
-            .Function => |d| d.name,
-            .VariableDecl => |d| d.name,
-            .Constant => |d| d.name,
-            .StructDecl => |d| d.name,
-            .BitfieldDecl => |d| d.name,
-            .EnumDecl => |d| d.name,
-            .LogDecl => |d| d.name,
-            .ErrorDecl => |d| d.name,
+    for (analysis.file().root_items) |item_id| {
+        const item = analysis.file().item(item_id).*;
+        const pair: ?struct { range: compiler.TextRange, symbol: []const u8 } = switch (item) {
+            .Contract => |contract_decl| .{ .range = contract_decl.range, .symbol = contract_decl.name },
+            .Function => |function_decl| .{ .range = function_decl.range, .symbol = function_decl.name },
+            .Field => |field_decl| .{ .range = field_decl.range, .symbol = field_decl.name },
+            .Constant => |constant_decl| .{ .range = constant_decl.range, .symbol = constant_decl.name },
+            .Struct => |struct_decl| .{ .range = struct_decl.range, .symbol = struct_decl.name },
+            .Bitfield => |bitfield_decl| .{ .range = bitfield_decl.range, .symbol = bitfield_decl.name },
+            .Enum => |enum_decl| .{ .range = enum_decl.range, .symbol = enum_decl.name },
+            .Trait => |trait_decl| .{ .range = trait_decl.range, .symbol = trait_decl.name },
+            .TypeAlias => |alias_decl| .{ .range = alias_decl.range, .symbol = alias_decl.name },
+            .LogDecl => |log_decl| .{ .range = log_decl.range, .symbol = log_decl.name },
+            .ErrorDecl => |error_decl| .{ .range = error_decl.range, .symbol = error_decl.name },
             else => null,
         };
-        if (decl_name) |dn| {
-            if (std.mem.eql(u8, dn, name)) {
-                const span = switch (node) {
-                    .Contract => |d| d.span,
-                    .Function => |d| d.span,
-                    .VariableDecl => |d| d.span,
-                    .Constant => |d| d.span,
-                    .StructDecl => |d| d.span,
-                    .BitfieldDecl => |d| d.span,
-                    .EnumDecl => |d| d.span,
-                    .LogDecl => |d| d.span,
-                    .ErrorDecl => |d| d.span,
-                    else => unreachable,
-                };
-                return selectionRange(span, dn);
+        if (pair) |p| {
+            if (std.mem.eql(u8, p.symbol, name)) {
+                return analysis.selectionRange(p.range, p.symbol);
             }
-        }
-    }
-    return null;
-}
-
-const file_origin: frontend.Range = .{
-    .start = .{ .line = 0, .character = 0 },
-    .end = .{ .line = 0, .character = 0 },
-};
-
-const Declaration = struct {
-    name: []const u8,
-    range: frontend.Range,
-};
-
-const ContractMemberDeclaration = struct {
-    contract_name: []const u8,
-    declaration: Declaration,
-};
-
-const LocalBinding = struct {
-    name: []const u8,
-    range: frontend.Range,
-    depth: usize,
-};
-
-const Context = struct {
-    allocator: Allocator,
-    query_position: frontend.Position,
-    scope_depth: usize = 0,
-    found_range: ?frontend.Range = null,
-    found_uri: ?[]const u8 = null,
-    cross_file: ?CrossFileContext = null,
-    global_declarations: std.ArrayList(Declaration) = .{},
-    contract_member_declarations: std.ArrayList(ContractMemberDeclaration) = .{},
-    local_bindings: std.ArrayList(LocalBinding) = .{},
-
-    fn deinit(self: *Context) void {
-        self.global_declarations.deinit(self.allocator);
-        self.contract_member_declarations.deinit(self.allocator);
-        self.local_bindings.deinit(self.allocator);
-    }
-
-    fn pushScope(self: *Context) void {
-        self.scope_depth += 1;
-    }
-
-    fn popScope(self: *Context) void {
-        if (self.scope_depth == 0) return;
-        self.scope_depth -= 1;
-    }
-
-    fn bindLocal(self: *Context, name: []const u8, span: ast.SourceSpan) !void {
-        try self.local_bindings.append(self.allocator, .{
-            .name = name,
-            .range = selectionRange(span, name),
-            .depth = self.scope_depth,
-        });
-    }
-
-    fn bindTopLevel(self: *Context, name: []const u8, span: ast.SourceSpan) !void {
-        try self.global_declarations.append(self.allocator, .{
-            .name = name,
-            .range = selectionRange(span, name),
-        });
-    }
-
-    fn bindContractMember(self: *Context, contract_name: []const u8, name: []const u8, span: ast.SourceSpan) !void {
-        try self.contract_member_declarations.append(self.allocator, .{
-            .contract_name = contract_name,
-            .declaration = .{
-                .name = name,
-                .range = selectionRange(span, name),
-            },
-        });
-    }
-};
-
-fn collectDeclarations(ctx: *Context, nodes: []const ast.AstNode) !void {
-    for (nodes) |node| {
-        switch (node) {
-            .Contract => |contract_decl| {
-                try ctx.bindTopLevel(contract_decl.name, contract_decl.span);
-                for (contract_decl.body) |member| {
-                    try collectContractMemberDeclaration(ctx, contract_decl.name, member);
-                }
-            },
-            .Function => |function_decl| try ctx.bindTopLevel(function_decl.name, function_decl.span),
-            .VariableDecl => |variable_decl| try ctx.bindTopLevel(variable_decl.name, variable_decl.span),
-            .Constant => |constant_decl| try ctx.bindTopLevel(constant_decl.name, constant_decl.span),
-            .StructDecl => |struct_decl| try ctx.bindTopLevel(struct_decl.name, struct_decl.span),
-            .BitfieldDecl => |bitfield_decl| try ctx.bindTopLevel(bitfield_decl.name, bitfield_decl.span),
-            .EnumDecl => |enum_decl| try ctx.bindTopLevel(enum_decl.name, enum_decl.span),
-            .LogDecl => |log_decl| try ctx.bindTopLevel(log_decl.name, log_decl.span),
-            .ErrorDecl => |error_decl| try ctx.bindTopLevel(error_decl.name, error_decl.span),
-            .Import => |import_decl| {
-                if (import_decl.alias) |alias| {
-                    try ctx.bindTopLevel(alias, import_decl.span);
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-fn collectContractMemberDeclaration(ctx: *Context, contract_name: []const u8, member: ast.AstNode) !void {
-    switch (member) {
-        .Function => |function_decl| try ctx.bindContractMember(contract_name, function_decl.name, function_decl.span),
-        .VariableDecl => |variable_decl| try ctx.bindContractMember(contract_name, variable_decl.name, variable_decl.span),
-        .Constant => |constant_decl| try ctx.bindContractMember(contract_name, constant_decl.name, constant_decl.span),
-        .StructDecl => |struct_decl| try ctx.bindContractMember(contract_name, struct_decl.name, struct_decl.span),
-        .BitfieldDecl => |bitfield_decl| try ctx.bindContractMember(contract_name, bitfield_decl.name, bitfield_decl.span),
-        .EnumDecl => |enum_decl| try ctx.bindContractMember(contract_name, enum_decl.name, enum_decl.span),
-        .LogDecl => |log_decl| try ctx.bindContractMember(contract_name, log_decl.name, log_decl.span),
-        .ErrorDecl => |error_decl| try ctx.bindContractMember(contract_name, error_decl.name, error_decl.span),
-        .Import => |import_decl| {
-            if (import_decl.alias) |alias| {
-                try ctx.bindContractMember(contract_name, alias, import_decl.span);
-            }
-        },
-        else => {},
-    }
-}
-
-fn resolveNode(ctx: *Context, node: ast.AstNode, active_contract: ?[]const u8) ResolveError!bool {
-    if (ctx.found_range != null) return true;
-
-    switch (node) {
-        .Contract => |contract_decl| {
-            if (matchDeclarationAtQuery(ctx, contract_decl.name, contract_decl.span)) return true;
-            for (contract_decl.body) |member| {
-                if (try resolveNode(ctx, member, contract_decl.name)) return true;
-            }
-        },
-        .Function => |function_decl| {
-            if (try resolveFunction(ctx, function_decl, active_contract)) return true;
-        },
-        .VariableDecl => |variable_decl| {
-            if (matchDeclarationAtQuery(ctx, variable_decl.name, variable_decl.span)) return true;
-            if (variable_decl.value) |value| {
-                if (try resolveExpression(ctx, value, active_contract)) return true;
-            }
-        },
-        .Constant => |constant_decl| {
-            if (matchDeclarationAtQuery(ctx, constant_decl.name, constant_decl.span)) return true;
-            if (try resolveExpression(ctx, constant_decl.value, active_contract)) return true;
-        },
-        .StructDecl => |struct_decl| {
-            if (matchDeclarationAtQuery(ctx, struct_decl.name, struct_decl.span)) return true;
-            for (struct_decl.fields) |field| {
-                if (matchDeclarationAtQuery(ctx, field.name, field.span)) return true;
-            }
-        },
-        .BitfieldDecl => |bitfield_decl| {
-            if (matchDeclarationAtQuery(ctx, bitfield_decl.name, bitfield_decl.span)) return true;
-            for (bitfield_decl.fields) |field| {
-                if (matchDeclarationAtQuery(ctx, field.name, field.span)) return true;
-            }
-        },
-        .EnumDecl => |enum_decl| {
-            if (matchDeclarationAtQuery(ctx, enum_decl.name, enum_decl.span)) return true;
-            for (enum_decl.variants) |variant| {
-                if (matchDeclarationAtQuery(ctx, variant.name, variant.span)) return true;
-                if (variant.value) |*value| {
-                    if (try resolveExpression(ctx, value, active_contract)) return true;
-                }
-            }
-        },
-        .LogDecl => |log_decl| {
-            if (matchDeclarationAtQuery(ctx, log_decl.name, log_decl.span)) return true;
-            for (log_decl.fields) |field| {
-                if (matchDeclarationAtQuery(ctx, field.name, field.span)) return true;
-            }
-        },
-        .ErrorDecl => |error_decl| {
-            if (matchDeclarationAtQuery(ctx, error_decl.name, error_decl.span)) return true;
-            if (error_decl.parameters) |parameters| {
-                for (parameters) |parameter| {
-                    if (matchDeclarationAtQuery(ctx, parameter.name, parameter.span)) return true;
-                }
-            }
-        },
-        .Import => |import_decl| {
-            if (rangeContainsPosition(spanToRange(import_decl.span), ctx.query_position)) {
-                if (findImportBinding(ctx.cross_file, import_decl.alias orelse import_decl.path)) |binding| {
-                    ctx.found_uri = binding.target_uri;
-                    ctx.found_range = file_origin;
-                    return true;
-                }
-            }
-            if (import_decl.alias) |alias| {
-                if (matchDeclarationAtQuery(ctx, alias, import_decl.span)) return true;
-            }
-        },
-        .Block => |block| if (try resolveBlock(ctx, block, active_contract)) return true,
-        .Statement => |stmt| if (try resolveStatement(ctx, stmt.*, active_contract)) return true,
-        .Expression => |expr| if (try resolveExpression(ctx, expr, active_contract)) return true,
-        .TryBlock => |try_block| {
-            if (try resolveBlock(ctx, try_block.try_block, active_contract)) return true;
-            if (try_block.catch_block) |catch_block| {
-                if (try resolveBlock(ctx, catch_block.block, active_contract)) return true;
-            }
-        },
-        else => {},
-    }
-
-    return false;
-}
-
-fn resolveFunction(ctx: *Context, function_decl: ast.FunctionNode, active_contract: ?[]const u8) ResolveError!bool {
-    if (matchDeclarationAtQuery(ctx, function_decl.name, function_decl.span)) return true;
-
-    ctx.pushScope();
-    defer ctx.popScope();
-
-    for (function_decl.parameters) |parameter| {
-        if (matchDeclarationAtQuery(ctx, parameter.name, parameter.span)) return true;
-        try ctx.bindLocal(parameter.name, parameter.span);
-        if (parameter.default_value) |default_value| {
-            if (try resolveExpression(ctx, default_value, active_contract)) return true;
-        }
-    }
-
-    for (function_decl.requires_clauses) |clause| {
-        if (try resolveExpression(ctx, clause, active_contract)) return true;
-    }
-    for (function_decl.ensures_clauses) |clause| {
-        if (try resolveExpression(ctx, clause, active_contract)) return true;
-    }
-
-    return resolveBlock(ctx, function_decl.body, active_contract);
-}
-
-fn resolveBlock(ctx: *Context, block: ast.Statements.BlockNode, active_contract: ?[]const u8) ResolveError!bool {
-    ctx.pushScope();
-    defer ctx.popScope();
-
-    for (block.statements) |stmt| {
-        if (try resolveStatement(ctx, stmt, active_contract)) return true;
-    }
-    return false;
-}
-
-fn resolveStatement(ctx: *Context, stmt: ast.Statements.StmtNode, active_contract: ?[]const u8) ResolveError!bool {
-    switch (stmt) {
-        .Expr => |expr| return resolveExpression(ctx, &expr, active_contract),
-        .VariableDecl => |variable_decl| {
-            if (variable_decl.value) |value| {
-                if (try resolveExpression(ctx, value, active_contract)) return true;
-            }
-
-            if (matchDeclarationAtQuery(ctx, variable_decl.name, variable_decl.span)) return true;
-            try ctx.bindLocal(variable_decl.name, variable_decl.span);
-
-            if (variable_decl.tuple_names) |names| {
-                for (names) |name| {
-                    try ctx.bindLocal(name, variable_decl.span);
-                }
-            }
-            return false;
-        },
-        .DestructuringAssignment => |destructure| return resolveExpression(ctx, destructure.value, active_contract),
-        .Return => |ret| {
-            if (ret.value) |*value| {
-                return resolveExpression(ctx, value, active_contract);
-            }
-            return false;
-        },
-        .If => |if_stmt| {
-            if (try resolveExpression(ctx, &if_stmt.condition, active_contract)) return true;
-            if (try resolveBlock(ctx, if_stmt.then_branch, active_contract)) return true;
-            if (if_stmt.else_branch) |else_branch| {
-                if (try resolveBlock(ctx, else_branch, active_contract)) return true;
-            }
-            return false;
-        },
-        .While => |while_stmt| {
-            if (try resolveExpression(ctx, &while_stmt.condition, active_contract)) return true;
-            for (while_stmt.invariants) |*invariant| {
-                if (try resolveExpression(ctx, invariant, active_contract)) return true;
-            }
-            if (while_stmt.decreases) |decreases| {
-                if (try resolveExpression(ctx, decreases, active_contract)) return true;
-            }
-            if (while_stmt.increases) |increases| {
-                if (try resolveExpression(ctx, increases, active_contract)) return true;
-            }
-            return resolveBlock(ctx, while_stmt.body, active_contract);
-        },
-        .ForLoop => |for_loop| {
-            if (try resolveExpression(ctx, &for_loop.iterable, active_contract)) return true;
-            for (for_loop.invariants) |*invariant| {
-                if (try resolveExpression(ctx, invariant, active_contract)) return true;
-            }
-            if (for_loop.decreases) |decreases| {
-                if (try resolveExpression(ctx, decreases, active_contract)) return true;
-            }
-            if (for_loop.increases) |increases| {
-                if (try resolveExpression(ctx, increases, active_contract)) return true;
-            }
-
-            ctx.pushScope();
-            defer ctx.popScope();
-
-            switch (for_loop.pattern) {
-                .Single => |single| {
-                    if (matchDeclarationAtQuery(ctx, single.name, single.span)) return true;
-                    try ctx.bindLocal(single.name, single.span);
-                },
-                .IndexPair => |pair| {
-                    if (matchDeclarationAtQuery(ctx, pair.item, pair.span)) return true;
-                    if (matchDeclarationAtQuery(ctx, pair.index, pair.span)) return true;
-                    try ctx.bindLocal(pair.item, pair.span);
-                    try ctx.bindLocal(pair.index, pair.span);
-                },
-                .Destructured => |destructured| {
-                    switch (destructured.pattern) {
-                        .Struct => |fields| {
-                            for (fields) |field| {
-                                if (matchDeclarationAtQuery(ctx, field.variable, field.span)) return true;
-                                try ctx.bindLocal(field.variable, field.span);
-                            }
-                        },
-                        .Tuple => |names| {
-                            for (names) |name| {
-                                if (matchDeclarationAtQuery(ctx, name, destructured.span)) return true;
-                                try ctx.bindLocal(name, destructured.span);
-                            }
-                        },
-                        .Array => |names| {
-                            for (names) |name| {
-                                if (matchDeclarationAtQuery(ctx, name, destructured.span)) return true;
-                                try ctx.bindLocal(name, destructured.span);
-                            }
-                        },
-                    }
-                },
-            }
-
-            return resolveBlock(ctx, for_loop.body, active_contract);
-        },
-        .Break => |break_stmt| {
-            if (break_stmt.value) |value| {
-                return resolveExpression(ctx, value, active_contract);
-            }
-            return false;
-        },
-        .Continue => |continue_stmt| {
-            if (continue_stmt.value) |value| {
-                return resolveExpression(ctx, value, active_contract);
-            }
-            return false;
-        },
-        .Log => |log_stmt| {
-            for (log_stmt.args) |*arg| {
-                if (try resolveExpression(ctx, arg, active_contract)) return true;
-            }
-            return false;
-        },
-        .Lock => |lock_stmt| return resolveExpression(ctx, &lock_stmt.path, active_contract),
-        .Unlock => |unlock_stmt| return resolveExpression(ctx, &unlock_stmt.path, active_contract),
-        .Assert => |assert_stmt| return resolveExpression(ctx, &assert_stmt.condition, active_contract),
-        .Invariant => |invariant_stmt| return resolveExpression(ctx, &invariant_stmt.condition, active_contract),
-        .Requires => |requires_stmt| return resolveExpression(ctx, &requires_stmt.condition, active_contract),
-        .Ensures => |ensures_stmt| return resolveExpression(ctx, &ensures_stmt.condition, active_contract),
-        .Assume => |assume_stmt| return resolveExpression(ctx, &assume_stmt.condition, active_contract),
-        .Havoc => |havoc_stmt| {
-            _ = havoc_stmt;
-            return false;
-        },
-        .Switch => |switch_stmt| {
-            if (try resolveExpression(ctx, &switch_stmt.condition, active_contract)) return true;
-            for (switch_stmt.cases) |switch_case| {
-                if (try resolveSwitchPattern(ctx, switch_case.pattern, active_contract)) return true;
-                if (try resolveSwitchBody(ctx, switch_case.body, active_contract)) return true;
-            }
-            if (switch_stmt.default_case) |default_case| {
-                if (try resolveBlock(ctx, default_case, active_contract)) return true;
-            }
-            return false;
-        },
-        .TryBlock => |try_block| {
-            if (try resolveBlock(ctx, try_block.try_block, active_contract)) return true;
-            if (try_block.catch_block) |catch_block| {
-                ctx.pushScope();
-                defer ctx.popScope();
-
-                if (catch_block.error_variable) |error_name| {
-                    if (matchDeclarationAtQuery(ctx, error_name, catch_block.span)) return true;
-                    try ctx.bindLocal(error_name, catch_block.span);
-                }
-                return resolveBlock(ctx, catch_block.block, active_contract);
-            }
-            return false;
-        },
-        .ErrorDecl => |error_decl| {
-            if (matchDeclarationAtQuery(ctx, error_decl.name, error_decl.span)) return true;
-            if (error_decl.parameters) |parameters| {
-                for (parameters) |parameter| {
-                    if (matchDeclarationAtQuery(ctx, parameter.name, parameter.span)) return true;
-                }
-            }
-            return false;
-        },
-        .CompoundAssignment => |compound| {
-            if (try resolveExpression(ctx, compound.target, active_contract)) return true;
-            return resolveExpression(ctx, compound.value, active_contract);
-        },
-        .LabeledBlock => |labeled| return resolveBlock(ctx, labeled.block, active_contract),
-    }
-}
-
-fn resolveExpression(ctx: *Context, expr: *const ast.Expressions.ExprNode, active_contract: ?[]const u8) ResolveError!bool {
-    switch (expr.*) {
-        .Identifier => |identifier| {
-            if (rangeContainsPosition(spanToRange(identifier.span), ctx.query_position)) {
-                if (resolveName(ctx, identifier.name, active_contract)) |decl| {
-                    if (findImportBinding(ctx.cross_file, identifier.name)) |binding| {
-                        ctx.found_uri = binding.target_uri;
-                        ctx.found_range = file_origin;
-                        return true;
-                    }
-                    ctx.found_range = decl.range;
-                    return true;
-                }
-            }
-            return false;
-        },
-        .Literal => return false,
-        .Binary => |binary| {
-            if (try resolveExpression(ctx, binary.lhs, active_contract)) return true;
-            return resolveExpression(ctx, binary.rhs, active_contract);
-        },
-        .Unary => |unary| return resolveExpression(ctx, unary.operand, active_contract),
-        .Assignment => |assignment| {
-            if (try resolveExpression(ctx, assignment.target, active_contract)) return true;
-            return resolveExpression(ctx, assignment.value, active_contract);
-        },
-        .CompoundAssignment => |compound| {
-            if (try resolveExpression(ctx, compound.target, active_contract)) return true;
-            return resolveExpression(ctx, compound.value, active_contract);
-        },
-        .Call => |call| {
-            if (try resolveExpression(ctx, call.callee, active_contract)) return true;
-            for (call.arguments) |argument| {
-                if (try resolveExpression(ctx, argument, active_contract)) return true;
-            }
-            return false;
-        },
-        .Index => |index| {
-            if (try resolveExpression(ctx, index.target, active_contract)) return true;
-            return resolveExpression(ctx, index.index, active_contract);
-        },
-        .FieldAccess => |field_access| {
-            if (ctx.cross_file != null) {
-                if (field_access.target.* == .Identifier) {
-                    const target_name = field_access.target.Identifier.name;
-                    if (findImportBinding(ctx.cross_file, target_name)) |binding| {
-                        if (rangeContainsPosition(spanToRange(field_access.span), ctx.query_position)) {
-                            if (binding.target_source) |target_source| {
-                                if (findTopLevelDeclarationInSource(ctx.allocator, target_source, field_access.field) catch null) |member_range| {
-                                    ctx.found_uri = binding.target_uri;
-                                    ctx.found_range = member_range;
-                                    return true;
-                                }
-                            }
-                            ctx.found_uri = binding.target_uri;
-                            ctx.found_range = file_origin;
-                            return true;
-                        }
-                    }
-                }
-            }
-            return resolveExpression(ctx, field_access.target, active_contract);
-        },
-        .Cast => |cast| return resolveExpression(ctx, cast.operand, active_contract),
-        .Comptime => |comptime_expr| return resolveBlock(ctx, comptime_expr.block, active_contract),
-        .Old => |old_expr| return resolveExpression(ctx, old_expr.expr, active_contract),
-        .Quantified => |quantified| {
-            ctx.pushScope();
-            defer ctx.popScope();
-
-            try ctx.bindLocal(quantified.variable, quantified.span);
-            if (quantified.condition) |condition| {
-                if (try resolveExpression(ctx, condition, active_contract)) return true;
-            }
-            return resolveExpression(ctx, quantified.body, active_contract);
-        },
-        .Tuple => |tuple| {
-            for (tuple.elements) |element| {
-                if (try resolveExpression(ctx, element, active_contract)) return true;
-            }
-            return false;
-        },
-        .SwitchExpression => |switch_expr| {
-            if (try resolveExpression(ctx, switch_expr.condition, active_contract)) return true;
-            for (switch_expr.cases) |switch_case| {
-                if (try resolveSwitchPattern(ctx, switch_case.pattern, active_contract)) return true;
-                if (try resolveSwitchBody(ctx, switch_case.body, active_contract)) return true;
-            }
-            if (switch_expr.default_case) |default_case| {
-                if (try resolveBlock(ctx, default_case, active_contract)) return true;
-            }
-            return false;
-        },
-        .Try => |try_expr| return resolveExpression(ctx, try_expr.expr, active_contract),
-        .ErrorReturn => |error_return| {
-            if (rangeContainsPosition(spanToRange(error_return.span), ctx.query_position)) {
-                if (resolveName(ctx, error_return.error_name, active_contract)) |decl| {
-                    ctx.found_range = decl.range;
-                    return true;
-                }
-            }
-            if (error_return.parameters) |parameters| {
-                for (parameters) |parameter| {
-                    if (try resolveExpression(ctx, parameter, active_contract)) return true;
-                }
-            }
-            return false;
-        },
-        .ErrorCast => |error_cast| return resolveExpression(ctx, error_cast.operand, active_contract),
-        .Shift => |shift| {
-            if (try resolveExpression(ctx, shift.mapping, active_contract)) return true;
-            if (try resolveExpression(ctx, shift.source, active_contract)) return true;
-            if (try resolveExpression(ctx, shift.dest, active_contract)) return true;
-            return resolveExpression(ctx, shift.amount, active_contract);
-        },
-        .StructInstantiation => |struct_instantiation| {
-            if (try resolveExpression(ctx, struct_instantiation.struct_name, active_contract)) return true;
-            for (struct_instantiation.fields) |field| {
-                if (try resolveExpression(ctx, field.value, active_contract)) return true;
-            }
-            return false;
-        },
-        .AnonymousStruct => |anonymous_struct| {
-            for (anonymous_struct.fields) |field| {
-                if (try resolveExpression(ctx, field.value, active_contract)) return true;
-            }
-            return false;
-        },
-        .Range => |range_expr| {
-            if (try resolveExpression(ctx, range_expr.start, active_contract)) return true;
-            return resolveExpression(ctx, range_expr.end, active_contract);
-        },
-        .LabeledBlock => |labeled| return resolveBlock(ctx, labeled.block, active_contract),
-        .Destructuring => |destructuring| return resolveExpression(ctx, destructuring.value, active_contract),
-        .EnumLiteral => |enum_literal| {
-            if (rangeContainsPosition(spanToRange(enum_literal.span), ctx.query_position)) {
-                if (resolveName(ctx, enum_literal.enum_name, active_contract)) |decl| {
-                    ctx.found_range = decl.range;
-                    return true;
-                }
-                if (resolveName(ctx, enum_literal.variant_name, active_contract)) |decl| {
-                    ctx.found_range = decl.range;
-                    return true;
-                }
-            }
-            return false;
-        },
-        .ArrayLiteral => |array_literal| {
-            for (array_literal.elements) |element| {
-                if (try resolveExpression(ctx, element, active_contract)) return true;
-            }
-            return false;
-        },
-    }
-}
-
-fn resolveSwitchPattern(ctx: *Context, pattern: ast.Switch.Pattern, active_contract: ?[]const u8) ResolveError!bool {
-    switch (pattern) {
-        .Range => |range_expr| {
-            if (try resolveExpression(ctx, range_expr.start, active_contract)) return true;
-            return resolveExpression(ctx, range_expr.end, active_contract);
-        },
-        else => return false,
-    }
-}
-
-fn resolveSwitchBody(ctx: *Context, body: ast.Switch.Body, active_contract: ?[]const u8) ResolveError!bool {
-    switch (body) {
-        .Expression => |expr| return resolveExpression(ctx, expr, active_contract),
-        .Block => |block| return resolveBlock(ctx, block, active_contract),
-        .LabeledBlock => |labeled| return resolveBlock(ctx, labeled.block, active_contract),
-    }
-}
-
-fn resolveName(ctx: *Context, name: []const u8, active_contract: ?[]const u8) ?Declaration {
-    var binding_index = ctx.local_bindings.items.len;
-    while (binding_index > 0) {
-        binding_index -= 1;
-        const binding = ctx.local_bindings.items[binding_index];
-        if (binding.depth > ctx.scope_depth) continue;
-        if (std.mem.eql(u8, binding.name, name)) {
-            return .{ .name = binding.name, .range = binding.range };
-        }
-    }
-
-    if (active_contract) |contract_name| {
-        var member_index = ctx.contract_member_declarations.items.len;
-        while (member_index > 0) {
-            member_index -= 1;
-            const member = ctx.contract_member_declarations.items[member_index];
-            if (!std.mem.eql(u8, member.contract_name, contract_name)) continue;
-            if (std.mem.eql(u8, member.declaration.name, name)) {
-                return member.declaration;
-            }
-        }
-    }
-
-    var global_index = ctx.global_declarations.items.len;
-    while (global_index > 0) {
-        global_index -= 1;
-        const declaration = ctx.global_declarations.items[global_index];
-        if (std.mem.eql(u8, declaration.name, name)) {
-            return declaration;
         }
     }
 
     return null;
-}
-
-fn matchDeclarationAtQuery(ctx: *Context, name: []const u8, span: ast.SourceSpan) bool {
-    const range = selectionRange(span, name);
-    if (!rangeContainsPosition(range, ctx.query_position)) return false;
-    ctx.found_range = range;
-    return true;
-}
-
-fn spanToRange(span: ast.SourceSpan) frontend.Range {
-    const start_line = if (span.line > 0) span.line - 1 else 0;
-    const start_character = if (span.column > 0) span.column - 1 else 0;
-    const end_character = std.math.add(u32, start_character, span.length) catch std.math.maxInt(u32);
-
-    return .{
-        .start = .{ .line = start_line, .character = start_character },
-        .end = .{ .line = start_line, .character = end_character },
-    };
-}
-
-fn selectionRange(span: ast.SourceSpan, name: []const u8) frontend.Range {
-    var range = spanToRange(span);
-    const name_len = std.math.cast(u32, name.len) orelse std.math.maxInt(u32);
-    range.end.character = std.math.add(u32, range.start.character, name_len) catch std.math.maxInt(u32);
-    return range;
 }
 
 fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {
@@ -769,4 +680,77 @@ fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
     if (lhs.line < rhs.line) return true;
     if (lhs.line > rhs.line) return false;
     return lhs.character < rhs.character;
+}
+
+fn identifierAtPosition(source_text: []const u8, position: frontend.Position) ?[]const u8 {
+    const byte_index = byteIndexFromPosition(source_text, position) orelse return null;
+    if (byte_index >= source_text.len) return null;
+    if (!isIdentifierChar(source_text[byte_index])) return null;
+
+    var start = byte_index;
+    while (start > 0 and isIdentifierChar(source_text[start - 1])) start -= 1;
+
+    var end = byte_index;
+    while (end < source_text.len and isIdentifierChar(source_text[end])) end += 1;
+
+    return source_text[start..end];
+}
+
+fn nextFieldIdentifier(source_text: []const u8, position: frontend.Position) ?[]const u8 {
+    const byte_index = byteIndexFromPosition(source_text, position) orelse return null;
+    if (byte_index >= source_text.len or !isIdentifierChar(source_text[byte_index])) return null;
+
+    var end = byte_index;
+    while (end < source_text.len and isIdentifierChar(source_text[end])) end += 1;
+    if (end >= source_text.len or source_text[end] != '.') return null;
+    const member_start = end + 1;
+    if (member_start >= source_text.len or !isIdentifierChar(source_text[member_start])) return null;
+    var member_end = member_start;
+    while (member_end < source_text.len and isIdentifierChar(source_text[member_end])) member_end += 1;
+    return source_text[member_start..member_end];
+}
+
+fn byteIndexFromPosition(source_text: []const u8, position: frontend.Position) ?usize {
+    var line: u32 = 0;
+    var character: u32 = 0;
+    for (source_text, 0..) |byte, index| {
+        if (line == position.line and character == position.character) return index;
+        if (byte == '\n') {
+            line += 1;
+            character = 0;
+        } else {
+            character += 1;
+        }
+    }
+    if (line == position.line and character == position.character) return source_text.len;
+    return null;
+}
+
+fn isIdentifierChar(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+fn hasTopLevelDeclarationNamed(analysis: *const Analysis, name: []const u8) bool {
+    for (analysis.file().root_items) |item_id| {
+        const item = analysis.file().item(item_id).*;
+        const item_name: ?[]const u8 = switch (item) {
+            .Import => |import_item| import_item.alias,
+            .Contract => |contract_decl| contract_decl.name,
+            .Function => |function_decl| function_decl.name,
+            .Field => |field_decl| field_decl.name,
+            .Constant => |constant_decl| constant_decl.name,
+            .Struct => |struct_decl| struct_decl.name,
+            .Bitfield => |bitfield_decl| bitfield_decl.name,
+            .Enum => |enum_decl| enum_decl.name,
+            .Trait => |trait_decl| trait_decl.name,
+            .TypeAlias => |alias_decl| alias_decl.name,
+            .LogDecl => |log_decl| log_decl.name,
+            .ErrorDecl => |error_decl| error_decl.name,
+            else => null,
+        };
+        if (item_name) |item_name_slice| {
+            if (std.mem.eql(u8, item_name_slice, name)) return true;
+        }
+    }
+    return false;
 }

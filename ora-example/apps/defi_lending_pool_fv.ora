@@ -59,6 +59,7 @@ enum OperationType : u8 {
     Liquidation = 4
 }
 
+comptime const std = @import("std");
 contract LendingPoolFV {
     // ========================================================================
     // STORAGE STATE WITH REFINEMENT TYPES
@@ -388,7 +389,7 @@ contract LendingPoolFV {
     {
         // Check if contract is paused
         if (is_paused) {
-            return error.ContractPaused;
+            return ContractPaused;
         }
         
         let user: address = std.transaction.sender;
@@ -431,7 +432,7 @@ contract LendingPoolFV {
     {
         // Check if contract is paused
         if (is_paused) {
-            return error.ContractPaused;
+            return ContractPaused;
         }
         
         let user: address = std.transaction.sender;
@@ -520,7 +521,7 @@ contract LendingPoolFV {
     {
         // Check if contract is paused
         if (is_paused) {
-            return error.ContractPaused;
+            return ContractPaused;
         }
         
         let user: address = std.transaction.sender;
@@ -573,7 +574,7 @@ contract LendingPoolFV {
     {
         // Check if contract is paused
         if (is_paused) {
-            return error.ContractPaused;
+            return ContractPaused;
         }
         
         let liquidator: address = std.transaction.sender;

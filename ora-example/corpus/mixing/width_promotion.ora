@@ -1,0 +1,62 @@
+// Level 3: Type widening — narrow arithmetic results stored in wide types
+// Tests implicit promotion: u8+u8->u256, u16*u32->u256, etc.
+contract WidthPromotion {
+    storage var result8: u8;
+    storage var result16: u16;
+    storage var result32: u32;
+    storage var result64: u64;
+    storage var result256: u256;
+
+    pub fn u8_add_to_u256(a: u8, b: u8) -> u256 {
+        let wa: u256 = a;
+        let wb: u256 = b;
+        let sum: u256 = wa + wb;
+        return sum;
+    }
+
+    pub fn u16_mul_u32_to_u256(a: u16, b: u32) -> u256 {
+        let wa: u256 = a;
+        let wb: u256 = b;
+        let product: u256 = wa * wb;
+        return product;
+    }
+
+    pub fn u8_to_u64(x: u8) -> u64 {
+        let w: u64 = x;
+        return w;
+    }
+
+    pub fn u16_to_u128(x: u16) -> u128 {
+        let w: u128 = x;
+        return w;
+    }
+
+    pub fn u32_to_u256(x: u32) -> u256 {
+        let w: u256 = x;
+        return w;
+    }
+
+    pub fn chain_widen(x: u8) -> u256 {
+        let a: u16 = x;
+        let b: u32 = a;
+        let c: u64 = b;
+        let d: u128 = c;
+        let e: u256 = d;
+        return e;
+    }
+
+    pub fn multi_width_sum(a: u8, b: u16, c: u32, d: u64) -> u256 {
+        let wa: u256 = a;
+        let wb: u256 = b;
+        let wc: u256 = c;
+        let wd: u256 = d;
+        let total: u256 = wa + wb + wc + wd;
+        return total;
+    }
+
+    pub fn store_promoted(a: u8, b: u16) {
+        let wa: u256 = a;
+        let wb: u256 = b;
+        result256 = wa * wb;
+    }
+}

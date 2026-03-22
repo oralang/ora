@@ -1,0 +1,81 @@
+// ==========================================
+// CONST DECLARATIONS — compile-time constants and usage
+// ==========================================
+
+contract ConstDeclarations {
+    // Integer constants
+    const MAX_SUPPLY: u256 = 1_000_000;
+    const MIN_STAKE: u256 = 100;
+    const DECIMALS: u8 = 18;
+    const FEE_BPS: u16 = 30;
+    const SCALE: u256 = 1_000_000_000_000_000_000;
+
+    // Bool constants
+    const IS_UPGRADEABLE: bool = false;
+    const ALLOW_FLASH_LOANS: bool = true;
+
+    // Hex integer constants
+    const SELECTOR: u32 = 0xA9059CBB;
+    const MASK_LOW: u256 = 0xFF;
+    const MASK_HIGH: u256 = 0xFF00;
+
+    storage var totalSupply: u256;
+
+    // Use constants in arithmetic
+    pub fn calculate_fee(amount: u256) -> u256 {
+        let fee: u256 = amount * FEE_BPS / 10000;
+        return fee;
+    }
+
+    // Use constant in comparison
+    pub fn check_supply(amount: u256) -> bool {
+        let projected: u256 = totalSupply + amount;
+        let within_cap: bool = projected <= MAX_SUPPLY;
+        return within_cap;
+    }
+
+    // Use constant in conditional
+    pub fn validate_stake(amount: u256) -> bool {
+        if (amount < MIN_STAKE) {
+            return false;
+        }
+        return true;
+    }
+
+    // Constants in expressions
+    pub fn scale_amount(amount: u256) -> u256 {
+        let scaled: u256 = amount * SCALE;
+        return scaled;
+    }
+
+    // Multiple constants together
+    pub fn complex_calculation(amount: u256) -> u256 {
+        let fee: u256 = amount * FEE_BPS / 10000;
+        let net: u256 = amount - fee;
+        let scaled: u256 = net * SCALE;
+        return scaled;
+    }
+
+    // Const in function-local scope
+    pub fn local_const() -> u256 {
+        const LOCAL_FACTOR: u256 = 42;
+        const LOCAL_OFFSET: u256 = 10;
+        let res: u256 = LOCAL_FACTOR * LOCAL_OFFSET;
+        return res;
+    }
+
+    // Bool constant usage
+    pub fn check_feature() -> bool {
+        if (ALLOW_FLASH_LOANS) {
+            return true;
+        }
+        return false;
+    }
+
+    // Masking with hex constants
+    pub fn apply_mask(value: u256) -> u256 {
+        let low: u256 = value & MASK_LOW;
+        let high: u256 = value & MASK_HIGH;
+        return low + high;
+    }
+}

@@ -41,7 +41,7 @@ pub fn scanString(lexer: *Lexer) LexerError!void {
                 .start_offset = start_offset,
                 .end_offset = lexer.current,
             };
-            lexer.error_recovery.?.recordDetailedError(LexerError.UnterminatedString, range, lexer.source, "Unterminated string literal") catch {};
+            if (lexer.error_recovery) |*er| er.recordDetailedError(LexerError.UnterminatedString, range, lexer.source, "Unterminated string literal") catch {};
             return;
         } else {
             return LexerError.UnterminatedString;
@@ -102,7 +102,7 @@ pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
                     .start_offset = lexer.current - 1,
                     .end_offset = lexer.current,
                 };
-                lexer.error_recovery.?.recordDetailedError(LexerError.InvalidHexLiteral, range, lexer.source, "Invalid hex character in bytes literal") catch {};
+                if (lexer.error_recovery) |*er| er.recordDetailedError(LexerError.InvalidHexLiteral, range, lexer.source, "Invalid hex character in bytes literal") catch {};
             }
         }
     }

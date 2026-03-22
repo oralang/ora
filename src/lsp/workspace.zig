@@ -1,7 +1,6 @@
 const std = @import("std");
 const lexer = @import("ora_lexer");
-const parser = @import("../parser.zig");
-const ast = @import("ora_ast");
+const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
 
 const Allocator = std.mem.Allocator;
@@ -43,7 +42,7 @@ pub const ResolutionResult = struct {
 const ImportRef = struct {
     specifier: []const u8,
     alias: ?[]const u8,
-    span: ast.SourceSpan,
+    range: compiler.TextRange,
 };
 
 pub fn pathToFileUri(allocator: Allocator, path: []const u8) ![]u8 {
@@ -142,7 +141,7 @@ pub fn resolveDocumentImports(
                 .{import_ref.specifier},
             );
             try diagnostics.append(allocator, .{
-                .range = spanToRange(import_ref.span),
+                .range = try spanToRange(allocator, source, import_ref.range),
                 .message = message,
             });
             continue;
@@ -156,7 +155,7 @@ pub fn resolveDocumentImports(
                 .{import_ref.specifier},
             );
             try diagnostics.append(allocator, .{
-                .range = spanToRange(import_ref.span),
+                .range = try spanToRange(allocator, source, import_ref.range),
                 .message = message,
             });
             continue;
@@ -172,7 +171,7 @@ pub fn resolveDocumentImports(
                 .{import_ref.specifier},
             );
             try diagnostics.append(allocator, .{
-                .range = spanToRange(import_ref.span),
+                .range = try spanToRange(allocator, source, import_ref.range),
                 .message = message,
             });
             allocator.free(resolved_path);
@@ -213,24 +212,51 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
     };
     defer allocator.free(tokens);
 
-    const previous_parser_stderr = parser.diagnostics.enable_stderr_diagnostics;
-    parser.diagnostics.enable_stderr_diagnostics = false;
-    defer parser.diagnostics.enable_stderr_diagnostics = previous_parser_stderr;
+    var index: usize = 0;
+    while (index < tokens.len) : (index += 1) {
+        const token = tokens[index];
+        if (token.type != .Const or index + 6 >= tokens.len) continue;
 
-    var parse_result = parser.parseRaw(allocator, tokens) catch {
-        return try collected.toOwnedSlice(allocator);
-    };
-    defer parse_result.arena.deinit();
+        const alias_token = tokens[index + 1];
+        const equal_token = tokens[index + 2];
+        const at_token = tokens[index + 3];
+        const import_token = tokens[index + 4];
+        const left_paren_token = tokens[index + 5];
+        const path_token = tokens[index + 6];
 
-    for (parse_result.nodes) |node| {
-        if (node != .Import) continue;
-        const specifier = try allocator.dupe(u8, node.Import.path);
+        if (alias_token.type != .Identifier or
+            equal_token.type != .Equal or
+            at_token.type != .At or
+            import_token.type != .Import or
+            left_paren_token.type != .LeftParen or
+            (path_token.type != .StringLiteral and path_token.type != .RawStringLiteral))
+        {
+            continue;
+        }
+
+        const string_value = switch (path_token.value orelse continue) {
+            .string => |value| value,
+            else => continue,
+        };
+        const specifier = try allocator.dupe(u8, string_value);
         errdefer allocator.free(specifier);
-        const alias = if (node.Import.alias) |a| try allocator.dupe(u8, a) else null;
+        const alias = try allocator.dupe(u8, alias_token.lexeme);
+
+        var end_offset = path_token.range.end_offset;
+        if (index + 7 < tokens.len and tokens[index + 7].type == .RightParen) {
+            end_offset = tokens[index + 7].range.end_offset;
+        }
+        if (index + 8 < tokens.len and tokens[index + 8].type == .Semicolon) {
+            end_offset = tokens[index + 8].range.end_offset;
+        }
+
         try collected.append(allocator, .{
             .specifier = specifier,
             .alias = alias,
-            .span = node.Import.span,
+            .range = .{
+                .start = path_token.range.start_offset,
+                .end = end_offset,
+            },
         });
     }
 
@@ -245,15 +271,23 @@ fn freeImportRefs(allocator: Allocator, refs: []ImportRef) void {
     allocator.free(refs);
 }
 
-fn spanToRange(span: ast.SourceSpan) frontend.Range {
-    const start_line = if (span.line > 0) span.line - 1 else 0;
-    const start_char = if (span.column > 0) span.column - 1 else 0;
-    var end_char = start_char + span.length;
-    if (end_char < start_char) end_char = start_char;
+fn spanToRange(allocator: Allocator, source_text: []const u8, range: compiler.TextRange) !frontend.Range {
+    var sources = compiler.source.SourceStore.init(allocator);
+    defer sources.deinit();
+
+    const file_id = try sources.addFile("<lsp>", source_text);
+    const start = sources.lineColumn(.{ .file_id = file_id, .range = .{ .start = range.start, .end = range.start } });
+    const end = sources.lineColumn(.{ .file_id = file_id, .range = .{ .start = range.end, .end = range.end } });
 
     return .{
-        .start = .{ .line = start_line, .character = start_char },
-        .end = .{ .line = start_line, .character = end_char },
+        .start = .{
+            .line = if (start.line > 0) start.line - 1 else 0,
+            .character = if (start.column > 0) start.column - 1 else 0,
+        },
+        .end = .{
+            .line = if (end.line > 0) end.line - 1 else 0,
+            .character = if (end.column > 0) end.column - 1 else 0,
+        },
     };
 }
 

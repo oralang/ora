@@ -1,0 +1,43 @@
+// Function returning multiple possible errors.
+// Tests: error union with multiple error types in return position.
+
+error InsufficientFunds(required: u256, available: u256);
+error Unauthorized;
+error ZeroAmount;
+
+comptime const std = @import("std");
+contract ErrorMultiple {
+    storage var owner: address;
+    storage var balance: u256 = 0;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn transfer(to: address, amount: u256) -> !bool | InsufficientFunds | Unauthorized | ZeroAmount {
+        if (std.msg.sender() != owner) {
+            return Unauthorized;
+        }
+        if (amount == 0) {
+            return ZeroAmount;
+        }
+        let current: u256 = balance;
+        if (amount > current) {
+            return InsufficientFunds(amount, current);
+        }
+        balance = current - amount;
+        return true;
+    }
+
+    pub fn deposit(amount: u256) -> !bool | ZeroAmount {
+        if (amount == 0) {
+            return ZeroAmount;
+        }
+        balance += amount;
+        return true;
+    }
+
+    pub fn get_balance() -> u256 {
+        return balance;
+    }
+}

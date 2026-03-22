@@ -1,0 +1,29 @@
+// Basic nullary error: no fields, just a named error value.
+// Tests: error declaration, returning error, catching error.
+
+error NotFound;
+
+contract ErrorNullary {
+    storage var last_lookup: u256 = 0;
+
+    pub fn find(id: u256) -> !u256 | NotFound {
+        if (id == 0) {
+            return NotFound;
+        }
+        last_lookup = id;
+        return id;
+    }
+
+    pub fn find_and_handle(id: u256) -> u256 {
+        try {
+            let res: u256 = try find(id);
+            return res;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    pub fn get_last_lookup() -> u256 {
+        return last_lookup;
+    }
+}

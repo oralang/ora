@@ -1,0 +1,114 @@
+// ==========================================
+// STORAGE MIXED — multiple storage vars of different types interacting
+// ==========================================
+
+struct AccountData {
+    balance: u256;
+    nonce: u64;
+    active: bool;
+}
+
+comptime const std = @import("std");
+contract StorageMixed {
+    // Primitives
+    storage var totalAccounts: u256 = 0;
+    storage var totalBalance: u256 = 0;
+    storage var paused: bool = false;
+    storage var owner: address;
+
+    // Maps
+    storage var accounts: map<address, AccountData>;
+    storage var balances: map<address, u256>;
+    storage var is_registered: map<address, bool>;
+
+    // Arrays
+    storage var recentUsers: [address; 4];
+    storage var recentAmounts: [u256; 4];
+
+    // Interact: register an account (primitives + maps)
+    pub fn register() {
+        let sender: address = std.msg.sender();
+        is_registered[sender] = true;
+        accounts[sender] = AccountData {
+            balance: 0,
+            nonce: 0,
+            active: true,
+        };
+        totalAccounts += 1;
+    }
+
+    // Interact: deposit (maps + primitives + arrays)
+    pub fn deposit(amount: u256) {
+        let sender: address = std.msg.sender();
+
+        // Update map
+        balances[sender] += amount;
+        totalBalance += amount;
+
+        // Update struct in map
+        let acc: AccountData = accounts[sender];
+        let updated: AccountData = AccountData {
+            balance: acc.balance + amount,
+            nonce: acc.nonce + 1,
+            active: acc.active,
+        };
+        accounts[sender] = updated;
+
+        // Shift recent arrays
+        recentUsers[3] = recentUsers[2];
+        recentUsers[2] = recentUsers[1];
+        recentUsers[1] = recentUsers[0];
+        recentUsers[0] = sender;
+
+        recentAmounts[3] = recentAmounts[2];
+        recentAmounts[2] = recentAmounts[1];
+        recentAmounts[1] = recentAmounts[0];
+        recentAmounts[0] = amount;
+    }
+
+    // Interact: withdraw (maps + primitives)
+    pub fn withdraw(amount: u256) {
+        let sender: address = std.msg.sender();
+        balances[sender] -= amount;
+        totalBalance -= amount;
+
+        let acc: AccountData = accounts[sender];
+        let updated: AccountData = AccountData {
+            balance: acc.balance - amount,
+            nonce: acc.nonce + 1,
+            active: acc.active,
+        };
+        accounts[sender] = updated;
+    }
+
+    // Read across types
+    pub fn get_summary(user: address) -> u256 {
+        let bal: u256 = balances[user];
+        let acc: AccountData = accounts[user];
+        let total: u256 = totalBalance;
+        let count: u256 = totalAccounts;
+        return bal + total + count;
+    }
+
+    // Pause toggle (bool + address)
+    pub fn toggle_pause() {
+        let sender: address = std.msg.sender();
+        if (sender == owner) {
+            paused = !paused;
+        }
+    }
+
+    // Init owner
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    // Check recent activity (arrays)
+    pub fn get_most_recent_amount() -> u256 {
+        return recentAmounts[0];
+    }
+
+    pub fn get_most_recent_user() -> address {
+        return recentUsers[0];
+    }
+}

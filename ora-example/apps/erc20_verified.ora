@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract VerifiedToken {
     storage var owner: address;
     storage var initialized: bool = false;

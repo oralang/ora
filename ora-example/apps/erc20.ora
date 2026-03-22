@@ -8,6 +8,7 @@ error InvalidAddress;
 error InvalidAmount;
 error TransferToZeroAddress;
 
+comptime const std = @import("std");
 contract ERC20Token {
     // Storage variables (explicit @storage region)
     storage var totalSupply: u256;  // @storage: persistent contract storage
@@ -54,7 +55,7 @@ contract ERC20Token {
         
         // Check sufficient balance (runtime check required - sender_balance is from storage)
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InvalidAmount;  // error values are @stack
+            return InvalidAmount;  // error values are @stack
         }
         
         // After the check, we know sender_balance >= amount
@@ -112,13 +113,13 @@ contract ERC20Token {
         // Check allowance
         let current_allowance: u256 = allowances[sender][spender];  // @stack: nested storage map read (@storage[@calldata][@stack]) returns stack value
         if (current_allowance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InvalidAmount;  // @stack: error value
+            return InvalidAmount;  // @stack: error value
         }
         
         // Check sender balance (runtime check required - sender_balance is from storage)
         let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@calldata]) returns stack value
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return error.InvalidAmount;  // @stack: error value
+            return InvalidAmount;  // @stack: error value
         }
         
         // After the check, we know sender_balance >= amount and current_allowance >= amount

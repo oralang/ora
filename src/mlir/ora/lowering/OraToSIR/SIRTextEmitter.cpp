@@ -357,6 +357,11 @@ namespace
             mnemonic = "mload8";
         else if (isa<sir::Store8Op>(op))
             mnemonic = "mstore8";
+        else if (auto sallocany = dyn_cast<sir::SAllocAnyOp>(op))
+        {
+            if (!sallocany.getSize().getDefiningOp<sir::ConstOp>())
+                mnemonic = "mallocany";
+        }
         else if (auto cst = dyn_cast<sir::ConstOp>(op))
         {
             // Sensei uses "const" for u32 values, "large_const" for larger.

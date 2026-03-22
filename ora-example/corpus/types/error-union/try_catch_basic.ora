@@ -1,0 +1,39 @@
+// Basic try/catch block.
+// Tests: try { body } catch |e| { handler } syntax.
+
+error DivisionByZero;
+
+contract TryCatchBasic {
+    storage var last_result: u256 = 0;
+
+    pub fn divide(a: u256, b: u256) -> !u256 | DivisionByZero {
+        if (b == 0) {
+            return DivisionByZero;
+        }
+        return a / b;
+    }
+
+    pub fn safe_divide(a: u256, b: u256) -> u256 {
+        try {
+            let res: u256 = try divide(a, b);
+            last_result = res;
+            return res;
+        } catch (e) {
+            last_result = 0;
+            return 0;
+        }
+    }
+
+    pub fn divide_with_default(a: u256, b: u256, default_val: u256) -> u256 {
+        try {
+            let res: u256 = try divide(a, b);
+            return res;
+        } catch (e) {
+            return default_val;
+        }
+    }
+
+    pub fn get_last_result() -> u256 {
+        return last_result;
+    }
+}

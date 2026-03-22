@@ -25,7 +25,7 @@ contract EnumUsageTest {
     storage var last_error: ErrorCode;
     
     // Initialize with enum value
-    fn init() {
+    pub fn init() {
         current_status = Status.Active;
         last_error = ErrorCode.InvalidInput;
     }

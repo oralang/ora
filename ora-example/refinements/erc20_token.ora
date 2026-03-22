@@ -15,6 +15,7 @@
 //   • Exact<T> - Ensures exact division (no rounding errors)
 // ============================================================================
 
+comptime const std = @import("std");
 contract ERC20Token {
     // ============================================================================
     // State Variables with Refined Types
@@ -246,14 +247,16 @@ contract ERC20Token {
     
     /// Calculate total required amount including fees
     /// Uses refined type arithmetic: BasisPoints operations preserve type safety
-    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> u256 {
+    fn calculateTotalRequired(amount: MinValue<u256, 1>) -> u256
         requires(amount >= 1)
+    {
         return amount;
     }
     
     /// Calculate burn amount with burn rate
-    fn calculateBurnAmount(amount: MinValue<u256, 1>) -> u256 {
+    fn calculateBurnAmount(amount: MinValue<u256, 1>) -> u256
         requires(amount >= 1)
+    {
         // If burn_rate > 0, apply it; otherwise burn full amount
         const burn_rate_value: u256 = burn_rate;
         if (burn_rate_value > 10000) {

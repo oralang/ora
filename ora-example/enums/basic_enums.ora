@@ -3,6 +3,7 @@
 // ==========================================
 // This file tests only enum declarations
 
+contract EnumDeclarations {
 
 // Basic enum without explicit values
 enum Status {
@@ -94,3 +95,4 @@ enum AdvancedConfig : u16 {
     Value3 = (1 + 2) * 3
 }
 
+}

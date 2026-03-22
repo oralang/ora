@@ -11,7 +11,7 @@ contract StorageTest1 {
     const CONTRACT_ADDRESS: address = 0x1234567890123456789012345678901234567890;
     
     // Initialize contract
-    fn init() {
+    pub fn init() {
         counter = 0;
         active = true;
         owner = CONTRACT_ADDRESS;

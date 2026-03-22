@@ -1,7 +1,6 @@
 //===- OraOps.td - Ora dialect operations ---------------*- tablegen -*-===//
 //
-// This file defines the core operations for the Ora MLIR dialect.
-// Currently supports the 4 operations that are actually implemented.
+// This file defines the operations for the Ora MLIR dialect.
 //
 //===----------------------------------------------------------------------===//
 
@@ -9,6 +8,7 @@
 #define ORA_OPS
 
 include "OraDialect.td"
+include "OraTypes.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/Traits.td"
 include "mlir/IR/BuiltinTypes.td"
@@ -17,8 +17,40 @@ include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
-// Ora Operations - Core 4 Operations
+// Ora operation type constraints
 //===----------------------------------------------------------------------===//
+
+def Ora_IntegerValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::IntegerType>($_self)">,
+  "ora.int">;
+
+def Ora_IntegerLikeValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType>($_self)">,
+  "ora.int or builtin integer">;
+
+def Ora_BoolValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::BoolType>($_self)">,
+  "ora.bool">;
+
+def Ora_AddressValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::AddressType>($_self)">,
+  "ora.address">;
+
+def Ora_I160ValueType : TypeConstraint<
+  CPred<"::llvm::isa<::mlir::IntegerType>($_self) && ::llvm::cast<::mlir::IntegerType>($_self).getWidth() == 160">,
+  "builtin i160">;
+
+def Ora_RefinementValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType, ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>($_self)">,
+  "Ora refinement type">;
+
+def Ora_RefinementBaseValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType, ora::AddressType>($_self)">,
+  "ora.int, builtin integer, or ora.address">;
+
+def Ora_ComparableValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::IntegerType, ::mlir::IntegerType, ora::BoolType, ora::AddressType>($_self)">,
+  "ora.int, builtin integer, ora.bool, or ora.address">;
 
 //===----------------------------------------------------------------------===//
 // Contract Operations
@@ -71,8 +103,8 @@ def Ora_AddrToI160Op : Ora_PureOp<"addr.to.i160"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$addr);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_AddressValueType:$addr);
+  let results = (outs Ora_I160ValueType:$result);
   
   let assemblyFormat = "$addr attr-dict `:` type($addr) `->` type($result)";
   
@@ -94,8 +126,8 @@ def Ora_I160ToAddrOp : Ora_PureOp<"i160.to.addr"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$i160);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_I160ValueType:$i160);
+  let results = (outs Ora_AddressValueType:$result);
   
   let assemblyFormat = "$i160 attr-dict `:` type($i160) `->` type($result)";
 }
@@ -113,10 +145,11 @@ def Ora_RefinementToBaseOp : Ora_PureOp<"refinement_to_base"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$value);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_RefinementValueType:$value);
+  let results = (outs Ora_RefinementBaseValueType:$result);
   
   let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  let hasVerifier = 1;
   
   let extraClassDeclaration = [{
     // Builder that infers result type from input refinement type
@@ -138,10 +171,11 @@ def Ora_BaseToRefinementOp : Ora_PureOp<"base_to_refinement"> {
     ```
   }];
 
-  let arguments = (ins AnyType:$value);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_RefinementBaseValueType:$value);
+  let results = (outs Ora_RefinementValueType:$result);
 
   let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -199,6 +233,7 @@ def Ora_SLoadOp : Ora_Op<"sload",
   let results = (outs AnyType:$result);
   
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
   
   let extraClassDeclaration = [{
     /// Get the name of the global variable being loaded
@@ -223,6 +258,7 @@ def Ora_SStoreOp : Ora_Op<"sstore",
   let arguments = (ins AnyType:$value, StrAttr:$global);
   
   let assemblyFormat = "$value `,` $global `:` type($value) attr-dict";
+  let hasVerifier = 1;
   let extraClassDeclaration = [{
     /// Get the value being stored
     ::mlir::Value getStoredValue() { return getValue(); }
@@ -266,6 +302,22 @@ def Ora_TStoreGlobalOp : Ora_Op<"tstore.global"> {
     StrAttr:$sym_name,
     TypeAttr:$type
   );
+
+  let traits = [Symbol, MemoryEffects<[MemWrite]>];
+}
+
+def Ora_BitfieldDeclOp : Ora_Op<"bitfield_decl"> {
+  let summary = "Bitfield declaration";
+  let description = [{
+    Declares a bitfield type with optional layout metadata used by Ora lowering.
+
+    Example:
+    ```mlir
+    "ora.bitfield_decl"() {sym_name = "Flags", ora.bitfield = "Flags", ora.bitfield_layout = "u1:enabled,u7:mode"}
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
 
   let traits = [Symbol, MemoryEffects<[MemWrite]>];
 }
@@ -351,7 +403,7 @@ def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
 // Range Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_RangeOp : Ora_PureOp<"range"> {
+def Ora_RangeOp : Ora_PureOp<"range", [AllTypesMatch<["start", "end", "result"]>]> {
   let summary = "Range operation";
   let description = [{
     Creates a range value from start to end, with optional inclusive flag.
@@ -363,8 +415,8 @@ def Ora_RangeOp : Ora_PureOp<"range"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$start, AnyType:$end, OptionalAttr<BoolAttr>:$inclusive);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerValueType:$start, Ora_IntegerValueType:$end, OptionalAttr<BoolAttr>:$inclusive);
+  let results = (outs Ora_IntegerValueType:$result);
   
   let assemblyFormat = "$start `,` $end attr-dict `:` type($start) `,` type($end) `->` type($result)";
 }
@@ -373,7 +425,10 @@ def Ora_RangeOp : Ora_PureOp<"range"> {
 // Arithmetic Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_AddOp : Ora_PureOp<"add", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+def Ora_AddOp : Ora_PureOp<"add", [
+    AllTypesMatch<["lhs", "rhs", "result"]>,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+  ]> {
   let hasCanonicalizer = 1;
   let summary = "Add operation";
   let description = [{
@@ -386,14 +441,77 @@ def Ora_AddOp : Ora_PureOp<"add", [DeclareOpInterfaceMethods<OpAsmOpInterface, [
     ```
   }];
   
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
   
 }
 
-def Ora_SubOp : Ora_PureOp<"sub", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+def Ora_AddWrappingOp : Ora_PureOp<"add_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping add operation";
+  let description = [{
+    Adds two Ora integer values with modular wrapping semantics.
+    Accepts !ora.int<width, signed> types and preserves the type in the result.
+
+    Example:
+    ```mlir
+    %result = ora.add_wrapping %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+    ```
+  }];
+
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_SubWrappingOp : Ora_PureOp<"sub_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping subtract operation";
+  let description = [{Subtracts two Ora integer values with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_MulWrappingOp : Ora_PureOp<"mul_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping multiply operation";
+  let description = [{Multiplies two Ora integer values with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_ShlWrappingOp : Ora_PureOp<"shl_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping shift-left operation";
+  let description = [{Shifts an Ora integer left with modular wrapping semantics.}];
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_ShrWrappingOp : Ora_PureOp<"shr_wrapping", [
+    AllTypesMatch<["lhs", "rhs", "result"]>
+  ]> {
+  let summary = "Wrapping shift-right operation";
+  let description = [{Shifts an Ora integer right with wrapping semantics, preserving signedness from the Ora type.}];
+  let arguments = (ins Ora_IntegerLikeValueType:$lhs, Ora_IntegerLikeValueType:$rhs);
+  let results = (outs Ora_IntegerLikeValueType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_SubOp : Ora_PureOp<"sub", [
+    AllTypesMatch<["lhs", "rhs", "result"]>,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+  ]> {
   let hasCanonicalizer = 1;
   let summary = "Subtract operation";
   let description = [{
@@ -406,13 +524,16 @@ def Ora_SubOp : Ora_PureOp<"sub", [DeclareOpInterfaceMethods<OpAsmOpInterface, [
     ```
   }];
   
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
-def Ora_MulOp : Ora_PureOp<"mul", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+def Ora_MulOp : Ora_PureOp<"mul", [
+    AllTypesMatch<["lhs", "rhs", "result"]>,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+  ]> {
   let hasCanonicalizer = 1;
   let summary = "Multiply operation";
   let description = [{
@@ -425,13 +546,16 @@ def Ora_MulOp : Ora_PureOp<"mul", [DeclareOpInterfaceMethods<OpAsmOpInterface, [
     ```
   }];
   
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
-def Ora_DivOp : Ora_PureOp<"div", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+def Ora_DivOp : Ora_PureOp<"div", [
+    AllTypesMatch<["lhs", "rhs", "result"]>,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+  ]> {
   let hasCanonicalizer = 1;
   let summary = "Divide operation";
   let description = [{
@@ -444,13 +568,14 @@ def Ora_DivOp : Ora_PureOp<"div", [DeclareOpInterfaceMethods<OpAsmOpInterface, [
     ```
   }];
   
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+  let hasVerifier = 1;
 }
 
-def Ora_RemOp : Ora_PureOp<"rem"> {
+def Ora_RemOp : Ora_PureOp<"rem", [AllTypesMatch<["lhs", "rhs", "result"]>]> {
   let summary = "Remainder operation";
   let description = [{
     Computes the remainder of dividing two Ora integer values.
@@ -462,13 +587,14 @@ def Ora_RemOp : Ora_PureOp<"rem"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerValueType:$lhs, Ora_IntegerValueType:$rhs);
+  let results = (outs Ora_IntegerValueType:$result);
   
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+  let hasVerifier = 1;
 }
 
-def Ora_CmpOp : Ora_PureOp<"cmp"> {
+def Ora_CmpOp : Ora_PureOp<"cmp", [SameTypeOperands]> {
   let summary = "Compare operation";
   let description = [{
     Compares two Ora integer values with proper unsigned semantics.
@@ -480,13 +606,13 @@ def Ora_CmpOp : Ora_PureOp<"cmp"> {
     ```
   }];
   
-  let arguments = (ins StrAttr:$predicate, AnyType:$lhs, AnyType:$rhs);
+  let arguments = (ins StrAttr:$predicate, Ora_ComparableValueType:$lhs, Ora_ComparableValueType:$rhs);
   let results = (outs I1:$result);
   
   let assemblyFormat = "$predicate `,` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
-def Ora_PowerOp : Ora_PureOp<"power"> {
+def Ora_PowerOp : Ora_PureOp<"power", [AllTypesMatch<["base", "exponent", "result"]>]> {
   let summary = "Power operation";
   let description = [{
     Computes base raised to the power of exponent.
@@ -497,8 +623,8 @@ def Ora_PowerOp : Ora_PureOp<"power"> {
     ```
   }];
   
-  let arguments = (ins AnyType:$base, AnyType:$exponent);
-  let results = (outs AnyType:$result);
+  let arguments = (ins Ora_IntegerLikeValueType:$base, Ora_IntegerLikeValueType:$exponent);
+  let results = (outs Ora_IntegerLikeValueType:$result);
   
   let assemblyFormat = "$base `,` $exponent attr-dict `:` type($base) `,` type($exponent) `->` type($result)";
 }
@@ -623,59 +749,56 @@ def Ora_EvmBasefeeOp : Ora_PureOp<"evm.basefee"> {
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
+def Ora_FunctionRefOp : Ora_PureOp<"function_ref"> {
+  let summary = "Reference a function symbol";
+  let description = [{
+    Materializes a first-class reference to an Ora function symbol.
+
+    Example:
+    ```mlir
+    %f = ora.function_ref @helper : !ora.function<(i256) -> (i256)>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$sym_name attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Control Flow Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_IfOp : Ora_Op<"if"> {
-  let summary = "Conditional operation";
+def Ora_IfOp : Ora_Op<"conditional_return"> {
+  let summary = "Conditional early return";
   let description = [{
-    Executes one of two regions based on a condition.
+    Conditional early return escape hatch for cases that cannot be expressed
+    with scf.if because the then-region must terminate the enclosing function.
+    This is not a general-purpose if op: it is reserved for early-return control
+    flow. The then-region must terminate with func.return or ora.return, and the
+    else-region must contain only an empty ora.yield terminator.
     
     Example:
     ```mlir
-    %result = ora.if %condition then {
-      %then_val = arith.constant 1 : i256
-      ora.yield %then_val : i256
+    ora.conditional_return %condition then {
+      %err = ora.error.err %code : i256 -> !ora.error_union<i256>
+      func.return %err : !ora.error_union<i256>
     } else {
-      %else_val = arith.constant 0 : i256
-      ora.yield %else_val : i256
+      ora.yield
     }
     ```
   }];
   
   let arguments = (ins I1:$condition);
-  let results = (outs Variadic<AnyType>:$results);
+  let results = (outs);
   let regions = (region AnyRegion:$thenRegion,
                         AnyRegion:$elseRegion);
   
   // Custom parser/printer for prettier syntax with "then"/"else" keywords
   let hasCustomAssemblyFormat = 1;
-}
-
-def Ora_IsolatedIfOp : Ora_Op<"isolated_if", [IsolatedFromAbove]> {
-  let summary = "Isolated conditional operation";
-  let description = [{
-    Executes one of two regions based on a condition. This variant is isolated
-    from the parent scope, so values from the parent region must be passed
-    explicitly.
-
-    Example:
-    ```mlir
-    ora.isolated_if %condition then {
-      ora.yield
-    } else {
-      ora.yield
-    }
-    ```
-  }];
-
-  let arguments = (ins I1:$condition);
-  let results = (outs Variadic<AnyType>:$results);
-  let regions = (region AnyRegion:$thenRegion,
-                        AnyRegion:$elseRegion);
-
-  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ora_YieldOp : Ora_Op<"yield", [Terminator]> {
@@ -900,7 +1023,7 @@ def Ora_StructDeclOp : Ora_Op<"struct.decl"> {
     ```
   }];
   
-  let arguments = (ins StrAttr:$name);
+  let arguments = (ins StrAttr:$sym_name);
   let regions = (region AnyRegion:$fields);
 
   let traits = [Symbol, MemoryEffects<[MemWrite]>];
@@ -958,6 +1081,43 @@ def Ora_StructInitOp : Ora_PureOp<"struct_init"> {
   let results = (outs AnyType:$result);
   
   let assemblyFormat = "`{` $field_values `}` attr-dict `:` type($field_values) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_TupleCreateOp : Ora_PureOp<"tuple_create"> {
+  let summary = "Tuple construction";
+  let description = [{
+    Creates a tuple value from element operands.
+
+    Example:
+    ```mlir
+    %pair = ora.tuple_create (%lhs, %rhs) : (i256, i1) -> !ora.tuple<i256, i1>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$elements);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "`(` $elements `)` attr-dict `:` type($elements) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_TupleExtractOp : Ora_PureOp<"tuple_extract"> {
+  let summary = "Tuple element extraction";
+  let description = [{
+    Extracts an element from a tuple by constant index.
+
+    Example:
+    ```mlir
+    %lhs = ora.tuple_extract %pair[0] : !ora.tuple<i256, i1> -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$tuple_value, I64Attr:$index);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$tuple_value `[` $index `]` attr-dict `:` type($tuple_value) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 // Extract field from struct (pure operation)
@@ -975,10 +1135,11 @@ def Ora_StructFieldExtractOp : Ora_PureOp<"struct_field_extract"> {
   let arguments = (ins AnyType:$struct_value, StrAttr:$field_name);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$struct_value `,` $field_name attr-dict `:` type($struct_value) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 // Struct type constraint for operations
-def Ora_StructType : TypeConstraint<
+def Ora_StructValueType : TypeConstraint<
   CPred<"::llvm::isa<ora::StructType>($_self)">,
   "ora.struct">;
 
@@ -996,9 +1157,10 @@ def Ora_StructFieldUpdateOp : Ora_PureOp<"struct_field_update"> {
     ```
   }];
   
-  let arguments = (ins Ora_StructType:$struct_value, StrAttr:$field_name, AnyType:$value);
-  let results = (outs Ora_StructType:$result);
+  let arguments = (ins Ora_StructValueType:$struct_value, StrAttr:$field_name, AnyType:$value);
+  let results = (outs Ora_StructValueType:$result);
   let assemblyFormat = "$struct_value `,` $field_name `,` $value attr-dict `:` type($struct_value) `,` type($value) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1022,6 +1184,7 @@ def Ora_MapGetOp : Ora_Op<"map_get",
   let results = (outs AnyType:$result);
   
   let assemblyFormat = "$map `,` $key attr-dict `:` type($map) `,` type($key) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 def Ora_MapStoreOp : Ora_Op<"map_store",
@@ -1039,6 +1202,7 @@ def Ora_MapStoreOp : Ora_Op<"map_store",
   let arguments = (ins AnyType:$map, AnyType:$key, AnyType:$value);
   
   let assemblyFormat = "$map `,` $key `,` $value attr-dict `:` type($map) `,` type($key) `,` type($value)";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1336,6 +1500,24 @@ def Ora_ErrorDeclOp : Ora_Op<"error.decl"> {
   let traits = [Symbol, MemoryEffects<[MemWrite]>];
 }
 
+def Ora_ErrorReturnOp : Ora_PureOp<"error.return"> {
+  let summary = "Construct a nominal error value";
+  let description = [{
+    Materializes a named error constructor expression with zero or more payload operands.
+
+    Example:
+    ```mlir
+    %err = ora.error.return "Failure"(%code : i256) : !ora.struct<"Failure">
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$sym_name, Variadic<AnyType>:$operands);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$sym_name (`(` $operands^ `:` type($operands) `)`)? attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
 def Ora_ErrorOkOp : Ora_PureOp<"error.ok"> {
   let summary = "Construct a successful error union value";
   let description = [{
@@ -1412,6 +1594,7 @@ def Ora_ErrorUnwrapOp : Ora_PureOp<"error.unwrap"> {
   let results = (outs AnyType:$result);
   
   let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 def Ora_ErrorGetErrorOp : Ora_PureOp<"error.get_error"> {
@@ -1430,6 +1613,50 @@ def Ora_ErrorGetErrorOp : Ora_PureOp<"error.get_error"> {
   let results = (outs AnyType:$result);
   
   let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
+//===----------------------------------------------------------------------===//
+// External Call Operations
+//===----------------------------------------------------------------------===//
+
+def Ora_AbiEncodeOp : Ora_Op<"abi_encode"> {
+  let summary = "ABI-encode external call arguments";
+  let description = [{
+    Encodes arguments into calldata format for an external call.
+  }];
+
+  let arguments = (ins AnyAttr:$selector, AnyAttr:$arg_types, Variadic<AnyType>:$operands);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$operands attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_ExternalCallOp : Ora_Op<"external_call"> {
+  let summary = "External CALL/STATICCALL security boundary";
+  let description = [{
+    Represents an external call with explicit call kind, target, gas, and calldata.
+  }];
+
+  let arguments = (ins StrAttr:$call_kind, StrAttr:$trait_name, StrAttr:$method_name,
+                       AnyType:$target, AnyType:$gas, AnyType:$calldata);
+  let results = (outs I1:$success, AnyType:$returndata);
+
+  let assemblyFormat = "$target `,` $gas `,` $calldata attr-dict `:` type($target) `,` type($gas) `,` type($calldata) `->` type($success) `,` type($returndata)";
+  let hasVerifier = 1;
+}
+
+def Ora_AbiDecodeOp : Ora_Op<"abi_decode"> {
+  let summary = "ABI-decode external call returndata";
+  let description = [{
+    Decodes returndata into a typed value.
+  }];
+
+  let arguments = (ins AnyAttr:$return_types, AnyType:$returndata);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$returndata attr-dict `:` type($returndata) `->` type($result)";
+  let hasVerifier = 1;
 }
 
 def Ora_TryOp : Ora_Op<"try_catch"> {
@@ -1484,47 +1711,6 @@ def Ora_TryStmtOp : Ora_Op<"try_stmt"> {
 // Loop Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_WhileOp : Ora_Op<"while"> {
-  let summary = "While loop operation";
-  let description = [{
-    Executes a region while a condition is true.
-    
-    Example:
-    ```mlir
-    ora.while %condition : i1 {
-      // loop body
-      ora.yield
-    }
-    ```
-  }];
-  
-  let arguments = (ins I1:$condition);
-  let regions = (region AnyRegion:$body);
-  
-  let hasCustomAssemblyFormat = 1;
-}
-
-def Ora_ForOp : Ora_Op<"for"> {
-  let summary = "For loop operation";
-  let description = [{
-    Iterates over a collection with key-value pairs.
-    
-    Example:
-    ```mlir
-    ora.for %collection : !ora.map<i256, i256> |%key, %value| {
-      // loop body
-      ora.yield
-    }
-    ```
-  }];
-  
-  let arguments = (ins AnyType:$collection);
-  let regions = (region AnyRegion:$body);
-  
-  // Custom parser/printer needed for '|' separator syntax
-  // let assemblyFormat = "$collection `|` `%key` `,` `%value` `|` region($body) attr-dict";
-}
-
 def Ora_BreakOp : Ora_Op<"break"> {
   let summary = "Break operation";
   let description = [{
@@ -1576,6 +1762,7 @@ def Ora_ReturnOp : Ora_Op<"return", [Terminator]> {
   let arguments = (ins Variadic<AnyType>:$operands);
   
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1637,6 +1824,7 @@ def Ora_SwitchOp : Ora_Op<"switch", [RecursiveMemoryEffects]> {
   }];
   
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ora_SwitchExprOp : Ora_Op<"switch_expr", [RecursiveMemoryEffects]> {
@@ -1684,6 +1872,7 @@ def Ora_SwitchExprOp : Ora_Op<"switch_expr", [RecursiveMemoryEffects]> {
   }];
   
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 #endif // ORA_OPS

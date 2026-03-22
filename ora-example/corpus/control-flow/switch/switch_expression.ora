@@ -1,0 +1,72 @@
+// ==========================================
+// SWITCH EXPRESSION — switch as expression
+// ==========================================
+
+contract SwitchExpression {
+    // Switch expression assigned to variable
+    pub fn test_assign(x: u256) -> u256 {
+        var res: u256 = switch (x) {
+            0 => 10,
+            1 => 20,
+            2 => 30,
+            else => 0
+        };
+        return res;
+    }
+
+    // Switch expression in return
+    pub fn test_return_expr(x: u256) -> u256 {
+        return switch (x) {
+            0 => 100,
+            1 => 200,
+            else => 0
+        };
+    }
+
+    // Switch expression with ranges
+    pub fn test_range_expr(x: u256) -> u256 {
+        return switch (x) {
+            0...9 => 1,
+            10...99 => 2,
+            100...999 => 3,
+            else => 4
+        };
+    }
+
+    // Switch expression used in arithmetic
+    pub fn test_in_arithmetic(x: u256, base: u256) -> u256 {
+        var factor: u256 = switch (x) {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            else => 8
+        };
+        return base * factor;
+    }
+
+    // Nested switch expressions
+    pub fn test_nested_switch_expr(a: u256, b: u256) -> u256 {
+        var outer: u256 = switch (a) {
+            0 => switch (b) {
+                0 => 0,
+                1 => 1,
+                else => 2
+            },
+            1 => switch (b) {
+                0 => 10,
+                1 => 11,
+                else => 12
+            },
+            else => 99
+        };
+        return outer;
+    }
+
+    // Switch expression with bool result
+    pub fn test_bool_result(x: u256) -> bool {
+        return switch (x) {
+            0 => false,
+            else => true
+        };
+    }
+}

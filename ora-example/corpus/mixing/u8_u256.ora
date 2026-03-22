@@ -1,0 +1,37 @@
+// Level 1: Simple mixing — u8 and u256 in same contract
+// Tests implicit widening from narrow to wide integer types.
+contract U8U256 {
+    storage var narrow: u8;
+    storage var wide: u256;
+
+    pub fn widen_assignment(x: u8) -> u256 {
+        let w: u256 = x;
+        return w;
+    }
+
+    pub fn widen_from_storage() -> u256 {
+        narrow = 42;
+        let w: u256 = narrow;
+        return w;
+    }
+
+    pub fn store_both(a: u8, b: u256) {
+        narrow = a;
+        wide = b;
+    }
+
+    pub fn add_widened(x: u8, y: u8) -> u256 {
+        let a: u256 = x;
+        let b: u256 = y;
+        let sum: u256 = a + b;
+        return sum;
+    }
+
+    pub fn mixed_locals() -> u256 {
+        let small: u8 = 255;
+        let big: u256 = 1000000;
+        let widened: u256 = small;
+        let res: u256 = widened + big;
+        return res;
+    }
+}

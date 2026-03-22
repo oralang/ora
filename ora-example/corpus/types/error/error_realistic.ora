@@ -1,0 +1,80 @@
+// Realistic vault pattern: deposit/withdraw with error returns for all failure paths.
+
+error ZeroDeposit;
+error InsufficientFunds(requested: u256, available: u256);
+error NotOwner;
+error VaultPaused;
+
+comptime const std = @import("std");
+
+contract ErrorRealistic {
+    storage owner: address;
+    storage var paused: bool = false;
+    storage balances: map<address, u256>;
+    storage var total_deposits: u256 = 0;
+
+    pub fn deposit(amount: u256) -> !u256 | ZeroDeposit | VaultPaused {
+        if (paused) {
+            return VaultPaused;
+        }
+        if (amount == 0) {
+            return ZeroDeposit;
+        }
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        balances[sender] = current + amount;
+        total_deposits = total_deposits + amount;
+        return balances[sender];
+    }
+
+    pub fn withdraw(amount: u256) -> !u256 | InsufficientFunds | VaultPaused {
+        if (paused) {
+            return VaultPaused;
+        }
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (amount > current) {
+            return InsufficientFunds(amount, current);
+        }
+        balances[sender] = current - amount;
+        total_deposits = total_deposits - amount;
+        return balances[sender];
+    }
+
+    pub fn transfer(to: address, amount: u256) -> !bool | InsufficientFunds | VaultPaused {
+        if (paused) {
+            return VaultPaused;
+        }
+        let sender: address = std.msg.sender();
+        let sender_balance: u256 = balances[sender];
+        if (amount > sender_balance) {
+            return InsufficientFunds(amount, sender_balance);
+        }
+        balances[sender] = sender_balance - amount;
+        let to_balance: u256 = balances[to];
+        balances[to] = to_balance + amount;
+        return true;
+    }
+
+    pub fn pause() -> !void | NotOwner {
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+        paused = true;
+    }
+
+    pub fn unpause() -> !void | NotOwner {
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+        paused = false;
+    }
+
+    pub fn get_balance(addr: address) -> u256 {
+        return balances[addr];
+    }
+
+    pub fn get_total() -> u256 {
+        return total_deposits;
+    }
+}

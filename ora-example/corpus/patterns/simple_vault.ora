@@ -1,0 +1,54 @@
+// Level 5: Simple DeFi vault
+// Tests: deposit/withdraw with totalDeposits tracking, share accounting
+
+comptime const std = @import("std");
+contract SimpleVault {
+    storage var totalDeposits: u256 = 0;
+    storage var deposits: map<address, u256>;
+
+    log Deposit(account: address, amount: u256);
+    log Withdrawal(account: address, amount: u256);
+
+    pub fn deposit(amount: u256)
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        deposits[sender] += amount;
+        totalDeposits += amount;
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: u256) -> bool
+        requires(amount > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let current: u256 = deposits[sender];
+
+        if (current < amount) {
+            return false;
+        }
+
+        deposits[sender] = current - amount;
+        totalDeposits -= amount;
+
+        log Withdrawal(sender, amount);
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return deposits[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+
+    pub fn getUtilization() -> u256 {
+        if (totalDeposits == 0) {
+            return 0;
+        }
+        return totalDeposits;
+    }
+}

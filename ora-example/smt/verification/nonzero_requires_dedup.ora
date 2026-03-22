@@ -18,6 +18,7 @@
 // - cf.assert preconditions remain (no refinement dedup)
 // ============================================================================
 
+comptime const std = @import("std");
 contract NonZeroRequiresDedup {
     pub fn initRedundant(token: NonZeroAddress, adapter: NonZeroAddress)
         requires(token != std.constants.ZERO_ADDRESS)

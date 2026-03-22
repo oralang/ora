@@ -1,0 +1,12 @@
+// Declare error, function that returns it.
+
+error NotFound;
+
+contract ErrorSimple {
+    pub fn find(id: u256) -> !u256 | NotFound {
+        if (id == 0) {
+            return NotFound;
+        }
+        return id;
+    }
+}

@@ -1,0 +1,151 @@
+// ==========================================
+// STORAGE VAR ALL TYPES — storage vars for every scalar type
+// ==========================================
+
+comptime const std = @import("std");
+contract StorageVarAllTypes {
+    storage var val_u8: u8;
+    storage var val_u16: u16;
+    storage var val_u32: u32;
+    storage var val_u64: u64;
+    storage var val_u128: u128;
+    storage var val_u256: u256;
+    storage var val_i8: i8;
+    storage var val_i16: i16;
+    storage var val_i32: i32;
+    storage var val_i64: i64;
+    storage var val_i128: i128;
+    storage var val_i256: i256;
+    storage var val_bool: bool;
+    storage var val_addr: address;
+
+    // Set and get u8
+    pub fn set_u8(v: u8) {
+        val_u8 = v;
+    }
+    pub fn get_u8() -> u8 {
+        return val_u8;
+    }
+
+    // Set and get u16
+    pub fn set_u16(v: u16) {
+        val_u16 = v;
+    }
+    pub fn get_u16() -> u16 {
+        return val_u16;
+    }
+
+    // Set and get u32
+    pub fn set_u32(v: u32) {
+        val_u32 = v;
+    }
+    pub fn get_u32() -> u32 {
+        return val_u32;
+    }
+
+    // Set and get u64
+    pub fn set_u64(v: u64) {
+        val_u64 = v;
+    }
+    pub fn get_u64() -> u64 {
+        return val_u64;
+    }
+
+    // Set and get u128
+    pub fn set_u128(v: u128) {
+        val_u128 = v;
+    }
+    pub fn get_u128() -> u128 {
+        return val_u128;
+    }
+
+    // Set and get u256
+    pub fn set_u256(v: u256) {
+        val_u256 = v;
+    }
+    pub fn get_u256() -> u256 {
+        return val_u256;
+    }
+
+    // Set and get i8
+    pub fn set_i8(v: i8) {
+        val_i8 = v;
+    }
+    pub fn get_i8() -> i8 {
+        return val_i8;
+    }
+
+    // Set and get i16
+    pub fn set_i16(v: i16) {
+        val_i16 = v;
+    }
+    pub fn get_i16() -> i16 {
+        return val_i16;
+    }
+
+    // Set and get i32
+    pub fn set_i32(v: i32) {
+        val_i32 = v;
+    }
+    pub fn get_i32() -> i32 {
+        return val_i32;
+    }
+
+    // Set and get i64
+    pub fn set_i64(v: i64) {
+        val_i64 = v;
+    }
+    pub fn get_i64() -> i64 {
+        return val_i64;
+    }
+
+    // Set and get i128
+    pub fn set_i128(v: i128) {
+        val_i128 = v;
+    }
+    pub fn get_i128() -> i128 {
+        return val_i128;
+    }
+
+    // Set and get i256
+    pub fn set_i256(v: i256) {
+        val_i256 = v;
+    }
+    pub fn get_i256() -> i256 {
+        return val_i256;
+    }
+
+    // Set and get bool
+    pub fn set_bool(v: bool) {
+        val_bool = v;
+    }
+    pub fn get_bool() -> bool {
+        return val_bool;
+    }
+
+    // Set and get address
+    pub fn set_addr(v: address) {
+        val_addr = v;
+    }
+    pub fn get_addr() -> address {
+        return val_addr;
+    }
+
+    // Set all at once
+    pub fn set_all() {
+        val_u8 = 255;
+        val_u16 = 65535;
+        val_u32 = 4294967295;
+        val_u64 = 1000000000;
+        val_u128 = 1000000000000;
+        val_u256 = 1000000000000000;
+        val_i8 = -1;
+        val_i16 = -1;
+        val_i32 = -1;
+        val_i64 = -1;
+        val_i128 = -1;
+        val_i256 = -1;
+        val_bool = true;
+        val_addr = std.msg.sender();
+    }
+}

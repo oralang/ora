@@ -1,0 +1,38 @@
+// Vault — Tier 8: Comptime evaluation
+// Compile-time constants, comptime blocks, and comptime function calls.
+
+const MAX_DEPOSIT: u256 = 1000000;
+const MIN_DEPOSIT: u256 = 1;
+const VERSION: u256 = comptime { return 1 + 2; };
+
+comptime const std = @import("std");
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    fn maxAllowed() -> u256 {
+        return MAX_DEPOSIT;
+    }
+
+    fn minAllowed() -> u256 {
+        return MIN_DEPOSIT;
+    }
+
+    pub fn deposit(amount: u256) {
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+    }
+
+    pub fn getVersion() -> u256 {
+        return VERSION;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

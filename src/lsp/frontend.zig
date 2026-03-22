@@ -1,12 +1,13 @@
 const std = @import("std");
 const lexer = @import("ora_lexer");
-const parser = @import("../parser.zig");
+const compiler = @import("../compiler.zig");
 
 const Allocator = std.mem.Allocator;
 
 pub const DiagnosticSource = enum {
     lexer,
     parser,
+    sema,
 };
 
 pub const Severity = enum {
@@ -53,6 +54,7 @@ pub const DocumentAnalysis = struct {
 };
 
 pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalysis {
+    const file_id = compiler.FileId.fromIndex(0);
     var diagnostics = std.ArrayList(Diagnostic){};
     errdefer {
         for (diagnostics.items) |diagnostic| {
@@ -77,29 +79,86 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         });
     }
 
-    const previous_parser_stderr = parser.diagnostics.enable_stderr_diagnostics;
-    parser.diagnostics.enable_stderr_diagnostics = false;
-    defer parser.diagnostics.enable_stderr_diagnostics = previous_parser_stderr;
+    var parse_result = try compiler.syntax.parse(allocator, file_id, source);
+    defer parse_result.deinit();
 
-    var parse_result = parser.parseRaw(allocator, tokens) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "Parser error: {s}", .{parserErrorMessage(err)});
+    const parse_had_diagnostics = parse_result.diagnostics.items.items.len != 0;
+    for (parse_result.diagnostics.items.items) |diag| {
+        const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+        const message = try allocator.dupe(u8, diag.message);
         try diagnostics.append(allocator, Diagnostic{
             .source = .parser,
-            .severity = .err,
-            .range = eofTokenRange(tokens),
+            .severity = mapCompilerSeverity(diag.severity),
+            .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
             .message = message,
         });
+    }
 
-        return .{
-            .diagnostics = try diagnostics.toOwnedSlice(allocator),
-            .parse_succeeded = false,
-        };
-    };
-    parse_result.arena.deinit();
+    var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
+    defer lower_result.deinit();
+
+    const lower_had_diagnostics = lower_result.diagnostics.items.items.len != 0;
+    for (lower_result.diagnostics.items.items) |diag| {
+        const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+        const message = try allocator.dupe(u8, diag.message);
+        try diagnostics.append(allocator, Diagnostic{
+            .source = .parser,
+            .severity = mapCompilerSeverity(diag.severity),
+            .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+            .message = message,
+        });
+    }
+
+    // Run sema type checking if parsing succeeded — produces type errors,
+    // region errors, effect errors, and refinement diagnostics.
+    var sema_had_diagnostics = false;
+    if (!parse_had_diagnostics and !lower_had_diagnostics) {
+        var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
+        defer item_index.deinit();
+        var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
+        defer resolution.deinit();
+        var const_eval_result = try compiler.comptime_eval.constEval(allocator, &lower_result.file, .{});
+        defer const_eval_result.deinit();
+
+        var typecheck_result = try compiler.sema.typeCheck(
+            allocator,
+            file_id,
+            &lower_result.file,
+            &item_index,
+            &resolution,
+            &const_eval_result,
+            .{ .body = compiler.ast.BodyId.fromIndex(0) },
+        );
+        defer typecheck_result.deinit();
+
+        sema_had_diagnostics = typecheck_result.diagnostics.items.items.len != 0;
+        for (typecheck_result.diagnostics.items.items) |diag| {
+            const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+            const message = try allocator.dupe(u8, diag.message);
+            try diagnostics.append(allocator, Diagnostic{
+                .source = .sema,
+                .severity = mapCompilerSeverity(diag.severity),
+                .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+                .message = message,
+            });
+        }
+
+        // Also collect comptime diagnostics.
+        for (const_eval_result.diagnostics.items.items) |diag| {
+            const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+            const message = try allocator.dupe(u8, diag.message);
+            try diagnostics.append(allocator, Diagnostic{
+                .source = .sema,
+                .severity = mapCompilerSeverity(diag.severity),
+                .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+                .message = message,
+            });
+        }
+    }
 
     return .{
         .diagnostics = try diagnostics.toOwnedSlice(allocator),
-        .parse_succeeded = true,
+        .parse_succeeded = !(parse_had_diagnostics or lower_had_diagnostics or sema_had_diagnostics),
     };
 }
 
@@ -161,19 +220,31 @@ fn toZeroBased(value: u32) u32 {
     return if (value == 0) 0 else value - 1;
 }
 
-fn parserErrorMessage(err: parser.ParserError) []const u8 {
-    return switch (err) {
-        error.UnexpectedToken => "unexpected token",
-        error.ExpectedToken => "expected token",
-        error.ExpectedIdentifier => "expected identifier",
-        error.ExpectedType => "expected type",
-        error.ExpectedExpression => "expected expression",
-        error.ExpectedRangeExpression => "expected range expression",
-        error.UnexpectedEof => "unexpected end of file",
-        error.OutOfMemory => "out of memory",
-        error.InvalidMemoryRegion => "invalid memory region",
-        error.InvalidReturnType => "invalid return type",
-        error.UnresolvedType => "unresolved type",
-        error.TypeResolutionFailed => "type resolution failed",
+fn mapCompilerSeverity(severity: compiler.diagnostics.Severity) Severity {
+    return switch (severity) {
+        .Error => .err,
+        .Warning => .warning,
+        .Note => .information,
+        .Help => .hint,
+    };
+}
+
+fn textRangeToRange(allocator: Allocator, source_text: []const u8, range: compiler.TextRange) !Range {
+    var sources = compiler.source.SourceStore.init(allocator);
+    defer sources.deinit();
+
+    const file_id = try sources.addFile("<lsp>", source_text);
+    const start = sources.lineColumn(.{ .file_id = file_id, .range = .{ .start = range.start, .end = range.start } });
+    const end = sources.lineColumn(.{ .file_id = file_id, .range = .{ .start = range.end, .end = range.end } });
+
+    return .{
+        .start = .{
+            .line = toZeroBased(start.line),
+            .character = toZeroBased(start.column),
+        },
+        .end = .{
+            .line = toZeroBased(end.line),
+            .character = toZeroBased(end.column),
+        },
     };
 }

@@ -1,0 +1,75 @@
+// ==========================================
+// WHILE BREAK — while with break
+// ==========================================
+
+contract WhileBreak {
+    // Simple break on condition
+    pub fn test_break_on_condition() -> u256 {
+        var i: u256 = 0;
+        while (i < 100) {
+            if (i == 10) {
+                break;
+            }
+            i += 1;
+        }
+        return i; // 10
+    }
+
+    // Break from infinite loop
+    pub fn test_break_infinite() -> u256 {
+        var x: u256 = 0;
+        while (true) {
+            x += 1;
+            if (x >= 20) {
+                break;
+            }
+        }
+        return x;
+    }
+
+    // Break with computation after loop
+    pub fn test_break_then_compute(target: u256) -> u256 {
+        var sum: u256 = 0;
+        var i: u256 = 1;
+        while (i <= 1000) {
+            sum += i;
+            if (sum >= target) {
+                break;
+            }
+            i += 1;
+        }
+        return sum;
+    }
+
+    // Break in nested — only breaks inner
+    pub fn test_break_inner_only() -> u256 {
+        var count: u256 = 0;
+        var i: u256 = 0;
+        while (i < 5) {
+            var j: u256 = 0;
+            while (j < 100) {
+                if (j >= 3) {
+                    break; // only breaks inner loop
+                }
+                count += 1;
+                j += 1;
+            }
+            i += 1;
+        }
+        return count; // 5 * 3 = 15
+    }
+
+    // Break preserves last value
+    pub fn test_break_preserves_state() -> u256 {
+        var last: u256 = 0;
+        var i: u256 = 0;
+        while (i < 100) {
+            last = i;
+            if (i == 7) {
+                break;
+            }
+            i += 1;
+        }
+        return last; // 7
+    }
+}

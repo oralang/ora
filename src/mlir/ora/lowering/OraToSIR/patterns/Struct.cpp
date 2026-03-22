@@ -42,7 +42,7 @@ namespace
         ora::StructDeclOp structDecl = nullptr;
         module.walk([&](ora::StructDeclOp declOp)
                     {
-            auto nameAttr = declOp->getAttrOfType<StringAttr>("name");
+            auto nameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
             if (nameAttr && nameAttr.getValue() == structName)
             {
                 structDecl = declOp;
@@ -182,6 +182,80 @@ LogicalResult ConvertStructInitOp::matchAndRewrite(
     auto loc = op.getLoc();
     Value basePtr = buildStructBuffer(loc, rewriter, adaptor.getFieldValues());
     rewriter.replaceOp(op, basePtr);
+    return success();
+}
+
+LogicalResult ConvertTupleCreateOp::matchAndRewrite(
+    ora::TupleCreateOp op,
+    typename ora::TupleCreateOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    Value basePtr = buildStructBuffer(loc, rewriter, adaptor.getElements());
+    rewriter.replaceOp(op, basePtr);
+    return success();
+}
+
+LogicalResult ConvertTupleExtractOp::matchAndRewrite(
+    ora::TupleExtractOp op,
+    typename ora::TupleExtractOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value basePtr = adaptor.getTupleValue();
+    if (llvm::isa<sir::U256Type>(basePtr.getType()))
+    {
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    }
+    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+    {
+        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (castOp.getNumOperands() == 1)
+            {
+                Value src = castOp.getOperand(0);
+                if (llvm::isa<sir::PtrType>(src.getType()))
+                {
+                    basePtr = src;
+                }
+                else if (llvm::isa<sir::U256Type>(src.getType()))
+                {
+                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+                }
+            }
+        }
+    }
+
+    Value slotPtr = basePtr;
+    const uint64_t fieldIndex = static_cast<uint64_t>(op.getIndex());
+    if (fieldIndex != 0)
+    {
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL);
+        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!resultType)
+        return rewriter.notifyMatchFailure(op, "could not convert tuple extract result type");
+    Value loaded = rewriter.create<sir::LoadOp>(loc, u256Type, slotPtr);
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, loaded);
+        return success();
+    }
+    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType))
+    {
+        rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+
+    rewriter.replaceOpWithNewOp<mlir::UnrealizedConversionCastOp>(op, resultType, loaded);
     return success();
 }
 

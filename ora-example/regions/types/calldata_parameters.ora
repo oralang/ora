@@ -4,6 +4,7 @@
 // Tests that function parameters are calldata region
 // ============================================================================
 
+comptime const std = @import("std");
 contract CalldataParameters {
     storage var storage_x: u256;
 

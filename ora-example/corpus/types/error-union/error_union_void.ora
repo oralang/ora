@@ -1,0 +1,57 @@
+// Error union with void payload: success/fail with no return value.
+// Tests: !void | Error — function either succeeds (no value) or fails.
+
+error NotAuthorized;
+error InvalidState;
+
+comptime const std = @import("std");
+contract ErrorUnionVoid {
+    storage var owner: address;
+    storage var paused: bool = false;
+    storage var value: u256 = 0;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn pause() -> !void | NotAuthorized {
+        if (std.msg.sender() != owner) {
+            return NotAuthorized;
+        }
+        paused = true;
+    }
+
+    pub fn unpause() -> !void | NotAuthorized {
+        if (std.msg.sender() != owner) {
+            return NotAuthorized;
+        }
+        paused = false;
+    }
+
+    pub fn set_value(v: u256) -> !void | NotAuthorized | InvalidState {
+        if (std.msg.sender() != owner) {
+            return NotAuthorized;
+        }
+        if (paused) {
+            return InvalidState;
+        }
+        value = v;
+    }
+
+    pub fn try_set_value(v: u256) -> bool {
+        try {
+            try set_value(v);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+
+    pub fn is_paused() -> bool {
+        return paused;
+    }
+}

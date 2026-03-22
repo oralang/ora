@@ -1,6 +1,7 @@
 // Test refinement propagation through arithmetic operations
 // This validates that refinement types are preserved/computed correctly
 
+comptime const std = @import("std");
 contract RefinementArithmetic {
     // Test MinValue propagation
     pub fn test_min_value_addition(x: MinValue<u256, 100>) -> MinValue<u256, 100>

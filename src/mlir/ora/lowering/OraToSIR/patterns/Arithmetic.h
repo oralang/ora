@@ -260,6 +260,37 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAddWrappingOp : public OpConversionPattern<ora::AddWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AddWrappingOp op,
+                typename ora::AddWrappingOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertSubWrappingOp : public OpConversionPattern<ora::SubWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::SubWrappingOp op,
+                typename ora::SubWrappingOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertMulWrappingOp : public OpConversionPattern<ora::MulWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::MulWrappingOp op,
+                typename ora::MulWrappingOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithSubIOp : public OpConversionPattern<mlir::arith::SubIOp>
         {
         public:
@@ -370,6 +401,16 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertShlWrappingOp : public OpConversionPattern<ora::ShlWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::ShlWrappingOp op,
+                typename ora::ShlWrappingOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertArithShrUIOp : public OpConversionPattern<mlir::arith::ShRUIOp>
         {
         public:
@@ -389,6 +430,16 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 mlir::arith::ShRSIOp op,
                 typename mlir::arith::ShRSIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertShrWrappingOp : public OpConversionPattern<ora::ShrWrappingOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+            LogicalResult matchAndRewrite(
+                ora::ShrWrappingOp op,
+                typename ora::ShrWrappingOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

@@ -1,0 +1,53 @@
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+struct TokenInfo {
+    id: u256;
+    decimals: u8;
+    active: bool;
+}
+
+contract StructBasic {
+    storage var origin: Point = Point { x: 0, y: 0 };
+    storage var token: TokenInfo;
+
+    pub fn create() -> u256 {
+        let p: Point = Point { x: 10, y: 20 };
+        return p.x + p.y;
+    }
+
+    pub fn field_access() -> u256 {
+        let p: Point = Point { x: 5, y: 15 };
+        let sum: u256 = p.x + p.y;
+        return sum;
+    }
+
+    pub fn storage_write() {
+        origin = Point { x: 100, y: 200 };
+    }
+
+    pub fn storage_read() -> u256 {
+        return origin.x + origin.y;
+    }
+
+    pub fn storage_field_write() {
+        origin.x = 42;
+        origin.y = origin.x + 1;
+    }
+
+    pub fn pass_struct(p: Point) -> u256 {
+        return p.x * p.y;
+    }
+
+    pub fn return_struct() -> Point {
+        return Point { x: 7, y: 8 };
+    }
+
+    pub fn multi_field_types() {
+        token = TokenInfo { id: 1, decimals: 18, active: true };
+        let d: u8 = token.decimals;
+        let a: bool = token.active;
+    }
+}

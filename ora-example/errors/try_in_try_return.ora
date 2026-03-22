@@ -17,7 +17,7 @@ contract TryInTryReturn {
             let y: u256 = try mayFail(x);
             return y + 1;
         } catch (e) {
-            return e;
+            return 0;
         }
     }
 }

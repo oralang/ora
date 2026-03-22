@@ -1,0 +1,22 @@
+// Error union widening: !u256 | ErrorA assignable to !u256 | ErrorA | ErrorB
+
+error ErrorA;
+error ErrorB;
+
+contract ErrorWidening {
+    pub fn narrow_fn(x: u256) -> !u256 | ErrorA {
+        if (x == 0) {
+            return ErrorA;
+        }
+        return x;
+    }
+
+    pub fn wide_fn(x: u256) -> !u256 | ErrorA | ErrorB {
+        if (x > 1000) {
+            return ErrorB;
+        }
+        // narrow_fn returns !u256 | ErrorA, which widens to !u256 | ErrorA | ErrorB
+        let res: u256 = try narrow_fn(x);
+        return res;
+    }
+}

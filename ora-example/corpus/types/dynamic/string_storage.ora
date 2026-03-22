@@ -1,0 +1,36 @@
+contract StringStorage {
+    storage var first_name: string;
+    storage var last_name: string;
+    storage var bio: string;
+
+    pub fn setNames(first: string, last: string) {
+        first_name = first;
+        last_name = last;
+    }
+
+    pub fn setBio(b: string) {
+        bio = b;
+    }
+
+    pub fn getFirstName() -> string {
+        return first_name;
+    }
+
+    pub fn getLastName() -> string {
+        return last_name;
+    }
+
+    pub fn getBio() -> string {
+        return bio;
+    }
+
+    pub fn copyFirstToLast() {
+        last_name = first_name;
+    }
+
+    pub fn swapNames() {
+        let temp: string = first_name;
+        first_name = last_name;
+        last_name = temp;
+    }
+}

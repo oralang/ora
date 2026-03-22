@@ -1,0 +1,53 @@
+// Error guard pattern: check condition, return if failed, continue if passed.
+// Tests: early-return guards as a common validation idiom.
+
+error InvalidAmount;
+error InsufficientBalance(needed: u256, have: u256);
+error NotOwner;
+
+comptime const std = @import("std");
+contract ErrorGuardPattern {
+    storage var owner: address;
+    storage var balance: u256 = 0;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn guarded_withdraw(amount: u256) -> !u256 | InvalidAmount | InsufficientBalance | NotOwner {
+        // Guard 1: caller must be owner
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+
+        // Guard 2: amount must be positive
+        if (amount == 0) {
+            return InvalidAmount;
+        }
+
+        // Guard 3: sufficient balance
+        let current: u256 = balance;
+        if (amount > current) {
+            return InsufficientBalance(amount, current);
+        }
+
+        // All guards passed — execute
+        balance = current - amount;
+        return balance;
+    }
+
+    pub fn guarded_deposit(amount: u256) -> !u256 | InvalidAmount | NotOwner {
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+        if (amount == 0) {
+            return InvalidAmount;
+        }
+        balance += amount;
+        return balance;
+    }
+
+    pub fn get_balance() -> u256 {
+        return balance;
+    }
+}

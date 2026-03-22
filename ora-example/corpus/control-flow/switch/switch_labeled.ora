@@ -1,0 +1,86 @@
+// ==========================================
+// SWITCH LABELED — labeled switch with continue
+// ==========================================
+
+contract SwitchLabeled {
+    // Labeled switch with continue to re-enter
+    pub fn test_labeled_continue() -> u256 {
+        var x: u256 = 5;
+        var iterations: u256 = 0;
+
+        outer: switch (x) {
+            0 => {
+                return iterations;
+            }
+            1...10 => {
+                iterations += 1;
+                x -= 1;
+                continue :outer (x);
+            }
+            else => {
+                return 999;
+            }
+        }
+    }
+
+    // Labeled switch with labeled block arms
+    pub fn test_labeled_block_arm() -> u256 {
+        var x: u256 = 7;
+
+        outer: switch (x) {
+            0 => { x = 100; }
+            1...5 => { x = x + 1; }
+            else => {
+                continue :outer (0);
+            }
+        }
+        return x;
+    }
+
+    // Labeled switch as state dispatcher
+    pub fn test_state_dispatch() -> u256 {
+        var state: u256 = 0;
+        var res: u256 = 0;
+
+        dispatch: switch (state) {
+            0 => {
+                res += 1;
+                continue :dispatch (1);
+            }
+            1 => {
+                res += 10;
+                continue :dispatch (2);
+            }
+            2 => {
+                res += 100;
+                // fall through to end
+            }
+            else => {
+                res = 999;
+            }
+        }
+        return res; // 111
+    }
+
+    // Labeled switch with conditional continue
+    pub fn test_conditional_continue(input: u256) -> u256 {
+        var val: u256 = input;
+        var count: u256 = 0;
+
+        process: switch (val) {
+            0 => {
+                return count;
+            }
+            1...100 => {
+                count += 1;
+                if (val > 1) {
+                    continue :process (val - 1);
+                }
+            }
+            else => {
+                continue :process (100); // clamp to 100
+            }
+        }
+        return count;
+    }
+}

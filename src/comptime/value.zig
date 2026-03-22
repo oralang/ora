@@ -44,6 +44,8 @@ pub const CtValue = union(enum) {
     bytes_ref: HeapId,
     string_ref: HeapId,
     array_ref: HeapId,
+    slice_ref: HeapId,
+    map_ref: HeapId,
     tuple_ref: HeapId,
     struct_ref: HeapId,
 
@@ -58,7 +60,7 @@ pub const CtValue = union(enum) {
     /// Check if value is heap-backed
     pub fn isHeapBacked(self: CtValue) bool {
         return switch (self) {
-            .bytes_ref, .string_ref, .array_ref, .tuple_ref, .struct_ref => true,
+            .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => true,
             .enum_val => |e| e.payload != null,
             else => false,
         };
@@ -67,7 +69,7 @@ pub const CtValue = union(enum) {
     /// Get the heap id if heap-backed
     pub fn getHeapId(self: CtValue) ?HeapId {
         return switch (self) {
-            .bytes_ref, .string_ref, .array_ref, .tuple_ref, .struct_ref => |id| id,
+            .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => |id| id,
             else => null,
         };
     }

@@ -1,6 +1,7 @@
 // State Analysis Test Contract
 // This contract tests various storage access patterns
 
+comptime const std = @import("std");
 contract StateTest {
     // Storage variables
     storage counter: u256;

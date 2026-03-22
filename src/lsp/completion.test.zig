@@ -46,7 +46,7 @@ test "lsp completion: includes keyword suggestions by prefix" {
 
     const position = try positionAfterNth(source, "ret", 0);
 
-    const items = try completion.completionAt(testing.allocator, source, position);
+    const items = try completion.completionAt(testing.allocator, source, position, null);
     defer completion.deinitItems(testing.allocator, items);
 
     try testing.expect(hasLabel(items, "return"));
@@ -60,7 +60,7 @@ test "lsp completion: includes symbols from semantic index" {
 
     const position = try positionAfterNth(source, "hel", 0);
 
-    const items = try completion.completionAt(testing.allocator, source, position);
+    const items = try completion.completionAt(testing.allocator, source, position, null);
     defer completion.deinitItems(testing.allocator, items);
 
     try testing.expect(hasLabel(items, "helper"));
@@ -74,7 +74,7 @@ test "lsp completion: non-matching prefix returns empty" {
 
     const position = try positionAfterNth(source, "zzz", 0);
 
-    const items = try completion.completionAt(testing.allocator, source, position);
+    const items = try completion.completionAt(testing.allocator, source, position, null);
     defer completion.deinitItems(testing.allocator, items);
 
     try testing.expectEqual(@as(usize, 0), items.len);

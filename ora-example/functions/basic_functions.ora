@@ -1,7 +1,11 @@
+comptime const std = @import("std");
+
 // ==========================================
 // FUNCTION DECLARATIONS TEST
 // ==========================================
 // This file tests function declaration syntax
+
+contract BasicFunctions {
 
 // Top-level function without parameters or return type
 fn simple_function() {
@@ -26,7 +30,7 @@ fn add(a: u256, b: u256) -> u256
 }
 
 // Function with preconditions
-fn calculate_fee(amount: u256, rate: u256) -> u256 
+fn calculate_fee(amount: u256, rate: u256) -> u256
     requires(rate <= 10000)
     requires(amount <= std.constants.U256_MAX / 10000)
 {
@@ -38,4 +42,6 @@ fn safe_subtract(a: u256, b: u256) -> u256
     requires(a >= b)
 {
     return a - b;
+}
+
 }

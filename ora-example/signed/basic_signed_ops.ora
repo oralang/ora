@@ -2,6 +2,8 @@
 // BASIC SIGNED OPERATIONS
 // ==========================================
 // End-to-end-safe signed arithmetic using i256 values.
+comptime const std = @import("std");
+
 contract SignedBasicOps {
     pub fn add(a: i256, b: i256) -> i256
         requires(a >= -1000000)

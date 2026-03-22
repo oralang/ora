@@ -31,6 +31,7 @@ enum OperationType : u8 {
     Liquidation = 4
 }
 
+comptime const std = @import("std");
 contract LendingPool {
     // Storage state
     storage var total_deposits: u256 = 0;

@@ -5,6 +5,7 @@
 // This is a valid transition: stack -> tstore
 // ============================================================================
 
+comptime const std = @import("std");
 contract StackToTStore {
     tstore var temp_counter: u256;
     tstore var temp_flag: bool;

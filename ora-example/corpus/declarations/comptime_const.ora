@@ -1,0 +1,51 @@
+// ==========================================
+// COMPTIME CONST — comptime values used in runtime code
+// ==========================================
+
+contract ComptimeConst {
+    // Comptime const used in runtime arithmetic
+    pub fn comptime_in_runtime() -> u256 {
+        const scale: u256 = 1_000_000_000_000_000_000; // 10^18
+        let amount: u256 = 100;
+        let scaled: u256 = amount * scale;
+        return scaled;
+    }
+
+    // Comptime decimals used at runtime
+    pub fn decimals_example() -> u256 {
+        const decimals: u256 = 18;
+        let factor: u256 = 1_000_000_000_000_000_000; // 10^18
+        return factor;
+    }
+
+    // Comptime constant in comparison
+    pub fn comptime_threshold() -> bool {
+        const max: u256 = 1_000_000;
+        const safety_margin: u256 = max / 10;
+        const threshold: u256 = max - safety_margin;
+        let value: u256 = 500_000;
+        return value <= threshold;
+    }
+
+    // Multiple comptime consts combined at runtime
+    pub fn combined_comptime() -> u256 {
+        const fee_bps: u256 = comptime {
+            return 30;
+        };
+        const bps_base: u256 = comptime {
+            return 10000;
+        };
+        let amount: u256 = 1_000_000;
+        let fee: u256 = amount * fee_bps / bps_base;
+        return fee;
+    }
+
+    // Comptime const used with contract-level const
+    const MAX_SUPPLY: u256 = 1_000_000;
+
+    pub fn check_with_comptime(amount: u256) -> bool {
+        const buffer: u256 = 1000;
+        let limit: u256 = MAX_SUPPLY - buffer;
+        return amount <= limit;
+    }
+}

@@ -4,6 +4,7 @@
 // Demonstrates proper use of MaxValue for token supply caps
 // ============================================================================
 
+comptime const std = @import("std");
 contract SupplyCap {
     storage var total_supply: MaxValue<u256, 1_000_000_000>; // Max 1 billion
     storage var balances: map<address, u256>;

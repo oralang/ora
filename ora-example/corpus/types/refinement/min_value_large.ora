@@ -1,0 +1,32 @@
+// MinValue<u256, 100> — larger minimum bound
+
+comptime const std = @import("std");
+contract MinValueLarge {
+    storage var minStake: MinValue<u256, 100>;
+    storage var totalStaked: u256 = 0;
+
+    pub fn stake(amount: MinValue<u256, 100>) {
+        let sender: address = std.msg.sender();
+        totalStaked = totalStaked + amount;
+    }
+
+    pub fn setMinStake(val: MinValue<u256, 100>) {
+        minStake = val;
+    }
+
+    pub fn getMinStake() -> MinValue<u256, 100> {
+        return minStake;
+    }
+
+    pub fn isAboveMinimum(val: MinValue<u256, 100>) -> bool {
+        return val >= minStake;
+    }
+
+    pub fn doubleStake(amount: MinValue<u256, 100>) -> u256 {
+        return amount * 2;
+    }
+
+    pub fn getTotalStaked() -> u256 {
+        return totalStaked;
+    }
+}

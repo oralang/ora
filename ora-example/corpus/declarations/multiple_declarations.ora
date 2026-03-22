@@ -1,0 +1,89 @@
+// ==========================================
+// MULTIPLE DECLARATIONS — multiple let/var, shadowing, sequential use
+// ==========================================
+
+comptime const std = @import("std");
+contract MultipleDeclarations {
+    // Multiple let in same function
+    pub fn multiple_lets() -> u256 {
+        let a: u256 = 1;
+        let b: u256 = 2;
+        let c: u256 = 3;
+        let d: u256 = 4;
+        let e: u256 = 5;
+        return a + b + c + d + e;
+    }
+
+    // Multiple var in same function
+    pub fn multiple_vars() -> u256 {
+        var a: u256 = 0;
+        var b: u256 = 0;
+        var c: u256 = 0;
+        a = 10;
+        b = 20;
+        c = 30;
+        return a + b + c;
+    }
+
+    // Mixed let and var
+    pub fn mixed_let_var() -> u256 {
+        let fixed_val: u256 = 100;
+        var mutable: u256 = 0;
+        mutable = fixed_val + 50;
+        let captured: u256 = mutable;
+        return captured;
+    }
+
+    // Sequential: later declarations use earlier values
+    pub fn sequential_declarations() -> u256 {
+        let base: u256 = 10;
+        let doubled: u256 = base * 2;
+        let tripled: u256 = base * 3;
+        let sum: u256 = doubled + tripled;
+        let res: u256 = sum + base;
+        return res;
+    }
+
+    // Shadowing in nested scope (if block)
+    pub fn shadowing_in_scope() -> u256 {
+        let x: u256 = 10;
+        var res: u256 = x;
+        if (x > 5) {
+            let x: u256 = 20;
+            res = x;
+        }
+        return res;
+    }
+
+    // Many declarations of different types
+    pub fn many_types() -> u256 {
+        let count: u256 = 42;
+        let flag: bool = true;
+        let addr: address = std.msg.sender();
+        let small: u8 = 255;
+        let medium: u64 = 1000000;
+        let signed: i256 = -1;
+        return count;
+    }
+
+    // Var chain: each depends on previous
+    pub fn var_chain() -> u256 {
+        var a: u256 = 1;
+        var b: u256 = a + 1;
+        var c: u256 = b + a;
+        a = c;
+        b = a + c;
+        c = a + b;
+        return c;
+    }
+
+    // Let with same-line expressions
+    pub fn expression_lets() -> u256 {
+        let a: u256 = 2 + 3;
+        let b: u256 = a * 4;
+        let c: u256 = b - a;
+        let d: u256 = c / 2;
+        let e: u256 = d % 3;
+        return e;
+    }
+}

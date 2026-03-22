@@ -1,0 +1,64 @@
+// ==========================================
+// SWITCH LITERAL — switch on literal values
+// ==========================================
+
+contract SwitchLiteral {
+    // Switch on integer literals
+    pub fn test_int_literals(x: u256) -> u256 {
+        switch (x) {
+            0 => { return 100; }
+            1 => { return 200; }
+            2 => { return 300; }
+            3 => { return 400; }
+            else => { return 0; }
+        }
+    }
+
+    // Switch on boolean
+    pub fn test_bool_literal(flag: bool) -> u256 {
+        switch (flag) {
+            true => { return 1; }
+            false => { return 0; }
+        }
+    }
+
+    // Switch with single arm + else
+    pub fn test_single_arm(x: u256) -> u256 {
+        switch (x) {
+            42 => { return 1; }
+            else => { return 0; }
+        }
+    }
+
+    // Switch with many literal arms
+    pub fn test_many_arms(day: u256) -> u256 {
+        switch (day) {
+            0 => { return 0; } // Sunday
+            1 => { return 1; } // Monday
+            2 => { return 1; } // Tuesday
+            3 => { return 1; } // Wednesday
+            4 => { return 1; } // Thursday
+            5 => { return 1; } // Friday
+            6 => { return 0; } // Saturday
+            else => { return 99; }
+        }
+    }
+
+    // Switch with block bodies containing computation
+    pub fn test_block_bodies(x: u256) -> u256 {
+        switch (x) {
+            0 => {
+                var res: u256 = 10 + 20;
+                return res;
+            }
+            1 => {
+                var a: u256 = 5;
+                var b: u256 = 7;
+                return a * b;
+            }
+            else => {
+                return x;
+            }
+        }
+    }
+}

@@ -1,8 +1,5 @@
 const std = @import("std");
-const lexer = @import("ora_lexer");
-const parser = @import("../parser.zig");
-const ast = @import("ora_ast");
-const type_info = @import("ora_types").type_info;
+const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
 
 const Allocator = std.mem.Allocator;
@@ -26,6 +23,7 @@ pub const SymbolKind = enum {
 pub const Symbol = struct {
     name: []const u8,
     detail: ?[]const u8 = null,
+    doc_comment: ?[]const u8 = null,
     kind: SymbolKind,
     range: frontend.Range,
     selection_range: frontend.Range,
@@ -39,9 +37,8 @@ pub const SemanticIndex = struct {
     pub fn deinit(self: *SemanticIndex, allocator: Allocator) void {
         for (self.symbols) |symbol| {
             allocator.free(symbol.name);
-            if (symbol.detail) |detail| {
-                allocator.free(detail);
-            }
+            if (symbol.detail) |detail| allocator.free(detail);
+            if (symbol.doc_comment) |doc| allocator.free(doc);
         }
         allocator.free(self.symbols);
     }
@@ -56,67 +53,45 @@ pub const DocumentSymbol = struct {
     children: []DocumentSymbol = &.{},
 
     pub fn deinit(self: *DocumentSymbol, allocator: Allocator) void {
-        for (self.children) |*child| {
-            child.deinit(allocator);
-        }
+        for (self.children) |*child| child.deinit(allocator);
         allocator.free(self.children);
     }
 };
 
 pub fn deinitDocumentSymbols(allocator: Allocator, symbols: []DocumentSymbol) void {
-    for (symbols) |*symbol| {
-        symbol.deinit(allocator);
-    }
+    for (symbols) |*symbol| symbol.deinit(allocator);
     allocator.free(symbols);
 }
 
 pub fn indexDocument(allocator: Allocator, source: []const u8) !SemanticIndex {
-    var builder = SymbolBuilder.init(allocator);
+    var builder = try SymbolBuilder.init(allocator, source);
     errdefer builder.deinit();
 
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
-    defer lex.deinit();
+    var parse_result = try compiler.syntax.parse(allocator, compiler.FileId.fromIndex(0), source);
+    defer parse_result.deinit();
 
-    const tokens = try lex.scanTokens();
-    defer allocator.free(tokens);
+    var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
+    defer lower_result.deinit();
 
-    const previous_parser_stderr = parser.diagnostics.enable_stderr_diagnostics;
-    parser.diagnostics.enable_stderr_diagnostics = false;
-    defer parser.diagnostics.enable_stderr_diagnostics = previous_parser_stderr;
-
-    var parse_result = parser.parseRaw(allocator, tokens) catch {
-        return .{
-            .symbols = try builder.finish(),
-            .parse_succeeded = false,
-        };
-    };
-    defer parse_result.arena.deinit();
-
-    for (parse_result.nodes) |node| {
-        try collectNode(&builder, node, null, false);
+    for (lower_result.file.root_items) |item_id| {
+        try collectItem(&builder, &lower_result.file, item_id, null, false);
     }
 
     return .{
         .symbols = try builder.finish(),
-        .parse_succeeded = true,
+        .parse_succeeded = parse_result.diagnostics.isEmpty() and lower_result.diagnostics.isEmpty(),
     };
 }
 
 pub fn buildDocumentSymbols(allocator: Allocator, symbols: []const Symbol) ![]DocumentSymbol {
-    if (symbols.len == 0) {
-        return try allocator.alloc(DocumentSymbol, 0);
-    }
+    if (symbols.len == 0) return try allocator.alloc(DocumentSymbol, 0);
 
     const child_lists = try allocator.alloc(std.ArrayList(usize), symbols.len);
     defer {
-        for (child_lists) |*list| {
-            list.deinit(allocator);
-        }
+        for (child_lists) |*list| list.deinit(allocator);
         allocator.free(child_lists);
     }
-    for (child_lists) |*list| {
-        list.* = .{};
-    }
+    for (child_lists) |*list| list.* = .{};
 
     var roots = std.ArrayList(usize){};
     defer roots.deinit(allocator);
@@ -139,9 +114,7 @@ pub fn buildDocumentSymbols(allocator: Allocator, symbols: []const Symbol) ![]Do
     const result = try allocator.alloc(DocumentSymbol, root_indices.len);
     var built: usize = 0;
     errdefer {
-        for (result[0..built]) |*symbol| {
-            symbol.deinit(allocator);
-        }
+        for (result[0..built]) |*symbol| symbol.deinit(allocator);
         allocator.free(result);
     }
 
@@ -165,9 +138,7 @@ fn buildDocumentSymbolRecursive(
     const children = try allocator.alloc(DocumentSymbol, child_indices.len);
     var built: usize = 0;
     errdefer {
-        for (children[0..built]) |*child| {
-            child.deinit(allocator);
-        }
+        for (children[0..built]) |*child| child.deinit(allocator);
         allocator.free(children);
     }
 
@@ -186,74 +157,87 @@ fn buildDocumentSymbolRecursive(
     };
 }
 
-fn collectNode(builder: *SymbolBuilder, node: ast.AstNode, parent: ?usize, in_contract: bool) !void {
-    switch (node) {
+fn collectItem(
+    builder: *SymbolBuilder,
+    file: *const compiler.ast.AstFile,
+    item_id: compiler.ast.ItemId,
+    parent: ?usize,
+    in_contract: bool,
+) !void {
+    const item = file.item(item_id).*;
+    switch (item) {
         .Contract => |contract_decl| {
-            const contract_index = try builder.addSymbol(contract_decl.name, .contract, contract_decl.span, parent, null);
-            for (contract_decl.body) |member| {
-                try collectNode(builder, member, contract_index, true);
+            const contract_index = try builder.addSymbol(contract_decl.name, .contract, contract_decl.range, parent, null);
+            for (contract_decl.members) |member_id| {
+                try collectItem(builder, file, member_id, contract_index, true);
             }
         },
         .Function => |function_decl| {
             const function_kind: SymbolKind = if (in_contract) .method else .function;
-            const function_detail = try formatFunctionDetailAlloc(builder.allocator, function_decl);
-            const function_index = try builder.addSymbol(function_decl.name, function_kind, function_decl.span, parent, function_detail);
+            const function_detail = try formatFunctionDetailAlloc(builder.allocator, file, function_decl);
+            const function_index = try builder.addSymbol(function_decl.name, function_kind, function_decl.range, parent, function_detail);
             for (function_decl.parameters) |parameter| {
-                const parameter_type = try formatTypeInfoAlloc(builder.allocator, parameter.type_info);
-                _ = try builder.addSymbol(parameter.name, .parameter, parameter.span, function_index, parameter_type);
+                const parameter_name = patternName(file, parameter.pattern) orelse continue;
+                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, function_index, parameter_type);
             }
         },
-        .VariableDecl => |variable_decl| {
+        .Field => |field_decl| {
             const variable_kind: SymbolKind = if (in_contract) .field else .variable;
-            const variable_type = try formatTypeInfoAlloc(builder.allocator, variable_decl.type_info);
-            _ = try builder.addSymbol(variable_decl.name, variable_kind, variable_decl.span, parent, variable_type);
+            const variable_type = if (field_decl.type_expr) |type_expr|
+                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+            else
+                null;
+            _ = try builder.addSymbol(field_decl.name, variable_kind, field_decl.range, parent, variable_type);
         },
         .Constant => |constant_decl| {
-            const constant_type = try formatTypeInfoAlloc(builder.allocator, constant_decl.typ);
-            _ = try builder.addSymbol(constant_decl.name, .constant, constant_decl.span, parent, constant_type);
+            const constant_type = if (constant_decl.type_expr) |type_expr|
+                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+            else
+                null;
+            _ = try builder.addSymbol(constant_decl.name, .constant, constant_decl.range, parent, constant_type);
         },
-        .StructDecl => |struct_decl| {
-            const struct_index = try builder.addSymbol(struct_decl.name, .struct_decl, struct_decl.span, parent, null);
+        .Struct => |struct_decl| {
+            const struct_index = try builder.addSymbol(struct_decl.name, .struct_decl, struct_decl.range, parent, null);
             for (struct_decl.fields) |field| {
-                const field_type = try formatTypeInfoAlloc(builder.allocator, field.type_info);
-                _ = try builder.addSymbol(field.name, .field, field.span, struct_index, field_type);
+                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                _ = try builder.addSymbol(field.name, .field, field.range, struct_index, field_type);
             }
         },
-        .BitfieldDecl => |bitfield_decl| {
-            const bitfield_index = try builder.addSymbol(bitfield_decl.name, .bitfield_decl, bitfield_decl.span, parent, null);
+        .Bitfield => |bitfield_decl| {
+            const bitfield_index = try builder.addSymbol(bitfield_decl.name, .bitfield_decl, bitfield_decl.range, parent, null);
             for (bitfield_decl.fields) |field| {
-                const field_type = try formatTypeInfoAlloc(builder.allocator, field.type_info);
-                _ = try builder.addSymbol(field.name, .field, field.span, bitfield_index, field_type);
+                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                _ = try builder.addSymbol(field.name, .field, field.range, bitfield_index, field_type);
             }
         },
-        .EnumDecl => |enum_decl| {
-            const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.span, parent, null);
+        .Enum => |enum_decl| {
+            const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.range, parent, null);
             for (enum_decl.variants) |variant| {
-                _ = try builder.addSymbol(variant.name, .enum_member, variant.span, enum_index, null);
+                _ = try builder.addSymbol(variant.name, .enum_member, variant.range, enum_index, null);
             }
         },
         .LogDecl => |log_decl| {
-            const log_detail = try formatLogDetailAlloc(builder.allocator, log_decl);
-            const log_index = try builder.addSymbol(log_decl.name, .event, log_decl.span, parent, log_detail);
+            const log_detail = try formatLogDetailAlloc(builder.allocator, file, log_decl);
+            const log_index = try builder.addSymbol(log_decl.name, .event, log_decl.range, parent, log_detail);
             for (log_decl.fields) |field| {
-                const field_type = try formatTypeInfoAlloc(builder.allocator, field.type_info);
-                _ = try builder.addSymbol(field.name, .field, field.span, log_index, field_type);
+                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                _ = try builder.addSymbol(field.name, .field, field.range, log_index, field_type);
             }
         },
         .ErrorDecl => |error_decl| {
-            const error_detail = try formatErrorDetailAlloc(builder.allocator, error_decl);
-            const error_index = try builder.addSymbol(error_decl.name, .error_decl, error_decl.span, parent, error_detail);
-            if (error_decl.parameters) |parameters| {
-                for (parameters) |parameter| {
-                    const parameter_type = try formatTypeInfoAlloc(builder.allocator, parameter.type_info);
-                    _ = try builder.addSymbol(parameter.name, .parameter, parameter.span, error_index, parameter_type);
-                }
+            const error_detail = try formatErrorDetailAlloc(builder.allocator, file, error_decl);
+            const error_index = try builder.addSymbol(error_decl.name, .error_decl, error_decl.range, parent, error_detail);
+            for (error_decl.parameters) |parameter| {
+                const parameter_name = patternName(file, parameter.pattern) orelse continue;
+                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, error_index, parameter_type);
             }
         },
         .Import => |import_decl| {
             if (import_decl.alias) |alias| {
                 const detail = try std.fmt.allocPrint(builder.allocator, "import \"{s}\"", .{import_decl.path});
-                _ = try builder.addSymbol(alias, .variable, import_decl.span, parent, detail);
+                _ = try builder.addSymbol(alias, .variable, import_decl.range, parent, detail);
             }
         },
         else => {},
@@ -289,7 +273,7 @@ pub fn findSymbolAtPosition(symbols: []const Symbol, position: frontend.Position
     return best_index;
 }
 
-fn formatFunctionDetailAlloc(allocator: Allocator, function_decl: ast.FunctionNode) ![]u8 {
+fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, function_decl: compiler.ast.FunctionItem) ![]u8 {
     var buffer = std.ArrayList(u8){};
     errdefer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
@@ -297,47 +281,143 @@ fn formatFunctionDetailAlloc(allocator: Allocator, function_decl: ast.FunctionNo
     try writer.writeByte('(');
     for (function_decl.parameters, 0..) |parameter, i| {
         if (i > 0) try writer.writeAll(", ");
-        try writer.print("{s}: ", .{parameter.name});
+        const parameter_name = patternName(file, parameter.pattern) orelse "_";
+        try writer.print("{s}: ", .{parameter_name});
 
-        const parameter_type = try formatTypeInfoAlloc(allocator, parameter.type_info);
+        const parameter_type = try formatTypeExprAlloc(allocator, file, parameter.type_expr);
         defer allocator.free(parameter_type);
         try writer.writeAll(parameter_type);
     }
     try writer.writeByte(')');
 
-    if (function_decl.return_type_info) |return_type| {
-        const return_type_text = try formatTypeInfoAlloc(allocator, return_type);
+    if (function_decl.return_type) |return_type| {
+        const return_type_text = try formatTypeExprAlloc(allocator, file, return_type);
         defer allocator.free(return_type_text);
         try writer.writeAll(" -> ");
         try writer.writeAll(return_type_text);
-    } else {
-        try writer.writeAll(" -> void");
+    }
+
+    // Append spec clauses (requires/ensures) for formal verification visibility.
+    for (function_decl.clauses) |clause| {
+        try writer.writeByte('\n');
+        try writer.writeAll(switch (clause.kind) {
+            .requires => "    requires(",
+            .ensures => "    ensures(",
+            .invariant => "    invariant(",
+        });
+        try writeExprText(writer, file, clause.expr);
+        try writer.writeByte(')');
     }
 
     return buffer.toOwnedSlice(allocator);
 }
 
-fn formatErrorDetailAlloc(allocator: Allocator, error_decl: ast.Statements.ErrorDeclNode) ![]u8 {
+/// Write a best-effort text representation of an expression (for spec clause display).
+fn writeExprText(writer: anytype, file: *const compiler.ast.AstFile, expr_id: compiler.ast.ExprId) !void {
+    switch (file.expression(expr_id).*) {
+        .Name => |name| try writer.writeAll(name.name),
+        .IntegerLiteral => |lit| try writer.writeAll(lit.text),
+        .BoolLiteral => |lit| try writer.writeAll(if (lit.value) "true" else "false"),
+        .Field => |field| {
+            try writeExprText(writer, file, field.base);
+            try writer.writeByte('.');
+            try writer.writeAll(field.name);
+        },
+        .Index => |index| {
+            try writeExprText(writer, file, index.base);
+            try writer.writeByte('[');
+            try writeExprText(writer, file, index.index);
+            try writer.writeByte(']');
+        },
+        .Binary => |bin| {
+            try writeExprText(writer, file, bin.lhs);
+            try writer.print(" {s} ", .{binaryOpText(bin.op)});
+            try writeExprText(writer, file, bin.rhs);
+        },
+        .Unary => |un| {
+            try writer.writeAll(unaryOpText(un.op));
+            try writeExprText(writer, file, un.operand);
+        },
+        .Call => |call| {
+            try writeExprText(writer, file, call.callee);
+            try writer.writeByte('(');
+            for (call.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExprText(writer, file, arg);
+            }
+            try writer.writeByte(')');
+        },
+        .Group => |group| {
+            try writer.writeByte('(');
+            try writeExprText(writer, file, group.expr);
+            try writer.writeByte(')');
+        },
+        .Old => |old| {
+            try writer.writeAll("old(");
+            try writeExprText(writer, file, old.expr);
+            try writer.writeByte(')');
+        },
+        .Result => try writer.writeAll("result"),
+        .AddressLiteral => |lit| try writer.writeAll(lit.text),
+        .StringLiteral => |lit| try writer.print("\"{s}\"", .{lit.text}),
+        else => try writer.writeAll("..."),
+    }
+}
+
+fn binaryOpText(op: compiler.ast.BinaryOp) []const u8 {
+    return switch (op) {
+        .add => "+",
+        .sub => "-",
+        .mul => "*",
+        .div => "/",
+        .mod => "%",
+        .pow => "**",
+        .eq => "==",
+        .ne => "!=",
+        .lt => "<",
+        .le => "<=",
+        .gt => ">",
+        .ge => ">=",
+        .and_and => "&&",
+        .or_or => "||",
+        .bit_and => "&",
+        .bit_or => "|",
+        .bit_xor => "^",
+        .shl => "<<",
+        .shr => ">>",
+        else => "?",
+    };
+}
+
+fn unaryOpText(op: compiler.ast.UnaryOp) []const u8 {
+    return switch (op) {
+        .neg => "-",
+        .not_ => "!",
+        .bit_not => "~",
+        .try_ => "try ",
+    };
+}
+
+fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, error_decl: compiler.ast.ErrorDeclItem) ![]u8 {
     var buffer = std.ArrayList(u8){};
     errdefer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
 
     try writer.writeByte('(');
-    if (error_decl.parameters) |parameters| {
-        for (parameters, 0..) |parameter, i| {
-            if (i > 0) try writer.writeAll(", ");
-            try writer.print("{s}: ", .{parameter.name});
-            const parameter_type = try formatTypeInfoAlloc(allocator, parameter.type_info);
-            defer allocator.free(parameter_type);
-            try writer.writeAll(parameter_type);
-        }
+    for (error_decl.parameters, 0..) |parameter, i| {
+        if (i > 0) try writer.writeAll(", ");
+        const parameter_name = patternName(file, parameter.pattern) orelse "_";
+        try writer.print("{s}: ", .{parameter_name});
+        const parameter_type = try formatTypeExprAlloc(allocator, file, parameter.type_expr);
+        defer allocator.free(parameter_type);
+        try writer.writeAll(parameter_type);
     }
     try writer.writeByte(')');
 
     return buffer.toOwnedSlice(allocator);
 }
 
-fn formatLogDetailAlloc(allocator: Allocator, log_decl: ast.LogDeclNode) ![]u8 {
+fn formatLogDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, log_decl: compiler.ast.LogDeclItem) ![]u8 {
     var buffer = std.ArrayList(u8){};
     errdefer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
@@ -346,7 +426,7 @@ fn formatLogDetailAlloc(allocator: Allocator, log_decl: ast.LogDeclNode) ![]u8 {
     for (log_decl.fields, 0..) |field, i| {
         if (i > 0) try writer.writeAll(", ");
         try writer.print("{s}: ", .{field.name});
-        const field_type = try formatTypeInfoAlloc(allocator, field.type_info);
+        const field_type = try formatTypeExprAlloc(allocator, file, field.type_expr);
         defer allocator.free(field_type);
         try writer.writeAll(field_type);
     }
@@ -355,17 +435,75 @@ fn formatLogDetailAlloc(allocator: Allocator, log_decl: ast.LogDeclNode) ![]u8 {
     return buffer.toOwnedSlice(allocator);
 }
 
-fn formatTypeInfoAlloc(allocator: Allocator, info: type_info.TypeInfo) ![]u8 {
-    if (info.ora_type) |ora_type| {
-        var buffer = std.ArrayList(u8){};
-        errdefer buffer.deinit(allocator);
-        try ora_type.render(buffer.writer(allocator));
-        return buffer.toOwnedSlice(allocator);
-    }
+fn formatTypeExprAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, type_expr_id: compiler.ast.TypeExprId) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    errdefer buffer.deinit(allocator);
+    try writeTypeExpr(buffer.writer(allocator), file, type_expr_id);
+    return buffer.toOwnedSlice(allocator);
+}
 
-    return switch (info.category) {
-        .Unknown => allocator.dupe(u8, "unknown"),
-        else => allocator.dupe(u8, @tagName(info.category)),
+fn writeTypeExpr(writer: anytype, file: *const compiler.ast.AstFile, type_expr_id: compiler.ast.TypeExprId) !void {
+    switch (file.typeExpr(type_expr_id).*) {
+        .Path => |path| try writer.writeAll(path.name),
+        .Generic => |generic| {
+            try writer.writeAll(generic.name);
+            try writer.writeByte('<');
+            for (generic.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                switch (arg) {
+                    .Type => |nested| try writeTypeExpr(writer, file, nested),
+                    .Integer => |value| try writer.writeAll(value.text),
+                }
+            }
+            try writer.writeByte('>');
+        },
+        .Tuple => |tuple| {
+            try writer.writeByte('(');
+            for (tuple.elements, 0..) |element, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeTypeExpr(writer, file, element);
+            }
+            try writer.writeByte(')');
+        },
+        .AnonymousStruct => |struct_type| {
+            try writer.writeAll("struct { ");
+            for (struct_type.fields, 0..) |field, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(field.name);
+                try writer.writeAll(": ");
+                try writeTypeExpr(writer, file, field.type_expr);
+            }
+            try writer.writeAll(" }");
+        },
+        .Array => |array| {
+            try writer.writeByte('[');
+            switch (array.size) {
+                .Integer => |value| try writer.writeAll(value.text),
+                .Name => |name| try writer.writeAll(name.name),
+            }
+            try writer.writeByte(']');
+            try writeTypeExpr(writer, file, array.element);
+        },
+        .Slice => |slice| {
+            try writer.writeAll("[]");
+            try writeTypeExpr(writer, file, slice.element);
+        },
+        .ErrorUnion => |error_union| {
+            try writer.writeByte('!');
+            try writeTypeExpr(writer, file, error_union.payload);
+            for (error_union.errors) |err_ty| {
+                try writer.writeAll(" | ");
+                try writeTypeExpr(writer, file, err_ty);
+            }
+        },
+        .Error => try writer.writeAll("unknown"),
+    }
+}
+
+fn patternName(file: *const compiler.ast.AstFile, pattern_id: compiler.ast.PatternId) ?[]const u8 {
+    return switch (file.pattern(pattern_id).*) {
+        .Name => |name| name.name,
+        else => null,
     };
 }
 
@@ -402,80 +540,66 @@ fn rangeSize(range: frontend.Range) u64 {
     return @as(u64, line_span) * 1_000_000 + @as(u64, char_span);
 }
 
-fn spanToRange(span: ast.SourceSpan) frontend.Range {
-    const start_line = if (span.line > 0) span.line - 1 else 0;
-    const start_character = if (span.column > 0) span.column - 1 else 0;
-
-    const span_len = std.math.cast(u32, span.length) orelse std.math.maxInt(u32);
-    const end_character = std.math.add(u32, start_character, span_len) catch std.math.maxInt(u32);
-
-    return .{
-        .start = .{
-            .line = start_line,
-            .character = start_character,
-        },
-        .end = .{
-            .line = start_line,
-            .character = end_character,
-        },
-    };
-}
-
-fn spanToSelectionRange(span: ast.SourceSpan, name: []const u8) frontend.Range {
-    var selection = spanToRange(span);
-    const name_len = std.math.cast(u32, name.len) orelse std.math.maxInt(u32);
-    selection.end.character = std.math.add(u32, selection.start.character, name_len) catch std.math.maxInt(u32);
-    return selection;
-}
-
 fn toLspKind(kind: SymbolKind) u8 {
     return switch (kind) {
-        .contract => 5, // class
-        .function => 12, // function
-        .method => 6, // method
-        .variable => 13, // variable
-        .field => 8, // field
-        .constant => 14, // constant
-        .parameter => 26, // typeParameter (closest stable match for declaration parameters)
-        .struct_decl => 23, // struct
-        .bitfield_decl => 23, // struct
-        .enum_decl => 10, // enum
-        .enum_member => 22, // enumMember
-        .event => 24, // event
-        .error_decl => 5, // class
+        .contract => 5,
+        .function => 12,
+        .method => 6,
+        .variable => 13,
+        .field => 8,
+        .constant => 14,
+        .parameter => 26,
+        .struct_decl => 23,
+        .bitfield_decl => 23,
+        .enum_decl => 10,
+        .enum_member => 22,
+        .event => 24,
+        .error_decl => 5,
     };
 }
 
 const SymbolBuilder = struct {
     allocator: Allocator,
     symbols: std.ArrayList(Symbol),
+    sources: compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    source_text: []const u8,
 
-    fn init(allocator: Allocator) SymbolBuilder {
+    fn init(allocator: Allocator, source_text: []const u8) !SymbolBuilder {
+        var sources = compiler.source.SourceStore.init(allocator);
+        errdefer sources.deinit();
+        const file_id = try sources.addFile("<lsp>", source_text);
         return .{
             .allocator = allocator,
             .symbols = .{},
+            .sources = sources,
+            .file_id = file_id,
+            .source_text = source_text,
         };
     }
 
     fn deinit(self: *SymbolBuilder) void {
         for (self.symbols.items) |symbol| {
             self.allocator.free(symbol.name);
-            if (symbol.detail) |detail| {
-                self.allocator.free(detail);
-            }
+            if (symbol.detail) |detail| self.allocator.free(detail);
+            if (symbol.doc_comment) |doc| self.allocator.free(doc);
         }
         self.symbols.deinit(self.allocator);
+        self.sources.deinit();
     }
 
     fn finish(self: *SymbolBuilder) ![]Symbol {
-        return self.symbols.toOwnedSlice(self.allocator);
+        const owned = try self.symbols.toOwnedSlice(self.allocator);
+        self.sources.deinit();
+        self.sources = compiler.source.SourceStore.init(self.allocator);
+        return owned;
     }
 
     fn addSymbol(
         self: *SymbolBuilder,
         name: []const u8,
         kind: SymbolKind,
-        span: ast.SourceSpan,
+        range: compiler.TextRange,
         parent: ?usize,
         detail: ?[]u8,
     ) !usize {
@@ -483,15 +607,132 @@ const SymbolBuilder = struct {
         errdefer self.allocator.free(name_copy);
         errdefer if (detail) |detail_text| self.allocator.free(detail_text);
 
+        const doc = try self.extractDocComment(range);
+
         try self.symbols.append(self.allocator, .{
             .name = name_copy,
             .detail = detail,
+            .doc_comment = doc,
             .kind = kind,
-            .range = spanToRange(span),
-            .selection_range = spanToSelectionRange(span, name),
+            .range = self.textRangeToRange(range),
+            .selection_range = self.textRangeToSelectionRange(range, name),
             .parent = parent,
         });
 
         return self.symbols.items.len - 1;
+    }
+
+    /// Extract doc comments (// lines) immediately preceding a declaration.
+    /// Scans backwards from the declaration start to find contiguous comment lines.
+    fn extractDocComment(self: *const SymbolBuilder, range: compiler.TextRange) !?[]u8 {
+        const start: usize = @intCast(@min(range.start, self.source_text.len));
+        if (start == 0) return null;
+
+        // Walk backwards to find the start of the line containing the declaration.
+        var line_start = start;
+        while (line_start > 0 and self.source_text[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+
+        // Now walk backwards through preceding comment lines.
+        var comment_lines = std.ArrayList([]const u8){};
+        defer comment_lines.deinit(self.allocator);
+
+        var scan_pos = line_start;
+        while (scan_pos > 0) {
+            // Move to the previous line.
+            var prev_line_end = scan_pos;
+            if (prev_line_end > 0 and self.source_text[prev_line_end - 1] == '\n') {
+                prev_line_end -= 1;
+            }
+            var prev_line_start = prev_line_end;
+            while (prev_line_start > 0 and self.source_text[prev_line_start - 1] != '\n') {
+                prev_line_start -= 1;
+            }
+
+            const line = self.source_text[prev_line_start..prev_line_end];
+            const trimmed = std.mem.trimLeft(u8, line, " \t");
+
+            if (std.mem.startsWith(u8, trimmed, "//")) {
+                // Strip the // prefix and optional leading space.
+                var comment_text = trimmed[2..];
+                if (comment_text.len > 0 and comment_text[0] == ' ') {
+                    comment_text = comment_text[1..];
+                }
+                try comment_lines.append(self.allocator, comment_text);
+                scan_pos = prev_line_start;
+            } else if (trimmed.len == 0) {
+                // Empty line — stop collecting.
+                break;
+            } else {
+                // Non-comment, non-empty line — stop.
+                break;
+            }
+        }
+
+        if (comment_lines.items.len == 0) return null;
+
+        // Reverse the lines (we collected bottom-up) and join.
+        std.mem.reverse([]const u8, comment_lines.items);
+
+        var total_len: usize = 0;
+        for (comment_lines.items, 0..) |line, i| {
+            total_len += line.len;
+            if (i < comment_lines.items.len - 1) total_len += 1; // newline
+        }
+
+        const result = try self.allocator.alloc(u8, total_len);
+        var offset: usize = 0;
+        for (comment_lines.items, 0..) |line, i| {
+            @memcpy(result[offset .. offset + line.len], line);
+            offset += line.len;
+            if (i < comment_lines.items.len - 1) {
+                result[offset] = '\n';
+                offset += 1;
+            }
+        }
+
+        return result;
+    }
+
+    fn textRangeToRange(self: *const SymbolBuilder, range: compiler.TextRange) frontend.Range {
+        const start = self.sources.lineColumn(.{
+            .file_id = self.file_id,
+            .range = .{ .start = range.start, .end = range.start },
+        });
+        const end = self.sources.lineColumn(.{
+            .file_id = self.file_id,
+            .range = .{ .start = range.end, .end = range.end },
+        });
+        return .{
+            .start = .{
+                .line = if (start.line > 0) start.line - 1 else 0,
+                .character = if (start.column > 0) start.column - 1 else 0,
+            },
+            .end = .{
+                .line = if (end.line > 0) end.line - 1 else 0,
+                .character = if (end.column > 0) end.column - 1 else 0,
+            },
+        };
+    }
+
+    fn textRangeToSelectionRange(self: *const SymbolBuilder, range: compiler.TextRange, name: []const u8) frontend.Range {
+        var name_start = range.start;
+        const start: usize = @intCast(@min(range.start, self.source_text.len));
+        const end: usize = @intCast(@min(range.end, self.source_text.len));
+        if (start <= end and end <= self.source_text.len) {
+            if (std.mem.indexOf(u8, self.source_text[start..end], name)) |relative| {
+                const relative_u32 = std.math.cast(u32, relative) orelse std.math.maxInt(u32);
+                name_start = std.math.add(u32, range.start, relative_u32) catch range.start;
+            }
+        }
+        var selection = self.textRangeToRange(.{
+            .start = name_start,
+            .end = name_start,
+        });
+        const name_len = std.math.cast(u32, name.len) orelse std.math.maxInt(u32);
+        selection.end.line = selection.start.line;
+        selection.end.character = std.math.add(u32, selection.start.character, name_len) catch std.math.maxInt(u32);
+        return selection;
     }
 };

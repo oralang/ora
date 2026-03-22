@@ -1,0 +1,62 @@
+// Vault — Tier 10: Full composition
+// Combines storage, errors, refinements, verification, locks, events.
+// This is the stress test: all features on one contract.
+
+error InsufficientBalance(required: u256, available: u256);
+
+comptime const std = @import("std");
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+    storage var reentrancyGuard: u256 = 0;
+
+    ghost storage spec_sum: u256 = 0;
+
+    log Deposit(account: address, amount: u256);
+    log Withdrawal(account: address, amount: u256);
+
+    pub fn deposit(amount: MinValue<u256, 1>)
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        ensures(totalDeposits == old(totalDeposits) + amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        @lock(reentrancyGuard);
+        balances[sender] += amount;
+        totalDeposits += amount;
+        spec_sum += amount;
+        @unlock(reentrancyGuard);
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
+        requires(amount > 0)
+        requires(balances[std.msg.sender()] >= amount)
+        ensures(totalDeposits == old(totalDeposits) - amount)
+        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        @lock(reentrancyGuard);
+        let current: u256 = balances[sender];
+        if (current < amount) {
+            @unlock(reentrancyGuard);
+            return InsufficientBalance(amount, current);
+        }
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        spec_sum -= amount;
+        @unlock(reentrancyGuard);
+        log Withdrawal(sender, amount);
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

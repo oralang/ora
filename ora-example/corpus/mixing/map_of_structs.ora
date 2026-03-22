@@ -1,0 +1,63 @@
+// Level 2: Compound + scalar mixing — map<address, AccountInfo>
+// Tests map with struct values.
+contract MapOfStructs {
+    struct AccountInfo {
+        balance: u256;
+        nonce: u64;
+        active: bool;
+    }
+
+    storage var accounts: map<address, AccountInfo>;
+
+    pub fn create_account(account: address, initial: u256) {
+        let info: AccountInfo = AccountInfo {
+            balance: initial,
+            nonce: 0,
+            active: true
+        };
+        accounts[account] = info;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        let info: AccountInfo = accounts[account];
+        return info.balance;
+    }
+
+    pub fn get_nonce(account: address) -> u64 {
+        let info: AccountInfo = accounts[account];
+        return info.nonce;
+    }
+
+    pub fn is_active(account: address) -> bool {
+        let info: AccountInfo = accounts[account];
+        return info.active;
+    }
+
+    pub fn increment_nonce(account: address) {
+        let info: AccountInfo = accounts[account];
+        let new_nonce: u64 = info.nonce + 1;
+        accounts[account] = AccountInfo {
+            balance: info.balance,
+            nonce: new_nonce,
+            active: info.active
+        };
+    }
+
+    pub fn deactivate(account: address) {
+        let info: AccountInfo = accounts[account];
+        accounts[account] = AccountInfo {
+            balance: info.balance,
+            nonce: info.nonce,
+            active: false
+        };
+    }
+
+    pub fn add_balance(account: address, amount: u256) {
+        let info: AccountInfo = accounts[account];
+        accounts[account] = AccountInfo {
+            balance: info.balance + amount,
+            nonce: info.nonce,
+            active: info.active
+        };
+    }
+}

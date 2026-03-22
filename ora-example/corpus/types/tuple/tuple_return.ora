@@ -1,0 +1,20 @@
+// Function returning a tuple.
+
+contract TupleReturn {
+    pub fn get_pair() -> (u256, u256) {
+        return (10, 20);
+    }
+
+    pub fn get_mixed() -> (u256, bool) {
+        return (42, true);
+    }
+
+    pub fn use_returned_pair() -> u256 {
+        let p: (u256, u256) = get_pair();
+        return p.0 + p.1;
+    }
+
+    pub fn compute_and_return(a: u256, b: u256) -> (u256, u256) {
+        return (a + b, a * b);
+    }
+}

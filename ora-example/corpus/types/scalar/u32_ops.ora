@@ -1,0 +1,62 @@
+contract U32Ops {
+    storage var a: u32;
+    storage var b: u32;
+
+    pub fn arithmetic(x: u32, y: u32) -> u32 {
+        let add: u32 = x + y;
+        let sub: u32 = x - y;
+        let mul: u32 = x * y;
+        let div: u32 = x / y;
+        let mod_: u32 = x % y;
+        let compound: u32 = (x + y) * x;
+        return add;
+    }
+
+    pub fn wrapping(x: u32, y: u32) -> u32 {
+        let add: u32 = x +% y;
+        let sub: u32 = x -% y;
+        let mul: u32 = x *% y;
+        return add;
+    }
+
+    pub fn comparison(x: u32, y: u32) -> bool {
+        let eq: bool = x == y;
+        let ne: bool = x != y;
+        let lt: bool = x < y;
+        let le: bool = x <= y;
+        let gt: bool = x > y;
+        let ge: bool = x >= y;
+        return eq;
+    }
+
+    pub fn bitwise(x: u32, y: u32) -> u32 {
+        let and_: u32 = x & y;
+        let or_: u32 = x | y;
+        let xor_: u32 = x ^ y;
+        let shl: u32 = x << y;
+        let shr: u32 = x >> y;
+        let not_: u32 = ~x;
+        return and_;
+    }
+
+    pub fn assignment() {
+        a = 1;
+        a += 1;
+        a -= 1;
+        a *= 2;
+        a /= 2;
+        a %= 3;
+        a &= 0xFFFFFFFF;
+        a |= 0x01;
+        a ^= 0x0F;
+        a <<= 1;
+        a >>= 1;
+    }
+
+    pub fn storage_ops() -> u32 {
+        a = 100000;
+        b = a;
+        let val: u32 = a + b;
+        return val;
+    }
+}

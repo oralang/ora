@@ -4,6 +4,7 @@
 // Tests basic requires and ensures clauses in function contracts
 // ============================================================================
 
+comptime const std = @import("std");
 contract FunctionContractsBasic {
     storage var balance: u256 = 0;
     storage var max_balance: u256 = 1000;

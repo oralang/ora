@@ -1,0 +1,173 @@
+// Level 6: ERC20 with bitfield metadata
+// Tests: bitfield for compact token config (paused, decimals, version)
+
+bitfield TokenConfig : u256 {
+    paused: bool;
+    mintable: bool;
+    burnable: bool;
+    decimals: u8;
+    version: u8;
+}
+
+comptime const std = @import("std");
+contract TokenWithBitfield {
+    storage var totalSupply: u256;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+    storage var config: TokenConfig;
+    storage var owner: address;
+
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
+
+    pub fn init(initialSupply: u256) {
+        let deployer: NonZeroAddress = std.msg.sender();
+        owner = deployer;
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+
+        let cfg: TokenConfig = .{
+            .paused = false,
+            .mintable = true,
+            .burnable = true,
+            .decimals = 18,
+            .version = 1,
+        };
+        config = cfg;
+
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
+    }
+
+    pub fn isPaused() -> bool {
+        let cfg: TokenConfig = config;
+        return cfg.paused;
+    }
+
+    pub fn getDecimals() -> u8 {
+        let cfg: TokenConfig = config;
+        return cfg.decimals;
+    }
+
+    pub fn getVersion() -> u8 {
+        let cfg: TokenConfig = config;
+        return cfg.version;
+    }
+
+    pub fn setPaused(nextPaused: bool) {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            let cfg: TokenConfig = config;
+            cfg.paused = nextPaused;
+            config = cfg;
+        }
+    }
+
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(to: NonZeroAddress, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let cfg: TokenConfig = config;
+        if (cfg.paused) {
+            return false;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[sender] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: NonZeroAddress, amount: u256) -> bool {
+        let caller: NonZeroAddress = std.msg.sender();
+        allowances[caller][spender] = amount;
+        log Approval(caller, spender, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: address, to: NonZeroAddress, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let cfg: TokenConfig = config;
+        if (cfg.paused) {
+            return false;
+        }
+
+        let spender: NonZeroAddress = std.msg.sender();
+        let currentAllowance: u256 = allowances[from][spender];
+        if (currentAllowance < amount) {
+            return false;
+        }
+
+        let senderBalance: u256 = balances[from];
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        allowances[from][spender] = currentAllowance - amount;
+        balances[from] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn mint(to: NonZeroAddress, amount: u256) -> bool
+        requires(totalSupply <= std.constants.U256_MAX - amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let caller: address = std.msg.sender();
+        if (caller != owner) {
+            return false;
+        }
+
+        let cfg: TokenConfig = config;
+        if (!cfg.mintable) {
+            return false;
+        }
+
+        totalSupply += amount;
+        balances[to] += amount;
+
+        log Transfer(std.constants.ZERO_ADDRESS, to, amount);
+        return true;
+    }
+
+    pub fn burn(amount: u256) -> bool {
+        let cfg: TokenConfig = config;
+        if (!cfg.burnable) {
+            return false;
+        }
+
+        let sender: address = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[sender] = senderBalance - amount;
+        totalSupply -= amount;
+
+        log Transfer(sender, std.constants.ZERO_ADDRESS, amount);
+        return true;
+    }
+
+    pub fn allowance(ownerAddr: address, spender: address) -> u256 {
+        return allowances[ownerAddr][spender];
+    }
+}

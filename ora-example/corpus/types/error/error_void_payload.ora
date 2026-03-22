@@ -1,0 +1,21 @@
+// Function with no return value that can error: -> !void | Error
+
+error NotOwner;
+
+comptime const std = @import("std");
+
+contract ErrorVoidPayload {
+    storage owner: address;
+    storage var value: u256 = 0;
+
+    pub fn set_value(new_value: u256) -> !void | NotOwner {
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+        value = new_value;
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+}

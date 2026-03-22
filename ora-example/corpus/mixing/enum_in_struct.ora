@@ -1,0 +1,72 @@
+// Level 4: Complex mixing — struct containing enum field
+// Tests enum variants used as struct members.
+contract EnumInStruct {
+    enum OrderStatus {
+        Pending,
+        Filled,
+        Cancelled,
+    }
+
+    struct Order {
+        id: u256;
+        amount: u256;
+        price: u256;
+        maker: address;
+        status: OrderStatus;
+    }
+
+    storage var orders: map<u256, Order>;
+    storage var next_id: u256;
+
+    pub fn create_order(maker: address, amount: u256, price: u256) -> u256 {
+        let id: u256 = next_id;
+        let order: Order = Order {
+            id: id,
+            amount: amount,
+            price: price,
+            maker: maker,
+            status: OrderStatus.Pending
+        };
+        orders[id] = order;
+        next_id = id + 1;
+        return id;
+    }
+
+    pub fn fill_order(id: u256) {
+        let order: Order = orders[id];
+        orders[id] = Order {
+            id: order.id,
+            amount: order.amount,
+            price: order.price,
+            maker: order.maker,
+            status: OrderStatus.Filled
+        };
+    }
+
+    pub fn cancel_order(id: u256) {
+        let order: Order = orders[id];
+        orders[id] = Order {
+            id: order.id,
+            amount: order.amount,
+            price: order.price,
+            maker: order.maker,
+            status: OrderStatus.Cancelled
+        };
+    }
+
+    pub fn get_order_amount(id: u256) -> u256 {
+        let order: Order = orders[id];
+        return order.amount;
+    }
+
+    pub fn get_order_price(id: u256) -> u256 {
+        let order: Order = orders[id];
+        return order.price;
+    }
+
+    pub fn get_order_value(id: u256) -> u256 {
+        let order: Order = orders[id];
+        let value: u256 = order.amount * order.price;
+        return value;
+    }
+}

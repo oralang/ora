@@ -4,6 +4,7 @@
 // Tests that guards are skipped for trusted builtins (std.transaction.sender, std.msg.sender)
 // ============================================================================
 
+comptime const std = @import("std");
 contract BuiltinGuards {
     // ============================================================================
     // NonZeroAddress from Trusted Builtins (No Guard)

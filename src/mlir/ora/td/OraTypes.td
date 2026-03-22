@@ -138,7 +138,7 @@ def Ora_TupleType : Ora_Type<"Tuple", "tuple"> {
     Syntax: `!ora.tuple<type1, type2, ...>`
   }];
   
-  let parameters = (ins "ArrayRef<Type>":$elementTypes);
+  let parameters = (ins ArrayRefParameter<"Type">:$elementTypes);
   let hasCustomAssemblyFormat = 1;
 }
 
@@ -186,7 +186,7 @@ def Ora_FunctionType : Ora_Type<"Function", "function"> {
     Syntax: `!ora.function<param_types, return_type>`
   }];
   
-  let parameters = (ins "ArrayRef<Type>":$paramTypes, "Type":$returnType);
+  let parameters = (ins ArrayRefParameter<"Type">:$paramTypes, "Type":$returnType);
   let hasCustomAssemblyFormat = 1;
 }
 
@@ -198,7 +198,7 @@ def Ora_UnionType : Ora_Type<"Union", "union"> {
     Syntax: `!ora.union<type1, type2, ...>`
   }];
   
-  let parameters = (ins "ArrayRef<Type>":$elementTypes);
+  let parameters = (ins ArrayRefParameter<"Type">:$elementTypes);
   let hasCustomAssemblyFormat = 1;
 }
 

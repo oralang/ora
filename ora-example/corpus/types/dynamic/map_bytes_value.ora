@@ -1,0 +1,19 @@
+contract MapBytesValue {
+    storage var blobs: map<u256, bytes>;
+
+    pub fn store(key: u256, data: bytes) {
+        blobs[key] = data;
+    }
+
+    pub fn load(key: u256) -> bytes {
+        return blobs[key];
+    }
+
+    pub fn copy(from: u256, to: u256) {
+        blobs[to] = blobs[from];
+    }
+
+    pub fn overwrite(key: u256, data: bytes) {
+        blobs[key] = data;
+    }
+}

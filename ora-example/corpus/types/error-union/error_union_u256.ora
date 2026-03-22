@@ -1,0 +1,38 @@
+// Error union with u256 payload.
+// Tests: !u256 | Error return type — the most common error union form.
+
+error Underflow;
+error Overflow;
+
+comptime const std = @import("std");
+contract ErrorUnionU256 {
+    storage var value: u256 = 0;
+
+    pub fn add(x: u256) -> !u256 | Overflow {
+        let current: u256 = value;
+        if (x > std.constants.U256_MAX - current) {
+            return Overflow;
+        }
+        value = current + x;
+        return value;
+    }
+
+    pub fn sub(x: u256) -> !u256 | Underflow {
+        let current: u256 = value;
+        if (x > current) {
+            return Underflow;
+        }
+        value = current - x;
+        return value;
+    }
+
+    pub fn add_and_sub(a: u256, s: u256) -> !u256 | Overflow | Underflow {
+        let after_add: u256 = try add(a);
+        let after_sub: u256 = try sub(s);
+        return after_sub;
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+}

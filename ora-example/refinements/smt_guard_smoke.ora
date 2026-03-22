@@ -9,6 +9,7 @@
 //
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementGuardSMT {
     // SMT can prove this guard (requires implies non-zero)
     pub fn provenNonZero(addr: NonZeroAddress)
@@ -18,8 +19,9 @@ contract RefinementGuardSMT {
     }
 
     // Guard is discharged with explicit precondition
-    pub fn runtimeNonZero(addr: NonZeroAddress) {
+    pub fn runtimeNonZero(addr: NonZeroAddress)
         requires(addr != std.constants.ZERO_ADDRESS)
+    {
         let owner: NonZeroAddress = addr;
     }
 
@@ -31,8 +33,9 @@ contract RefinementGuardSMT {
     }
 
     // Guard is discharged with explicit precondition
-    pub fn runtimeMin(value: MinValue<u256, 10>) {
+    pub fn runtimeMin(value: MinValue<u256, 10>)
         requires(value >= 10)
+    {
         let v: MinValue<u256, 10> = value;
     }
 
@@ -52,8 +55,9 @@ contract RefinementGuardSMT {
     }
 
     // Guard is discharged with explicit precondition
-    pub fn runtimeExact(dividend: Exact<u256>, divisor: u256) {
+    pub fn runtimeExact(dividend: Exact<u256>, divisor: u256)
         requires(divisor == 1)
+    {
         let q: u256 = dividend / divisor;
     }
 

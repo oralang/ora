@@ -1,0 +1,70 @@
+// Level 4: Complex mixing — multiple maps with different key/value combos
+// Tests varied map type signatures coexisting in one contract.
+contract MultiMapContract {
+    storage var balances: map<address, u256>;
+    storage var names: map<address, u64>;
+    storage var permissions: map<address, bool>;
+    storage var scores: map<u256, u256>;
+    storage var pairs: map<address, map<address, u256>>;
+    storage var config: map<u64, bool>;
+
+    pub fn set_balance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn set_name_id(account: address, name_id: u64) {
+        names[account] = name_id;
+    }
+
+    pub fn get_name_id(account: address) -> u64 {
+        return names[account];
+    }
+
+    pub fn set_permission(account: address, allowed: bool) {
+        permissions[account] = allowed;
+    }
+
+    pub fn has_permission(account: address) -> bool {
+        return permissions[account];
+    }
+
+    pub fn set_score(key: u256, value: u256) {
+        scores[key] = value;
+    }
+
+    pub fn get_score(key: u256) -> u256 {
+        return scores[key];
+    }
+
+    pub fn set_pair_value(a: address, b: address, value: u256) {
+        pairs[a][b] = value;
+    }
+
+    pub fn get_pair_value(a: address, b: address) -> u256 {
+        return pairs[a][b];
+    }
+
+    pub fn set_config(key: u64, enabled: bool) {
+        config[key] = enabled;
+    }
+
+    pub fn get_config(key: u64) -> bool {
+        return config[key];
+    }
+
+    pub fn complex_lookup(account: address, partner: address, score_key: u256) -> u256 {
+        let bal: u256 = balances[account];
+        let perm: bool = permissions[account];
+        let pair_val: u256 = pairs[account][partner];
+        let score: u256 = scores[score_key];
+        if (perm) {
+            let total: u256 = bal + pair_val + score;
+            return total;
+        }
+        return 0;
+    }
+}

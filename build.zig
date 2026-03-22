@@ -73,12 +73,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const ora_ast_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast.zig"),
+    const ora_imports_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
-    ora_ast_mod.addImport("ora_types", ora_types_mod);
+    ora_imports_mod.addImport("ora_lexer", ora_lexer_mod);
 
     const ora_fmt_mod = b.createModule(.{
         .root_source_file = b.path("src/fmt/mod.zig"),
@@ -100,13 +100,16 @@ pub fn build(b: *std.Build) void {
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("ora_lib", lib_mod);
+    exe_mod.addImport("ora_imports", ora_imports_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
     exe_mod.addImport("log", log_mod);
+    exe_mod.addImport("ora_lexer", ora_lexer_mod);
+    exe_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("log", log_mod);
     lib_mod.addImport("ora_types", ora_types_mod);
-    lib_mod.addImport("ora_ast", ora_ast_mod);
     lib_mod.addImport("ora_lexer", ora_lexer_mod);
+    lib_mod.addImport("ora_imports", ora_imports_mod);
 
     // now, we will create a static library based on the module we created above.
     // this creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -326,16 +329,6 @@ pub fn build(b: *std.Build) void {
     const error_recovery_tests = b.addTest(.{ .root_module = error_recovery_test_mod });
     test_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
 
-    // semantics locals binder tests
-    const locals_binder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/semantics/locals_binder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    locals_binder_test_mod.addImport("ora_root", lib_mod);
-    const locals_binder_tests = b.addTest(.{ .root_module = locals_binder_test_mod });
-    test_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
-
     // cli argument parsing tests
     const cli_args_test_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/args.test.zig"),
@@ -362,6 +355,8 @@ pub fn build(b: *std.Build) void {
     });
     abi_test_mod.addImport("ora_root", lib_mod);
     const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
+    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, abi_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
 
     // scanner tests - Numbers
@@ -394,85 +389,16 @@ pub fn build(b: *std.Build) void {
     const identifiers_tests = b.addTest(.{ .root_module = identifiers_test_mod });
     test_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
 
-    // parser tests - Expression Parser
-    const expression_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/expression_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    expression_parser_test_mod.addImport("ora_root", lib_mod);
-    const expression_parser_tests = b.addTest(.{ .root_module = expression_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
-
-    // ast tests - AST Builder
-    const ast_builder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/ast_builder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_builder_test_mod.addImport("ora_root", lib_mod);
-    const ast_builder_tests = b.addTest(.{ .root_module = ast_builder_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
-
-    // parser tests - Statement Parser
-    const statement_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/statement_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    statement_parser_test_mod.addImport("ora_root", lib_mod);
-    const statement_parser_tests = b.addTest(.{ .root_module = statement_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
-
-    // parser tests - Parser Core
-    const parser_core_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/parser_core.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    parser_core_test_mod.addImport("ora_root", lib_mod);
-    const parser_core_tests = b.addTest(.{ .root_module = parser_core_test_mod });
-    test_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
-
-    // parser tests - Declaration Parser
-    const declaration_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/declaration_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    declaration_parser_test_mod.addImport("ora_root", lib_mod);
-    const declaration_parser_tests = b.addTest(.{ .root_module = declaration_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
-
-    // parser tests - Type Parser
-    const type_parser_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/type_parser.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    type_parser_test_mod.addImport("ora_root", lib_mod);
-    const type_parser_tests = b.addTest(.{ .root_module = type_parser_test_mod });
-    test_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
-
     // import resolver tests
     const import_resolver_test_mod = b.createModule(.{
         .root_source_file = b.path("src/imports/mod.test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    import_resolver_test_mod.addImport("ora_lib", lib_mod);
+    import_resolver_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    import_resolver_test_mod.addImport("ora_types", ora_types_mod);
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
-
-    // import program loader tests
-    const import_program_loader_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/imports/program_loader.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    import_program_loader_test_mod.addImport("ora_lib", lib_mod);
-    const import_program_loader_tests = b.addTest(.{ .root_module = import_program_loader_test_mod });
-    test_step.dependOn(&b.addRunArtifact(import_program_loader_tests).step);
 
     // z3 encoder tests (requires MLIR + Z3)
     const z3_encoder_test_mod = b.createModule(.{
@@ -499,77 +425,19 @@ pub fn build(b: *std.Build) void {
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
 
-    // mlir type mapper tests
-    const mlir_types_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/types.test.zig"),
+    // MLIR verifier-negative tests
+    const mlir_verifiers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/verifiers.test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    mlir_types_test_mod.addImport("ora_lib", lib_mod);
-    mlir_types_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    mlir_types_test_mod.addImport("log", log_mod);
-    const mlir_types_tests = b.addTest(.{ .root_module = mlir_types_test_mod });
-    linkMlirLibraries(b, mlir_types_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(mlir_types_tests).step);
-
-    // refinement guard tests (MLIR)
-    const refinement_guard_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/refinements.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    refinement_guard_test_mod.addImport("ora_lib", lib_mod);
-    refinement_guard_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    refinement_guard_test_mod.addImport("log", log_mod);
-    const refinement_guard_tests = b.addTest(.{ .root_module = refinement_guard_test_mod });
-    linkMlirLibraries(b, refinement_guard_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(refinement_guard_tests).step);
-
-    // MLIR effect metadata tests
-    const mlir_effects_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/mlir/effects.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mlir_effects_test_mod.addImport("ora_lib", lib_mod);
-    mlir_effects_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    mlir_effects_test_mod.addImport("log", log_mod);
-    const mlir_effects_tests = b.addTest(.{ .root_module = mlir_effects_test_mod });
-    linkMlirLibraries(b, mlir_effects_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    test_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
-    test_mlir_step.dependOn(&b.addRunArtifact(mlir_effects_tests).step);
-
-    // ast tests - Expressions
-    const ast_expressions_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/expressions.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_expressions_test_mod.addImport("ora_root", lib_mod);
-    const ast_expressions_tests = b.addTest(.{ .root_module = ast_expressions_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
-
-    // ast tests - Statements
-    const ast_statements_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/statements.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ast_statements_test_mod.addImport("ora_root", lib_mod);
-    const ast_statements_tests = b.addTest(.{ .root_module = ast_statements_test_mod });
-    test_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
-
-    // ast tests - Type Resolver (logs)
-    const type_resolver_logs_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/type_resolver_logs.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    type_resolver_logs_test_mod.addImport("ora_root", lib_mod);
-    const type_resolver_logs_tests = b.addTest(.{ .root_module = type_resolver_logs_test_mod });
-    test_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
+    mlir_verifiers_test_mod.addImport("ora_lib", lib_mod);
+    mlir_verifiers_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_verifiers_test_mod.addImport("log", log_mod);
+    const mlir_verifiers_tests = b.addTest(.{ .root_module = mlir_verifiers_test_mod });
+    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
+    test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
 
     // lsp tests - Frontend diagnostics
     const lsp_frontend_test_mod = b.createModule(.{
@@ -672,42 +540,29 @@ pub fn build(b: *std.Build) void {
     const lsp_formatting_tests = b.addTest(.{ .root_module = lsp_formatting_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
 
-    // ========================================================================
-    // Boundary enforcement canary
-    // ========================================================================
-    // Compiles parser_core.zig as an isolated module with only the allowed
-    // named module imports, and scans parser sources for forbidden relative
-    // imports into semantics/type-resolver/MLIR/Z3.
-    //
-    //   zig build check-parser-boundary
-    //
-    const parser_canary_mod = b.createModule(.{
-        .root_source_file = b.path("src/parser/parser_core.zig"),
+    const compiler_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler.test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    parser_canary_mod.addImport("ora_types", ora_types_mod);
-    parser_canary_mod.addImport("ora_lexer", ora_lexer_mod);
-    parser_canary_mod.addImport("ora_ast", ora_ast_mod);
-    parser_canary_mod.addImport("log", log_mod);
-    // Allowed: ora_types, ora_lexer, ora_ast, log.
-    // NOT provided: semantics, type_resolver, MLIR, Z3.
-    // If a parser file adds a forbidden import, this step fails.
+    const z3_verification_mod = b.createModule(.{
+        .root_source_file = b.path("src/z3/verification.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
+    z3_verification_mod.addImport("ora_lib", lib_mod);
+    compiler_test_mod.addImport("ora_root", lib_mod);
+    compiler_test_mod.addImport("ora_lib", lib_mod);
+    compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
+    const compiler_tests = b.addTest(.{ .root_module = compiler_test_mod });
+    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkZ3Libraries(b, compiler_tests, z3_step, target);
+    test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
-    const parser_canary = b.addObject(.{
-        .name = "parser_boundary_canary",
-        .root_module = parser_canary_mod,
-    });
-    const parser_import_guard = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    parser_import_guard.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "parser-import-guard",
-        .owner = b,
-        .makeFn = checkParserImportsImpl,
-    });
-    const check_parser_step = b.step("check-parser-boundary", "Verify parser module has no semantics/MLIR/Z3 imports");
-    check_parser_step.dependOn(&parser_canary.step);
-    check_parser_step.dependOn(parser_import_guard);
+    const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
+    test_compiler_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
     // ========================================================================
     // Per-module test targets (no MLIR/Z3 required)
@@ -727,22 +582,6 @@ pub fn build(b: *std.Build) void {
     test_lexer_step.dependOn(&b.addRunArtifact(numbers_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(strings_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
-
-    // zig build test-parser
-    const test_parser_step = b.step("test-parser", "Run parser unit tests (no MLIR/Z3)");
-    test_parser_step.dependOn(&b.addRunArtifact(expression_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(statement_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(parser_core_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(declaration_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(type_parser_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_builder_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_expressions_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(ast_statements_tests).step);
-    test_parser_step.dependOn(&b.addRunArtifact(type_resolver_logs_tests).step);
-
-    // zig build test-semantics
-    const test_semantics_step = b.step("test-semantics", "Run semantics unit tests (no MLIR/Z3)");
-    test_semantics_step.dependOn(&b.addRunArtifact(locals_binder_tests).step);
 
     // zig build test-lsp
     const test_lsp_step = b.step("test-lsp", "Run LSP frontend tests (no MLIR/Z3)");
@@ -800,48 +639,6 @@ fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     }
 }
 
-fn checkParserImportsImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-    _ = options;
-    const b = step.owner;
-    const allocator = b.allocator;
-
-    const forbidden = [_]struct {
-        pattern: []const u8,
-        description: []const u8,
-    }{
-        .{ .pattern = "@import(\"../semantics/", .description = "parser core must not import semantics" },
-        .{ .pattern = "@import(\"../ast/type_resolver/", .description = "parser core must not import type resolver" },
-        .{ .pattern = "@import(\"../mlir/", .description = "parser core must not import MLIR" },
-        .{ .pattern = "@import(\"../z3/", .description = "parser core must not import Z3" },
-    };
-
-    var parser_dir = try std.fs.cwd().openDir("src/parser", .{ .iterate = true });
-    defer parser_dir.close();
-
-    var walker = try parser_dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        if (std.mem.eql(u8, entry.path, "pipeline.zig")) continue;
-
-        const rel_path = try std.fmt.allocPrint(allocator, "src/parser/{s}", .{entry.path});
-        defer allocator.free(rel_path);
-
-        const contents = try std.fs.cwd().readFileAlloc(allocator, rel_path, 4 * 1024 * 1024);
-        defer allocator.free(contents);
-
-        for (forbidden) |rule| {
-            if (std.mem.indexOf(u8, contents, rule.pattern) != null) {
-                std.log.err("Parser boundary violation in {s}: {s}", .{ rel_path, rule.description });
-                std.log.err("  found forbidden import pattern: {s}", .{rule.pattern});
-                return error.ParserBoundaryViolation;
-            }
-        }
-    }
-}
-
 /// Build MLIR from vendored llvm-project and install into vendor/mlir
 fn buildMlirLibraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
     _ = target;
@@ -864,8 +661,16 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const b = step.owner;
     const allocator = b.allocator;
 
-    // ensure submodule exists
     const cwd = std.fs.cwd();
+
+    // skip if MLIR C API library is already installed
+    const mlir_c_lib = if (@import("builtin").os.tag == .macos) "vendor/mlir/lib/libMLIR-C.dylib" else "vendor/mlir/lib/libMLIR-C.so";
+    if (cwd.access(mlir_c_lib, .{}) catch null) |_| {
+        std.log.info("MLIR libraries already installed, skipping build (delete vendor/mlir to force rebuild)", .{});
+        return;
+    }
+
+    // ensure submodule exists
     _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
         std.log.err("Missing LLVM source tree: vendor/llvm-project", .{});
         std.log.err("Run: ./setup.sh --skip-deps --skip-build", .{});
@@ -879,26 +684,6 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         error.PathAlreadyExists => {},
         else => return err,
     };
-
-    // clear CMake cache if it exists to avoid stale SDK paths after system updates
-    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
-    defer allocator.free(cache_file);
-    if (cwd.access(cache_file, .{}) catch null) |_| {
-        std.log.info("Clearing stale MLIR CMake cache after macOS/Xcode update", .{});
-        cwd.deleteFile(cache_file) catch |err| {
-            std.log.warn("Could not delete MLIR CMakeCache.txt: {}", .{err});
-        };
-    }
-
-    // also clear CMakeFiles directory which may contain cached package configs
-    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
-    defer allocator.free(cmake_files_dir);
-    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
-        std.log.info("Clearing MLIR CMakeFiles directory to remove stale package configs", .{});
-        cwd.deleteTree(cmake_files_dir) catch |err| {
-            std.log.warn("Could not delete MLIR CMakeFiles directory: {}", .{err});
-        };
-    }
 
     const install_prefix = "vendor/mlir";
     cwd.makeDir(install_prefix) catch |err| switch (err) {
@@ -1089,10 +874,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/ora-dialect-build";
-    // remove existing build directory to avoid CMake cache conflicts
-    cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -1216,10 +998,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const cwd = std.fs.cwd();
 
-    // create build directory (clean if it exists to avoid CMake cache conflicts)
     const build_dir = "vendor/sir-dialect-build";
-    // remove existing build directory to avoid CMake cache conflicts
-    cwd.deleteTree(build_dir) catch {};
     cwd.makeDir(build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -1583,26 +1362,6 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         error.PathAlreadyExists => {},
         else => return err,
     };
-
-    // clear CMake cache if it exists to avoid stale SDK paths after system updates
-    const cache_file = try std.fmt.allocPrint(allocator, "{s}/CMakeCache.txt", .{build_dir});
-    defer allocator.free(cache_file);
-    if (cwd.access(cache_file, .{}) catch null) |_| {
-        std.log.info("Clearing stale Z3 CMake cache after macOS/Xcode update", .{});
-        cwd.deleteFile(cache_file) catch |err| {
-            std.log.warn("Could not delete Z3 CMakeCache.txt: {}", .{err});
-        };
-    }
-
-    // also clear CMakeFiles directory which may contain cached package configs
-    const cmake_files_dir = try std.fmt.allocPrint(allocator, "{s}/CMakeFiles", .{build_dir});
-    defer allocator.free(cmake_files_dir);
-    if (cwd.access(cmake_files_dir, .{}) catch null) |_| {
-        std.log.info("Clearing Z3 CMakeFiles directory to remove stale package configs", .{});
-        cwd.deleteTree(cmake_files_dir) catch |err| {
-            std.log.warn("Could not delete Z3 CMakeFiles directory: {}", .{err});
-        };
-    }
 
     const install_prefix = "vendor/z3-install";
     cwd.makeDir(install_prefix) catch |err| switch (err) {

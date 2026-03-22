@@ -1,0 +1,34 @@
+// InRange<u256, 0, 10000> — basis points pattern (0-100.00%)
+
+contract InRangePercentage {
+    storage var feeRate: InRange<u256, 0, 10000>;
+    storage var rewardRate: InRange<u256, 0, 10000>;
+
+    pub fn setFeeRate(rate: InRange<u256, 0, 10000>) {
+        feeRate = rate;
+    }
+
+    pub fn setRewardRate(rate: InRange<u256, 0, 10000>) {
+        rewardRate = rate;
+    }
+
+    pub fn getFeeRate() -> InRange<u256, 0, 10000> {
+        return feeRate;
+    }
+
+    pub fn getRewardRate() -> InRange<u256, 0, 10000> {
+        return rewardRate;
+    }
+
+    pub fn calculateFee(amount: u256) -> u256 {
+        return amount * feeRate / 10000;
+    }
+
+    pub fn calculateReward(amount: u256) -> u256 {
+        return amount * rewardRate / 10000;
+    }
+
+    pub fn totalRate() -> u256 {
+        return feeRate + rewardRate;
+    }
+}

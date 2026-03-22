@@ -8,14 +8,14 @@ error E1;
 contract PartialReturnInTry {
     pub fn mayFail(x: u256) -> !u256 | E1 {
         if (x == 0) {
-            return error.E1;
+            return E1;
         }
         return x;
     }
 
     pub fn partial_return(x: u256) -> u256 {
         try {
-            var y: u256 = mayFail(x);
+            var y: u256 = try mayFail(x);
             if (y == 0) {
                 return 1;
             }

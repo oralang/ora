@@ -1,0 +1,30 @@
+// try used inside expressions: let sum = try getA() + try getB();
+
+error FailA;
+error FailB;
+
+contract TryInExpression {
+    pub fn get_a(x: u256) -> !u256 | FailA {
+        if (x == 0) {
+            return FailA;
+        }
+        return x;
+    }
+
+    pub fn get_b(x: u256) -> !u256 | FailB {
+        if (x == 0) {
+            return FailB;
+        }
+        return x * 10;
+    }
+
+    pub fn sum_both(a: u256, b: u256) -> !u256 | FailA | FailB {
+        let sum: u256 = try get_a(a) + try get_b(b);
+        return sum;
+    }
+
+    pub fn mul_both(a: u256, b: u256) -> !u256 | FailA | FailB {
+        let product: u256 = try get_a(a) * try get_b(b);
+        return product;
+    }
+}

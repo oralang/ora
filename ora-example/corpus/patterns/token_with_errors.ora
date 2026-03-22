@@ -1,0 +1,91 @@
+// Level 6: ERC20 with error unions on all failure paths
+// Tests: error declarations, !T | Error return types, error returns
+
+error InsufficientBalance(required: u256, available: u256);
+error InsufficientAllowance(required: u256, available: u256);
+error ZeroAmount;
+error ZeroAddress;
+
+comptime const std = @import("std");
+contract TokenWithErrors {
+    storage var totalSupply: u256;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
+
+    pub fn init(initialSupply: u256) {
+        let deployer: NonZeroAddress = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
+    }
+
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(to: NonZeroAddress, amount: u256) -> !bool | InsufficientBalance | ZeroAmount
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        if (amount == 0) {
+            return ZeroAmount;
+        }
+
+        let sender: NonZeroAddress = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return InsufficientBalance(amount, senderBalance);
+        }
+
+        balances[sender] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: NonZeroAddress, amount: u256) -> !bool {
+        let owner: NonZeroAddress = std.msg.sender();
+        allowances[owner][spender] = amount;
+        log Approval(owner, spender, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: address, to: NonZeroAddress, amount: u256) -> !bool | InsufficientBalance | InsufficientAllowance | ZeroAmount
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        if (amount == 0) {
+            return ZeroAmount;
+        }
+
+        let spender: NonZeroAddress = std.msg.sender();
+
+        let currentAllowance: u256 = allowances[from][spender];
+        if (currentAllowance < amount) {
+            return InsufficientAllowance(amount, currentAllowance);
+        }
+
+        let senderBalance: u256 = balances[from];
+        if (senderBalance < amount) {
+            return InsufficientBalance(amount, senderBalance);
+        }
+
+        allowances[from][spender] = currentAllowance - amount;
+        balances[from] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+}

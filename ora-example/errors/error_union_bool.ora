@@ -19,7 +19,7 @@ contract ErrorUnionBool {
 
     fn handleWithCatch(x: u256) -> bool {
         try {
-            let ok: bool = mayFail(x);
+            let ok: bool = try mayFail(x);
             return ok;
         } catch {
             return false;

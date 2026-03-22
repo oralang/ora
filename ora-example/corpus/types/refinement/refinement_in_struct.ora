@@ -1,0 +1,45 @@
+// Struct with refinement-typed fields
+
+struct BoundedConfig {
+    minStake: MinValue<u256, 1>;
+    maxStake: MaxValue<u256, 1000000>;
+    feeRate: InRange<u256, 0, 10000>;
+}
+
+struct AccountRef {
+    owner: NonZeroAddress;
+    balance: u256;
+}
+
+contract RefinementInStruct {
+    storage var config: BoundedConfig;
+    storage var account: AccountRef;
+
+    pub fn setConfig(min: MinValue<u256, 1>, max: MaxValue<u256, 1000000>, fee: InRange<u256, 0, 10000>) {
+        config = BoundedConfig { minStake: min, maxStake: max, feeRate: fee };
+    }
+
+    pub fn getMinStake() -> MinValue<u256, 1> {
+        return config.minStake;
+    }
+
+    pub fn getMaxStake() -> MaxValue<u256, 1000000> {
+        return config.maxStake;
+    }
+
+    pub fn getFeeRate() -> InRange<u256, 0, 10000> {
+        return config.feeRate;
+    }
+
+    pub fn setAccount(owner: NonZeroAddress, balance: u256) {
+        account = AccountRef { owner: owner, balance: balance };
+    }
+
+    pub fn getAccountOwner() -> NonZeroAddress {
+        return account.owner;
+    }
+
+    pub fn getAccountBalance() -> u256 {
+        return account.balance;
+    }
+}

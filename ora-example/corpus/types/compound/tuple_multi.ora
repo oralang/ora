@@ -1,0 +1,53 @@
+contract TupleMulti {
+    storage var saved: u256;
+
+    pub fn mixed_u256_bool() -> u256 {
+        let t: (u256, bool) = (42, true);
+        if (t.1) {
+            return t.0;
+        }
+        return 0;
+    }
+
+    pub fn mixed_u8_u256() -> u256 {
+        let t: (u8, u256) = (255, 1000);
+        return t.1;
+    }
+
+    pub fn mixed_address_u256() -> u256 {
+        let t: (address, u256) = (
+            0x0000000000000000000000000000000000000001,
+            500
+        );
+        return t.1;
+    }
+
+    pub fn mixed_bool_bool() -> bool {
+        let t: (bool, bool) = (true, false);
+        return t.0 && t.1;
+    }
+
+    pub fn wide_tuple() -> u256 {
+        let t: (u256, u256, u256, u256) = (1, 2, 3, 4);
+        return t.0 + t.1 + t.2 + t.3;
+    }
+
+    pub fn destructure_mixed() -> u256 {
+        let t: (u256, bool) = (100, true);
+        if (t.1) {
+            return t.0;
+        }
+        return 0;
+    }
+
+    pub fn nested_tuple() -> u256 {
+        let t: (u256, (u256, u256)) = (1, (2, 3));
+        return t.0;
+    }
+
+    pub fn tuple_in_computation(a: u256, b: u256) -> u256 {
+        let t: (u256, u256) = (a + b, a - b);
+        saved = t.0;
+        return t.1;
+    }
+}

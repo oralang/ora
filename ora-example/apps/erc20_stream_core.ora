@@ -27,6 +27,8 @@ error EscrowOverflow;
 error EscrowUnderflow;
 error SpecOverflow;
 error StreamIdExhausted;
+comptime const std = @import("std");
+
 contract ERC20StreamCore {
     // External integration anchors
     storage var token_address: address;
@@ -146,44 +148,44 @@ contract ERC20StreamCore {
         -> !u256 | Unauthorized | InvalidAddress | InvalidSchedule | InvalidRate | InvalidAmount | EscrowOverflow | StreamIdExhausted | SpecOverflow
     {
         if (!onlyAdapter()) {
-            return error.Unauthorized;
+            return Unauthorized;
         }
         if (sender == std.constants.ZERO_ADDRESS) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         if (recipient == std.constants.ZERO_ADDRESS) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         if (sender == recipient) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         if (rate_per_second == 0) {
-            return error.InvalidRate;
+            return InvalidRate;
         }
         if (total_amount == 0) {
-            return error.InvalidAmount;
+            return InvalidAmount;
         }
         var duration: u256 = 0;
         if (ends_at > starts_at) {
             duration = ends_at - starts_at;
         } else {
-            return error.InvalidSchedule;
+            return InvalidSchedule;
         }
         let expected_total: struct { value: u256, overflow: bool } = @mulWithOverflow(rate_per_second, duration);
         if (expected_total.overflow) {
-            return error.InvalidRate;
+            return InvalidRate;
         }
         if (expected_total.value != total_amount) {
-            return error.InvalidAmount;
+            return InvalidAmount;
         }
         if (next_stream_id == std.constants.U256_MAX) {
-            return error.StreamIdExhausted;
+            return StreamIdExhausted;
         }
         if (total_escrowed > std.constants.U256_MAX - total_amount) {
-            return error.EscrowOverflow;
+            return EscrowOverflow;
         }
         if (spec_total_opened > std.constants.U256_MAX - total_amount) {
-            return error.SpecOverflow;
+            return SpecOverflow;
         }
         let stream_id: u256 = next_stream_id;
         next_stream_id = stream_id + 1;
@@ -214,18 +216,18 @@ contract ERC20StreamCore {
 
     pub fn closeStream(stream_id: u256, close_timestamp: u256) -> !u256 | Unauthorized | StreamNotFound | StreamNotOpen | InvalidSchedule | InvalidAmount {
         if (!onlyAdapter()) {
-            return error.Unauthorized;
+            return Unauthorized;
         }
         if (!stream_exists[stream_id]) {
-            return error.StreamNotFound;
+            return StreamNotFound;
         }
         if (!stream_open[stream_id]) {
-            return error.StreamNotOpen;
+            return StreamNotOpen;
         }
         let start_ts: u256 = stream_start[stream_id];
         let end_ts: u256 = stream_end[stream_id];
         if (end_ts < start_ts) {
-            return error.InvalidSchedule;
+            return InvalidSchedule;
         }
         var final_close_ts: u256 = close_timestamp;
         if (final_close_ts < start_ts) {
@@ -239,7 +241,7 @@ contract ERC20StreamCore {
         let final_accrued: u256 = accruedAt(stream_id, final_close_ts);
         let deposit: u256 = stream_deposit[stream_id];
         if (final_accrued > deposit) {
-            return error.InvalidAmount;
+            return InvalidAmount;
         }
         assert(!stream_open[stream_id], "closed stream must be inactive");
         assert(stream_closed_at[stream_id] >= stream_start[stream_id], "close timestamp below start");
@@ -252,7 +254,7 @@ contract ERC20StreamCore {
 
     pub fn claimableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound {
         if (!stream_exists[stream_id]) {
-            return error.StreamNotFound;
+            return StreamNotFound;
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let claimed: u256 = stream_claimed[stream_id];
@@ -266,36 +268,36 @@ contract ERC20StreamCore {
         -> !u256 | Unauthorized | InvalidAddress | StreamNotFound | NotStreamRecipient | NothingToClaim | EscrowUnderflow | SpecOverflow
     {
         if (!onlyAdapter()) {
-            return error.Unauthorized;
+            return Unauthorized;
         }
         if (recipient == std.constants.ZERO_ADDRESS) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         if (!stream_exists[stream_id]) {
-            return error.StreamNotFound;
+            return StreamNotFound;
         }
         if (stream_recipient[stream_id] != recipient) {
-            return error.NotStreamRecipient;
+            return NotStreamRecipient;
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let claimed_before: u256 = stream_claimed[stream_id];
         let reclaimed_before: u256 = stream_reclaimed[stream_id];
         let deposit: u256 = stream_deposit[stream_id];
         if (accrued <= claimed_before) {
-            return error.NothingToClaim;
+            return NothingToClaim;
         }
         if (@addWithOverflow(accrued, reclaimed_before).overflow) {
-            return error.SpecOverflow;
+            return SpecOverflow;
         }
         if (@addWithOverflow(accrued, reclaimed_before).value > deposit) {
-            return error.NothingToClaim;
+            return NothingToClaim;
         }
         let payout: u256 = accrued - claimed_before;
         if (total_escrowed < payout) {
-            return error.EscrowUnderflow;
+            return EscrowUnderflow;
         }
         if (spec_total_claimed > std.constants.U256_MAX - payout) {
-            return error.SpecOverflow;
+            return SpecOverflow;
         }
         stream_claimed[stream_id] = accrued;
         total_escrowed = total_escrowed - payout;
@@ -311,10 +313,10 @@ contract ERC20StreamCore {
 
     pub fn refundableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound | StreamStillOpen {
         if (!stream_exists[stream_id]) {
-            return error.StreamNotFound;
+            return StreamNotFound;
         }
         if (stream_open[stream_id]) {
-            return error.StreamStillOpen;
+            return StreamStillOpen;
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let deposit: u256 = stream_deposit[stream_id];
@@ -333,19 +335,19 @@ contract ERC20StreamCore {
         -> !u256 | Unauthorized | InvalidAddress | StreamNotFound | StreamStillOpen | NotStreamSender | NothingToReclaim | EscrowUnderflow | SpecOverflow
     {
         if (!onlyAdapter()) {
-            return error.Unauthorized;
+            return Unauthorized;
         }
         if (sender == std.constants.ZERO_ADDRESS) {
-            return error.InvalidAddress;
+            return InvalidAddress;
         }
         if (!stream_exists[stream_id]) {
-            return error.StreamNotFound;
+            return StreamNotFound;
         }
         if (stream_open[stream_id]) {
-            return error.StreamStillOpen;
+            return StreamStillOpen;
         }
         if (stream_sender[stream_id] != sender) {
-            return error.NotStreamSender;
+            return NotStreamSender;
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let deposit: u256 = stream_deposit[stream_id];
@@ -355,21 +357,21 @@ contract ERC20StreamCore {
         }
         let reclaimed_before: u256 = stream_reclaimed[stream_id];
         if (refundable_total <= reclaimed_before) {
-            return error.NothingToReclaim;
+            return NothingToReclaim;
         }
         let claimed_before: u256 = stream_claimed[stream_id];
         if (@addWithOverflow(claimed_before, refundable_total).overflow) {
-            return error.SpecOverflow;
+            return SpecOverflow;
         }
         if (@addWithOverflow(claimed_before, refundable_total).value > deposit) {
-            return error.NothingToReclaim;
+            return NothingToReclaim;
         }
         let refund: u256 = refundable_total - reclaimed_before;
         if (total_escrowed < refund) {
-            return error.EscrowUnderflow;
+            return EscrowUnderflow;
         }
         if (spec_total_reclaimed > std.constants.U256_MAX - refund) {
-            return error.SpecOverflow;
+            return SpecOverflow;
         }
         stream_reclaimed[stream_id] = refundable_total;
         total_escrowed = total_escrowed - refund;

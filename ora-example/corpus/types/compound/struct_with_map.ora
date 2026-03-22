@@ -1,0 +1,55 @@
+struct AccountInfo {
+    balance: u256;
+    nonce: u256;
+    active: bool;
+}
+
+contract StructWithMap {
+    storage var accounts: map<address, AccountInfo>;
+    storage var names: map<u256, address>;
+
+    pub fn create_account(owner: address) {
+        accounts[owner] = AccountInfo { balance: 0, nonce: 0, active: true };
+    }
+
+    pub fn deposit(owner: address, amount: u256) {
+        let acct: AccountInfo = accounts[owner];
+        accounts[owner] = AccountInfo {
+            balance: acct.balance + amount,
+            nonce: acct.nonce + 1,
+            active: acct.active
+        };
+    }
+
+    pub fn get_balance(owner: address) -> u256 {
+        let acct: AccountInfo = accounts[owner];
+        return acct.balance;
+    }
+
+    pub fn get_nonce(owner: address) -> u256 {
+        let acct: AccountInfo = accounts[owner];
+        return acct.nonce;
+    }
+
+    pub fn is_active(owner: address) -> bool {
+        let acct: AccountInfo = accounts[owner];
+        return acct.active;
+    }
+
+    pub fn deactivate(owner: address) {
+        let acct: AccountInfo = accounts[owner];
+        accounts[owner] = AccountInfo {
+            balance: acct.balance,
+            nonce: acct.nonce,
+            active: false
+        };
+    }
+
+    pub fn register_name(id: u256, owner: address) {
+        names[id] = owner;
+    }
+
+    pub fn lookup_name(id: u256) -> address {
+        return names[id];
+    }
+}

@@ -1,0 +1,23 @@
+// Division and modulo operations.
+
+contract TupleFromDivmod {
+    pub fn basic_divmod() -> u256 {
+        let q: u256 = 10 / 3;
+        return q;
+    }
+
+    pub fn get_remainder() -> u256 {
+        let r: u256 = 10 % 3;
+        return r;
+    }
+
+    pub fn divmod_combined() -> u256 {
+        let q: u256 = 17 / 5;
+        let r: u256 = 17 % 5;
+        return q * 5 + r;
+    }
+
+    pub fn divmod_runtime(a: u256, b: u256) -> u256 {
+        return a / b;
+    }
+}

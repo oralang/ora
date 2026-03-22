@@ -16,7 +16,7 @@
 // ============================================================================
 
 const std = @import("std");
-const lib = @import("ora_lib");
+const lexer = @import("ora_lexer");
 
 pub const ImportValidationError = error{
     ImportTargetNotFound,
@@ -340,7 +340,7 @@ const Resolver = struct {
         };
         defer self.allocator.free(source);
 
-        var lex = lib.Lexer.init(self.allocator, source);
+        var lex = lexer.Lexer.init(self.allocator, source);
         defer lex.deinit();
 
         const tokens = lex.scanTokens() catch |err| {
@@ -348,36 +348,66 @@ const Resolver = struct {
             return ImportValidationError.ParseFailed;
         };
         defer self.allocator.free(tokens);
+        try self.scanImportTokens(module, tokens);
+    }
 
-        var arena = lib.ast_arena.AstArena.init(self.allocator);
-        defer arena.deinit();
-
-        var parser = lib.Parser.init(tokens, &arena);
-        const nodes = parser.parse() catch |err| {
-            std.log.warn("Failed to parse module '{s}' while resolving imports: {s}", .{ module.resolved_path, @errorName(err) });
-            return ImportValidationError.ParseFailed;
-        };
-
-        for (nodes) |node| {
-            if (node != .Import) continue;
-
-            const import_decl = node.Import;
-            const specifier = import_decl.path;
-
-            if (import_decl.alias == null) {
-                std.log.warn("Import alias required in '{s}' for '{s}'. Use: const name = @import(\"...\");", .{ module.resolved_path, specifier });
-                return ImportValidationError.ImportAliasRequired;
+    fn scanImportTokens(self: *Resolver, module: *ModuleRecord, tokens: []const lexer.Token) ImportValidationError!void {
+        var index: usize = 0;
+        while (index < tokens.len) {
+            var cursor = index;
+            if (tokens[cursor].type == .Comptime and cursor + 1 < tokens.len) {
+                cursor += 1;
             }
+
+            if (cursor + 7 >= tokens.len) {
+                index += 1;
+                continue;
+            }
+
+            if (tokens[cursor].type != .Const or
+                tokens[cursor + 1].type != .Identifier or
+                tokens[cursor + 2].type != .Equal or
+                tokens[cursor + 3].type != .At or
+                tokens[cursor + 4].type != .Import or
+                tokens[cursor + 5].type != .LeftParen)
+            {
+                index += 1;
+                continue;
+            }
+
+            const path_token = tokens[cursor + 6];
+            if (path_token.type != .StringLiteral and path_token.type != .RawStringLiteral) {
+                std.log.warn("Invalid import path token in '{s}'", .{module.resolved_path});
+                return ImportValidationError.ParseFailed;
+            }
+            if (tokens[cursor + 7].type != .RightParen) {
+                std.log.warn("Unterminated import in '{s}'", .{module.resolved_path});
+                return ImportValidationError.ParseFailed;
+            }
+
+            const specifier = tokenStringValue(path_token) orelse {
+                std.log.warn("Invalid import path literal in '{s}'", .{module.resolved_path});
+                return ImportValidationError.ParseFailed;
+            };
+            const alias = tokens[cursor + 1].lexeme;
 
             const dependency_descriptor_opt = try self.resolveImportSpecifier(module, specifier);
             if (dependency_descriptor_opt) |dependency_descriptor| {
                 const dependency_record = try self.ensureModule(dependency_descriptor);
-                const alias = import_decl.alias.?;
                 try module.addImport(self.allocator, alias, specifier, dependency_record.canonical_id);
                 try module.addDependency(self.allocator, dependency_record.canonical_id);
                 try self.visitRecord(dependency_record);
             }
+
+            index = cursor + 8;
         }
+    }
+
+    fn tokenStringValue(token: lexer.Token) ?[]const u8 {
+        return switch (token.value orelse return null) {
+            .string => |value| value,
+            else => null,
+        };
     }
 
     fn resolveImportSpecifier(self: *Resolver, importer: *const ModuleRecord, specifier: []const u8) ImportValidationError!?ModuleDescriptor {

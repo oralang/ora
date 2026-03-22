@@ -1,0 +1,93 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Ora",
+  "scopeName": "source.ora",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#verification" },
+    { "include": "#storage" },
+    { "include": "#constants" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.ora", "match": "//.*$" },
+        { "name": "comment.block.ora", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "name": "string.quoted.double.ora", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.ora", "match": "\\\\." }] }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.ora", "match": "\\b0x[0-9a-fA-F_]+\\b" },
+        { "name": "constant.numeric.binary.ora", "match": "\\b0b[01_]+\\b" },
+        { "name": "constant.numeric.decimal.ora", "match": "\\b[0-9][0-9_]*\\b" },
+        { "name": "constant.numeric.address.ora", "match": "\\baddress\"0x[0-9a-fA-F]+\"" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.ora",
+          "match": "\\b(if|else|while|for|break|continue|return|switch|try|catch)\\b"
+        },
+        {
+          "name": "keyword.declaration.ora",
+          "match": "\\b(contract|fn|let|var|const|pub|import|struct|bitfield|enum|trait|impl|extern|log|error|init)\\b"
+        },
+        {
+          "name": "keyword.other.ora",
+          "match": "\\b(as|from|to|call|staticcall|errors|comptime)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.ora",
+          "match": "\\b(u8|u16|u32|u64|u128|u256|i8|i16|i32|i64|i128|i256|bool|address|string|void)\\b"
+        },
+        {
+          "name": "support.type.collection.ora",
+          "match": "\\b(Map|Slice|Bytes)\\b"
+        }
+      ]
+    },
+    "verification": {
+      "patterns": [
+        {
+          "name": "keyword.other.verification.ora",
+          "match": "\\b(requires|ensures|invariant|old|result|ghost|assert|assume|havoc|forall|exists|where|modifies|decreases|increases)\\b"
+        }
+      ]
+    },
+    "storage": {
+      "patterns": [
+        {
+          "name": "storage.modifier.ora",
+          "match": "\\b(storage|memory|transient|immutable)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.boolean.ora", "match": "\\b(true|false)\\b" },
+        { "name": "variable.language.ora", "match": "\\b(self)\\b" },
+        { "name": "support.function.builtin.ora", "match": "\\b(MinValue|MaxValue|InRange|NonZeroAddress)\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.ora", "match": "->|=>|\\.\\.\\.|\\.\\.|\\.|&&|\\|\\||!" }
+      ]
+    }
+  }
+}

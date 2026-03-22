@@ -1,0 +1,39 @@
+// NonZeroAddress as map key and in transfer patterns
+
+contract NonZeroInMap {
+    storage var balances: map<NonZeroAddress, u256>;
+    storage var approved: map<NonZeroAddress, bool>;
+
+    pub fn deposit(account: NonZeroAddress, amount: u256) {
+        balances[account] = balances[account] + amount;
+    }
+
+    pub fn withdraw(account: NonZeroAddress, amount: u256) {
+        let current: u256 = balances[account];
+        if (current >= amount) {
+            balances[account] = current - amount;
+        }
+    }
+
+    pub fn transfer(from: NonZeroAddress, to: NonZeroAddress, amount: u256) -> bool {
+        let senderBal: u256 = balances[from];
+        if (senderBal < amount) {
+            return false;
+        }
+        balances[from] = senderBal - amount;
+        balances[to] = balances[to] + amount;
+        return true;
+    }
+
+    pub fn balanceOf(account: NonZeroAddress) -> u256 {
+        return balances[account];
+    }
+
+    pub fn approve(account: NonZeroAddress) {
+        approved[account] = true;
+    }
+
+    pub fn isApproved(account: NonZeroAddress) -> bool {
+        return approved[account];
+    }
+}

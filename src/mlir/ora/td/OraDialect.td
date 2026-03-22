@@ -36,7 +36,7 @@ def Ora_Dialect : Dialect {
     - Struct operations (ora.struct.decl, ora.struct_field_store, ora.struct_instantiate, ora.struct_init)
     - Map operations (ora.map_get, ora.map_store)
     - Formal verification (ora.requires, ora.ensures, ora.invariant, ora.old)
-    - Control flow (ora.if, ora.while, ora.for, ora.switch, ora.break, ora.continue, ora.return)
+    - Control flow (ora.conditional_return, ora.switch, ora.break, ora.continue, ora.return)
     - Financial operations (ora.move)
     - Event logging (ora.log)
     - Locking (ora.lock, ora.unlock)

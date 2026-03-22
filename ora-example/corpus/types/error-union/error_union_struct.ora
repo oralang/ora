@@ -1,0 +1,60 @@
+// Error union with struct payload.
+// Tests: returning a struct inside an error union.
+
+struct TokenBalance {
+    token_id: u256;
+    amount: u256;
+    last_updated: u256;
+}
+
+error TokenNotFound;
+error InsufficientTokenBalance(needed: u256, have: u256);
+
+comptime const std = @import("std");
+contract ErrorUnionStruct {
+    storage var balances: map<u256, u256>;
+    storage var update_times: map<u256, u256>;
+
+    pub fn get_token_balance(token_id: u256) -> !TokenBalance | TokenNotFound {
+        let amount: u256 = balances[token_id];
+        if (amount == 0) {
+            return TokenNotFound;
+        }
+        let tb: TokenBalance = TokenBalance {
+            token_id: token_id,
+            amount: amount,
+            last_updated: update_times[token_id]
+        };
+        return tb;
+    }
+
+    pub fn withdraw_token(token_id: u256, amount: u256) -> !TokenBalance | TokenNotFound | InsufficientTokenBalance {
+        let tb: TokenBalance = try get_token_balance(token_id);
+        if (amount > tb.amount) {
+            return InsufficientTokenBalance(amount, tb.amount);
+        }
+        let new_amount: u256 = tb.amount - amount;
+        balances[token_id] = new_amount;
+        update_times[token_id] = std.block.timestamp();
+        let updated: TokenBalance = TokenBalance {
+            token_id: token_id,
+            amount: new_amount,
+            last_updated: std.block.timestamp()
+        };
+        return updated;
+    }
+
+    pub fn deposit_token(token_id: u256, amount: u256) {
+        balances[token_id] += amount;
+        update_times[token_id] = std.block.timestamp();
+    }
+
+    pub fn safe_get_amount(token_id: u256) -> u256 {
+        try {
+            let tb: TokenBalance = try get_token_balance(token_id);
+            return tb.amount;
+        } catch (e) {
+            return 0;
+        }
+    }
+}

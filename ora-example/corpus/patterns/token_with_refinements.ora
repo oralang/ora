@@ -1,0 +1,78 @@
+// Level 6: ERC20 with refinement types on all parameters
+// Tests: MinValue, NonZeroAddress, BasisPoints on function signatures
+
+comptime const std = @import("std");
+contract TokenWithRefinements {
+    storage var totalSupply: u256;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    log Transfer(from: address, to: address, amount: u256);
+    log Approval(owner: address, spender: address, amount: u256);
+
+    pub fn init(initialSupply: MinValue<u256, 1>) {
+        let deployer: NonZeroAddress = std.msg.sender();
+        totalSupply = initialSupply;
+        balances[deployer] = initialSupply;
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);
+    }
+
+    pub fn getTotalSupply() -> u256 {
+        return totalSupply;
+    }
+
+    pub fn balanceOf(account: NonZeroAddress) -> u256 {
+        return balances[account];
+    }
+
+    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let senderBalance: u256 = balances[sender];
+
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        balances[sender] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: NonZeroAddress, amount: MinValue<u256, 0>) -> bool {
+        let owner: NonZeroAddress = std.msg.sender();
+        allowances[owner][spender] = amount;
+        log Approval(owner, spender, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
+        let spender: NonZeroAddress = std.msg.sender();
+
+        let currentAllowance: u256 = allowances[from][spender];
+        if (currentAllowance < amount) {
+            return false;
+        }
+
+        let senderBalance: u256 = balances[from];
+        if (senderBalance < amount) {
+            return false;
+        }
+
+        allowances[from][spender] = currentAllowance - amount;
+        balances[from] = senderBalance - amount;
+        balances[to] += amount;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn allowance(owner: NonZeroAddress, spender: NonZeroAddress) -> u256 {
+        return allowances[owner][spender];
+    }
+}

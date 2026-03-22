@@ -1,0 +1,33 @@
+contract MapNested {
+    storage var allowances: map<address, map<address, u256>>;
+    storage var permissions: map<address, map<u256, bool>>;
+
+    pub fn approve(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] = amount;
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+
+    pub fn increase_allowance(owner: address, spender: address, added: u256) {
+        allowances[owner][spender] += added;
+    }
+
+    pub fn decrease_allowance(owner: address, spender: address, removed: u256) {
+        allowances[owner][spender] -= removed;
+    }
+
+    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256) {
+        allowances[owner][spender] -= amount;
+        // Would also update balances in a real contract
+    }
+
+    pub fn set_permission(account: address, permission_id: u256, granted: bool) {
+        permissions[account][permission_id] = granted;
+    }
+
+    pub fn has_permission(account: address, permission_id: u256) -> bool {
+        return permissions[account][permission_id];
+    }
+}

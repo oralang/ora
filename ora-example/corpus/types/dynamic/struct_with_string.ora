@@ -1,0 +1,28 @@
+contract StructWithString {
+    struct Profile {
+        name: string,
+        age: u256,
+    }
+
+    storage var profile: Profile;
+
+    pub fn setProfile(n: string, a: u256) {
+        profile = Profile { name: n, age: a };
+    }
+
+    pub fn getName() -> string {
+        return profile.name;
+    }
+
+    pub fn getAge() -> u256 {
+        return profile.age;
+    }
+
+    pub fn updateName(n: string) {
+        profile.name = n;
+    }
+
+    pub fn updateAge(a: u256) {
+        profile.age = a;
+    }
+}

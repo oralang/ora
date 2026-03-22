@@ -4,6 +4,7 @@
 // Tests explicit type annotations in Ora
 // ============================================================================
 
+comptime const std = @import("std");
 contract TypeAnnotations {
     // Variable declarations require explicit types
     pub fn testVariableAnnotations() {

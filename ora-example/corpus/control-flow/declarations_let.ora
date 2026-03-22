@@ -1,0 +1,61 @@
+// ==========================================
+// DECLARATIONS LET — let bindings with all types
+// ==========================================
+
+contract DeclarationsLet {
+    // Integer types
+    pub fn test_integer_lets() {
+        let a: u8 = 255;
+        let b: u16 = 65535;
+        let c: u32 = 100;
+        let d: u64 = 1000;
+        let e: u128 = 10000;
+        let f: u256 = 99999;
+        let g: i8 = -1;
+        let h: i16 = -100;
+        let i: i32 = -1000;
+        let j: i64 = -10000;
+        let k: i128 = -100000;
+        let l: i256 = -999999;
+    }
+
+    // Boolean
+    pub fn test_bool_lets() {
+        let flag_true: bool = true;
+        let flag_false: bool = false;
+    }
+
+    // Address
+    pub fn test_address_let() {
+        let addr: address = 0x1234567890123456789012345678901234567890;
+    }
+
+    // String
+    pub fn test_string_let() {
+        let greeting: string = "hello world";
+    }
+
+    // Expression initialization
+    pub fn test_expression_lets() {
+        let sum: u256 = 10 + 20;
+        let product: u256 = 5 * 6;
+        let comparison: bool = 10 > 5;
+        let logical: bool = true && false;
+    }
+
+    // Let from function return
+    pub fn helper() -> u256 {
+        return 42;
+    }
+
+    pub fn test_let_from_call() {
+        let res: u256 = helper();
+    }
+
+    // Let is immutable — cannot reassign (this is a compile-time guarantee)
+    pub fn test_let_used_in_expression() -> u256 {
+        let x: u256 = 10;
+        let y: u256 = 20;
+        return x + y;
+    }
+}

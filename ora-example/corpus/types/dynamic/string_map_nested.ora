@@ -1,0 +1,21 @@
+comptime const std = @import("std");
+
+contract StringMapNested {
+    storage var labels: map<address, map<u256, string>>;
+
+    pub fn setLabel(owner: address, id: u256, label: string) {
+        labels[owner][id] = label;
+    }
+
+    pub fn getLabel(owner: address, id: u256) -> string {
+        return labels[owner][id];
+    }
+
+    pub fn setSelfLabel(id: u256, label: string) {
+        labels[std.msg.sender][id] = label;
+    }
+
+    pub fn getSelfLabel(id: u256) -> string {
+        return labels[std.msg.sender][id];
+    }
+}

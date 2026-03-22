@@ -8,6 +8,7 @@
 // Expected: Guards removed in MLIR output (SMT discharge successful)
 // ============================================================================
 
+comptime const std = @import("std");
 contract ExactProven {
     // SMT can prove Exact division from requires clause
     pub fn provenExactDivision(dividend: Exact<u256>, divisor: u256)

@@ -1,0 +1,36 @@
+contract BitNot {
+    pub fn not_u8(x: u8) -> u8 {
+        let res: u8 = ~x;
+        return res;
+    }
+
+    pub fn not_u16(x: u16) -> u16 {
+        let res: u16 = ~x;
+        return res;
+    }
+
+    pub fn not_u32(x: u32) -> u32 {
+        let res: u32 = ~x;
+        return res;
+    }
+
+    pub fn not_u64(x: u64) -> u64 {
+        let res: u64 = ~x;
+        return res;
+    }
+
+    pub fn not_u128(x: u128) -> u128 {
+        let res: u128 = ~x;
+        return res;
+    }
+
+    pub fn not_u256(x: u256) -> u256 {
+        let res: u256 = ~x;
+        return res;
+    }
+
+    pub fn double_not_u256(x: u256) -> u256 {
+        let res: u256 = ~(~x);
+        return res;
+    }
+}

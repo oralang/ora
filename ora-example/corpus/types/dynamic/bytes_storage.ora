@@ -1,0 +1,39 @@
+contract BytesStorage {
+    storage var payload: bytes;
+    storage var signature: bytes;
+    storage var metadata: bytes;
+
+    pub fn setPayload(p: bytes) {
+        payload = p;
+    }
+
+    pub fn setSignature(s: bytes) {
+        signature = s;
+    }
+
+    pub fn setMetadata(m: bytes) {
+        metadata = m;
+    }
+
+    pub fn getPayload() -> bytes {
+        return payload;
+    }
+
+    pub fn getSignature() -> bytes {
+        return signature;
+    }
+
+    pub fn getMetadata() -> bytes {
+        return metadata;
+    }
+
+    pub fn setAll(p: bytes, s: bytes, m: bytes) {
+        payload = p;
+        signature = s;
+        metadata = m;
+    }
+
+    pub fn copyPayloadToMetadata() {
+        metadata = payload;
+    }
+}

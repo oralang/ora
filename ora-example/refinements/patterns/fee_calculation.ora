@@ -4,6 +4,7 @@
 // Demonstrates proper use of BasisPoints and MinValue for fee calculations
 // ============================================================================
 
+comptime const std = @import("std");
 contract FeeCalculation {
     storage var transfer_fee_rate: BasisPoints<u256>;
     storage var min_transfer: MinValue<u256, 1>;

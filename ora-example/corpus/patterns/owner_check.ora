@@ -1,0 +1,27 @@
+// Level 1: Owner-only access pattern
+// Tests: address storage, msg.sender, conditional guard
+
+comptime const std = @import("std");
+contract OwnerCheck {
+    storage var owner: address;
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    pub fn getOwner() -> address {
+        return owner;
+    }
+
+    pub fn isOwner() -> bool {
+        let caller: address = std.msg.sender();
+        return caller == owner;
+    }
+
+    pub fn changeOwner(newOwner: address) {
+        let caller: address = std.msg.sender();
+        if (caller == owner) {
+            owner = newOwner;
+        }
+    }
+}

@@ -4,6 +4,7 @@
 // Tests requires/ensures clauses with refinement types
 // ============================================================================
 
+comptime const std = @import("std");
 contract FunctionContractsRefinements {
     storage var balance: MinValue<u256, 0> = 0;
     storage var max_balance: MinValue<u256, 100> = 1000;

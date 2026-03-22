@@ -1,0 +1,104 @@
+// Level 5: Staking contract with rewards
+// Tests: stake/unstake/claim with time-based reward calculation
+
+comptime const std = @import("std");
+contract Staking {
+    storage var totalStaked: u256 = 0;
+    storage var rewardRate: u256 = 100;  // reward per second per 10000 staked (basis points)
+    storage var stakes: map<address, u256>;
+    storage var stakeTimestamps: map<address, u256>;
+    storage var pendingRewards: map<address, u256>;
+    storage var owner: address;
+
+    log Staked(user: address, amount: u256);
+    log Unstaked(user: address, amount: u256);
+    log RewardClaimed(user: address, reward: u256);
+
+    pub fn init() {
+        owner = std.msg.sender();
+    }
+
+    fn calculateReward(user: address) -> u256 {
+        let staked: u256 = stakes[user];
+        if (staked == 0) {
+            return 0;
+        }
+
+        let lastTime: u256 = stakeTimestamps[user];
+        let currentTime: u256 = std.block.timestamp;
+
+        if (currentTime <= lastTime) {
+            return 0;
+        }
+
+        let elapsed: u256 = currentTime - lastTime;
+        let reward: u256 = (staked * rewardRate * elapsed) / (10000 * 86400);
+        return reward;
+    }
+
+    pub fn stake(amount: u256)
+        requires(amount > 0)
+        requires(totalStaked <= std.constants.U256_MAX - amount)
+        requires(stakes[std.msg.sender()] <= std.constants.U256_MAX - amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+
+        // Accrue pending rewards before changing stake
+        let reward: u256 = calculateReward(sender);
+        pendingRewards[sender] += reward;
+
+        stakes[sender] += amount;
+        stakeTimestamps[sender] = std.block.timestamp;
+        totalStaked += amount;
+
+        log Staked(sender, amount);
+    }
+
+    pub fn unstake(amount: u256) -> bool
+        requires(amount > 0)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let currentStake: u256 = stakes[sender];
+
+        if (currentStake < amount) {
+            return false;
+        }
+
+        // Accrue pending rewards before changing stake
+        let reward: u256 = calculateReward(sender);
+        pendingRewards[sender] += reward;
+
+        stakes[sender] = currentStake - amount;
+        stakeTimestamps[sender] = std.block.timestamp;
+        totalStaked -= amount;
+
+        log Unstaked(sender, amount);
+        return true;
+    }
+
+    pub fn claimRewards() -> u256 {
+        let sender: NonZeroAddress = std.msg.sender();
+
+        let newReward: u256 = calculateReward(sender);
+        let totalReward: u256 = pendingRewards[sender] + newReward;
+
+        pendingRewards[sender] = 0;
+        stakeTimestamps[sender] = std.block.timestamp;
+
+        log RewardClaimed(sender, totalReward);
+        return totalReward;
+    }
+
+    pub fn getStake(user: address) -> u256 {
+        return stakes[user];
+    }
+
+    pub fn getPendingReward(user: address) -> u256 {
+        let accrued: u256 = calculateReward(user);
+        return pendingRewards[user] + accrued;
+    }
+
+    pub fn getTotalStaked() -> u256 {
+        return totalStaked;
+    }
+}

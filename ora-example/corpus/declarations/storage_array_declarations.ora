@@ -1,0 +1,84 @@
+// ==========================================
+// STORAGE ARRAY DECLARATIONS — fixed-size storage arrays
+// ==========================================
+
+contract StorageArrayDeclarations {
+    storage var values: [u256; 4];
+    storage var flags: [bool; 8];
+    storage var addresses: [address; 3];
+
+    // Write to u256 array
+    pub fn set_values() {
+        values[0] = 100;
+        values[1] = 200;
+        values[2] = 300;
+        values[3] = 400;
+    }
+
+    // Read from u256 array
+    pub fn get_value(index: u256) -> u256 {
+        return values[index];
+    }
+
+    // Sum all values
+    pub fn sum_values() -> u256 {
+        let total: u256 = values[0] + values[1] + values[2] + values[3];
+        return total;
+    }
+
+    // Write to bool array
+    pub fn set_flags() {
+        flags[0] = true;
+        flags[1] = false;
+        flags[2] = true;
+        flags[3] = false;
+        flags[4] = true;
+        flags[5] = false;
+        flags[6] = true;
+        flags[7] = false;
+    }
+
+    // Read from bool array
+    pub fn get_flag(index: u256) -> bool {
+        return flags[index];
+    }
+
+    // Toggle a flag
+    pub fn toggle_flag(index: u256) {
+        flags[index] = !flags[index];
+    }
+
+    // Write to address array
+    pub fn set_addresses(a0: address, a1: address, a2: address) {
+        addresses[0] = a0;
+        addresses[1] = a1;
+        addresses[2] = a2;
+    }
+
+    // Read from address array
+    pub fn get_address(index: u256) -> address {
+        return addresses[index];
+    }
+
+    // Modify array element using previous elements
+    pub fn cascade_values() {
+        values[0] = 1;
+        values[1] = values[0] + 1;
+        values[2] = values[1] + values[0];
+        values[3] = values[2] + values[1] + values[0];
+    }
+
+    // Compound assignment on array elements
+    pub fn compound_on_array() {
+        values[0] = 100;
+        values[0] += 10;
+        values[0] -= 5;
+        values[0] *= 2;
+    }
+
+    // Local array creation and use
+    pub fn local_array() -> u256 {
+        let arr: [u256; 4] = [10, 20, 30, 40];
+        return arr[0] + arr[3];
+    }
+}

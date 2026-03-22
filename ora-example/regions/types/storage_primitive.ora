@@ -4,6 +4,7 @@
 // Tests primitive types in storage region
 // ============================================================================
 
+comptime const std = @import("std");
 contract StoragePrimitive {
     // u256 in storage
     storage var counter: u256;
@@ -21,8 +22,8 @@ contract StoragePrimitive {
     storage var name: string;
     storage var symbol: string;
 
-    // bytes in storage
-    storage var data: bytes;
+    // u256 in storage (hex data)
+    storage var data: u256;
 
     pub fn testStoragePrimitives() {
         counter = 100;
@@ -32,7 +33,7 @@ contract StoragePrimitive {
         owner = std.msg.sender();
         name = "Token";
         symbol = "TKN";
-        data = 0xdeadbeef;
+        data = 0xDEADBEEF;
     }
 
     pub fn testStorageRead() -> u256 {

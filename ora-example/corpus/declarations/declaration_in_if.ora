@@ -1,0 +1,94 @@
+// ==========================================
+// DECLARATION IN IF — declarations inside if branches, scoping
+// ==========================================
+
+contract DeclarationInIf {
+    storage var stored: u256;
+
+    // Let inside if body
+    pub fn let_in_if(x: u256) -> u256 {
+        var res: u256 = 0;
+        if (x > 10) {
+            let bonus: u256 = x * 2;
+            res = bonus;
+        }
+        return res;
+    }
+
+    // Let in both branches
+    pub fn let_in_both_branches(x: u256) -> u256 {
+        if (x > 100) {
+            let high: u256 = x - 100;
+            return high;
+        } else {
+            let low: u256 = 100 - x;
+            return low;
+        }
+    }
+
+    // Var inside if, modified before scope ends
+    pub fn var_in_if(x: u256) -> u256 {
+        var res: u256 = 0;
+        if (x > 0) {
+            var temp: u256 = x;
+            temp += 10;
+            temp *= 2;
+            res = temp;
+        }
+        return res;
+    }
+
+    // Multiple declarations in if
+    pub fn multi_decl_in_if(a: u256, b: u256) -> u256 {
+        var res: u256 = 0;
+        if (a > b) {
+            let diff: u256 = a - b;
+            let scaled: u256 = diff * 100;
+            let ratio: u256 = scaled / a;
+            res = ratio;
+        }
+        return res;
+    }
+
+    // Nested if with declarations at each level
+    pub fn nested_if_decl(x: u256) -> u256 {
+        var res: u256 = 0;
+        if (x > 0) {
+            let level1: u256 = x + 1;
+            if (level1 > 10) {
+                let level2: u256 = level1 * 2;
+                if (level2 > 50) {
+                    let level3: u256 = level2 + 100;
+                    res = level3;
+                } else {
+                    res = level2;
+                }
+            } else {
+                res = level1;
+            }
+        }
+        return res;
+    }
+
+    // Declaration inside if used with storage
+    pub fn if_with_storage(x: u256) {
+        if (x > stored) {
+            let diff: u256 = x - stored;
+            stored = diff;
+        } else {
+            let diff: u256 = stored - x;
+            stored = diff;
+        }
+    }
+
+    // Bool condition with declaration
+    pub fn bool_branch(active: bool) -> u256 {
+        if (active) {
+            let value: u256 = 100;
+            return value;
+        } else {
+            let value: u256 = 0;
+            return value;
+        }
+    }
+}

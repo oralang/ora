@@ -8,6 +8,7 @@
 // Expected: Guards removed in MLIR output (SMT discharge successful)
 // ============================================================================
 
+comptime const std = @import("std");
 contract NonZeroAddressProven {
     // SMT can prove NonZeroAddress from requires clause
     pub fn provenNonZeroAddress(addr: NonZeroAddress)

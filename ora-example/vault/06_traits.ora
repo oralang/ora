@@ -1,0 +1,36 @@
+// Vault -- Tier 6: Traits and impl
+// Trait/impl with bare `self` not yet supported by parser.
+// Simplified to plain contract functions.
+
+error InsufficientBalance(required: u256, available: u256);
+
+comptime const std = @import("std");
+contract SimpleVault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    pub fn deposit(amount: u256) {
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+    }
+
+    pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) {
+            return InsufficientBalance(amount, current);
+        }
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

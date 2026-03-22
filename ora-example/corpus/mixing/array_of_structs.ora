@@ -1,0 +1,42 @@
+// Level 2: Compound + scalar mixing — [Point; 3]
+// Tests array of structs with scalar fields.
+contract ArrayOfStructs {
+    struct Point {
+        x: u256;
+        y: u256;
+    }
+
+    storage var points: [Point; 3];
+
+    pub fn set_point(index: u256, px: u256, py: u256) {
+        let p: Point = Point { x: px, y: py };
+        points[index] = p;
+    }
+
+    pub fn get_x(index: u256) -> u256 {
+        let p: Point = points[index];
+        return p.x;
+    }
+
+    pub fn get_y(index: u256) -> u256 {
+        let p: Point = points[index];
+        return p.y;
+    }
+
+    pub fn sum_all_x() -> u256 {
+        let p0: Point = points[0];
+        let p1: Point = points[1];
+        let p2: Point = points[2];
+        let total: u256 = p0.x + p1.x + p2.x;
+        return total;
+    }
+
+    pub fn distance_squared(i: u256, j: u256) -> u256 {
+        let a: Point = points[i];
+        let b: Point = points[j];
+        let dx: u256 = a.x - b.x;
+        let dy: u256 = a.y - b.y;
+        let dist2: u256 = dx * dx + dy * dy;
+        return dist2;
+    }
+}

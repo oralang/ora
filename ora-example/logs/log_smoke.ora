@@ -1,4 +1,6 @@
 // Minimal log feature smoke test
+comptime const std = @import("std");
+
 contract LogSmoke {
     log Transfer(from: address, to: address, amount: u256);
     log Ping();

@@ -1,0 +1,23 @@
+// Error union with bool payload: !bool | SomeError
+
+error PermissionDenied;
+
+contract ErrorBoolPayload {
+    storage authorized: map<address, bool>;
+
+    pub fn check_access(addr: address) -> !bool | PermissionDenied {
+        let allowed: bool = authorized[addr];
+        if (!allowed) {
+            return PermissionDenied;
+        }
+        return true;
+    }
+
+    pub fn grant_access(addr: address) {
+        authorized[addr] = true;
+    }
+
+    pub fn revoke_access(addr: address) {
+        authorized[addr] = false;
+    }
+}

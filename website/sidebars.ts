@@ -18,6 +18,8 @@ const sidebars: SidebarsConfig = {
         'switch',
         'struct-types',
         'generics',
+        'traits',
+        'extern-traits',
         'research/comptime',
         'signed-integers',
         'bitfield-types',

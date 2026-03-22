@@ -1,0 +1,38 @@
+// Multiple try in sequence: try a(); try b(); try c();
+
+error StepAFailed;
+error StepBFailed;
+error StepCFailed;
+
+contract TryChain {
+    storage var state: u256 = 0;
+
+    pub fn step_a(x: u256) -> !u256 | StepAFailed {
+        if (x == 0) {
+            return StepAFailed;
+        }
+        return x;
+    }
+
+    pub fn step_b(x: u256) -> !u256 | StepBFailed {
+        if (x > 1000) {
+            return StepBFailed;
+        }
+        return x * 2;
+    }
+
+    pub fn step_c(x: u256) -> !u256 | StepCFailed {
+        if (x > 500) {
+            return StepCFailed;
+        }
+        return x + 1;
+    }
+
+    pub fn run_all(x: u256) -> !u256 | StepAFailed | StepBFailed | StepCFailed {
+        let a: u256 = try step_a(x);
+        let b: u256 = try step_b(a);
+        let c: u256 = try step_c(b);
+        state = c;
+        return c;
+    }
+}

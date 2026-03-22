@@ -1,0 +1,38 @@
+// Guard pattern: if (bad) { return Bad; } — multiple guards.
+
+error ZeroAmount;
+error NotOwner;
+error Paused;
+error OverLimit;
+
+comptime const std = @import("std");
+
+contract ErrorGuardReturn {
+    storage owner: address;
+    storage var paused: bool = false;
+    storage var limit: u256 = 1000;
+
+    pub fn guarded_action(amount: u256) -> !u256 | ZeroAmount | NotOwner | Paused | OverLimit {
+        if (std.msg.sender() != owner) {
+            return NotOwner;
+        }
+        if (paused) {
+            return Paused;
+        }
+        if (amount == 0) {
+            return ZeroAmount;
+        }
+        if (amount > limit) {
+            return OverLimit;
+        }
+        return amount;
+    }
+
+    pub fn pause() {
+        paused = true;
+    }
+
+    pub fn unpause() {
+        paused = false;
+    }
+}

@@ -1,0 +1,104 @@
+// ==========================================
+// DECLARATION CHAIN — sequential lets where each depends on previous
+// ==========================================
+
+contract DeclarationChain {
+    // Basic chain: a -> b -> c -> d
+    pub fn basic_chain() -> u256 {
+        let a: u256 = 1;
+        let b: u256 = a + 1;
+        let c: u256 = b * a;
+        let d: u256 = a + b + c;
+        return d;
+    }
+
+    // Longer chain
+    pub fn long_chain() -> u256 {
+        let a: u256 = 2;
+        let b: u256 = a + 3;
+        let c: u256 = b * a;
+        let d: u256 = c - b;
+        let e: u256 = d + a;
+        let f: u256 = e * c;
+        let g: u256 = f / b;
+        let h: u256 = g % d;
+        return h;
+    }
+
+    // Chain with different operations
+    pub fn mixed_ops_chain() -> u256 {
+        let base: u256 = 100;
+        let added: u256 = base + 50;
+        let multiplied: u256 = added * 2;
+        let divided: u256 = multiplied / 3;
+        let remainder: u256 = divided % 7;
+        let final_val: u256 = remainder + base;
+        return final_val;
+    }
+
+    // Chain with boolean
+    pub fn bool_chain() -> bool {
+        let a: u256 = 10;
+        let b: u256 = 20;
+        let sum: u256 = a + b;
+        let is_large: bool = sum > 25;
+        let is_even: bool = sum % 2 == 0;
+        let both: bool = is_large && is_even;
+        return both;
+    }
+
+    // Chain building a struct
+    pub fn struct_chain() -> u256 {
+        let x: u256 = 5;
+        let y: u256 = x * 2;
+        let sum: u256 = x + y;
+        let product: u256 = x * y;
+        let res: u256 = sum + product;
+        return res;
+    }
+
+    // Fibonacci-like chain
+    pub fn fibonacci_chain() -> u256 {
+        let f0: u256 = 0;
+        let f1: u256 = 1;
+        let f2: u256 = f0 + f1;
+        let f3: u256 = f1 + f2;
+        let f4: u256 = f2 + f3;
+        let f5: u256 = f3 + f4;
+        let f6: u256 = f4 + f5;
+        let f7: u256 = f5 + f6;
+        return f7;
+    }
+
+    // Chain with multiple references to earlier values
+    pub fn multi_ref_chain() -> u256 {
+        let a: u256 = 3;
+        let b: u256 = a * a;
+        let c: u256 = a + b;
+        let d: u256 = a * b * c;
+        let e: u256 = a + b + c + d;
+        return e;
+    }
+
+    // Chain with var mutations interspersed
+    pub fn mixed_let_var_chain() -> u256 {
+        let a: u256 = 10;
+        var b: u256 = a + 5;
+        let c: u256 = b * 2;
+        b = c + a;
+        let d: u256 = b + c;
+        var e: u256 = d + a + b + c;
+        e += 1;
+        return e;
+    }
+
+    // Power chain (repeated squaring pattern)
+    pub fn power_chain() -> u256 {
+        let x: u256 = 2;
+        let x2: u256 = x * x;
+        let x4: u256 = x2 * x2;
+        let x8: u256 = x4 * x4;
+        let x16: u256 = x8 * x8;
+        return x16;
+    }
+}

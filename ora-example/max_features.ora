@@ -23,6 +23,8 @@ enum Status: u256 { Idle, Running, Done }
 
 log Transfer(indexed source: address, indexed dest: address, amount: u256);
 // Example contract using a wide range of language features
+comptime const std = @import("std");
+
 contract FeatureMaximizer {
     // Contract-level constants and variables
     const MAX_VALUE: u256 = 1000;
@@ -44,7 +46,7 @@ contract FeatureMaximizer {
     // Use named struct for now to proceed with AST
     storage let config: Config = Config { fee: 1, enabled: true };
 
-    fn init() {
+    pub fn init() {
         // Basic assignments and lvalues
         var i: u256 = 0;
         balances[OWNER] = 100;
@@ -89,8 +91,8 @@ contract FeatureMaximizer {
         counter += val;
 
         // Try/catch statement  
-        try { 
-            let try_result: !u256 = may_fail();
+        try {
+            let try_result: u256 = try may_fail();
             counter += try_result;
         } catch (e) {
             counter += 1;
@@ -146,7 +148,7 @@ contract FeatureMaximizer {
 
     fn may_fail() -> !u256 {
         if (threshold > MAX_VALUE) {
-            return error.ParseError;
+            return ParseError;
         }
         return 0;
     }

@@ -1,0 +1,48 @@
+// Level 1: Simple mixing — bool conditions with u256 arithmetic
+// Tests bool used for control flow alongside u256 values.
+contract BoolU256 {
+    storage var value: u256;
+    storage var flag: bool;
+
+    pub fn conditional_set(x: u256, enable: bool) {
+        flag = enable;
+        if (enable) {
+            value = x;
+        }
+    }
+
+    pub fn conditional_add(x: u256, should_add: bool) -> u256 {
+        let res: u256 = value;
+        if (should_add) {
+            res = res + x;
+        }
+        return res;
+    }
+
+    pub fn compare_and_flag(x: u256, threshold: u256) -> bool {
+        let above: bool = x > threshold;
+        flag = above;
+        return above;
+    }
+
+    pub fn double_condition(a: u256, b: u256) -> u256 {
+        let gt: bool = a > b;
+        let eq: bool = a == b;
+        let res: u256 = 0;
+        if (gt) {
+            res = a - b;
+        }
+        if (eq) {
+            res = a;
+        }
+        return res;
+    }
+
+    pub fn bool_storage_with_arithmetic(x: u256) -> u256 {
+        if (flag) {
+            let doubled: u256 = x * 2;
+            return doubled;
+        }
+        return x;
+    }
+}

@@ -1,0 +1,50 @@
+// ==========================================
+// FOR BASIC — basic for loop over range
+// ==========================================
+
+contract ForBasic {
+    // Simple range iteration
+    pub fn test_range() -> u256 {
+        var sum: u256 = 0;
+        for (0..10) |i, _| {
+            sum += i;
+        }
+        return sum; // 0+1+...+9 = 45
+    }
+
+    // Range with non-zero start
+    pub fn test_range_offset() -> u256 {
+        var sum: u256 = 0;
+        for (5..10) |i, _| {
+            sum += i;
+        }
+        return sum; // 5+6+7+8+9 = 35
+    }
+
+    // Single iteration range
+    pub fn test_single_iteration() -> u256 {
+        var res: u256 = 0;
+        for (0..1) |i, _| {
+            res = 42;
+        }
+        return res;
+    }
+
+    // For loop with body that uses index
+    pub fn test_use_index() -> u256 {
+        var total: u256 = 0;
+        for (0..5) |i, _| {
+            total = total + i * i; // sum of squares
+        }
+        return total; // 0+1+4+9+16 = 30
+    }
+
+    // For loop accumulating product
+    pub fn test_factorial_like() -> u256 {
+        var product: u256 = 1;
+        for (1..6) |i, _| {
+            product = product * i;
+        }
+        return product; // 1*2*3*4*5 = 120
+    }
+}

@@ -1,0 +1,18 @@
+// Test: fixed-size array of dynamic bytes.
+
+contract ArrayOfBytes {
+    storage var chunks: [bytes; 2];
+
+    pub fn setChunk(index: u256, chunk: bytes) {
+        chunks[index] = chunk;
+    }
+
+    pub fn getChunk(index: u256) -> bytes {
+        return chunks[index];
+    }
+
+    pub fn setBothChunks(a: bytes, b: bytes) {
+        chunks[0] = a;
+        chunks[1] = b;
+    }
+}

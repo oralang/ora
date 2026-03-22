@@ -1,0 +1,28 @@
+// Tuples with different type combinations.
+
+comptime const std = @import("std");
+
+contract TupleTwoTypes {
+    pub fn u256_bool() -> u256 {
+        let t: (u256, bool) = (100, true);
+        if (t.1) {
+            return t.0;
+        }
+        return 0;
+    }
+
+    pub fn address_u256() -> u256 {
+        let t: (address, u256) = (std.msg.sender(), 500);
+        return t.1;
+    }
+
+    pub fn bool_bool() -> bool {
+        let t: (bool, bool) = (true, false);
+        return t.0;
+    }
+
+    pub fn u256_address() -> address {
+        let t: (u256, address) = (1, std.msg.sender());
+        return t.1;
+    }
+}

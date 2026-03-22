@@ -1,0 +1,41 @@
+contract SignedComparison {
+    pub fn lt_i8(a: i8, b: i8) -> bool {
+        let res: bool = a < b;
+        return res;
+    }
+
+    pub fn le_i8(a: i8, b: i8) -> bool {
+        let res: bool = a <= b;
+        return res;
+    }
+
+    pub fn gt_i8(a: i8, b: i8) -> bool {
+        let res: bool = a > b;
+        return res;
+    }
+
+    pub fn ge_i8(a: i8, b: i8) -> bool {
+        let res: bool = a >= b;
+        return res;
+    }
+
+    pub fn lt_i256(a: i256, b: i256) -> bool {
+        let res: bool = a < b;
+        return res;
+    }
+
+    pub fn le_i256(a: i256, b: i256) -> bool {
+        let res: bool = a <= b;
+        return res;
+    }
+
+    pub fn gt_i256(a: i256, b: i256) -> bool {
+        let res: bool = a > b;
+        return res;
+    }
+
+    pub fn ge_i256(a: i256, b: i256) -> bool {
+        let res: bool = a >= b;
+        return res;
+    }
+}

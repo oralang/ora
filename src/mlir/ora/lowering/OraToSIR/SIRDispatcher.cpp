@@ -15,7 +15,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <cctype>
 #include <string>
+#include <vector>
 
 using namespace mlir;
 
@@ -82,7 +84,7 @@ namespace mlir
                 out = AbiType();
                 if (s.empty())
                     return false;
-                if (s.front() == '(')
+                if (s.front() == '(' || s == "tuple")
                 {
                     out.base = AbiBase::Tuple;
                     return true;
@@ -128,16 +130,204 @@ namespace mlir
                 return out.base != AbiBase::Unknown;
             }
 
+            struct AbiLayout
+            {
+                AbiType abi;
+                std::vector<AbiLayout> fields;
+
+                bool isTupleLike() const { return !fields.empty(); }
+                bool isDynamic() const
+                {
+                    if (isTupleLike())
+                    {
+                        return llvm::any_of(fields, [](const AbiLayout &field) { return field.isDynamic(); });
+                    }
+                    return abi.isDynamic();
+                }
+                int64_t headSlots() const
+                {
+                    if (isTupleLike())
+                    {
+                        int64_t total = 0;
+                        for (const AbiLayout &field : fields)
+                        {
+                            int64_t slots = field.isDynamic() ? 1 : field.headSlots();
+                            if (slots < 0)
+                                return -1;
+                            total += slots;
+                        }
+                        return total;
+                    }
+                    return abi.headSlots();
+                }
+            };
+
+            static bool parseAbiLayout(StringRef text, size_t &pos, AbiLayout &out)
+            {
+                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                    ++pos;
+                if (pos >= text.size())
+                    return false;
+
+                if (text[pos] == '(')
+                {
+                    ++pos;
+                    out = AbiLayout{};
+                    out.abi.base = AbiBase::Tuple;
+                    while (pos < text.size() && text[pos] != ')')
+                    {
+                        AbiLayout child;
+                        if (!parseAbiLayout(text, pos, child))
+                            return false;
+                        out.fields.push_back(std::move(child));
+                        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                            ++pos;
+                        if (pos < text.size() && text[pos] == ',')
+                            ++pos;
+                    }
+                    if (pos >= text.size() || text[pos] != ')')
+                        return false;
+                    ++pos;
+                }
+                else
+                {
+                    size_t start = pos;
+                    while (pos < text.size() && text[pos] != ',' && text[pos] != ')' && text[pos] != '[')
+                        ++pos;
+                    if (start == pos)
+                        return false;
+                    AbiType abi;
+                    if (!parseAbiType(text.substr(start, pos - start), abi))
+                        return false;
+                    out = AbiLayout{};
+                    out.abi = abi;
+                }
+
+                while (pos < text.size() && text[pos] == '[')
+                {
+                    size_t close = text.find(']', pos);
+                    if (close == StringRef::npos)
+                        return false;
+                    StringRef inner = text.slice(pos + 1, close);
+                    if (inner.empty())
+                    {
+                        out.abi.dims.push_back(-1);
+                    }
+                    else
+                    {
+                        int64_t val = 0;
+                        if (inner.getAsInteger(10, val))
+                            return false;
+                        out.abi.dims.push_back(val);
+                    }
+                    pos = close + 1;
+                }
+                return true;
+            }
+
+            static bool parseAbiLayout(StringRef text, AbiLayout &out)
+            {
+                size_t pos = 0;
+                if (!parseAbiLayout(text, pos, out))
+                    return false;
+                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+                    ++pos;
+                return pos == text.size();
+            }
+
+            static Value computePaddedBytes(OpBuilder &builder, Location loc, MLIRContext *ctx, Value len)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                Value c31 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 31));
+                Value c5 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 5));
+                Value lenPlus = builder.create<sir::AddOp>(loc, u256Type, len, c31);
+                Value shifted = builder.create<sir::ShrOp>(loc, u256Type, c5, lenPlus);
+                return builder.create<sir::ShlOp>(loc, u256Type, c5, shifted);
+            }
+
+            static Value computeAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value basePtr,
+                const AbiLayout &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = IntegerType::get(ctx, 64, IntegerType::Unsigned);
+                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (!layout.isTupleLike())
+                {
+                    if (layout.abi.base == AbiBase::BytesDyn || layout.abi.base == AbiBase::String)
+                    {
+                        Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
+                        Value padded = computePaddedBytes(builder, loc, ctx, length);
+                        return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
+                    }
+                    if (layout.abi.supportsDynamicArray())
+                    {
+                        Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
+                        Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, c32);
+                        return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
+                    }
+                    return c32;
+                }
+
+                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.headSlots() * 32));
+                int64_t headOffset = 0;
+                for (const AbiLayout &field : layout.fields)
+                {
+                    if (field.isDynamic())
+                    {
+                        Value headOff = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, headOffset));
+                        Value offPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, headOff);
+                        Value relOff = builder.create<sir::LoadOp>(loc, u256Type, offPtr);
+                        Value childPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, relOff);
+                        Value childSize = computeAbiEncodedSize(builder, loc, ctx, childPtr, field);
+                        total = builder.create<sir::AddOp>(loc, u256Type, total, childSize);
+                        headOffset += 32;
+                    }
+                    else
+                    {
+                        headOffset += field.headSlots() * 32;
+                    }
+                }
+                return total;
+            }
+
             struct PubFuncInfo
             {
                 func::FuncOp func;
                 uint32_t selector = 0;
                 unsigned argCount = 0;
                 unsigned retCount = 0;
+                bool returnsErrorUnion = false;
                 SmallVector<AbiType, 8> abiParams;
+                SmallVector<std::string, 8> abiParamLayouts;
+                AbiType abiReturn;
+                bool hasAbiReturn = false;
+                int64_t abiReturnWords = -1;
+                std::string abiReturnLayout;
                 int64_t minHeadBytes = 0;
                 SmallVector<Type, 8> inputTypes;
             };
+
+            struct ErrorInfo
+            {
+                uint64_t id = 0;
+                uint32_t selector = 0;
+                uint64_t paramCount = 0;
+            };
+
+            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *ctx, uint32_t selector)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto u256IntType = IntegerType::get(ctx, 256, IntegerType::Unsigned);
+                llvm::APInt selectorWord(256, selector);
+                selectorWord = selectorWord.shl(224);
+                return builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(u256IntType, selectorWord));
+            }
 
             struct SIRDispatcherPass : public PassWrapper<SIRDispatcherPass, OperationPass<ModuleOp>>
             {
@@ -218,6 +408,39 @@ namespace mlir
                     auto u256Type = sir::U256Type::get(ctx);
                     auto ptrType = sir::PtrType::get(ctx, 1);
                     auto i64Type = builder.getI64Type();
+
+                    SmallVector<ErrorInfo, 8> abiErrors;
+                    module.walk([&](sir::ErrorDeclOp decl) {
+                        auto idAttr = decl->getAttrOfType<IntegerAttr>("sir.error_id");
+                        auto selectorAttr = decl->getAttrOfType<StringAttr>("sir.error_selector");
+                        auto paramTypes = decl->getAttrOfType<ArrayAttr>("sir.param_types");
+                        if (!idAttr || !selectorAttr || !paramTypes)
+                            return;
+
+                        StringRef selStr = selectorAttr.getValue();
+                        if (!selStr.starts_with("0x") || selStr.size() != 10)
+                            return;
+
+                        uint32_t selector = 0;
+                        for (char c : selStr.drop_front(2))
+                        {
+                            selector <<= 4;
+                            if (c >= '0' && c <= '9')
+                                selector |= (c - '0');
+                            else if (c >= 'a' && c <= 'f')
+                                selector |= (c - 'a' + 10);
+                            else if (c >= 'A' && c <= 'F')
+                                selector |= (c - 'A' + 10);
+                            else
+                                return;
+                        }
+
+                        abiErrors.push_back(ErrorInfo{
+                            idAttr.getValue().getZExtValue(),
+                            selector,
+                            static_cast<uint64_t>(paramTypes.size()),
+                        });
+                    });
 
                     // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
                     for (func::FuncOp func : module.getOps<func::FuncOp>())
@@ -329,8 +552,29 @@ namespace mlir
                                     return;
                                 }
                                 info.abiParams.push_back(abi);
+                                info.abiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
+
+                        if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
+                        {
+                            AbiType abiReturn;
+                            if (!parseAbiType(abiReturnAttr.getValue(), abiReturn))
+                            {
+                                func.emitError("unsupported ABI return type: " + abiReturnAttr.getValue());
+                                signalPassFailure();
+                                return;
+                            }
+                            info.abiReturn = abiReturn;
+                            info.hasAbiReturn = true;
+                        }
+                        if (auto abiReturnWordsAttr = func->getAttrOfType<IntegerAttr>("ora.abi_return_words"))
+                            info.abiReturnWords = abiReturnWordsAttr.getInt();
+                        if (auto abiReturnLayoutAttr = func->getAttrOfType<StringAttr>("ora.abi_return_layout"))
+                            info.abiReturnLayout = abiReturnLayoutAttr.getValue().str();
+
+                        if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
+                            info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
 
                         if (!info.abiParams.empty() && info.abiParams.size() != info.argCount)
                         {
@@ -350,6 +594,17 @@ namespace mlir
                             else
                             {
                                 int64_t slots = abi.headSlots();
+                                if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
+                                {
+                                    AbiLayout layout;
+                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout))
+                                    {
+                                        func.emitError("invalid tuple ABI param layout");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    slots = layout.isDynamic() ? 1 : layout.headSlots();
+                                }
                                 if (slots < 0)
                                 {
                                     func.emitError("unsupported ABI type for head sizing");
@@ -362,9 +617,6 @@ namespace mlir
                         info.minHeadBytes = 4 + 32 * headSlots;
                         pubFuncs.push_back(info);
                     }
-
-                    if (pubFuncs.empty() && !userInit)
-                        return;
 
                     // Synthesize boilerplate init/main; user-defined versions are replaced.
                     if (auto sym = SymbolTable::lookupSymbolIn(module, StringRef("init")))
@@ -834,6 +1086,33 @@ namespace mlir
                                 builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
                                 argVal = buf;
                             }
+                            else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
+                            {
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                {
+                                    info.func.emitError("invalid tuple ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                if (layout.isDynamic())
+                                {
+                                    module.emitError("unsupported dynamic ABI type for dispatcher");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                int64_t words = layout.headSlots();
+                                if (words <= 0)
+                                {
+                                    module.emitError("unsupported tuple ABI type for dispatcher");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
+                                builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
+                                argVal = buf;
+                            }
                             else if (!info.abiParams.empty() && abi.isDynamic())
                             {
                                 if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
@@ -907,7 +1186,143 @@ namespace mlir
                             SymbolRefAttr::get(ctx, info.func.getName()),
                             args);
 
-                        if (info.retCount == 2)
+                        if (info.returnsErrorUnion)
+                        {
+                            if (info.retCount != 2)
+                            {
+                                info.func.emitError("public error-union function must return dispatcher ptr/len pair");
+                                signalPassFailure();
+                                return;
+                            }
+                            if (!info.hasAbiReturn)
+                            {
+                                info.func.emitError("public error-union dispatcher missing ABI return metadata");
+                                signalPassFailure();
+                                return;
+                            }
+
+                            Value ptr_u = call.getResult(0);
+                            Value len = call.getResult(1);
+                            (void)len;
+                            Value ptr = builder.create<sir::BitcastOp>(loc, ptrType, ptr_u);
+                            Value tag = builder.create<sir::LoadOp>(loc, u256Type, ptr);
+                            Value c32_union = getConst(builder, loc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, c32_union);
+                            Value payload = builder.create<sir::LoadOp>(loc, u256Type, payloadPtr);
+                            Value one = getConst(builder, loc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                            Value maskedTag = builder.create<sir::AndOp>(loc, u256Type, tag, one);
+                            Value isError = builder.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+
+                            Block *successBlock = mainFunc.addBlock();
+                            Block *errorDispatchBlock = mainFunc.addBlock();
+                            builder.create<sir::CondBrOp>(loc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
+
+                            builder.setInsertionPointToEnd(successBlock);
+                            Value retPtr = nullptr;
+                            Value size = nullptr;
+                            if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            {
+                                size = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                                setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
+                                builder.create<sir::StoreOp>(loc, retPtr, payload);
+                            }
+                            else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
+                            {
+                                size = getConst(builder, loc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                            }
+                            else if (!info.abiReturnLayout.empty())
+                            {
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiReturnLayout, layout))
+                                {
+                                    info.func.emitError("invalid ora.abi_return_layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                size = computeAbiEncodedSize(builder, loc, ctx, retPtr, layout);
+                            }
+                            else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
+                            {
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
+                                Value padded = computePaddedBytes(builder, loc, ctx, length);
+                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                size = builder.create<sir::AddOp>(loc, u256Type, padded, wordSize);
+                            }
+                            else if (info.abiReturn.supportsDynamicArray())
+                            {
+                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
+                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, wordSize);
+                                size = builder.create<sir::AddOp>(loc, u256Type, lenBytes, wordSize);
+                            }
+                            else
+                            {
+                                info.func.emitError("public error-union dispatcher currently supports scalar, static tuple/struct, bytes/string, and static-base dynamic array ABI success payloads");
+                                signalPassFailure();
+                                return;
+                            }
+                            builder.create<sir::ReturnOp>(loc, retPtr, size);
+
+                            builder.setInsertionPointToEnd(errorDispatchBlock);
+                            Block *nextErrorBlock = revertError;
+                            for (const ErrorInfo &errInfo : llvm::reverse(abiErrors))
+                            {
+                                Block *compareBlock = mainFunc.addBlock();
+                                builder.setInsertionPointToEnd(compareBlock);
+
+                                Value errId = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
+                                Value compareValue = payload;
+                                if (errInfo.paramCount != 0)
+                                {
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                    compareValue = builder.create<sir::LoadOp>(loc, u256Type, payloadAggPtr);
+                                }
+                                Value matches = builder.create<sir::EqOp>(loc, u256Type, compareValue, errId);
+                                Block *emitBlock = mainFunc.addBlock();
+                                builder.create<sir::CondBrOp>(loc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
+
+                                builder.setInsertionPointToEnd(emitBlock);
+                                if (errInfo.paramCount == 0)
+                                {
+                                    Value size4 = getConst(builder, loc, u256Type, i64Type, 4, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size4);
+                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+                                    builder.create<sir::RevertOp>(loc, revertPtr, size4);
+                                }
+                                else
+                                {
+                                    const int64_t totalBytes = 4 + static_cast<int64_t>(errInfo.paramCount) * 32;
+                                    Value revertSize = getConst(builder, loc, u256Type, i64Type, totalBytes, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, revertSize);
+                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                    for (uint64_t index = 0; index < errInfo.paramCount; ++index)
+                                    {
+                                        Value srcOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>((index + 1) * 32), constCache, emitBlock);
+                                        Value srcPtr = builder.create<sir::AddPtrOp>(loc, ptrType, payloadAggPtr, srcOffset);
+                                        Value fieldWord = builder.create<sir::LoadOp>(loc, u256Type, srcPtr);
+
+                                        Value dstOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(4 + index * 32), constCache, emitBlock);
+                                        Value dstPtr = builder.create<sir::AddPtrOp>(loc, ptrType, revertPtr, dstOffset);
+                                        builder.create<sir::StoreOp>(loc, dstPtr, fieldWord);
+                                    }
+
+                                    builder.create<sir::RevertOp>(loc, revertPtr, revertSize);
+                                }
+
+                                nextErrorBlock = compareBlock;
+                            }
+
+                            builder.setInsertionPointToEnd(errorDispatchBlock);
+                            builder.create<sir::BrOp>(loc, ValueRange{}, nextErrorBlock);
+                        }
+                        else if (info.retCount == 2)
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);

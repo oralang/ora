@@ -1,0 +1,36 @@
+// Vault — Tier 2: Error unions and try/catch
+// Same core logic, adds error handling for insufficient balance.
+
+error InsufficientBalance(required: u256, available: u256);
+error ZeroAmount;
+
+comptime const std = @import("std");
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    pub fn deposit(amount: u256) -> !bool | ZeroAmount {
+        if (amount == 0) { return ZeroAmount; }
+        let sender: address = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+        return true;
+    }
+
+    pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
+        let sender: address = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) { return InsufficientBalance(amount, current); }
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

@@ -4,6 +4,7 @@
 // Tests refinement types in function parameters and return types
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementInFunctions {
     error InvalidAmount(amount: u256);
     // Refinement type in function parameter

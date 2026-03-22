@@ -387,6 +387,7 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
 {
     mlir::IRRewriter rewriter(funcOp.getContext());
     bool hadMalformedBlock = false;
+    SmallVector<Block *, 4> blocksToErase;
     for (Block &block : funcOp.getBody())
     {
         Operation *terminator = nullptr;
@@ -400,16 +401,29 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
         }
         if (!terminator)
         {
-            hadMalformedBlock = true;
             llvm::errs() << "[OraToSIR] ERROR: Missing terminator in function "
                          << funcOp.getName() << " at " << block.getParent()->getLoc() << "\n";
+            if (&block != &funcOp.front() && block.empty() && block.hasNoPredecessors())
+            {
+                blocksToErase.push_back(&block);
+                continue;
+            }
+            if (Block *next = block.getNextNode())
+            {
+                if (next->getNumArguments() == 0)
+                {
+                    rewriter.setInsertionPointToEnd(&block);
+                    rewriter.create<sir::BrOp>(funcOp.getLoc(), ValueRange{}, next);
+                    continue;
+                }
+            }
+            hadMalformedBlock = true;
             rewriter.setInsertionPointToEnd(&block);
             rewriter.create<sir::InvalidOp>(funcOp.getLoc());
             continue;
         }
         if (terminator->getNextNode())
         {
-            hadMalformedBlock = true;
             llvm::errs() << "[OraToSIR] ERROR: Terminator has trailing ops in function "
                          << funcOp.getName() << " at " << terminator->getLoc() << "\n";
             // Keep IR valid for downstream passes by dropping unreachable ops
@@ -423,6 +437,8 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
             }
         }
     }
+    for (Block *block : blocksToErase)
+        rewriter.eraseBlock(block);
     return hadMalformedBlock;
 }
 
@@ -805,6 +821,9 @@ public:
         if (enable_arith)
         {
             patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
+            patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
+            patterns.add<ConvertSubWrappingOp>(typeConverter, ctx);
+            patterns.add<ConvertMulWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
@@ -815,8 +834,10 @@ public:
             patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
             patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            patterns.add<ConvertShlWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
+            patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
@@ -830,6 +851,12 @@ public:
             patterns.add<ConvertFuncOp>(typeConverter, ctx);
         if (enable_func)
             patterns.add<ConvertCallOp>(typeConverter, ctx);
+        if (enable_func)
+        {
+            patterns.add<ConvertAbiEncodeOp>(typeConverter, ctx);
+            patterns.add<ConvertExternalCallOp>(typeConverter, ctx);
+            patterns.add<ConvertAbiDecodeOp>(typeConverter, ctx);
+        }
         if (enable_arith)
         {
             // ora.add/sub/mul/div/rem no longer emitted; arith.* used directly.
@@ -851,6 +878,8 @@ public:
             patterns.add<ConvertHavocOp>(typeConverter, ctx);
             patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
         }
+        patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
+        patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
         if (enable_struct)
         {
             patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
@@ -877,11 +906,8 @@ public:
         }
         // Defer ora.return lowering to phase 2 so scf.if results are split first.
         if (enable_control_flow)
-            patterns.add<ConvertWhileOp>(typeConverter, ctx);
-        if (enable_control_flow)
         {
             patterns.add<ConvertIfOp>(typeConverter, ctx);
-            patterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
             patterns.add<ConvertBreakOp>(typeConverter, ctx);
             patterns.add<ConvertContinueOp>(typeConverter, ctx);
             patterns.add<ConvertSwitchExprOp>(typeConverter, ctx);
@@ -895,8 +921,10 @@ public:
             patterns.add<ConvertRangeOp>(typeConverter, ctx);
         }
         patterns.add<ConvertErrorDeclOp>(typeConverter, ctx);
+        patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
         patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
+        patterns.add<EraseOpByName>("ora.bitfield_decl", ctx);
         patterns.add<EraseOpByName>("ora.log.decl", ctx);
         patterns.add<EraseOpByName>("ora.import", ctx);
         patterns.add<EraseOpByName>("ora.tstore.global", ctx);
@@ -919,7 +947,6 @@ public:
         patterns.add<ora::ConvertUnlockOp>(typeConverter, ctx);
         patterns.add<ora::ConvertTStoreGuardOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.move", ctx);
-        patterns.add<EraseOpByName>("ora.for", ctx);
 
         ConversionTarget target(*ctx);
         // Mark SIR dialect as legal
@@ -1010,7 +1037,7 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
+        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
         target.addIllegalOp<ora::GlobalOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
 
@@ -1035,18 +1062,24 @@ public:
                 } });
         DBG("Before conversion: " << totalOps << " total ops, " << oraOps << " Ora ops, " << oraReturnOps << " ora.return ops");
 
-        // Preserve error decl IDs as module attribute before any conversion
+        // Preserve error decl metadata as module attributes before any conversion
         // erases ora::ErrorDeclOp (sir::ErrorDeclOp lacks SymbolOpInterface).
         {
             SmallVector<NamedAttribute> errEntries;
+            SmallVector<NamedAttribute> errSelectorEntries;
             module.walk([&](ora::ErrorDeclOp decl)
                         {
                 auto id = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
                 auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+                auto selector = decl->getAttrOfType<mlir::StringAttr>("ora.error_selector");
                 if (sym && id)
-                    errEntries.push_back(NamedAttribute(sym, id)); });
+                    errEntries.push_back(NamedAttribute(sym, id));
+                if (sym && selector)
+                    errSelectorEntries.push_back(NamedAttribute(sym, selector)); });
             if (!errEntries.empty())
                 module->setAttr("sir.error_ids", DictionaryAttr::get(ctx, errEntries));
+            if (!errSelectorEntries.empty())
+                module->setAttr("sir.error_selectors", DictionaryAttr::get(ctx, errSelectorEntries));
         }
 
         // Phase 0 only: normalize error_union ops into explicit packing/unpacking.
@@ -1066,6 +1099,36 @@ public:
                 module.emitError("[OraToSIR] Phase 0: error-union normalization failed");
                 signalPassFailure();
                 return;
+            }
+        }
+
+        // Cleanup: fold local tuple carriers like tuple_extract(tuple_create(...), i).
+        // Overflow builtins currently use tuples as short-lived SSA carriers, and
+        // eliminating these pairs here avoids requiring full tuple lowering in SIR.
+        {
+            SmallVector<ora::TupleExtractOp, 16> tupleExtracts;
+            module.walk([&](ora::TupleExtractOp op)
+                        { tupleExtracts.push_back(op); });
+            for (auto extractOp : tupleExtracts)
+            {
+                auto tupleCreate = extractOp.getTupleValue().getDefiningOp<ora::TupleCreateOp>();
+                if (!tupleCreate)
+                    continue;
+                auto index = static_cast<size_t>(extractOp.getIndex());
+                auto elements = tupleCreate.getElements();
+                if (index >= elements.size())
+                    continue;
+                extractOp.getResult().replaceAllUsesWith(elements[index]);
+                extractOp.erase();
+            }
+
+            SmallVector<ora::TupleCreateOp, 16> tupleCreates;
+            module.walk([&](ora::TupleCreateOp op)
+                        { tupleCreates.push_back(op); });
+            for (auto createOp : tupleCreates)
+            {
+                if (createOp.getResult().use_empty())
+                    createOp.erase();
             }
         }
 
@@ -1163,7 +1226,7 @@ public:
             logModuleOps(module, "After Phase2 conversion");
         }
 
-        // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.if + returns.
+        // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.conditional_return + returns.
         {
             RewritePatternSet phase2bPatterns(ctx);
             phase2bPatterns.add<ConvertTryStmtOp>(typeConverter, ctx);
@@ -1178,7 +1241,6 @@ public:
             phase2bPatterns.add<ConvertScfIfOp>(typeConverter, ctx,
                                                 /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
             phase2bPatterns.add<ConvertIfOp>(typeConverter, ctx);
-            phase2bPatterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
 
             ConversionTarget phase2bTarget(*ctx);
             phase2bTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -1284,11 +1346,24 @@ public:
         // Phase 4: lower scf.for, scf.while, memref ops (stack temps) to SIR.
         typeConverter.setEnableMemRefLowering(true);
         {
+            RewritePatternSet phase3PrePatterns(ctx);
+            phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefLoadOp>(ctx);
+            phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefStoreOp>(ctx);
+            if (failed(applyPatternsGreedily(module, std::move(phase3PrePatterns))))
+            {
+                dumpModuleOnFailure(module, "Phase3 pre-normalization");
+                module.emitError("[OraToSIR] Phase 4: error-union memref normalization failed");
+                signalPassFailure();
+                return;
+            }
+
             RewritePatternSet phase3Patterns(ctx);
             phase3Patterns.add<ConvertScfForOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertScfWhileOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertIfOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertIsolatedIfOp>(typeConverter, ctx);
+            phase3Patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
+            phase3Patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
+            phase3Patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx);
@@ -1308,6 +1383,9 @@ public:
             phase3Target.addIllegalOp<mlir::scf::WhileOp>();
             phase3Target.addIllegalOp<ora::ReturnOp>();
             phase3Target.addIllegalOp<ora::IfOp>();
+            phase3Target.addIllegalOp<ora::ErrorReturnOp>();
+            phase3Target.addIllegalOp<ora::ErrorOkOp>();
+            phase3Target.addIllegalOp<ora::ErrorErrOp>();
             phase3Target.addLegalOp<ora::YieldOp>();
             phase3Target.addLegalOp<ora::ContinueOp>();
             phase3Target.addLegalOp<ora::TryStmtOp>();
@@ -1352,6 +1430,9 @@ public:
             phase4Patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertSubWrappingOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertMulWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSubIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithMulIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithDivUIOp>(typeConverter, ctx);
@@ -1362,8 +1443,10 @@ public:
             phase4Patterns.add<ConvertArithOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithXOrIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertShlWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
@@ -1376,6 +1459,8 @@ public:
             phase4Patterns.add<ConvertRefinementToBaseOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructInitOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldUpdateOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructDeclOp>(typeConverter, ctx);
@@ -1392,21 +1477,29 @@ public:
             phase4Target.addLegalDialect<mlir::scf::SCFDialect>();
             phase4Target.addIllegalDialect<mlir::tensor::TensorDialect>();
             phase4Target.addIllegalDialect<mlir::memref::MemRefDialect>();
-            phase4Target.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            phase4Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
             phase4Target.addIllegalOp<mlir::func::CallOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
             phase4Target.addDynamicallyLegalOp<mlir::func::FuncOp>(
                 [&](mlir::func::FuncOp funcOp)
                 {
+                    auto isSIRSignatureType = [](Type type) {
+                        if (llvm::isa<sir::U256Type, sir::PtrType, ora::StructType, ora::TupleType,
+                                      mlir::MemRefType, mlir::UnrankedMemRefType>(type))
+                            return true;
+                        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+                            return intType.getWidth() <= 256;
+                        return false;
+                    };
                     auto fnType = funcOp.getFunctionType();
                     for (Type inputType : fnType.getInputs())
                     {
-                        if (!typeConverter.isLegal(inputType))
+                        if (!isSIRSignatureType(inputType))
                             return false;
                     }
                     for (Type resultType : fnType.getResults())
                     {
-                        if (!typeConverter.isLegal(resultType))
+                        if (!isSIRSignatureType(resultType))
                             return false;
                     }
 
@@ -1416,7 +1509,7 @@ public:
                     {
                         for (BlockArgument arg : block.getArguments())
                         {
-                            if (!typeConverter.isLegal(arg.getType()))
+                            if (!isSIRSignatureType(arg.getType()))
                                 return false;
                         }
                     }
@@ -1434,22 +1527,12 @@ public:
             phase4Target.addIllegalOp<ora::StructDeclOp>();
             phase4Target.addIllegalOp<ora::BaseToRefinementOp>();
             phase4Target.addIllegalOp<ora::RefinementToBaseOp>();
+            phase4Target.addIllegalOp<ora::AbiEncodeOp>();
+            phase4Target.addIllegalOp<ora::ExternalCallOp>();
+            phase4Target.addIllegalOp<ora::AbiDecodeOp>();
             phase4Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before Phase 4.
-            if (mlir::ora::isDebugEnabled())
-            {
-                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
-                {
-                    llvm::errs() << "[OraToSIR] Phase4 pre-scan: unrealized cast at "
-                                 << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                                 << " results=" << castOp.getNumResults() << "\n";
-                }
-                llvm::errs().flush();
-            }
-
-            // (error IDs already preserved as module attr before Phase 1)
-
             logModuleOps(module, "Before Phase4 conversion");
             if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns))))
             {
@@ -1459,6 +1542,130 @@ public:
                 return;
             }
             logModuleOps(module, "After Phase4 conversion");
+
+            SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op) { residualCasts.push_back(op); });
+            for (auto castOp : residualCasts)
+            {
+                mlir::IRRewriter b(ctx);
+                b.setInsertionPoint(castOp);
+                auto loc = castOp.getLoc();
+                auto u256Ty = sir::U256Type::get(ctx);
+                auto isNarrowErr = [&](ora::ErrorUnionType errType) {
+                    auto successType = errType.getSuccessType();
+                    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+                };
+                auto asU256 = [&](Value value) -> Value {
+                    if (llvm::isa<sir::U256Type>(value.getType()))
+                        return value;
+                    return b.create<sir::BitcastOp>(loc, u256Ty, value);
+                };
+
+                if (llvm::all_of(castOp.getResults(), [](Value result) { return result.use_empty(); }))
+                {
+                    b.eraseOp(castOp);
+                    continue;
+                }
+
+                if (castOp.getNumOperands() == 1 && castOp.getNumResults() == 1)
+                {
+                    Value input = castOp.getOperand(0);
+                    Type resultType = castOp.getResult(0).getType();
+
+                    if (input.getType() == resultType)
+                    {
+                        castOp.getResult(0).replaceAllUsesWith(input);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (llvm::isa<sir::U256Type>(resultType) && llvm::isa<mlir::IntegerType>(input.getType()))
+                    {
+                        Value repl = asU256(input);
+                        castOp.getResult(0).replaceAllUsesWith(repl);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (llvm::isa<mlir::IntegerType>(resultType) && llvm::isa<sir::U256Type>(input.getType()))
+                    {
+                        Value repl = b.create<sir::BitcastOp>(loc, resultType, input);
+                        castOp.getResult(0).replaceAllUsesWith(repl);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (llvm::isa<sir::PtrType>(resultType) &&
+                        llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+                    {
+                        Value repl = b.create<sir::BitcastOp>(loc, resultType, input);
+                        castOp.getResult(0).replaceAllUsesWith(repl);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
+                        llvm::isa<sir::PtrType>(input.getType()))
+                    {
+                        castOp.getResult(0).replaceAllUsesWith(input);
+                        b.eraseOp(castOp);
+                        continue;
+                    }
+
+                    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+                    {
+                        if (isNarrowErr(errType) && llvm::isa<mlir::IntegerType>(input.getType()))
+                        {
+                            Value repl = asU256(input);
+                            castOp.getResult(0).replaceAllUsesWith(repl);
+                            b.eraseOp(castOp);
+                            continue;
+                        }
+                    }
+                }
+
+                if (castOp.getNumOperands() == 2 && castOp.getNumResults() == 1)
+                {
+                    Type resultType = castOp.getResult(0).getType();
+                    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+                    {
+                        if (isNarrowErr(errType))
+                        {
+                            auto u256IntTy = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+                            Value tag = asU256(castOp.getOperand(0));
+                            Value payload = asU256(castOp.getOperand(1));
+                            Value one = b.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
+                            Value shifted = b.create<sir::ShlOp>(loc, u256Ty, payload, one);
+                            Value packed = b.create<sir::OrOp>(loc, u256Ty, shifted, tag);
+                            castOp.getResult(0).replaceAllUsesWith(packed);
+                            b.eraseOp(castOp);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            RewritePatternSet castCleanupPatterns(ctx);
+            castCleanupPatterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
+            castCleanupPatterns.add<StripNormalizedErrorUnionCastOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
+
+            ConversionTarget castCleanupTarget(*ctx);
+            castCleanupTarget.addLegalDialect<mlir::BuiltinDialect>();
+            castCleanupTarget.addLegalDialect<sir::SIRDialect>();
+            castCleanupTarget.addLegalDialect<mlir::func::FuncDialect>();
+            castCleanupTarget.addLegalDialect<mlir::scf::SCFDialect>();
+            castCleanupTarget.addLegalDialect<ora::OraDialect>();
+            castCleanupTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+
+            if (failed(applyFullConversion(module, castCleanupTarget, std::move(castCleanupPatterns))))
+            {
+                dumpModuleOnFailure(module, "Phase4 cast cleanup");
+                module.emitError("[OraToSIR] Phase 5: unrealized cast cleanup failed");
+                signalPassFailure();
+                return;
+            }
 
             // Cleanup: strip any remaining normalized error_union casts.
             SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;
@@ -1514,12 +1721,12 @@ public:
             }
 
             // Cleanup: strip all remaining 1:1 unrealized_conversion_casts.
-            SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
+            SmallVector<mlir::UnrealizedConversionCastOp, 16> trailingCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op)
                         {
                 if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-                    residualCasts.push_back(op); });
-            for (auto castOp : residualCasts)
+                    trailingCasts.push_back(op); });
+            for (auto castOp : trailingCasts)
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
                 castOp.erase();
@@ -1658,7 +1865,7 @@ public:
             }
         }
 
-        // Guard: fail if any ops remain that should have been lowered by this stage.
+        // Guard: fail if any lowering-phase dialect ops remain after all lowering phases.
         if (mlir::ora::isDebugEnabled())
         {
             llvm::errs() << "[OraToSIR] Post-Phase4: illegal-op scan start\n";
@@ -1670,29 +1877,37 @@ public:
             if (op->getDialect())
             {
                 StringRef ns = op->getDialect()->getNamespace();
-                // Control-flow and high-level ops are allowed to remain for later phases.
-                if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
-                    return;
-
                 if (ns == "ora")
                 {
-                    // These should be gone by now.
-                    if (isa<ora::ReturnOp,
-                            ora::ErrorOkOp,
-                            ora::ErrorErrOp,
-                            ora::ErrorIsErrorOp,
-                            ora::ErrorUnwrapOp,
-                            ora::ErrorGetErrorOp>(op))
-                    {
-                        llvm::errs() << "[OraToSIR] ERROR: Illegal op remains: " << op->getName()
-                                     << " at " << op->getLoc() << "\n";
-                        illegalFound = true;
-                    }
+                    llvm::errs() << "[OraToSIR] ERROR: Residual Ora op remains: " << op->getName()
+                                 << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
+                    return;
+                }
+                if (ns == "cf" || ns == "scf" || ns == "tensor" || ns == "arith" || ns == "memref")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual lowering dialect op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
+                    return;
+                }
+                if (ns == "func" && op->getName().getStringRef() != "func.func")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual func dialect op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
+                    return;
+                }
+                if (ns == "builtin" && op->getName().getStringRef() != "builtin.module")
+                {
+                    llvm::errs() << "[OraToSIR] ERROR: Residual builtin op remains: "
+                                 << op->getName() << " at " << op->getLoc() << "\n";
+                    illegalFound = true;
                 }
             } });
         if (illegalFound)
         {
-            module.emitError("[OraToSIR] post-conversion: illegal Ora ops remain after all phases");
+            module.emitError("[OraToSIR] post-conversion: residual lowering ops remain after all phases");
             signalPassFailure();
             return;
         }
@@ -1734,24 +1949,6 @@ public:
         // NOTE: greedy peephole patterns (FoldRedundantBitcast, FoldEqSame, etc.)
         // are intentionally disabled here — they caused crashes in converted loop
         // CFGs. Re-enable when SIR CFG normalization is more robust.
-
-        // Remove gas_cost attributes from all operations (Ora MLIR specific, not SIR)
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup start\n";
-            llvm::errs().flush();
-        }
-        module.walk([&](Operation *op)
-                    {
-                if (op->hasAttr("gas_cost"))
-                {
-                    op->removeAttr("gas_cost");
-                } });
-        if (mlir::ora::isDebugEnabled())
-        {
-            llvm::errs() << "[OraToSIR] Post-Phase4: gas attribute cleanup done\n";
-            llvm::errs().flush();
-        }
 
         // Check what Ora ops remain (should be none)
         module.walk([&](Operation *op)
@@ -2145,11 +2342,18 @@ namespace mlir
                         llvm::errs().flush();
                     }
                     
-                    // Create a nested pass manager for this function
+                    // Create a nested pass manager for this function.
+                    // Disable canonicalizer constant-CSE here: upstream MLIR
+                    // rehomes uniqued constants with UnknownLoc, which strips
+                    // source locations from Ora MLIR before conversion.
                     OpPassManager funcPM("func.func");
+                    GreedyRewriteConfig config;
+                    config.enableConstantCSE(false);
                     
-                    // Run canonicalization first to fold constants (ora.add, ora.mul, etc.)
-                    funcPM.addPass(mlir::createCanonicalizerPass());
+                    // Run canonicalization first to fold algebraic identities
+                    // and simplify control flow, but keep region-local
+                    // constants anchored to their original source locations.
+                    funcPM.addPass(mlir::createCanonicalizerPass(config));
                     DBG("  Added canonicalize pass");
                     
                     // Run the pass manager on this function

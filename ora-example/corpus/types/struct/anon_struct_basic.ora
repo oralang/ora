@@ -1,0 +1,23 @@
+// Anonymous struct literal .{ x: 10, y: 20 } — if supported.
+// NOTE: Anonymous structs may not be fully supported in Ora yet.
+// This file tests the syntax; it may fail during compilation.
+
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+contract AnonStructBasic {
+    // Use named struct as baseline (known to work)
+    pub fn named_struct() -> u256 {
+        let p: Point = Point { x: 10, y: 20 };
+        return p.x + p.y;
+    }
+
+    // Anonymous struct literal assigned to typed variable
+    // This syntax is experimental and may not be supported.
+    // pub fn anon_struct() -> u256 {
+    //     let p: Point = .{ x: 10, y: 20 };
+    //     return p.x + p.y;
+    // }
+}

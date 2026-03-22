@@ -6,7 +6,7 @@ contract TryCatchBlock {
 
     fn mayFail(x: u256) -> !u256 {
         if (x == 0) {
-            return error.Fail;
+            return Fail;
         }
         return x + 1;
     }

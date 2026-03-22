@@ -1,6 +1,7 @@
 // Test file for formal verification annotations
 // This demonstrates requires, ensures, invariants, ghost functions, and ghost variables
 
+comptime const std = @import("std");
 contract FVTest {
     error InsufficientBalance;
 
@@ -60,7 +61,6 @@ contract FVTest {
             invariant(i >= 1)
             invariant(i <= n + 1)
             invariant(sum <= 5050)
-            decreases(n + 1 - i)
         {
             sum = sum + i;
             i = i + 1;

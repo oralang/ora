@@ -18,12 +18,9 @@ pub const CliOptions = struct {
     emit_bytecode: bool = false,
     emit_cfg: bool = false,
     emit_cfg_mode: ?[]const u8 = null,
-    emit_abi: bool = false,
-    emit_abi_solidity: bool = false,
-    emit_abi_extras: bool = false,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
-    analyze_state: bool = false,
+    validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
@@ -114,15 +111,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             }
             opts.emit_cfg = true;
             opts.emit_cfg_mode = mode;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-abi")) {
-            opts.emit_abi = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-abi-solidity")) {
-            opts.emit_abi_solidity = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-abi-extras")) {
-            opts.emit_abi_extras = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--cpp-lowering-stub")) {
             opts.cpp_lowering_stub = true;
@@ -218,9 +206,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;
             i += 1;
-        } else if (std.mem.eql(u8, arg, "--analyze-state")) {
-            opts.analyze_state = true;
-            i += 1;
         } else if (std.mem.eql(u8, arg, "-O0") or std.mem.eql(u8, arg, "-Onone")) {
             opts.mlir_opt_level = "none";
             i += 1;
@@ -231,6 +216,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             opts.mlir_opt_level = "aggressive";
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-validate-mlir")) {
+            opts.validate_mlir = false;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-canonicalize")) {
             opts.canonicalize_mlir = false;

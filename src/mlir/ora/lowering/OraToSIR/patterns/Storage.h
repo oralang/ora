@@ -50,13 +50,13 @@ namespace mlir
             {
                 auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
                 if (!slotsAttr)
-                    return fallbackSlotFromName(name);
+                    return std::nullopt;
                 if (auto slotAttr = slotsAttr.get(name))
                 {
                     if (auto intAttr = llvm::dyn_cast<IntegerAttr>(slotAttr))
                         return intAttr.getUInt();
                 }
-                return fallbackSlotFromName(name);
+                return std::nullopt;
             }
 
             // Check if the global has a slot index attribute
@@ -66,7 +66,7 @@ namespace mlir
                 return slotAttr.getUInt();
             }
 
-            return fallbackSlotFromName(name);
+            return std::nullopt;
         }
 
         // Storage operation conversions

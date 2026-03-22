@@ -1,0 +1,11 @@
+contract WrappingPow {
+    pub fn wrapping_pow_u256(base: u256, exp: u256) -> u256 {
+        let res: u256 = base **% exp;
+        return res;
+    }
+
+    pub fn wrapping_pow_square(x: u256) -> u256 {
+        let res: u256 = x **% 2;
+        return res;
+    }
+}

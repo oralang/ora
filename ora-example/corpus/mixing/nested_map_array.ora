@@ -1,0 +1,40 @@
+// Level 2: Compound + scalar mixing — map<address, map<u256, [bool; 8]>>
+// Tests deeply nested compound types.
+contract NestedMapArray {
+    storage var permissions: map<address, map<u256, [bool; 8]>>;
+
+    pub fn set_permission(account: address, role: u256, bit: u256, allowed: bool) {
+        let flags: [bool; 8] = permissions[account][role];
+        flags[bit] = allowed;
+        permissions[account][role] = flags;
+    }
+
+    pub fn get_permission(account: address, role: u256, bit: u256) -> bool {
+        let flags: [bool; 8] = permissions[account][role];
+        return flags[bit];
+    }
+
+    pub fn grant_all(account: address, role: u256) {
+        let flags: [bool; 8] = [true, true, true, true, true, true, true, true];
+        permissions[account][role] = flags;
+    }
+
+    pub fn revoke_all(account: address, role: u256) {
+        let flags: [bool; 8] = [false, false, false, false, false, false, false, false];
+        permissions[account][role] = flags;
+    }
+
+    pub fn count_granted(account: address, role: u256) -> u256 {
+        let flags: [bool; 8] = permissions[account][role];
+        let count: u256 = 0;
+        if (flags[0]) { count = count + 1; }
+        if (flags[1]) { count = count + 1; }
+        if (flags[2]) { count = count + 1; }
+        if (flags[3]) { count = count + 1; }
+        if (flags[4]) { count = count + 1; }
+        if (flags[5]) { count = count + 1; }
+        if (flags[6]) { count = count + 1; }
+        if (flags[7]) { count = count + 1; }
+        return count;
+    }
+}

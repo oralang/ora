@@ -1,0 +1,38 @@
+// Vault — Tier 3: Refinement types
+// Same core logic, adds compile-time refinements on parameters.
+
+error InsufficientBalance(required: u256, available: u256);
+
+comptime const std = @import("std");
+contract Vault {
+    storage var totalDeposits: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    log Deposit(account: address, amount: u256);
+    log Withdrawal(account: address, amount: u256);
+
+    pub fn deposit(amount: MinValue<u256, 1>) {
+        let sender: NonZeroAddress = std.msg.sender();
+        balances[sender] += amount;
+        totalDeposits += amount;
+        log Deposit(sender, amount);
+    }
+
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
+        let sender: NonZeroAddress = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) { return InsufficientBalance(amount, current); }
+        balances[sender] = current - amount;
+        totalDeposits -= amount;
+        log Withdrawal(sender, amount);
+        return true;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn getTotalDeposits() -> u256 {
+        return totalDeposits;
+    }
+}

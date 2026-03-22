@@ -1,0 +1,71 @@
+// ==========================================
+// SWITCH ENUM — switch on enum variants (exhaustive)
+// ==========================================
+
+enum Status : u8 {
+    Pending = 0,
+    Active = 1,
+    Paused = 2,
+    Closed = 3
+}
+
+enum Direction : u8 {
+    North = 0,
+    East = 1,
+    South = 2,
+    West = 3
+}
+
+contract SwitchEnum {
+    // Exhaustive enum switch
+    pub fn test_exhaustive(s: Status) -> u256 {
+        switch (s) {
+            Status.Pending => { return 0; }
+            Status.Active => { return 1; }
+            Status.Paused => { return 2; }
+            Status.Closed => { return 3; }
+        }
+    }
+
+    // Enum switch as expression
+    pub fn test_enum_expression(d: Direction) -> u256 {
+        return switch (d) {
+            Direction.North => 0,
+            Direction.East => 90,
+            Direction.South => 180,
+            Direction.West => 270
+        };
+    }
+
+    // Enum switch with block bodies
+    pub fn test_enum_blocks(s: Status) -> u256 {
+        switch (s) {
+            Status.Pending => {
+                var weight: u256 = 1;
+                return weight;
+            }
+            Status.Active => {
+                var weight: u256 = 10;
+                return weight;
+            }
+            Status.Paused => {
+                var weight: u256 = 5;
+                return weight;
+            }
+            Status.Closed => {
+                return 0;
+            }
+        }
+    }
+
+    // Switch on enum with computation
+    pub fn get_priority(s: Status, base: u256) -> u256 {
+        var multiplier: u256 = switch (s) {
+            Status.Pending => 1,
+            Status.Active => 3,
+            Status.Paused => 2,
+            Status.Closed => 0
+        };
+        return base * multiplier;
+    }
+}

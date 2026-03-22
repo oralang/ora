@@ -1,0 +1,34 @@
+// Multiple NonZeroAddress parameters in same function
+
+contract NonZeroMultiple {
+    storage var owner: NonZeroAddress;
+
+    pub fn transferOwnership(from: NonZeroAddress, to: NonZeroAddress) -> bool {
+        if (from == owner) {
+            owner = to;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn areSame(a: NonZeroAddress, b: NonZeroAddress) -> bool {
+        return a == b;
+    }
+
+    pub fn areDifferent(a: NonZeroAddress, b: NonZeroAddress) -> bool {
+        return a != b;
+    }
+
+    pub fn threeParams(a: NonZeroAddress, b: NonZeroAddress, c: NonZeroAddress) -> bool {
+        let ab: bool = a == b;
+        let bc: bool = b == c;
+        let ac: bool = a == c;
+        return ab;
+    }
+
+    pub fn setOwnerChecked(newOwner: NonZeroAddress, caller: NonZeroAddress) {
+        if (caller == owner) {
+            owner = newOwner;
+        }
+    }
+}
