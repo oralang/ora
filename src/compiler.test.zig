@@ -11300,6 +11300,24 @@ test "compiler lowers real HIR while loops for storage-driven loops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
+test "compiler lowers address-typed storage reads with address result types" {
+    const source_text =
+        \\contract C {
+        \\    storage var address_value: address;
+        \\
+        \\    pub fn read() -> address {
+        \\        return address_value;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.global \"address_value\" : !ora.address"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"address_value\" : !ora.address"));
+}
+
 test "compiler skips unknown carried locals in while lowering" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {
