@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 const source = @import("../source/mod.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
@@ -1260,10 +1261,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
                             const field = item.Field;
-                            const target_type = if (field.type_expr) |type_expr|
-                                self.parent.lowerTypeExpr(type_expr)
-                            else
-                                self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
+                            const target_type = self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
                             const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
                             const loc = self.parent.location(name.range);
                             const op = switch (field.storage_class) {
@@ -1305,7 +1303,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         return;
                     }
                     const base_value = try @This().lowerPatternValue(self, field.base, locals);
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
+                    const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
                     const op = mlir.oraStructFieldUpdateOpCreate(
                         self.parent.context,
@@ -1594,7 +1592,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
                             const field = item.Field;
-                            const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, name.range);
+                            const result_type = self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
                             const op = switch (field.storage_class) {
                                 .storage => mlir.oraSLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),
                                 .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),
@@ -1669,6 +1667,46 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk self.parent.typecheck.item_types[item_id.index()];
                     }
                     break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                },
+                .Field => |field| blk: {
+                    const base_type = @This().patternType(self, field.base, locals);
+                    if (base_type.kind() == .anonymous_struct) {
+                        for (base_type.anonymous_struct.fields) |struct_field| {
+                            if (std.mem.eql(u8, struct_field.name, field.name)) break :blk struct_field.ty;
+                        }
+                    }
+                    if (base_type.kind() == .struct_) {
+                        if (self.parent.typecheck.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
+                            for (instantiated.fields) |struct_field| {
+                                if (std.mem.eql(u8, struct_field.name, field.name)) break :blk struct_field.ty;
+                            }
+                        }
+                    }
+                    const type_name = base_type.name() orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                    const item_id = self.parent.item_index.lookup(type_name) orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                    break :blk switch (self.parent.file.item(item_id).*) {
+                        .Struct => |struct_item| blk2: {
+                            for (struct_item.fields) |struct_field| {
+                                if (std.mem.eql(u8, struct_field.name, field.name)) {
+                                    break :blk2 type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, struct_field.type_expr) catch self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                                }
+                            }
+                            break :blk2 self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        },
+                        .ErrorDecl => |error_decl| blk2: {
+                            for (error_decl.parameters) |parameter| {
+                                const pattern = self.parent.file.pattern(parameter.pattern).*;
+                                switch (pattern) {
+                                    .Name => |name| if (std.mem.eql(u8, name.name, field.name)) {
+                                        break :blk2 type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, parameter.type_expr) catch self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                                    },
+                                    else => {},
+                                }
+                            }
+                            break :blk2 self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        },
+                        else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
+                    };
                 },
                 else => self.parent.typecheck.pattern_types[pattern_id.index()].type,
             };
