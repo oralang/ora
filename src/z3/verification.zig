@@ -43,6 +43,21 @@ pub const SmtReportArtifacts = struct {
 
 /// Verification pass for MLIR modules
 pub const VerificationPass = struct {
+    const SwitchCaseMetadata = struct {
+        case_kinds: []i64,
+        case_values: []i64,
+        range_starts: []i64,
+        range_ends: []i64,
+        default_case_index: ?i64,
+
+        fn deinit(self: *SwitchCaseMetadata, allocator: std.mem.Allocator) void {
+            allocator.free(self.case_kinds);
+            allocator.free(self.case_values);
+            allocator.free(self.range_starts);
+            allocator.free(self.range_ends);
+        }
+    };
+
     pub const VerifyMode = enum {
         Basic,
         Full,
@@ -351,6 +366,8 @@ pub const VerificationPass = struct {
                     // entrypoints (e.g. private/internal helpers).
                 } else if (std.mem.eql(u8, op_name, "scf.if")) {
                     try self.walkScfIfRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "ora.switch")) {
+                    try self.walkOraSwitchRegions(current_op);
                 } else {
                     // walk nested regions (for functions, loops, etc.)
                     const num_regions = mlir.oraOperationGetNumRegions(current_op);
@@ -542,6 +559,90 @@ pub const VerificationPass = struct {
         }
     }
 
+    fn mergeEncoderBranchStatesMany(
+        self: *VerificationPass,
+        conditions: []const z3.Z3_ast,
+        base: *const EncoderBranchState,
+        branch_states: []const EncoderBranchState,
+    ) !void {
+        self.clearEncoderGlobalMap();
+        var global_names = std.ArrayList([]const u8){};
+        defer global_names.deinit(self.allocator);
+
+        var base_g_it = base.global_map.iterator();
+        while (base_g_it.next()) |entry| {
+            try self.appendUniqueName(&global_names, entry.key_ptr.*);
+        }
+        for (branch_states) |*branch_state| {
+            var branch_it = branch_state.global_map.iterator();
+            while (branch_it.next()) |entry| {
+                try self.appendUniqueName(&global_names, entry.key_ptr.*);
+            }
+        }
+
+        for (global_names.items) |name| {
+            const base_opt = base.global_map.get(name);
+            var fallback = base_opt orelse blk: {
+                for (branch_states) |*branch_state| {
+                    if (branch_state.global_map.get(name)) |value| break :blk value;
+                }
+                continue;
+            };
+
+            var idx = branch_states.len;
+            while (idx > 0) {
+                idx -= 1;
+                const branch_val = branch_states[idx].global_map.get(name) orelse fallback;
+                fallback = if (branch_val == fallback)
+                    branch_val
+                else
+                    self.encoder.encodeIte(conditions[idx], branch_val, fallback);
+            }
+
+            const key_dup = try self.allocator.dupe(u8, name);
+            try self.encoder.global_map.put(key_dup, fallback);
+        }
+
+        self.encoder.memref_map.clearRetainingCapacity();
+        var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
+        defer mem_keys.deinit();
+
+        var base_m_it = base.memref_map.iterator();
+        while (base_m_it.next()) |entry| {
+            try mem_keys.put(entry.key_ptr.*, {});
+        }
+        for (branch_states) |*branch_state| {
+            var branch_it = branch_state.memref_map.iterator();
+            while (branch_it.next()) |entry| {
+                try mem_keys.put(entry.key_ptr.*, {});
+            }
+        }
+
+        var key_it = mem_keys.iterator();
+        while (key_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const base_opt = base.memref_map.get(key);
+            var fallback = base_opt orelse blk: {
+                for (branch_states) |*branch_state| {
+                    if (branch_state.memref_map.get(key)) |value| break :blk value;
+                }
+                continue;
+            };
+
+            var idx = branch_states.len;
+            while (idx > 0) {
+                idx -= 1;
+                const branch_val = branch_states[idx].memref_map.get(key) orelse fallback;
+                fallback = if (branch_val == fallback)
+                    branch_val
+                else
+                    self.encoder.encodeIte(conditions[idx], branch_val, fallback);
+            }
+
+            try self.encoder.memref_map.put(key, fallback);
+        }
+    }
+
     fn walkScfIfRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
         const num_regions = mlir.oraOperationGetNumRegions(if_op);
         if (num_regions == 0) return;
@@ -609,6 +710,207 @@ pub const VerificationPass = struct {
         }
 
         try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+    }
+
+    fn walkOraSwitchRegions(self: *VerificationPass, switch_op: mlir.MlirOperation) anyerror!void {
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(switch_op));
+        if (num_regions == 0) return;
+
+        const num_operands = mlir.oraOperationGetNumOperands(switch_op);
+        if (num_operands < 1) {
+            for (0..num_regions) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(switch_op, @intCast(region_idx));
+                try self.walkMLIRRegion(nested_region);
+            }
+            return;
+        }
+
+        const scrutinee_value = mlir.oraOperationGetOperand(switch_op, 0);
+        const scrutinee = try self.encoder.encodeValue(scrutinee_value);
+        const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+
+        var metadata = try self.getSwitchCaseMetadata(switch_op, num_regions);
+        defer metadata.deinit(self.allocator);
+
+        var base_state = try self.captureEncoderBranchState();
+        defer base_state.deinit(self.allocator);
+
+        var branch_conditions = try self.allocator.alloc(z3.Z3_ast, num_regions);
+        defer self.allocator.free(branch_conditions);
+        var branch_states = try self.allocator.alloc(EncoderBranchState, num_regions);
+        defer {
+            for (branch_states) |*branch_state| {
+                branch_state.deinit(self.allocator);
+            }
+            self.allocator.free(branch_states);
+        }
+        for (branch_states) |*branch_state| {
+            branch_state.* = EncoderBranchState.init(self.allocator);
+        }
+
+        var remaining = self.encoder.encodeBoolConstant(true);
+        for (0..num_regions) |region_idx| {
+            try self.restoreEncoderBranchState(&base_state);
+            const raw_predicate = try self.buildOraSwitchCasePredicate(
+                scrutinee,
+                metadata.case_kinds,
+                metadata.case_values,
+                metadata.range_starts,
+                metadata.range_ends,
+                region_idx,
+            );
+            const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_idx)))
+                remaining
+            else
+                self.encoder.encodeAnd(&.{ remaining, raw_predicate });
+            branch_conditions[region_idx] = effective_predicate;
+
+            const saved_len = self.active_path_assumptions.items.len;
+            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = effective_predicate,
+                .extra_constraints = &[_]z3.Z3_ast{},
+            });
+            const region = mlir.oraOperationGetRegion(switch_op, @intCast(region_idx));
+            try self.walkMLIRRegion(region);
+            branch_states[region_idx].deinit(self.allocator);
+            branch_states[region_idx] = try self.captureEncoderBranchState();
+
+            if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_idx))) {
+                remaining = self.encoder.encodeAnd(&.{ remaining, self.encoder.encodeNot(raw_predicate) });
+            }
+        }
+
+        try self.mergeEncoderBranchStatesMany(branch_conditions, &base_state, branch_states);
+    }
+
+    fn getSwitchCaseAttrValues(self: *VerificationPass, op: mlir.MlirOperation, name: []const u8) ![]i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return try self.allocator.alloc(i64, 0);
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        var values = try self.allocator.alloc(i64, count);
+        for (0..count) |i| {
+            values[i] = mlir.oraIntegerAttrGetValueSInt(mlir.oraArrayAttrGetElement(attr, i));
+        }
+        return values;
+    }
+
+    fn getSwitchDefaultCaseIndex(_: *VerificationPass, op: mlir.MlirOperation) ?i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("default_case_index".ptr, "default_case_index".len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraIntegerAttrGetValueSInt(attr);
+    }
+
+    fn getSwitchCaseMetadata(self: *VerificationPass, op: mlir.MlirOperation, num_regions: usize) !SwitchCaseMetadata {
+        var metadata = SwitchCaseMetadata{
+            .case_kinds = try self.allocator.alloc(i64, num_regions),
+            .case_values = try self.allocator.alloc(i64, num_regions),
+            .range_starts = try self.allocator.alloc(i64, num_regions),
+            .range_ends = try self.allocator.alloc(i64, num_regions),
+            .default_case_index = null,
+        };
+        errdefer metadata.deinit(self.allocator);
+
+        @memset(metadata.case_kinds, 0);
+        @memset(metadata.case_values, 0);
+        @memset(metadata.range_starts, 0);
+        @memset(metadata.range_ends, 0);
+
+        const attr_case_kinds = try self.getSwitchCaseAttrValues(op, "case_kinds");
+        defer self.allocator.free(attr_case_kinds);
+        const attr_case_values = try self.getSwitchCaseAttrValues(op, "case_values");
+        defer self.allocator.free(attr_case_values);
+        const attr_range_starts = try self.getSwitchCaseAttrValues(op, "range_starts");
+        defer self.allocator.free(attr_range_starts);
+        const attr_range_ends = try self.getSwitchCaseAttrValues(op, "range_ends");
+        defer self.allocator.free(attr_range_ends);
+        const attr_default = self.getSwitchDefaultCaseIndex(op);
+
+        if (attr_case_kinds.len >= num_regions) {
+            @memcpy(metadata.case_kinds, attr_case_kinds[0..num_regions]);
+            if (attr_case_values.len >= num_regions) @memcpy(metadata.case_values, attr_case_values[0..num_regions]);
+            if (attr_range_starts.len >= num_regions) @memcpy(metadata.range_starts, attr_range_starts[0..num_regions]);
+            if (attr_range_ends.len >= num_regions) @memcpy(metadata.range_ends, attr_range_ends[0..num_regions]);
+            metadata.default_case_index = attr_default;
+            return metadata;
+        }
+
+        try self.parseSwitchCaseMetadataFromPrint(op, &metadata);
+        return metadata;
+    }
+
+    fn parseSwitchCaseMetadataFromPrint(self: *VerificationPass, op: mlir.MlirOperation, metadata: *SwitchCaseMetadata) !void {
+        const printed = mlir.oraOperationPrintToString(op);
+        defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
+        if (printed.data == null or printed.length == 0) return error.UnsupportedOperation;
+
+        var case_index: usize = 0;
+        var lines = std.mem.splitScalar(u8, printed.data[0..printed.length], '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "case ")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                const body = trimmed["case ".len..];
+                const arrow_index = std.mem.indexOf(u8, body, "=>") orelse continue;
+                const pattern = std.mem.trim(u8, body[0..arrow_index], " \t");
+                if (std.mem.indexOf(u8, pattern, "...")) |range_index| {
+                    metadata.case_kinds[case_index] = 1;
+                    metadata.range_starts[case_index] = try self.parseSwitchPatternInt(pattern[0..range_index]);
+                    metadata.range_ends[case_index] = try self.parseSwitchPatternInt(pattern[range_index + 3 ..]);
+                } else {
+                    metadata.case_kinds[case_index] = 0;
+                    metadata.case_values[case_index] = try self.parseSwitchPatternInt(pattern);
+                }
+                case_index += 1;
+            } else if (std.mem.startsWith(u8, trimmed, "else =>")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                metadata.case_kinds[case_index] = 2;
+                metadata.default_case_index = @intCast(case_index);
+                case_index += 1;
+            }
+        }
+        if (case_index < metadata.case_kinds.len) return error.UnsupportedOperation;
+    }
+
+    fn parseSwitchPatternInt(_: *VerificationPass, text: []const u8) !i64 {
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (std.mem.eql(u8, trimmed, "true")) return 1;
+        if (std.mem.eql(u8, trimmed, "false")) return 0;
+        return std.fmt.parseInt(i64, trimmed, 10) catch error.UnsupportedOperation;
+    }
+
+    fn buildOraSwitchCasePredicate(
+        self: *VerificationPass,
+        scrutinee: z3.Z3_ast,
+        case_kinds: []const i64,
+        case_values: []const i64,
+        range_starts: []const i64,
+        range_ends: []const i64,
+        case_index: usize,
+    ) !z3.Z3_ast {
+        if (case_index >= case_kinds.len) return error.UnsupportedOperation;
+        const sort = z3.Z3_get_sort(self.context.ctx, scrutinee);
+        return switch (case_kinds[case_index]) {
+            0 => blk: {
+                if (case_index >= case_values.len) return error.UnsupportedOperation;
+                const case_value = try self.encoder.encodeScalarValueForSort(case_values[case_index], sort);
+                break :blk self.encoder.encodeComparisonOp(.Eq, scrutinee, case_value);
+            },
+            1 => blk: {
+                if (case_index >= range_starts.len or case_index >= range_ends.len) return error.UnsupportedOperation;
+                const start_value = try self.encoder.encodeScalarValueForSort(range_starts[case_index], sort);
+                const end_value = try self.encoder.encodeScalarValueForSort(range_ends[case_index], sort);
+                const lower = self.encoder.encodeComparisonOp(.Ge, scrutinee, start_value);
+                const upper = self.encoder.encodeComparisonOp(.Le, scrutinee, end_value);
+                break :blk self.encoder.encodeAnd(&.{ lower, upper });
+            },
+            2 => self.encoder.encodeBoolConstant(true),
+            else => error.UnsupportedOperation,
+        };
     }
 
     fn collectRegionPredecessorCounts(

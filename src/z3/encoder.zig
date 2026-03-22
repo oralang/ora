@@ -16,6 +16,21 @@ const Context = @import("context.zig").Context;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    const SwitchCaseMetadata = struct {
+        case_kinds: []i64,
+        case_values: []i64,
+        range_starts: []i64,
+        range_ends: []i64,
+        default_case_index: ?i64,
+
+        fn deinit(self: *SwitchCaseMetadata, allocator: std.mem.Allocator) void {
+            allocator.free(self.case_kinds);
+            allocator.free(self.case_values);
+            allocator.free(self.range_starts);
+            allocator.free(self.range_ends);
+        }
+    };
+
     const TupleValue = struct {
         elements: []z3.Z3_ast,
     };
@@ -1327,6 +1342,10 @@ pub const Encoder = struct {
             return try self.encodeScfIfResult(mlir_op, result_index, mode);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.switch_expr")) {
+            return try self.encodeOraSwitchExprResult(mlir_op, result_index, mode);
+        }
+
         if (std.mem.eql(u8, op_name, "scf.while") or
             std.mem.eql(u8, op_name, "scf.for") or
             std.mem.eql(u8, op_name, "scf.execute_region"))
@@ -1362,9 +1381,58 @@ pub const Encoder = struct {
         if (num_operands < 1) return error.InvalidOperandCount;
         const condition_value = mlir.oraOperationGetOperand(mlir_op, 0);
         const condition = try self.encodeValueWithMode(condition_value, mode);
-        const then_expr = try self.extractIfYield(mlir_op, 0, result_index, mode);
-        const else_expr = try self.extractIfYield(mlir_op, 1, result_index, mode);
+        const then_expr = try self.extractRegionYield(mlir_op, 0, result_index, mode);
+        const else_expr = try self.extractRegionYield(mlir_op, 1, result_index, mode);
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
+    }
+
+    fn encodeOraSwitchExprResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
+        if (num_operands < 1) return error.InvalidOperandCount;
+
+        const scrutinee_value = mlir.oraOperationGetOperand(mlir_op, 0);
+        const scrutinee = try self.encodeValueWithMode(scrutinee_value, mode);
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(mlir_op));
+        var metadata = try self.getSwitchCaseMetadata(mlir_op, num_regions);
+        defer metadata.deinit(self.allocator);
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        const op_id = @intFromPtr(mlir_op.ptr);
+        var merged = try self.mkUndefValue(result_sort, "switch_expr", op_id);
+        var remaining = self.encodeBoolConstant(true);
+
+        var region_index = num_regions;
+        while (region_index > 0) {
+            region_index -= 1;
+
+            const branch_expr = (try self.extractRegionYield(mlir_op, @intCast(region_index), result_index, mode)) orelse merged;
+            const raw_predicate = try self.buildOraSwitchCasePredicate(
+                scrutinee,
+                metadata.case_kinds,
+                metadata.case_values,
+                metadata.range_starts,
+                metadata.range_ends,
+                region_index,
+            );
+            const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                remaining
+            else
+                self.encodeAnd(&.{ remaining, raw_predicate });
+            merged = self.encodeIte(effective_predicate, branch_expr, merged);
+
+            if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+            }
+        }
+
+        return merged;
     }
 
     fn encodeOperationOperandsWithMode(
@@ -1966,8 +2034,8 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.if")) {
             if (operands.len >= 1) {
                 const condition = operands[0];
-                const then_expr = try self.extractIfYield(mlir_op, 0, 0, mode);
-                const else_expr = try self.extractIfYield(mlir_op, 1, 0, mode);
+                const then_expr = try self.extractRegionYield(mlir_op, 0, 0, mode);
+                const else_expr = try self.extractRegionYield(mlir_op, 1, 0, mode);
                 return try self.encodeControlFlow(op_name, condition, then_expr, else_expr);
             }
         }
@@ -3242,7 +3310,7 @@ pub const Encoder = struct {
         }
     }
 
-    fn extractIfYield(
+    fn extractRegionYield(
         self: *Encoder,
         mlir_op: mlir.MlirOperation,
         region_index: u32,
@@ -3262,7 +3330,7 @@ pub const Encoder = struct {
                 ""
             else
                 name_ref.data[0..name_ref.length];
-            if (std.mem.eql(u8, name, "scf.yield")) {
+            if (std.mem.eql(u8, name, "scf.yield") or std.mem.eql(u8, name, "ora.yield")) {
                 const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
                 if (num_operands > result_index) {
                     const value = mlir.oraOperationGetOperand(current, result_index);
@@ -3273,6 +3341,133 @@ pub const Encoder = struct {
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
+    }
+
+    fn getSwitchCaseAttrValues(self: *Encoder, op: mlir.MlirOperation, name: []const u8) EncodeError![]i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return try self.allocator.alloc(i64, 0);
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        var values = try self.allocator.alloc(i64, count);
+        for (0..count) |i| {
+            values[i] = mlir.oraIntegerAttrGetValueSInt(mlir.oraArrayAttrGetElement(attr, i));
+        }
+        return values;
+    }
+
+    fn getSwitchDefaultCaseIndex(_: *Encoder, op: mlir.MlirOperation) ?i64 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("default_case_index".ptr, "default_case_index".len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraIntegerAttrGetValueSInt(attr);
+    }
+
+    fn getSwitchCaseMetadata(self: *Encoder, op: mlir.MlirOperation, num_regions: usize) EncodeError!SwitchCaseMetadata {
+        var metadata = SwitchCaseMetadata{
+            .case_kinds = try self.allocator.alloc(i64, num_regions),
+            .case_values = try self.allocator.alloc(i64, num_regions),
+            .range_starts = try self.allocator.alloc(i64, num_regions),
+            .range_ends = try self.allocator.alloc(i64, num_regions),
+            .default_case_index = null,
+        };
+        errdefer metadata.deinit(self.allocator);
+
+        @memset(metadata.case_kinds, 0);
+        @memset(metadata.case_values, 0);
+        @memset(metadata.range_starts, 0);
+        @memset(metadata.range_ends, 0);
+
+        const attr_case_kinds = try self.getSwitchCaseAttrValues(op, "case_kinds");
+        defer self.allocator.free(attr_case_kinds);
+        const attr_case_values = try self.getSwitchCaseAttrValues(op, "case_values");
+        defer self.allocator.free(attr_case_values);
+        const attr_range_starts = try self.getSwitchCaseAttrValues(op, "range_starts");
+        defer self.allocator.free(attr_range_starts);
+        const attr_range_ends = try self.getSwitchCaseAttrValues(op, "range_ends");
+        defer self.allocator.free(attr_range_ends);
+        const attr_default = self.getSwitchDefaultCaseIndex(op);
+
+        if (attr_case_kinds.len >= num_regions) {
+            @memcpy(metadata.case_kinds, attr_case_kinds[0..num_regions]);
+            if (attr_case_values.len >= num_regions) @memcpy(metadata.case_values, attr_case_values[0..num_regions]);
+            if (attr_range_starts.len >= num_regions) @memcpy(metadata.range_starts, attr_range_starts[0..num_regions]);
+            if (attr_range_ends.len >= num_regions) @memcpy(metadata.range_ends, attr_range_ends[0..num_regions]);
+            metadata.default_case_index = attr_default;
+            return metadata;
+        }
+
+        try self.parseSwitchCaseMetadataFromPrint(op, &metadata);
+        return metadata;
+    }
+
+    fn parseSwitchCaseMetadataFromPrint(self: *Encoder, op: mlir.MlirOperation, metadata: *SwitchCaseMetadata) EncodeError!void {
+        const printed = mlir.oraOperationPrintToString(op);
+        defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
+        if (printed.data == null or printed.length == 0) return error.UnsupportedOperation;
+
+        var case_index: usize = 0;
+        var lines = std.mem.splitScalar(u8, printed.data[0..printed.length], '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "case ")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                const body = trimmed["case ".len..];
+                const arrow_index = std.mem.indexOf(u8, body, "=>") orelse continue;
+                const pattern = std.mem.trim(u8, body[0..arrow_index], " \t");
+                if (std.mem.indexOf(u8, pattern, "...")) |range_index| {
+                    metadata.case_kinds[case_index] = 1;
+                    metadata.range_starts[case_index] = try self.parseSwitchPatternInt(pattern[0..range_index]);
+                    metadata.range_ends[case_index] = try self.parseSwitchPatternInt(pattern[range_index + 3 ..]);
+                } else {
+                    metadata.case_kinds[case_index] = 0;
+                    metadata.case_values[case_index] = try self.parseSwitchPatternInt(pattern);
+                }
+                case_index += 1;
+            } else if (std.mem.startsWith(u8, trimmed, "else =>")) {
+                if (case_index >= metadata.case_kinds.len) break;
+                metadata.case_kinds[case_index] = 2;
+                metadata.default_case_index = @intCast(case_index);
+                case_index += 1;
+            }
+        }
+
+        if (case_index < metadata.case_kinds.len) return error.UnsupportedOperation;
+    }
+
+    fn parseSwitchPatternInt(_: *Encoder, text: []const u8) EncodeError!i64 {
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (std.mem.eql(u8, trimmed, "true")) return 1;
+        if (std.mem.eql(u8, trimmed, "false")) return 0;
+        return std.fmt.parseInt(i64, trimmed, 10) catch error.UnsupportedOperation;
+    }
+
+    fn buildOraSwitchCasePredicate(
+        self: *Encoder,
+        scrutinee: z3.Z3_ast,
+        case_kinds: []const i64,
+        case_values: []const i64,
+        range_starts: []const i64,
+        range_ends: []const i64,
+        case_index: usize,
+    ) EncodeError!z3.Z3_ast {
+        if (case_index >= case_kinds.len) return error.UnsupportedOperation;
+        const sort = z3.Z3_get_sort(self.context.ctx, scrutinee);
+        return switch (case_kinds[case_index]) {
+            0 => blk: {
+                if (case_index >= case_values.len) return error.UnsupportedOperation;
+                const case_value = try self.encodeScalarValueForSort(case_values[case_index], sort);
+                break :blk self.encodeComparisonOp(.Eq, scrutinee, case_value);
+            },
+            1 => blk: {
+                if (case_index >= range_starts.len or case_index >= range_ends.len) return error.UnsupportedOperation;
+                const start_value = try self.encodeScalarValueForSort(range_starts[case_index], sort);
+                const end_value = try self.encodeScalarValueForSort(range_ends[case_index], sort);
+                const lower = self.encodeComparisonOp(.Ge, scrutinee, start_value);
+                const upper = self.encodeComparisonOp(.Le, scrutinee, end_value);
+                break :blk self.encodeAnd(&.{ lower, upper });
+            },
+            2 => self.encodeBoolConstant(true),
+            else => error.UnsupportedOperation,
+        };
     }
 
     fn getOperationName(_: *Encoder, op: mlir.MlirOperation) mlir.MlirStringRef {
@@ -3319,6 +3514,18 @@ pub const Encoder = struct {
 
     pub fn coerceBoolean(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {
         return self.coerceToBool(ast);
+    }
+
+    pub fn encodeScalarValueForSort(self: *Encoder, value: i64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
+        if (kind == z3.Z3_BOOL_SORT) {
+            return self.encodeBoolConstant(value != 0);
+        }
+        if (kind == z3.Z3_BV_SORT) {
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+            return self.encodeIntegerConstant(self.normalizeSignedIntToWidth(value, width), width);
+        }
+        return error.UnsupportedOperation;
     }
 
     fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) z3.Z3_sort {
