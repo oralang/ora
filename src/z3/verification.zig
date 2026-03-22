@@ -1494,7 +1494,11 @@ pub const VerificationPass = struct {
             return try self.runVerificationPassParallel(mlir_module);
         }
 
+        self.encoder.clearDegradation();
         try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) {
+            return try self.degradedVerificationResult();
+        }
         var result = errors.VerificationResult.init(self.allocator);
         var stats_total_queries: u64 = 0;
         var stats_sat: u64 = 0;
@@ -1541,18 +1545,18 @@ pub const VerificationPass = struct {
 
             for (annotations) |ann| {
                 if (ann.kind == .RefinementGuard) {
-                    guard_annotations.append(ann) catch {};
+                    try guard_annotations.append(ann);
                 } else if (ann.kind == .PathAssume) {
-                    path_assumption_annotations.append(ann) catch {};
+                    try path_assumption_annotations.append(ann);
                 } else if (isObligationKind(ann.kind)) {
-                    obligation_annotations.append(ann) catch {};
+                    try obligation_annotations.append(ann);
                     if (ann.kind == .Ensures) {
-                        ensure_annotations.append(ann) catch {};
+                        try ensure_annotations.append(ann);
                     } else if (ann.kind == .LoopInvariant and ann.loop_exit_condition != null) {
-                        loop_post_invariant_annotations.append(ann) catch {};
+                        try loop_post_invariant_annotations.append(ann);
                     }
                 } else if (isAssumptionKind(ann.kind)) {
-                    assumption_annotations.append(ann) catch {};
+                    try assumption_annotations.append(ann);
                 }
             }
 
@@ -1977,7 +1981,11 @@ pub const VerificationPass = struct {
     }
 
     fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
+        self.encoder.clearDegradation();
         try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) {
+            return try self.degradedVerificationResult();
+        }
         var queries = try self.buildPreparedQueries();
         defer {
             for (queries.items) |*query| {
@@ -2954,18 +2962,18 @@ pub const VerificationPass = struct {
 
             for (annotations) |ann| {
                 if (ann.kind == .RefinementGuard) {
-                    guard_annotations.append(ann) catch {};
+                    try guard_annotations.append(ann);
                 } else if (ann.kind == .PathAssume) {
-                    path_assumption_annotations.append(ann) catch {};
+                    try path_assumption_annotations.append(ann);
                 } else if (isObligationKind(ann.kind)) {
-                    obligation_annotations.append(ann) catch {};
+                    try obligation_annotations.append(ann);
                     if (ann.kind == .Ensures) {
-                        ensure_annotations.append(ann) catch {};
+                        try ensure_annotations.append(ann);
                     } else if (ann.kind == .LoopInvariant and ann.loop_exit_condition != null) {
-                        loop_post_invariant_annotations.append(ann) catch {};
+                        try loop_post_invariant_annotations.append(ann);
                     }
                 } else if (isAssumptionKind(ann.kind)) {
-                    assumption_annotations.append(ann) catch {};
+                    try assumption_annotations.append(ann);
                 }
             }
 
@@ -3217,6 +3225,25 @@ pub const VerificationPass = struct {
     fn firstLocationColumn(self: *const VerificationPass, annotations: []const EncodedAnnotation) u32 {
         _ = self;
         return if (annotations.len > 0) annotations[0].column else 0;
+    }
+
+    fn degradedVerificationResult(self: *VerificationPass) !errors.VerificationResult {
+        var result = errors.VerificationResult.init(self.allocator);
+        const reason = self.encoder.degradationReason() orelse "unknown SMT encoding degradation";
+        try result.addError(.{
+            .error_type = .Unknown,
+            .message = try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted: SMT encoding degraded ({s})",
+                .{reason},
+            ),
+            .file = try self.allocator.dupe(u8, ""),
+            .line = 0,
+            .column = 0,
+            .counterexample = null,
+            .allocator = self.allocator,
+        });
+        return result;
     }
 
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
@@ -4877,4 +4904,21 @@ test "contract invariants from loop body obligations use loop constraints" {
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
     try testing.expect(found_contract_obligation);
+}
+
+test "degraded SMT encoding fails closed" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    pass.encoder.encoding_degraded = true;
+    pass.encoder.encoding_degraded_reason = "test degradation";
+
+    var result = try pass.degradedVerificationResult();
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "SMT encoding degraded"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "test degradation"));
 }

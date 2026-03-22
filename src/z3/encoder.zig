@@ -95,6 +95,10 @@ pub const Encoder = struct {
     pending_constraints: std.ArrayList(z3.Z3_ast),
     /// Pending safety obligations emitted during encoding (e.g., div-by-zero, overflow).
     pending_obligations: std.ArrayList(z3.Z3_ast),
+    /// Set once encoding drops or skips any verification-relevant information.
+    encoding_degraded: bool,
+    /// Human-readable reason for the first degradation encountered.
+    encoding_degraded_reason: ?[]const u8,
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Stack of active quantified variable bindings (innermost binding last).
@@ -125,6 +129,8 @@ pub const Encoder = struct {
             .string_storage = std.ArrayList([]u8){},
             .pending_constraints = std.ArrayList(z3.Z3_ast){},
             .pending_obligations = std.ArrayList(z3.Z3_ast){},
+            .encoding_degraded = false,
+            .encoding_degraded_reason = null,
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
         };
@@ -136,6 +142,26 @@ pub const Encoder = struct {
 
     pub fn setVerifyState(self: *Encoder, enabled: bool) void {
         self.verify_state = enabled;
+    }
+
+    pub fn clearDegradation(self: *Encoder) void {
+        self.encoding_degraded = false;
+        self.encoding_degraded_reason = null;
+    }
+
+    pub fn isDegraded(self: *const Encoder) bool {
+        return self.encoding_degraded;
+    }
+
+    pub fn degradationReason(self: *const Encoder) ?[]const u8 {
+        return self.encoding_degraded_reason;
+    }
+
+    fn recordDegradation(self: *Encoder, reason: []const u8) void {
+        self.encoding_degraded = true;
+        if (self.encoding_degraded_reason == null) {
+            self.encoding_degraded_reason = reason;
+        }
     }
 
     pub fn resetFunctionState(self: *Encoder) void {
@@ -585,11 +611,15 @@ pub const Encoder = struct {
     }
 
     fn addConstraint(self: *Encoder, constraint: z3.Z3_ast) void {
-        self.pending_constraints.append(self.allocator, constraint) catch {};
+        self.pending_constraints.append(self.allocator, constraint) catch {
+            self.recordDegradation("failed to record SMT constraint");
+        };
     }
 
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
-        self.pending_obligations.append(self.allocator, obligation) catch {};
+        self.pending_obligations.append(self.allocator, obligation) catch {
+            self.recordDegradation("failed to record SMT obligation");
+        };
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
@@ -1830,7 +1860,9 @@ pub const Encoder = struct {
                 const value = self.coerceAstToSort(operands[2], value_sort);
                 const stored = self.encodeStore(operands[0], key, value);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {};
+                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {
+                    self.recordDegradation("failed to encode map store frame constraint");
+                };
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
                     const map_operand_id = @intFromPtr(map_operand.ptr);
@@ -3034,7 +3066,9 @@ pub const Encoder = struct {
                 std.mem.eql(u8, op_name, "call") or
                 std.mem.eql(u8, op_name, "ora.assert"))
             {
-                _ = self.encodeOperation(op) catch {};
+                _ = self.encodeOperation(op) catch {
+                    self.recordDegradation("failed to encode state effect operation");
+                };
             }
         }
 
@@ -3136,7 +3170,9 @@ pub const Encoder = struct {
                     if (self.isArraySort(slot_sort)) {
                         const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));
                         const frame_id = @as(u64, @intCast(slot_idx)) ^ (call_id_u64 << 8);
-                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {};
+                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {
+                            self.recordDegradation("failed to encode call-state frame constraint");
+                        };
                     }
                 }
 
@@ -3299,7 +3335,9 @@ pub const Encoder = struct {
                 parent_key,
                 updated,
                 op_id +% @as(u64, @intCast(depth + 1)),
-            ) catch {};
+            ) catch {
+                self.recordDegradation("failed to encode nested map-store frame constraint");
+            };
         }
 
         if (self.global_map.getPtr(global_name)) |existing| {
