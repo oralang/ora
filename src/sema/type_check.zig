@@ -2221,6 +2221,12 @@ const TypeChecker = struct {
             .Tuple => |tuple| {
                 if (expected_type.kind() != .tuple) return;
                 if (tuple.elements.len != expected_type.tuple.len) return;
+                for (tuple.elements, 0..) |element, index| {
+                    const expected_element_type = expected_type.tuple[index];
+                    try self.contextualizeLiteral(element, expected_element_type);
+                    const actual_type = self.expr_types[element.index()];
+                    if (!typesAssignable(expected_element_type, actual_type)) return;
+                }
                 self.expr_types[expr_id.index()] = expected_type;
             },
             .ArrayLiteral => |array| {

@@ -2745,6 +2745,22 @@ test "compiler contextualizes typed tuple literals with mixed element types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
 }
 
+test "compiler contextualizes typed tuple literals with narrow integer elements" {
+    const source_text =
+        \\pub fn amount_only() -> u256 {
+        \\    let t: (u8, u256) = (255, 1000);
+        \\    return t.1;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.tuple<i8, i256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.trunci"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+}
+
 test "compiler supports comptime while statements" {
     const source_text =
         \\pub fn run() -> u256 {

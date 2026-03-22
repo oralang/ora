@@ -105,8 +105,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Call => |call| try self.lowerCall(expr_id, call, locals),
                 .Builtin => |builtin| try self.lowerBuiltin(expr_id, builtin, locals),
                 .Tuple => |tuple| blk: {
+                    const sema_tuple_type = self.parent.typecheck.exprType(expr_id);
                     var operands: std.ArrayList(mlir.MlirValue) = .{};
-                    for (tuple.elements) |element| try operands.append(self.parent.allocator, try self.lowerExpr(element, locals));
+                    for (tuple.elements, 0..) |element, index| {
+                        const raw_value = try self.lowerExpr(element, locals);
+                        const value = if (sema_tuple_type.kind() == .tuple and index < sema_tuple_type.tuple.len)
+                            try self.convertValueForFlow(raw_value, self.parent.lowerSemaType(sema_tuple_type.tuple[index], tuple.range), exprRange(self.parent.file, element))
+                        else
+                            raw_value;
+                        try operands.append(self.parent.allocator, value);
+                    }
                     const result_type = self.parent.lowerExprType(expr_id);
                     const op = mlir.oraTupleCreateOpCreate(
                         self.parent.context,
