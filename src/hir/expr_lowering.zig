@@ -355,6 +355,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const result_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
             if (mlir.oraTypeIsNull(result_type)) return operand;
 
+            if (self.in_try_block) {
+                const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
+                if (mlir.oraOperationIsNull(unwrap)) return operand;
+                return appendValueOp(self.block, unwrap);
+            }
+
             if (!self.in_try_block) {
                 if (self.return_type) |return_type| {
                     if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(return_type))) {

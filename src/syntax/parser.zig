@@ -1131,7 +1131,7 @@ const Parser = struct {
             .While => self.parseWhileStmtNode(),
             .For => self.parseForStmtNode(),
             .Switch => self.parseSwitchStmtNode(),
-            .Try => self.parseTryStmtNode(),
+            .Try => if (self.peekKind(1) == .LeftBrace) self.parseTryStmtNode() else self.parseExprOrAssignStmtNode(),
             .Return => self.parseReturnStmtNode(),
             .Log => self.parseLogStmtNode(),
             .Assert => self.parseAssertStmtNode(),

@@ -10988,6 +10988,69 @@ test "compiler lowers real HIR try regions with shadowed catch locals" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
 }
 
+test "compiler parses statement-form try expressions" {
+    const source_text =
+        \\error E1;
+        \\pub fn mayFail(v: u256) -> !void | E1 {
+        \\    if (v == 0) {
+        \\        return E1;
+        \\    }
+        \\}
+        \\
+        \\pub fn run(v: u256) -> bool {
+        \\    try {
+        \\        try mayFail(v);
+        \\        return true;
+        \\    } catch (e) {
+        \\        return false;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+}
+
+test "compiler propagates try expressions inside try statements without default placeholders" {
+    const source_text =
+        \\struct Pair {
+        \\    value: u256;
+        \\}
+        \\
+        \\error Missing;
+        \\
+        \\pub fn load(ok: bool) -> !Pair | Missing {
+        \\    if (!ok) {
+        \\        return Missing;
+        \\    }
+        \\    return Pair { value: 7 };
+        \\}
+        \\
+        \\pub fn run(ok: bool) -> u256 {
+        \\    try {
+        \\        let pair: Pair = try load(ok);
+        \\        return pair.value;
+        \\    } catch (e) {
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.try_stmt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.default_value"));
+}
+
 test "compiler lowers real HIR switch regions with carried locals" {
     const source_text =
         \\pub fn choose(tag: u256, start: u256) -> u256 {

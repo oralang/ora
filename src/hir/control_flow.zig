@@ -41,6 +41,34 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 bodyMayReturn(self.parent.file, if_stmt.then_body) or
                 (if_stmt.else_body != null and bodyMayReturn(self.parent.file, if_stmt.else_body.?));
 
+            if (if_stmt.else_body == null and self.deferred_return_flag == null) {
+                const then_body = self.parent.file.body(if_stmt.then_body).*;
+                if (then_body.statements.len == 1 and self.parent.file.statement(then_body.statements[0]).* == .Return) {
+                    const condition = try self.lowerExpr(if_stmt.condition, locals);
+                    const loc = self.parent.location(if_stmt.range);
+                    const branch = mlir.oraConditionalReturnOpCreate(self.parent.context, loc, condition);
+                    if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
+                    appendOp(self.block, branch);
+
+                    const then_block = mlir.oraConditionalReturnOpGetThenBlock(branch);
+                    const else_block = mlir.oraConditionalReturnOpGetElseBlock(branch);
+                    if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                        return error.MlirOperationCreationFailed;
+                    }
+
+                    var then_lowerer = self.*;
+                    then_lowerer.block = then_block;
+                    var then_locals = try self.cloneLocals(locals);
+                    const then_terminated = try then_lowerer.lowerBody(if_stmt.then_body, &then_locals);
+                    if (!then_terminated) {
+                        try self.appendUnsupportedControlPlaceholder("ora.if_placeholder", if_stmt.range);
+                        return false;
+                    }
+                    try appendEmptyYield(self.parent.context, else_block, loc);
+                    return false;
+                }
+            }
+
             const condition = try self.lowerExpr(if_stmt.condition, locals);
             const loc = self.parent.location(if_stmt.range);
             const created_deferred_return = has_return and self.deferred_return_flag == null;
