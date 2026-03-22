@@ -311,7 +311,7 @@ pub fn main() !void {
     // handle fmt command
     if (fmt) {
         if (input_file == null) {
-            std.debug.print("error: fmt requires input file(s)\n", .{});
+            std.debug.print("error: fmt requires an input file or directory\n", .{});
             try printUsage();
             std.process.exit(2);
         }
@@ -1059,7 +1059,7 @@ fn printUsage() !void {
     try stdout.print("       ora build [options]\n", .{});
     try stdout.print("       ora build [options] <file.ora>\n", .{});
     try stdout.print("       ora emit [emit-options] <file.ora>\n", .{});
-    try stdout.print("       ora fmt [fmt-options] <file.ora>\n", .{});
+    try stdout.print("       ora fmt [fmt-options] <file.ora|dir>\n", .{});
     try stdout.print("       ora init [path]\n", .{});
     try stdout.print("       ora -v | --version\n", .{});
     try stdout.print("\nCompilation Control:\n", .{});
@@ -2175,14 +2175,15 @@ fn printUnifiedDiff(_: std.mem.Allocator, original: []const u8, formatted: []con
 }
 
 /// Run formatter on file(s)
-fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff: bool, stdout: bool, width: ?u32) !void {
+fn formatSingleFile(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    check: bool,
+    diff: bool,
+    stdout: bool,
+    options: anytype,
+) !bool {
     const fmt_mod = @import("fmt/mod.zig");
-    const FormatOptions = fmt_mod.FormatOptions;
-
-    const options = FormatOptions{
-        .line_width = width orelse 100,
-        .indent_size = 4,
-    };
 
     // Read source file
     const source = std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize)) catch |err| {
@@ -2207,28 +2208,94 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
     if (check) {
         if (!already_formatted) {
             std.debug.print("{s} needs formatting\n", .{file_path});
-            std.process.exit(1);
+            return true;
         }
-        return;
+        return false;
     }
 
     if (diff) {
         if (!already_formatted) {
             // Generate unified diff
             try printUnifiedDiff(allocator, source, formatted, file_path);
-            std.process.exit(1);
+            return true;
         }
-        return;
+        return false;
     }
 
     if (stdout) {
         try std.fs.File.stdout().writeAll(formatted);
-        return;
+        return false;
     }
 
     // Write formatted output
     if (!already_formatted) {
         try std.fs.cwd().writeFile(.{ .sub_path = file_path, .data = formatted });
+    }
+    return false;
+}
+
+fn formatDirectoryRecursive(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    check: bool,
+    diff: bool,
+    options: anytype,
+    found_mismatch: *bool,
+) !void {
+    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        const child_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+        defer allocator.free(child_path);
+
+        switch (entry.kind) {
+            .directory => try formatDirectoryRecursive(allocator, child_path, check, diff, options, found_mismatch),
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".ora")) continue;
+                if (try formatSingleFile(allocator, child_path, check, diff, false, options)) {
+                    found_mismatch.* = true;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff: bool, stdout: bool, width: ?u32) !void {
+    const fmt_mod = @import("fmt/mod.zig");
+    const FormatOptions = fmt_mod.FormatOptions;
+
+    const options = FormatOptions{
+        .line_width = width orelse 100,
+        .indent_size = 4,
+    };
+
+    var dir_probe = std.fs.cwd().openDir(file_path, .{}) catch |err| switch (err) {
+        error.NotDir => null,
+        else => {
+            std.debug.print("error: cannot access '{s}': {s}\n", .{ file_path, @errorName(err) });
+            std.process.exit(1);
+        },
+    };
+    if (dir_probe) |*dir| {
+        dir.close();
+        if (stdout) {
+            std.debug.print("error: --stdout does not support directory inputs\n", .{});
+            std.process.exit(2);
+        }
+
+        var found_mismatch = false;
+        try formatDirectoryRecursive(allocator, file_path, check, diff, options, &found_mismatch);
+        if (found_mismatch) {
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    if (try formatSingleFile(allocator, file_path, check, diff, stdout, options)) {
+        std.process.exit(1);
     }
 }
 
