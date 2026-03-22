@@ -468,7 +468,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             defer abi_param_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
-                const abi_type = try abi_support.canonicalAbiType(self.allocator, self.typecheck.pattern_types[parameter.pattern.index()].type);
+                const abi_type = try @This().abiLayoutForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type);
                 defer self.allocator.free(abi_type);
                 try signature_parts.append(self.allocator, try self.allocator.dupe(u8, abi_type));
                 abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
@@ -901,7 +901,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
             return switch (ty) {
-                .bool, .address, .integer => 1,
+                .bool, .address, .integer, .enum_ => 1,
                 .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
                 .tuple => |elements| blk: {
                     var total: usize = 0;
@@ -918,7 +918,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .struct_ => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
                 .contract => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
-                .named => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
+                .named => |named| @This().staticAbiWordCountForNamedType(self, named.name),
                 else => null,
             };
         }
@@ -936,7 +936,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             return switch (ty) {
-                .bool, .address, .string, .bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
+                .bool, .address, .string, .bytes, .integer, .enum_ => abi_support.canonicalAbiType(self.allocator, ty),
                 .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
                 .array => |array| blk: {
                     const element = try @This().abiLayoutForType(self, array.element_type.*);
@@ -962,8 +962,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .struct_ => |named| @This().abiLayoutForNamedStruct(self, named.name),
                 .contract => |named| @This().abiLayoutForNamedStruct(self, named.name),
-                .named => |named| @This().abiLayoutForNamedStruct(self, named.name),
+                .named => |named| @This().abiLayoutForNamedType(self, named.name),
                 else => error.UnsupportedAbiType,
+            };
+        }
+
+        fn abiLayoutForNamedType(self: *Lowerer, name: []const u8) anyerror![]const u8 {
+            if (self.typecheck.instantiatedEnumByName(name)) |_| {
+                return self.allocator.dupe(u8, "uint32");
+            }
+            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
+            return switch (self.file.item(item_id).*) {
+                .Enum => self.allocator.dupe(u8, "uint32"),
+                else => @This().abiLayoutForNamedStruct(self, name),
             };
         }
 
@@ -994,6 +1005,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
                 },
                 else => error.UnsupportedAbiType,
+            };
+        }
+
+        fn staticAbiWordCountForNamedType(self: *Lowerer, name: []const u8) ?usize {
+            if (self.typecheck.instantiatedEnumByName(name)) |_| return 1;
+            const item_id = self.item_index.lookup(name) orelse return null;
+            return switch (self.file.item(item_id).*) {
+                .Enum => 1,
+                else => @This().staticAbiWordCountForNamedStruct(self, name),
             };
         }
 
