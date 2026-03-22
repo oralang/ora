@@ -739,11 +739,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Break => |jump| {
                     if (jump.label != null) {
                         if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
-                            const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                            const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                                current_region_locals
+                            else if (self.deferred_return_kind == .ora_yield)
                                 self.deferred_return_carried_locals
                             else
                                 switch_context.carried_locals;
-                            if (carried_locals.len == 0) {
+                            if (self.current_scf_carried_locals != null) {
+                                if (carried_locals.len == 0) {
+                                    try appendEmptyScfYield(self.parent.context, self.block, self.parent.location(jump.range));
+                                } else {
+                                    try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                                }
+                            } else if (carried_locals.len == 0) {
                                 try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
                             } else {
                                 try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
@@ -765,11 +773,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                     }
                     if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
-                        const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                        const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                            current_region_locals
+                        else if (self.deferred_return_kind == .ora_yield)
                             self.deferred_return_carried_locals
                         else
                             switch_context.carried_locals;
-                        if (carried_locals.len == 0) {
+                        if (self.current_scf_carried_locals != null) {
+                            if (carried_locals.len == 0) {
+                                try appendEmptyScfYield(self.parent.context, self.block, self.parent.location(jump.range));
+                            } else {
+                                try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            }
+                        } else if (carried_locals.len == 0) {
                             try appendEmptyYield(self.parent.context, self.block, self.parent.location(jump.range));
                         } else {
                             try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
@@ -812,11 +828,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
                             if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, set_continue);
-                            const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                            const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                                current_region_locals
+                            else if (self.deferred_return_kind == .ora_yield)
                                 self.deferred_return_carried_locals
                             else
                                 switch_context.carried_locals;
-                            if (carried_locals.len == 0) {
+                            if (self.current_scf_carried_locals != null) {
+                                if (carried_locals.len == 0) {
+                                    try appendEmptyScfYield(self.parent.context, self.block, loc);
+                                } else {
+                                    try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                                }
+                            } else if (carried_locals.len == 0) {
                                 try appendEmptyYield(self.parent.context, self.block, loc);
                             } else {
                                 try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);
@@ -851,11 +875,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
                         if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, set_continue);
-                        const carried_locals = if (self.deferred_return_kind == .ora_yield)
+                        const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
+                            current_region_locals
+                        else if (self.deferred_return_kind == .ora_yield)
                             self.deferred_return_carried_locals
                         else
                             switch_context.carried_locals;
-                        if (carried_locals.len == 0) {
+                        if (self.current_scf_carried_locals != null) {
+                            if (carried_locals.len == 0) {
+                                try appendEmptyScfYield(self.parent.context, self.block, loc);
+                            } else {
+                                try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                            }
+                        } else if (carried_locals.len == 0) {
                             try appendEmptyYield(self.parent.context, self.block, loc);
                         } else {
                             try self.appendOraYieldFromLocals(self.block, jump.range, locals, carried_locals);

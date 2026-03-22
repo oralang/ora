@@ -1985,17 +1985,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             if (base_type == .enum_) {
-                const enum_name = base_type.name() orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
-                };
-                const op = mlir.oraEnumConstantOpCreate(
-                    self.parent.context,
-                    self.parent.location(field.range),
-                    strRef(enum_name),
-                    strRef(field.name),
-                    result_type,
-                );
-                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                if (@This().enumFieldOrdinal(self, field.base, field.name)) |ordinal| {
+                    return appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, self.parent.location(field.range), result_type, ordinal),
+                    );
+                }
                 return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
             }
 
@@ -2093,6 +2088,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (base_type.kind() != .anonymous_struct) return null;
             for (base_type.anonymous_struct.fields, 0..) |field, index| {
                 if (std.mem.eql(u8, field.name, field_name)) return @intCast(index);
+            }
+            return null;
+        }
+
+        fn enumFieldOrdinal(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) ?i64 {
+            const base_type = self.parent.typecheck.exprType(base_expr);
+            const enum_name = base_type.name() orelse return null;
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |item| item,
+                else => return null,
+            };
+            for (enum_item.variants, 0..) |variant, index| {
+                if (std.mem.eql(u8, variant.name, field_name)) return @intCast(index);
             }
             return null;
         }

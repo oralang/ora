@@ -557,7 +557,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
-            var all_cases_terminate = switch_stmt.else_body != null;
+            var all_cases_terminate = @This().switchIsExhaustive(self, switch_stmt);
             for (switch_stmt.arms, 0..) |arm, case_index| {
                 const arm_terminated = try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and arm_terminated;
@@ -590,6 +590,49 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return all_cases_terminate;
+        }
+
+        fn switchIsExhaustive(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt) bool {
+            if (switch_stmt.else_body != null) return true;
+
+            const condition_type = self.parent.typecheck.exprType(switch_stmt.condition);
+            if (condition_type.kind() == .bool) {
+                var seen_true = false;
+                var seen_false = false;
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| {
+                            const value = self.switchPatternValue(pattern_expr) orelse continue;
+                            if (value == 0) seen_false = true;
+                            if (value == 1) seen_true = true;
+                        },
+                        else => return false,
+                    }
+                }
+                return seen_true and seen_false;
+            }
+
+            const enum_name = condition_type.name() orelse return false;
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |item| item,
+                else => return false,
+            };
+
+            var seen = std.AutoHashMap(i64, void).init(self.parent.allocator);
+            defer seen.deinit();
+
+            for (switch_stmt.arms) |arm| {
+                switch (arm.pattern) {
+                    .Expr => |pattern_expr| {
+                        const value = self.switchPatternValue(pattern_expr) orelse return false;
+                        seen.put(value, {}) catch return false;
+                    },
+                    else => return false,
+                }
+            }
+
+            return seen.count() == enum_item.variants.len;
         }
 
         fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
