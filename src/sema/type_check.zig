@@ -2223,6 +2223,14 @@ const TypeChecker = struct {
                 if (tuple.elements.len != expected_type.tuple.len) return;
                 self.expr_types[expr_id.index()] = expected_type;
             },
+            .ArrayLiteral => |array| {
+                if (expected_type.kind() != .array) return;
+                if (expected_type.array.len == null or expected_type.array.len.? != array.elements.len) return;
+                self.expr_types[expr_id.index()] = expected_type;
+                for (array.elements) |element| {
+                    try self.contextualizeLiteral(element, expected_type.array.element_type.*);
+                }
+            },
             .StructLiteral => |struct_literal| {
                 if (struct_literal.type_expr != null or struct_literal.type_name.len != 0) return;
                 self.expr_types[expr_id.index()] = expected_type;

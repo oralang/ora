@@ -1629,10 +1629,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const item = self.parent.file.item(item_id).*;
                         if (item == .Field) {
                             const field = item.Field;
-                            const result_type = if (field.type_expr) |type_expr|
-                                self.parent.lowerTypeExpr(type_expr)
-                            else
-                                self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
+                            const result_type = self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
                             const op = switch (field.storage_class) {
                                 .storage => mlir.oraSLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),
                                 .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(name.range), strRef(field.name), result_type),

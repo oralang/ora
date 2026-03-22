@@ -249,7 +249,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                     self.parent.context,
                                     self.parent.location(field.range),
                                     strRef(field.name),
-                                    if (field.type_expr) |type_expr| self.parent.lowerTypeExpr(type_expr) else result_type,
+                                    result_type,
                                 ),
                                 .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
                                 .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),

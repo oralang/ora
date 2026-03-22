@@ -8205,6 +8205,30 @@ test "compiler rejects array length mismatches in assignments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
 }
 
+test "compiler contextualizes nested array literals to their declared element types" {
+    const source_text =
+        \\pub fn nested() -> [[u256; 2]; 2] {
+        \\    let inner1: [u256; 2] = [1, 2];
+        \\    let inner2: [u256; 2] = [3, 4];
+        \\    return [inner1, inner2];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @nested() -> memref<2xmemref<2xi256>>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.alloca() : memref<2xmemref<2xi256>>"));
+}
+
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
