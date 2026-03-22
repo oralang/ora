@@ -10,6 +10,20 @@
 
 const std = @import("std");
 const c = @import("c.zig");
+const builtin = @import("builtin");
+
+fn z3ErrorHandler(ctx: c.Z3_context, code: c.Z3_error_code) callconv(.c) void {
+    if (builtin.mode != .Debug) return;
+    const msg_ptr = c.Z3_get_error_msg(ctx, code);
+    const msg = if (msg_ptr == null) "<unknown>" else std.mem.span(msg_ptr);
+    std.log.err("Z3 API error: {s}", .{msg});
+}
+
+fn createContext(cfg: c.Z3_config) !c.Z3_context {
+    const ctx = c.Z3_mk_context(cfg) orelse return error.Z3InitFailed;
+    c.Z3_set_error_handler(ctx, z3ErrorHandler);
+    return ctx;
+}
 
 /// Z3 Context wrapper for RAII-style resource management
 pub const Context = struct {
@@ -22,7 +36,7 @@ pub const Context = struct {
         const cfg = c.Z3_mk_config() orelse return error.Z3InitFailed;
         errdefer c.Z3_del_config(cfg);
 
-        const ctx = c.Z3_mk_context(cfg) orelse return error.Z3InitFailed;
+        const ctx = try createContext(cfg);
 
         return Context{
             .cfg = cfg,
@@ -33,15 +47,11 @@ pub const Context = struct {
 
     /// Initialize with custom configuration options
     pub fn initWithConfig(allocator: std.mem.Allocator, timeout_ms: u32) !Context {
+        _ = timeout_ms;
         const cfg = c.Z3_mk_config() orelse return error.Z3InitFailed;
         errdefer c.Z3_del_config(cfg);
 
-        // set timeout
-        const timeout_str = try std.fmt.allocPrintZ(allocator, "{d}", .{timeout_ms});
-        defer allocator.free(timeout_str);
-        c.Z3_set_param_value(cfg, "timeout", timeout_str.ptr);
-
-        const ctx = c.Z3_mk_context(cfg) orelse return error.Z3InitFailed;
+        const ctx = try createContext(cfg);
 
         return Context{
             .cfg = cfg,
@@ -54,6 +64,19 @@ pub const Context = struct {
     pub fn deinit(self: *Context) void {
         c.Z3_del_context(self.ctx);
         c.Z3_del_config(self.cfg);
+    }
+
+    pub fn clearLastError(self: *Context) void {
+        c.Z3_set_error(self.ctx, c.Z3_OK);
+    }
+
+    pub fn lastErrorCode(self: *Context) c.Z3_error_code {
+        return c.Z3_get_error_code(self.ctx);
+    }
+
+    pub fn checkNoError(self: *Context) !void {
+        if (self.lastErrorCode() == c.Z3_OK) return;
+        return error.Z3ApiError;
     }
 };
 
@@ -69,4 +92,12 @@ test "Context init and deinit" {
 
     // context should be non-null
     try testing.expect(ctx.ctx != null);
+}
+
+test "Context initWithConfig registers a valid context" {
+    var ctx = try Context.initWithConfig(testing.allocator, 50);
+    defer ctx.deinit();
+
+    try testing.expect(ctx.ctx != null);
+    try testing.expectEqual(c.Z3_OK, ctx.lastErrorCode());
 }

@@ -19,6 +19,7 @@ const Context = @import("context.zig").Context;
 const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
+const mlir_helpers = @import("mlir_helpers.zig");
 const ManagedArrayList = std.array_list.Managed;
 
 pub const AnnotationKind = enum {
@@ -1351,33 +1352,12 @@ pub const VerificationPass = struct {
             const iv_ast = try self.encoder.encodeValue(induction_var);
             const ub_ast = try self.encoder.encodeValue(upper_bound);
 
-            const unsigned_cmp = self.getScfForUnsignedCmp(loop_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op);
 
             return self.buildNumericLt(iv_ast, ub_ast, unsigned_cmp);
         }
 
         return null;
-    }
-
-    fn getScfForUnsignedCmp(_: *VerificationPass, loop_op: mlir.MlirOperation) bool {
-        const printed = mlir.oraOperationPrintToString(loop_op);
-        defer if (printed.data != null) {
-            const mlir_c = @import("mlir_c_api");
-            mlir_c.freeStringRef(printed);
-        };
-
-        if (printed.data != null and printed.length > 0) {
-            const text = printed.data[0..printed.length];
-            if (std.mem.indexOf(u8, text, "unsignedCmp = true") != null) return true;
-            if (std.mem.indexOf(u8, text, "unsignedCmp = false") != null) return false;
-        }
-
-        const unsigned_attr = mlir.oraOperationGetAttributeByName(
-            loop_op,
-            mlir.oraStringRefCreate("unsignedCmp".ptr, "unsignedCmp".len),
-        );
-        if (mlir.oraAttributeIsNull(unsigned_attr)) return false;
-        return mlir.oraIntegerAttrGetValueSInt(unsigned_attr) != 0;
     }
 
     fn encodeLoopExitCondition(self: *VerificationPass, invariant_op: mlir.MlirOperation) !?z3.Z3_ast {
@@ -2081,7 +2061,10 @@ pub const VerificationPass = struct {
                             std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                         }
                     }
-                    solver.loadFromSmtlib(query.smtlib_z);
+                    solver.loadFromSmtlib(query.smtlib_z) catch |err| {
+                        ctx.results[idx].err = err;
+                        continue;
+                    };
                     if (ctx.trace_smt) {
                         std.debug.print("smt-trace: Q{d} load-smt done\n", .{idx + 1});
                         std.debug.print("smt-trace: Q{d} check start\n", .{idx + 1});
@@ -2372,7 +2355,7 @@ pub const VerificationPass = struct {
                     std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                 }
             }
-            self.solver.loadFromSmtlib(query.smtlib_z);
+            try self.solver.loadFromSmtlib(query.smtlib_z);
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report check-start", .{idx + 1});
             }
@@ -4528,7 +4511,7 @@ test "invariant-post query conjoins loop invariants from same loop" {
         if (q.kind != .LoopInvariantPost) continue;
         found_post_query = true;
         pass.solver.reset();
-        pass.solver.loadFromSmtlib(q.smtlib_z);
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -4786,7 +4769,7 @@ test "base query excludes path assumptions" {
         if (q.kind != .Base) continue;
         found_base = true;
         pass.solver.reset();
-        pass.solver.loadFromSmtlib(q.smtlib_z);
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), status);
     }
@@ -4819,7 +4802,7 @@ test "obligation query includes scoped path assumptions" {
         if (q.kind != .Obligation or q.obligation_kind != .Ensures) continue;
         found_obligation = true;
         pass.solver.reset();
-        pass.solver.loadFromSmtlib(q.smtlib_z);
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -4852,7 +4835,7 @@ test "guard satisfy queries ignore incompatible sibling branch paths" {
         if (q.kind != .GuardSatisfy) continue;
         satisfy_count += 1;
         pass.solver.reset();
-        pass.solver.loadFromSmtlib(q.smtlib_z);
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), status);
     }
@@ -4907,7 +4890,7 @@ test "contract invariants from loop body obligations use loop constraints" {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        pass.solver.loadFromSmtlib(q.smtlib_z);
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }

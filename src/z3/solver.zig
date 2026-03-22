@@ -49,8 +49,10 @@ pub const Solver = struct {
         c.Z3_solver_reset(self.context.ctx, self.solver);
     }
 
-    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) void {
+    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) !void {
+        self.context.clearLastError();
         c.Z3_solver_from_string(self.context.ctx, self.solver, smtlib.ptr);
+        try self.context.checkNoError();
     }
 
     pub fn push(self: *Solver) void {
@@ -70,9 +72,16 @@ pub const Solver = struct {
         c.Z3_params_set_uint(self.context.ctx, params, sym, timeout_ms);
         c.Z3_solver_set_params(self.context.ctx, self.solver, params);
     }
-
-    // todo: Add methods for:
-    // - push/pop (incremental solving)
-    // - timeout management
-    // - unsat core extraction
 };
+
+const testing = std.testing;
+
+test "loadFromSmtlib rejects malformed smtlib" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert (= x))"));
+}

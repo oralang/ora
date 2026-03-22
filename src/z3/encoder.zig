@@ -13,6 +13,7 @@ const std = @import("std");
 const z3 = @import("c.zig");
 const mlir = @import("mlir_c_api").c;
 const Context = @import("context.zig").Context;
+const mlir_helpers = @import("mlir_helpers.zig");
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
@@ -1337,7 +1338,7 @@ pub const Encoder = struct {
 
             const lb_ast = try self.encodeValueWithMode(lower_bound, mode);
             const ub_ast = try self.encodeValueWithMode(upper_bound, mode);
-            const unsigned_cmp = self.getScfForUnsignedCmp(parent_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(parent_op);
             const lower_ok = if (unsigned_cmp)
                 z3.Z3_mk_bvuge(self.context.ctx, ast, lb_ast)
             else
@@ -1351,28 +1352,6 @@ pub const Encoder = struct {
         }
     }
 
-    fn getScfForUnsignedCmp(self: *Encoder, loop_op: mlir.MlirOperation) bool {
-        const printed = mlir.oraOperationPrintToString(loop_op);
-        defer if (printed.data != null) {
-            const mlir_c = @import("mlir_c_api");
-            mlir_c.freeStringRef(printed);
-        };
-
-        if (printed.data != null and printed.length > 0) {
-            const text = printed.data[0..printed.length];
-            if (std.mem.indexOf(u8, text, "unsignedCmp = true") != null) return true;
-            if (std.mem.indexOf(u8, text, "unsignedCmp = false") != null) return false;
-        }
-
-        const unsigned_attr = mlir.oraOperationGetAttributeByName(
-            loop_op,
-            mlir.oraStringRefCreate("unsignedCmp".ptr, "unsignedCmp".len),
-        );
-        if (mlir.oraAttributeIsNull(unsigned_attr)) return false;
-
-        _ = self;
-        return mlir.oraIntegerAttrGetValueSInt(unsigned_attr) != 0;
-    }
 
     fn encodeOperationResultWithMode(
         self: *Encoder,
