@@ -1702,13 +1702,16 @@ pub const Encoder = struct {
         // comparison operations
         if (std.mem.eql(u8, op_name, "arith.cmpi")) {
             // get predicate from attributes
-            const predicate = self.getCmpPredicate(mlir_op);
+            const predicate = try self.getCmpPredicate(mlir_op);
             return try self.encodeCmpOp(predicate, operands);
         }
 
         if (std.mem.eql(u8, op_name, "ora.cmp")) {
             if (operands.len < 2) return error.InvalidOperandCount;
-            const predicate = self.getStringAttr(mlir_op, "predicate") orelse "eq";
+            const predicate = self.getStringAttr(mlir_op, "predicate") orelse {
+                self.recordDegradation("ora.cmp missing predicate");
+                return error.UnsupportedOperation;
+            };
             if (std.mem.eql(u8, predicate, "eq")) return self.encodeComparisonOp(.Eq, operands[0], operands[1]);
             if (std.mem.eql(u8, predicate, "ne")) return self.encodeComparisonOp(.Ne, operands[0], operands[1]);
             if (std.mem.eql(u8, predicate, "lt") or std.mem.eql(u8, predicate, "ult")) return self.encodeComparisonOp(.Lt, operands[0], operands[1]);
@@ -2149,7 +2152,10 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.struct_field_extract")) {
             if (operands.len >= 1) {
-                const field_name = self.getStringAttr(mlir_op, "field_name") orelse "field";
+                const field_name = self.getStringAttr(mlir_op, "field_name") orelse {
+                    self.recordDegradation("struct_field_extract missing field_name");
+                    return error.UnsupportedOperation;
+                };
                 const struct_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
@@ -2160,7 +2166,10 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
             if (operands.len >= 2 and mlir.oraOperationGetNumResults(mlir_op) >= 1) {
-                const field_name = self.getStringAttr(mlir_op, "field_name") orelse "field";
+                const field_name = self.getStringAttr(mlir_op, "field_name") orelse {
+                    self.recordDegradation("struct_field_update missing field_name");
+                    return error.UnsupportedOperation;
+                };
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
@@ -4032,14 +4041,14 @@ pub const Encoder = struct {
     }
 
     /// Get comparison predicate from MLIR operation
-    fn getCmpPredicate(_: *Encoder, mlir_op: mlir.MlirOperation) u32 {
+    fn getCmpPredicate(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!u32 {
         // extract predicate from arith.cmpi attributes
         // the predicate attribute contains the comparison type (eq, ne, ult, ule, ugt, uge, etc.)
         const attr_name_ref = mlir.oraStringRefCreate("predicate".ptr, "predicate".len);
         const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
         if (mlir.oraAttributeIsNull(attr)) {
-            // default to eq (0) if predicate is missing
-            return 0;
+            self.recordDegradation("arith.cmpi missing predicate");
+            return error.UnsupportedOperation;
         }
 
         // get the integer value of the predicate
