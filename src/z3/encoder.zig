@@ -2571,6 +2571,7 @@ pub const Encoder = struct {
                 if (try self.tryInlinePureCallResult(callee, func_op, operands, result_index, mode)) |inlined| {
                     return inlined;
                 }
+                self.recordDegradation("failed to encode known pure callee result exactly");
             }
         }
         return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
@@ -3307,7 +3308,10 @@ pub const Encoder = struct {
         for (0..num_results) |i| result_exprs[i] = null;
 
         if (func_op) |fop| {
-            _ = try self.tryInlineFunctionCallSummary(callee, fop, operands, slots.items, result_exprs);
+            const summarized = try self.tryInlineFunctionCallSummary(callee, fop, operands, slots.items, result_exprs);
+            if (!summarized and num_results > 0) {
+                self.recordDegradation("failed to encode known callee results exactly");
+            }
         }
 
         for (0..num_results) |i| {
@@ -3318,6 +3322,9 @@ pub const Encoder = struct {
                 expr
             else
                 try self.encodeCallResultUFSymbol(callee, operands, slots.items, @intCast(i), result_sort);
+            if (func_op != null and result_exprs[i] == null) {
+                self.recordDegradation("known callee result fell back to opaque UF summary");
+            }
             const result_id = @intFromPtr(result_value.ptr);
             try self.value_map.put(result_id, encoded);
         }

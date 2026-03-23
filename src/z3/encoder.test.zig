@@ -1354,6 +1354,68 @@ test "func.call preserves state summary for multi-return callee" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known multi-return callee result fallback degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_name_attr = mlir.oraStringAttrCreate(mlir_ctx, stringRef("chooseValue"));
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", helper_name_attr),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i1_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper_func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper_func);
+    const helper_flag = mlir.oraBlockGetArgument(helper_body, 0);
+    const helper_value = mlir.oraBlockGetArgument(helper_body, 1);
+
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const if_op = mlir.oraScfIfOpCreate(mlir_ctx, loc, helper_flag, &result_types, result_types.len, false);
+    const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+    const then_ret_vals = [_]mlir.MlirValue{helper_value};
+    const then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &then_ret_vals, then_ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_ret);
+
+    const helper_ret_vals = [_]mlir.MlirValue{helper_value};
+    const helper_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &helper_ret_vals, helper_ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(helper_body, if_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, helper_ret);
+
+    try encoder.registerFunctionOperation(helper_func);
+
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const arg_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const arg_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, arg_attr);
+    const call_operands = [_]mlir.MlirValue{ mlir.oraOperationGetResult(true_op, 0), mlir.oraOperationGetResult(arg_op, 0) };
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("chooseValue"),
+        &call_operands,
+        call_operands.len,
+        &result_types,
+        result_types.len,
+    );
+
+    _ = try encoder.encodeOperation(call_op);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to encode known callee results exactly"));
+}
+
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
