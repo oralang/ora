@@ -103,6 +103,7 @@ pub const Z3_mk_tuple_sort = c.Z3_mk_tuple_sort;
 pub const Z3_mk_bvand = c.Z3_mk_bvand;
 pub const Z3_mk_bvor = c.Z3_mk_bvor;
 pub const Z3_mk_bvxor = c.Z3_mk_bvxor;
+pub const Z3_mk_concat = c.Z3_mk_concat;
 pub const Z3_mk_bvshl = c.Z3_mk_bvshl;
 pub const Z3_mk_bvashr = c.Z3_mk_bvashr;
 pub const Z3_mk_bvlshr = c.Z3_mk_bvlshr;

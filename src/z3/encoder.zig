@@ -907,24 +907,23 @@ pub const Encoder = struct {
                 break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
             }
         else blk: {
-            var bits = std.ArrayList(u8){};
-            defer bits.deinit(self.allocator);
-            bits.appendSlice(self.allocator, "#b") catch {
-                self.recordDegradation("failed to construct max bitvector numeral");
-                break :blk zero;
-            };
-            var i: u32 = 0;
-            while (i < width) : (i += 1) {
-                bits.append(self.allocator, '1') catch {
-                    self.recordDegradation("failed to construct max bitvector numeral");
-                    break :blk zero;
-                };
+            var remaining = width;
+            var assembled: ?z3.Z3_ast = null;
+            while (remaining > 0) {
+                const chunk_width: u32 = if (assembled == null and remaining % 64 != 0) remaining % 64 else @min(remaining, 64);
+                const chunk_sort = z3.Z3_mk_bv_sort(self.context.ctx, chunk_width);
+                const chunk_value: u64 = if (chunk_width == 64)
+                    std.math.maxInt(u64)
+                else
+                    (@as(u64, 1) << @intCast(chunk_width)) - 1;
+                const chunk = z3.Z3_mk_unsigned_int64(self.context.ctx, chunk_value, chunk_sort);
+                assembled = if (assembled) |existing|
+                    z3.Z3_mk_concat(self.context.ctx, existing, chunk)
+                else
+                    chunk;
+                remaining -= chunk_width;
             }
-            bits.append(self.allocator, 0) catch {
-                self.recordDegradation("failed to construct max bitvector numeral");
-                break :blk zero;
-            };
-            break :blk z3.Z3_mk_numeral(self.context.ctx, @ptrCast(bits.items.ptr), sort);
+            break :blk assembled orelse zero;
         };
         const max_div_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, max_value, rhs);
         const lhs_too_large = z3.Z3_mk_bvugt(self.context.ctx, lhs, max_div_rhs);
@@ -1589,6 +1588,13 @@ pub const Encoder = struct {
         }
         if (mlir.oraTypeIsAddressType(mlir_type)) {
             return self.mkBitVectorSort(160);
+        }
+        {
+            const type_ctx = mlir.mlirTypeGetContext(mlir_type);
+            const index_ty = mlir.oraIndexTypeCreate(type_ctx);
+            if (!mlir.oraTypeIsNull(index_ty) and mlir.oraTypeEqual(mlir_type, index_ty)) {
+                return self.mkBitVectorSort(256);
+            }
         }
         {
             const type_ctx = mlir.mlirTypeGetContext(mlir_type);
@@ -4035,6 +4041,11 @@ pub const Encoder = struct {
         }
         if (mlir.oraTypeIsAInteger(ty)) {
             return @intCast(mlir.oraIntegerTypeGetWidth(ty));
+        }
+        const type_ctx = mlir.mlirTypeGetContext(ty);
+        const index_ty = mlir.oraIndexTypeCreate(type_ctx);
+        if (!mlir.oraTypeIsNull(index_ty) and mlir.oraTypeEqual(ty, index_ty)) {
+            return 256;
         }
         return null;
     }
