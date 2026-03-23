@@ -3350,12 +3350,7 @@ pub const Encoder = struct {
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
 
-        const return_op = self.findFunctionReturnOp(func_op) orelse return null;
-        const ret_operands = mlir.oraOperationGetNumOperands(return_op);
-        if (result_index >= ret_operands) return null;
-        const ret_value = mlir.oraOperationGetOperand(return_op, result_index);
-
-        const encoded = summary_encoder.encodeValueWithMode(ret_value, mode) catch return null;
+        const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
         if (summary_encoder.isDegraded()) {
             self.recordDegradation(summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call result");
         }
@@ -3371,6 +3366,89 @@ pub const Encoder = struct {
         }
 
         return encoded;
+    }
+
+    fn extractFunctionReturnExpr(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return null;
+        const entry_block = mlir.oraRegionGetFirstBlock(body_region);
+        if (mlir.oraBlockIsNull(entry_block)) return null;
+        return try self.extractReturnedExprFromBlock(entry_block, result_index, mode);
+    }
+
+    fn extractReturnedExprFromBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        if (mlir.oraBlockIsNull(block)) return null;
+        return try self.extractReturnedExprFromSequence(
+            mlir.oraBlockGetFirstOperation(block),
+            result_index,
+            mode,
+        );
+    }
+
+    fn extractReturnedExprFromSequence(
+        self: *Encoder,
+        start_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        var current = start_op;
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return null;
+                const ret_value = mlir.oraOperationGetOperand(current, result_index);
+                return try self.encodeValueWithMode(ret_value, mode);
+            }
+
+            if (std.mem.eql(u8, name, "scf.if")) {
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                const fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                const branch_expr = try self.extractScfIfReturnedExpr(current, result_index, mode, fallthrough_expr);
+                if (branch_expr != null) return branch_expr;
+            }
+
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
+    }
+
+    fn extractScfIfReturnedExpr(
+        self: *Encoder,
+        if_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+        fallthrough_expr: ?z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(if_op);
+        if (num_operands < 1) return null;
+
+        var then_expr = try self.extractReturnedExprFromBlock(mlir.oraScfIfOpGetThenBlock(if_op), result_index, mode);
+        var else_expr = try self.extractReturnedExprFromBlock(mlir.oraScfIfOpGetElseBlock(if_op), result_index, mode);
+
+        if (then_expr == null) then_expr = fallthrough_expr;
+        if (else_expr == null) else_expr = fallthrough_expr;
+        if (then_expr == null or else_expr == null) return null;
+
+        const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        const condition = try self.encodeValueWithMode(condition_value, mode);
+        return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
     }
 
     fn tryInlineFunctionCallSummary(
@@ -3426,21 +3504,12 @@ pub const Encoder = struct {
         summary_encoder.encodeStateEffectsInOperation(func_op);
 
         var any_result = false;
-        if (self.findFunctionReturnOp(func_op)) |return_op| {
-            const ret_operands = mlir.oraOperationGetNumOperands(return_op);
-            const result_count = @min(ret_operands, result_exprs.len);
-            if (result_count == 0 and result_exprs.len > 0) return false;
-
-            for (0..result_count) |i| {
-                const ret_value = mlir.oraOperationGetOperand(return_op, i);
-                const encoded = summary_encoder.encodeValue(ret_value) catch return false;
-                result_exprs[i] = encoded;
+        for (0..result_exprs.len) |i| {
+            const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
+            if (encoded) |expr| {
+                result_exprs[i] = expr;
                 any_result = true;
             }
-        } else if (result_exprs.len > 0) {
-            // Multiple/conditional returns can still produce useful post-state
-            // summaries even when the result value remains opaque.
-            any_result = false;
         }
 
         if (summary_encoder.isDegraded()) {
