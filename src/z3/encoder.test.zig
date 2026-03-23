@@ -2202,6 +2202,7 @@ test "known pure callee local memref merge result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+
 test "known callee result degradation reports callee and callsite" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

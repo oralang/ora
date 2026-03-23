@@ -471,12 +471,12 @@ pub const VerificationPass = struct {
 
     const EncoderBranchState = struct {
         global_map: std.StringHashMap(z3.Z3_ast),
-        memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+        memref_map: std.AutoHashMap(u64, Encoder.TrackedMemrefState),
 
         fn init(allocator: std.mem.Allocator) EncoderBranchState {
             return .{
                 .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
-                .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+                .memref_map = std.AutoHashMap(u64, Encoder.TrackedMemrefState).init(allocator),
             };
         }
 
@@ -612,18 +612,36 @@ pub const VerificationPass = struct {
             const base_opt = base.memref_map.get(key);
             const then_opt = then_state.memref_map.get(key);
             const else_opt = else_state.memref_map.get(key);
-            if (base_opt == null and (then_opt == null or else_opt == null)) {
-                self.encoder.noteDegradation("branch merge lost exact memref initialization state");
+            const fallback_value = if (base_opt) |base_state|
+                base_state.value
+            else if (then_opt) |then_state_entry|
+                then_state_entry.value
+            else if (else_opt) |else_state_entry|
+                else_state_entry.value
+            else
                 continue;
-            }
-            const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
-            const then_val = then_opt orelse fallback;
-            const else_val = else_opt orelse fallback;
+            const fallback_init = if (base_opt) |base_state|
+                base_state.initialized
+            else
+                z3.Z3_mk_false(self.context.ctx);
+            const then_state_entry = then_opt orelse Encoder.TrackedMemrefState{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            };
+            const else_state_entry = else_opt orelse Encoder.TrackedMemrefState{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            };
+            const then_val = then_state_entry.value;
+            const else_val = else_state_entry.value;
             const merged = if (then_val == else_val)
                 then_val
             else
                 self.encoder.encodeIte(condition, then_val, else_val);
-            try self.encoder.memref_map.put(key, merged);
+            try self.encoder.memref_map.put(key, .{
+                .value = merged,
+                .initialized = self.encoder.mergeInitPredicate(condition, then_state_entry.initialized, else_state_entry.initialized),
+            });
         }
     }
 
@@ -697,39 +715,38 @@ pub const VerificationPass = struct {
         while (key_it.next()) |entry| {
             const key = entry.key_ptr.*;
             const base_opt = base.memref_map.get(key);
-            if (base_opt == null) {
-                var saw_present = false;
-                var saw_missing = false;
+            var fallback_value = if (base_opt) |base_state|
+                base_state.value
+            else blk: {
                 for (branch_states) |*branch_state| {
-                    if (branch_state.memref_map.get(key) != null) {
-                        saw_present = true;
-                    } else {
-                        saw_missing = true;
-                    }
-                }
-                if (saw_present and saw_missing) {
-                    self.encoder.noteDegradation("branch merge lost exact memref initialization state");
-                    continue;
-                }
-            }
-            var fallback = base_opt orelse blk: {
-                for (branch_states) |*branch_state| {
-                    if (branch_state.memref_map.get(key)) |value| break :blk value;
+                    if (branch_state.memref_map.get(key)) |state| break :blk state.value;
                 }
                 continue;
             };
+            var fallback_init = if (base_opt) |base_state|
+                base_state.initialized
+            else
+                z3.Z3_mk_false(self.context.ctx);
 
             var idx = branch_states.len;
             while (idx > 0) {
                 idx -= 1;
-                const branch_val = branch_states[idx].memref_map.get(key) orelse fallback;
-                fallback = if (branch_val == fallback)
+                const branch_state_entry = branch_states[idx].memref_map.get(key) orelse Encoder.TrackedMemrefState{
+                    .value = fallback_value,
+                    .initialized = fallback_init,
+                };
+                const branch_val = branch_state_entry.value;
+                fallback_value = if (branch_val == fallback_value)
                     branch_val
                 else
-                    self.encoder.encodeIte(conditions[idx], branch_val, fallback);
+                    self.encoder.encodeIte(conditions[idx], branch_val, fallback_value);
+                fallback_init = self.encoder.mergeInitPredicate(conditions[idx], branch_state_entry.initialized, fallback_init);
             }
 
-            try self.encoder.memref_map.put(key, fallback);
+            try self.encoder.memref_map.put(key, .{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            });
         }
     }
 
@@ -5629,7 +5646,7 @@ test "branch merge preserves untouched global base state" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "branch merge degrades partial memref initialization" {
+test "branch merge preserves conditional memref initialization" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
 
@@ -5645,13 +5662,17 @@ test "branch merge degrades partial memref initialization" {
     const cond = try pass.encoder.mkVariable("memref_branch_cond", bool_sort);
     const forty_two = z3.Z3_mk_numeral(pass.encoder.context.ctx, "42", i256_sort);
 
-    try then_state.memref_map.put(1234, forty_two);
+    try then_state.memref_map.put(1234, .{
+        .value = forty_two,
+        .initialized = z3.Z3_mk_true(pass.encoder.context.ctx),
+    });
 
     try pass.mergeEncoderBranchState(cond, &base, &then_state, &else_state);
 
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, pass.encoder.degradationReason().?, "branch merge lost exact memref initialization state"));
-    try testing.expect(pass.encoder.memref_map.get(1234) == null);
+    try testing.expect(!pass.encoder.isDegraded());
+    const merged = pass.encoder.memref_map.get(1234).?;
+    try testing.expect(z3.c.Z3_is_eq_ast(pass.encoder.context.ctx, merged.value, forty_two));
+    try testing.expect(z3.c.Z3_is_eq_ast(pass.encoder.context.ctx, merged.initialized, cond));
 }
 
 test "many-branch merge preserves untouched global base state" {
@@ -5717,14 +5738,19 @@ test "many-branch merge degrades partial memref initialization" {
     };
     const seven = z3.Z3_mk_numeral(pass.encoder.context.ctx, "7", i256_sort);
 
-    try branch_states[0].memref_map.put(777, seven);
-    try branch_states[2].memref_map.put(777, seven);
+    try branch_states[0].memref_map.put(777, .{
+        .value = seven,
+        .initialized = z3.Z3_mk_true(pass.encoder.context.ctx),
+    });
+    try branch_states[2].memref_map.put(777, .{
+        .value = seven,
+        .initialized = z3.Z3_mk_true(pass.encoder.context.ctx),
+    });
 
     try pass.mergeEncoderBranchStatesMany(&conditions, &base, &branch_states);
 
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, pass.encoder.degradationReason().?, "branch merge lost exact memref initialization state"));
-    try testing.expect(pass.encoder.memref_map.get(777) == null);
+    try testing.expect(!pass.encoder.isDegraded());
+    try testing.expect(pass.encoder.memref_map.get(777) != null);
 }
 
 test "private callee obligations are guarded by callee requires in public summaries" {

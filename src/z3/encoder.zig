@@ -54,6 +54,11 @@ pub const Encoder = struct {
         ast: z3.Z3_ast,
     };
 
+    pub const TrackedMemrefState = struct {
+        value: z3.Z3_ast,
+        initialized: z3.Z3_ast,
+    };
+
     context: *Context,
     allocator: std.mem.Allocator,
     verify_calls: bool,
@@ -79,9 +84,9 @@ pub const Encoder = struct {
     /// Map from environment symbol name (e.g. msg.sender) to Z3 AST.
     env_map: std.StringHashMap(z3.Z3_ast),
     /// Scalar memref local state threaded during verification extraction.
-    memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+    memref_map: std.AutoHashMap(u64, TrackedMemrefState),
     /// Scalar memref local state for old() mode.
-    memref_old_map: std.AutoHashMap(u64, z3.Z3_ast),
+    memref_old_map: std.AutoHashMap(u64, TrackedMemrefState),
     /// Stable symbolic dimensions for tensor.dim/memref.dim on dynamic shapes.
     tensor_dim_map: std.AutoHashMap(TensorDimKey, z3.Z3_ast),
     /// Map from function symbol name to MLIR function operation.
@@ -108,6 +113,8 @@ pub const Encoder = struct {
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Stack of active quantified variable bindings (innermost binding last).
     quantified_bindings: std.ArrayList(QuantifiedBinding),
+    /// Active branch assumptions used during pure-return extraction.
+    return_path_assumptions: std.ArrayList(z3.Z3_ast),
 
     pub fn init(context: *Context, allocator: std.mem.Allocator) Encoder {
         return .{
@@ -125,8 +132,8 @@ pub const Encoder = struct {
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .written_global_slots = std.StringHashMap(void).init(allocator),
             .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
-            .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
-            .memref_old_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+            .memref_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
+            .memref_old_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
             .tensor_dim_map = std.AutoHashMap(TensorDimKey, z3.Z3_ast).init(allocator),
             .function_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .struct_field_names_csv = std.StringHashMap([]u8).init(allocator),
@@ -140,6 +147,7 @@ pub const Encoder = struct {
             .encoding_degraded_reason = null,
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
+            .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
         };
     }
 
@@ -217,6 +225,40 @@ pub const Encoder = struct {
         self.recordDegradation(reason);
     }
 
+    fn astEquivalent(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) bool {
+        return z3.c.Z3_is_eq_ast(self.context.ctx, lhs, rhs);
+    }
+
+    fn boolTrue(self: *Encoder) z3.Z3_ast {
+        return z3.Z3_mk_true(self.context.ctx);
+    }
+
+    fn boolFalse(self: *Encoder) z3.Z3_ast {
+        return z3.Z3_mk_false(self.context.ctx);
+    }
+
+    fn isBoolConst(self: *Encoder, ast: z3.Z3_ast, expected: bool) bool {
+        const target = if (expected) self.boolTrue() else self.boolFalse();
+        return astEquivalent(self, ast, target);
+    }
+
+    fn activeReturnPathContains(self: *Encoder, needle: z3.Z3_ast) bool {
+        for (self.return_path_assumptions.items) |assume| {
+            if (astEquivalent(self, assume, needle)) return true;
+        }
+        return false;
+    }
+
+    pub fn mergeInitPredicate(self: *Encoder, condition: z3.Z3_ast, then_init: z3.Z3_ast, else_init: z3.Z3_ast) z3.Z3_ast {
+        const cond = self.coerceToBool(condition);
+        if (astEquivalent(self, then_init, else_init)) return then_init;
+        if (self.isBoolConst(then_init, true) and self.isBoolConst(else_init, false)) return cond;
+        if (self.isBoolConst(then_init, false) and self.isBoolConst(else_init, true)) {
+            return z3.Z3_mk_not(self.context.ctx, cond);
+        }
+        return self.encodeIte(cond, then_init, else_init);
+    }
+
     fn anyResultSlotMissing(result_exprs: []const ?z3.Z3_ast) bool {
         for (result_exprs) |expr| {
             if (expr == null) return true;
@@ -235,13 +277,13 @@ pub const Encoder = struct {
 
     const StateSnapshot = struct {
         global_map: std.StringHashMap(z3.Z3_ast),
-        memref_map: std.AutoHashMap(u64, z3.Z3_ast),
+        memref_map: std.AutoHashMap(u64, TrackedMemrefState),
         written_global_slots: std.StringHashMap(void),
 
         fn init(allocator: std.mem.Allocator) StateSnapshot {
             return .{
                 .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
-                .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+                .memref_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
                 .written_global_slots = std.StringHashMap(void).init(allocator),
             };
         }
@@ -376,18 +418,36 @@ pub const Encoder = struct {
             const base_opt = base.memref_map.get(key);
             const then_opt = then_state.memref_map.get(key);
             const else_opt = else_state.memref_map.get(key);
-            if (base_opt == null and (then_opt == null or else_opt == null)) {
-                self.noteDegradation("branch merge lost exact memref initialization state");
+            const fallback_value = if (base_opt) |base_state|
+                base_state.value
+            else if (then_opt) |then_state_entry|
+                then_state_entry.value
+            else if (else_opt) |else_state_entry|
+                else_state_entry.value
+            else
                 continue;
-            }
-            const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
-            const then_val = then_opt orelse fallback;
-            const else_val = else_opt orelse fallback;
+            const fallback_init = if (base_opt) |base_state|
+                base_state.initialized
+            else
+                self.boolFalse();
+            const then_state_entry = then_opt orelse TrackedMemrefState{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            };
+            const else_state_entry = else_opt orelse TrackedMemrefState{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            };
+            const then_val = then_state_entry.value;
+            const else_val = else_state_entry.value;
             const merged = if (then_val == else_val)
                 then_val
             else
                 self.encodeIte(condition, then_val, else_val);
-            try self.memref_map.put(key, merged);
+            try self.memref_map.put(key, .{
+                .value = merged,
+                .initialized = self.mergeInitPredicate(condition, then_state_entry.initialized, else_state_entry.initialized),
+            });
         }
 
         var written_names = std.ArrayList([]const u8){};
@@ -458,40 +518,38 @@ pub const Encoder = struct {
         while (key_it.next()) |entry| {
             const key = entry.key_ptr.*;
             const base_opt = base.memref_map.get(key);
-            if (base_opt == null) {
-                var saw_present = false;
-                var saw_missing = false;
+            var fallback_value = if (base_opt) |base_state|
+                base_state.value
+            else blk: {
                 for (branch_states) |*branch_state| {
-                    if (branch_state.memref_map.get(key) != null) {
-                        saw_present = true;
-                    } else {
-                        saw_missing = true;
-                    }
-                }
-                if (saw_present and saw_missing) {
-                    self.noteDegradation("branch merge lost exact memref initialization state");
-                    continue;
-                }
-            }
-
-            var fallback = base_opt orelse blk: {
-                for (branch_states) |*branch_state| {
-                    if (branch_state.memref_map.get(key)) |value| break :blk value;
+                    if (branch_state.memref_map.get(key)) |state| break :blk state.value;
                 }
                 continue;
             };
+            var fallback_init = if (base_opt) |base_state|
+                base_state.initialized
+            else
+                self.boolFalse();
 
             var idx = branch_states.len;
             while (idx > 0) {
                 idx -= 1;
-                const branch_val = branch_states[idx].memref_map.get(key) orelse fallback;
-                fallback = if (branch_val == fallback)
+                const branch_state_entry = branch_states[idx].memref_map.get(key) orelse TrackedMemrefState{
+                    .value = fallback_value,
+                    .initialized = fallback_init,
+                };
+                const branch_val = branch_state_entry.value;
+                fallback_value = if (branch_val == fallback_value)
                     branch_val
                 else
-                    self.encodeIte(conditions[idx], branch_val, fallback);
+                    self.encodeIte(conditions[idx], branch_val, fallback_value);
+                fallback_init = self.mergeInitPredicate(conditions[idx], branch_state_entry.initialized, fallback_init);
             }
 
-            try self.memref_map.put(key, fallback);
+            try self.memref_map.put(key, .{
+                .value = fallback_value,
+                .initialized = fallback_init,
+            });
         }
 
         var written_names = std.ArrayList([]const u8){};
@@ -557,6 +615,7 @@ pub const Encoder = struct {
             self.allocator.free(binding.name);
         }
         self.quantified_bindings.clearRetainingCapacity();
+        self.return_path_assumptions.clearRetainingCapacity();
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -621,6 +680,7 @@ pub const Encoder = struct {
             self.allocator.free(binding.name);
         }
         self.quantified_bindings.deinit(self.allocator);
+        self.return_path_assumptions.deinit(self.allocator);
         var tuple_it = self.tuple_values.iterator();
         while (tuple_it.next()) |entry| {
             self.allocator.free(entry.value_ptr.elements);
@@ -2597,10 +2657,14 @@ pub const Encoder = struct {
             if (num_operands == 2) {
                 const memref_value = mlir.oraOperationGetOperand(mlir_op, 1);
                 const memref_id = @intFromPtr(memref_value.ptr);
+                const tracked = TrackedMemrefState{
+                    .value = operands[0],
+                    .initialized = self.boolTrue(),
+                };
                 if (mode == .Old) {
-                    try self.memref_old_map.put(memref_id, operands[0]);
+                    try self.memref_old_map.put(memref_id, tracked);
                 } else {
-                    try self.memref_map.put(memref_id, operands[0]);
+                    try self.memref_map.put(memref_id, tracked);
                 }
             }
             return operands[0];
@@ -2620,12 +2684,24 @@ pub const Encoder = struct {
                     const memref_id = @intFromPtr(memref_value.ptr);
                     const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
                     if (map.get(memref_id)) |stored| {
-                        return stored;
+                        if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathContains(stored.initialized)) {
+                            return stored.value;
+                        }
+                        const op_id_unknown_conditional = @intFromPtr(mlir_op.ptr);
+                        const fresh_conditional = try self.degradeToUndef(result_sort, "memref_load", op_id_unknown_conditional, "memref.load read from conditionally initialized tracked local state");
+                        try map.put(memref_id, .{
+                            .value = fresh_conditional,
+                            .initialized = stored.initialized,
+                        });
+                        return fresh_conditional;
                     }
 
                     const op_id_unknown = @intFromPtr(mlir_op.ptr);
                     const fresh = try self.degradeToUndef(result_sort, "memref_load", op_id_unknown, "memref.load read from uninitialized tracked local state");
-                    try map.put(memref_id, fresh);
+                    try map.put(memref_id, .{
+                        .value = fresh,
+                        .initialized = self.boolFalse(),
+                    });
                     return fresh;
                 }
 
@@ -3523,16 +3599,22 @@ pub const Encoder = struct {
     ) EncodeError!?z3.Z3_ast {
         const num_operands = mlir.oraOperationGetNumOperands(if_op);
         if (num_operands < 1) return null;
+        const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        const condition = try self.encodeValueWithMode(condition_value, mode);
 
+        const saved_len = self.return_path_assumptions.items.len;
+        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+
+        try self.return_path_assumptions.append(self.allocator, condition);
         var then_expr = try self.extractReturnedExprFromBlock(mlir.oraScfIfOpGetThenBlock(if_op), result_index, mode);
+
+        self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+        try self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition)));
         var else_expr = try self.extractReturnedExprFromBlock(mlir.oraScfIfOpGetElseBlock(if_op), result_index, mode);
 
         if (then_expr == null) then_expr = fallthrough_expr;
         if (else_expr == null) else_expr = fallthrough_expr;
         if (then_expr == null or else_expr == null) return null;
-
-        const condition_value = mlir.oraOperationGetOperand(if_op, 0);
-        const condition = try self.encodeValueWithMode(condition_value, mode);
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
     }
 
@@ -3546,15 +3628,21 @@ pub const Encoder = struct {
         const num_operands = mlir.oraOperationGetNumOperands(conditional_ret_op);
         if (num_operands < 1) return null;
 
+        const condition_value = mlir.oraOperationGetOperand(conditional_ret_op, 0);
+        const condition = try self.encodeValueWithMode(condition_value, mode);
+        const saved_len = self.return_path_assumptions.items.len;
+        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+
+        try self.return_path_assumptions.append(self.allocator, condition);
         var then_expr = try self.extractReturnedExprFromBlock(mlir.oraConditionalReturnOpGetThenBlock(conditional_ret_op), result_index, mode);
+
+        self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+        try self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition)));
         var else_expr = try self.extractReturnedExprFromBlock(mlir.oraConditionalReturnOpGetElseBlock(conditional_ret_op), result_index, mode);
 
         if (then_expr == null) then_expr = fallthrough_expr;
         if (else_expr == null) else_expr = fallthrough_expr;
         if (then_expr == null or else_expr == null) return null;
-
-        const condition_value = mlir.oraOperationGetOperand(conditional_ret_op, 0);
-        const condition = try self.encodeValueWithMode(condition_value, mode);
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
     }
 
