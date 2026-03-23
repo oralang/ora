@@ -136,3 +136,22 @@ test "setTimeoutMs configures solver without Z3 error" {
     try solver.setTimeoutMs(50);
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
 }
+
+test "checked solver operations succeed on simple SAT query" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    const bool_sort = c.Z3_mk_bool_sort(context.ctx);
+    const sym = c.Z3_mk_string_symbol(context.ctx, "p");
+    const decl = c.Z3_mk_const(context.ctx, sym, bool_sort);
+
+    try solver.resetChecked();
+    try solver.pushChecked();
+    try solver.assertChecked(decl);
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_TRUE), try solver.checkChecked());
+    try testing.expect(try solver.getModelChecked() != null);
+    try solver.popChecked();
+}
