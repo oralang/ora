@@ -2312,6 +2312,16 @@ pub const VerificationPass = struct {
             timeout_ms: ?u32,
             trace_smt: bool,
             trace_smtlib: bool,
+            setup_error_mutex: std.Thread.Mutex = .{},
+            setup_error: ?anyerror = null,
+
+            fn recordSetupError(state: *@This(), err: anyerror) void {
+                state.setup_error_mutex.lock();
+                defer state.setup_error_mutex.unlock();
+                if (state.setup_error == null) {
+                    state.setup_error = err;
+                }
+            }
         };
 
         var state = WorkState{
@@ -2326,14 +2336,23 @@ pub const VerificationPass = struct {
 
         const Worker = struct {
             fn run(ctx: *WorkState) void {
-                var context = Context.init(ctx.allocator) catch return;
+                var context = Context.init(ctx.allocator) catch |err| {
+                    ctx.recordSetupError(err);
+                    return;
+                };
                 defer context.deinit();
 
-                var solver = Solver.init(&context, ctx.allocator) catch return;
+                var solver = Solver.init(&context, ctx.allocator) catch |err| {
+                    ctx.recordSetupError(err);
+                    return;
+                };
                 defer solver.deinit();
 
                 if (ctx.timeout_ms) |ms| {
-                    solver.setTimeoutMs(ms) catch return;
+                    solver.setTimeoutMs(ms) catch |err| {
+                        ctx.recordSetupError(err);
+                        return;
+                    };
                 }
 
                 while (true) {
@@ -2434,6 +2453,8 @@ pub const VerificationPass = struct {
             threads[launched] = try std.Thread.spawn(.{}, Worker.run, .{&state});
         }
         for (threads[0..launched]) |t| t.join();
+
+        if (state.setup_error) |err| return err;
 
         const combined = try self.collectPreparedQueryResults(queries.items, results);
 
