@@ -568,7 +568,11 @@ pub const VerificationPass = struct {
             const base_opt = base.global_map.get(name);
             const then_opt = then_state.global_map.get(name);
             const else_opt = else_state.global_map.get(name);
-            const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
+            const fallback = base_opt orelse blk: {
+                const branch_val = then_opt orelse else_opt orelse break :blk null;
+                const branch_sort = z3.Z3_get_sort(self.encoder.context.ctx, branch_val);
+                break :blk try self.encoder.getOrCreateCurrentGlobal(name, branch_sort);
+            } orelse continue;
             const then_val = then_opt orelse fallback;
             const else_val = else_opt orelse fallback;
             const merged = if (then_val == else_val)
@@ -576,8 +580,12 @@ pub const VerificationPass = struct {
             else
                 self.encoder.encodeIte(condition, then_val, else_val);
 
-            const key_dup = try self.allocator.dupe(u8, name);
-            try self.encoder.global_map.put(key_dup, merged);
+            if (self.encoder.global_map.getPtr(name)) |existing| {
+                existing.* = merged;
+            } else {
+                const key_dup = try self.allocator.dupe(u8, name);
+                try self.encoder.global_map.put(key_dup, merged);
+            }
         }
 
         // Scalar memrefs: same merge logic.
@@ -604,6 +612,10 @@ pub const VerificationPass = struct {
             const base_opt = base.memref_map.get(key);
             const then_opt = then_state.memref_map.get(key);
             const else_opt = else_state.memref_map.get(key);
+            if (base_opt == null and (then_opt == null or else_opt == null)) {
+                self.encoder.noteDegradation("branch merge lost exact memref initialization state");
+                continue;
+            }
             const fallback = base_opt orelse then_opt orelse else_opt orelse continue;
             const then_val = then_opt orelse fallback;
             const else_val = else_opt orelse fallback;
@@ -640,7 +652,10 @@ pub const VerificationPass = struct {
             const base_opt = base.global_map.get(name);
             var fallback = base_opt orelse blk: {
                 for (branch_states) |*branch_state| {
-                    if (branch_state.global_map.get(name)) |value| break :blk value;
+                    if (branch_state.global_map.get(name)) |value| {
+                        const branch_sort = z3.Z3_get_sort(self.encoder.context.ctx, value);
+                        break :blk try self.encoder.getOrCreateCurrentGlobal(name, branch_sort);
+                    }
                 }
                 continue;
             };
@@ -655,8 +670,12 @@ pub const VerificationPass = struct {
                     self.encoder.encodeIte(conditions[idx], branch_val, fallback);
             }
 
-            const key_dup = try self.allocator.dupe(u8, name);
-            try self.encoder.global_map.put(key_dup, fallback);
+            if (self.encoder.global_map.getPtr(name)) |existing| {
+                existing.* = fallback;
+            } else {
+                const key_dup = try self.allocator.dupe(u8, name);
+                try self.encoder.global_map.put(key_dup, fallback);
+            }
         }
 
         self.encoder.memref_map.clearRetainingCapacity();
@@ -678,6 +697,21 @@ pub const VerificationPass = struct {
         while (key_it.next()) |entry| {
             const key = entry.key_ptr.*;
             const base_opt = base.memref_map.get(key);
+            if (base_opt == null) {
+                var saw_present = false;
+                var saw_missing = false;
+                for (branch_states) |*branch_state| {
+                    if (branch_state.memref_map.get(key) != null) {
+                        saw_present = true;
+                    } else {
+                        saw_missing = true;
+                    }
+                }
+                if (saw_present and saw_missing) {
+                    self.encoder.noteDegradation("branch merge lost exact memref initialization state");
+                    continue;
+                }
+            }
             var fallback = base_opt orelse blk: {
                 for (branch_states) |*branch_state| {
                     if (branch_state.memref_map.get(key)) |value| break :blk value;
@@ -5413,6 +5447,62 @@ test "private callee assert is enforced through reachable public call path" {
     defer result.deinit();
     try testing.expect(!result.success);
     try testing.expect(result.errors.items.len > 0);
+}
+
+test "branch merge preserves untouched global base state" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var base = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer base.deinit(testing.allocator);
+    var then_state = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer then_state.deinit(testing.allocator);
+    var else_state = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer else_state.deinit(testing.allocator);
+
+    const bool_sort = z3.Z3_mk_bool_sort(pass.encoder.context.ctx);
+    const i256_sort = z3.Z3_mk_bv_sort(pass.encoder.context.ctx, 256);
+    const cond = try pass.encoder.mkVariable("branch_cond", bool_sort);
+    const one = z3.Z3_mk_numeral(pass.encoder.context.ctx, "1", i256_sort);
+
+    try then_state.global_map.put(try testing.allocator.dupe(u8, "counter"), one);
+
+    try pass.mergeEncoderBranchState(cond, &base, &then_state, &else_state);
+
+    const merged = pass.encoder.global_map.get("counter").?;
+    const untouched_base = pass.encoder.global_entry_map.get("counter").?;
+
+    var solver = try Solver.init(pass.encoder.context, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
+    solver.assert(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
+    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "branch merge degrades partial memref initialization" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var base = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer base.deinit(testing.allocator);
+    var then_state = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer then_state.deinit(testing.allocator);
+    var else_state = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer else_state.deinit(testing.allocator);
+
+    const bool_sort = z3.Z3_mk_bool_sort(pass.encoder.context.ctx);
+    const i256_sort = z3.Z3_mk_bv_sort(pass.encoder.context.ctx, 256);
+    const cond = try pass.encoder.mkVariable("memref_branch_cond", bool_sort);
+    const forty_two = z3.Z3_mk_numeral(pass.encoder.context.ctx, "42", i256_sort);
+
+    try then_state.memref_map.put(1234, forty_two);
+
+    try pass.mergeEncoderBranchState(cond, &base, &then_state, &else_state);
+
+    try testing.expect(pass.encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, pass.encoder.degradationReason().?, "branch merge lost exact memref initialization state"));
+    try testing.expect(pass.encoder.memref_map.get(1234) == null);
 }
 
 test "private callee obligations are guarded by callee requires in public summaries" {

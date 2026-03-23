@@ -164,6 +164,14 @@ pub const Encoder = struct {
         return self.encoding_degraded_reason;
     }
 
+    pub fn noteDegradation(self: *Encoder, reason: []const u8) void {
+        self.recordDegradation(reason);
+    }
+
+    pub fn getOrCreateCurrentGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        return try self.getOrCreateGlobal(name, sort);
+    }
+
     fn recordDegradation(self: *Encoder, reason: []const u8) void {
         self.encoding_degraded = true;
         if (self.encoding_degraded_reason == null) {
