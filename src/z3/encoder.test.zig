@@ -607,6 +607,34 @@ test "arith divsi encodes signed division" {
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvsdiv") != null);
 }
 
+test "arith divui encodes unsigned division" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(div_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvudiv") != null);
+}
+
 test "ora.power encodes modular exponentiation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -734,6 +762,62 @@ test "arith remsi encodes signed remainder" {
     const ast = try encoder.encodeOperation(rem_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvsrem") != null);
+}
+
+test "arith remui encodes unsigned remainder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const rem_op = mlir.oraArithRemUIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(rem_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvurem") != null);
+}
+
+test "arith cmpi ult encodes unsigned comparison" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, lhs, rhs); // ult
+    const ast = try encoder.encodeOperation(cmp_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvult") != null);
 }
 
 test "storage store threads into later load" {
