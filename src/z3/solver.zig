@@ -79,8 +79,20 @@ pub const Solver = struct {
         c.Z3_solver_push(self.context.ctx, self.solver);
     }
 
+    pub fn pushChecked(self: *Solver) !void {
+        self.context.clearLastError();
+        c.Z3_solver_push(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+    }
+
     pub fn pop(self: *Solver) void {
         c.Z3_solver_pop(self.context.ctx, self.solver, 1);
+    }
+
+    pub fn popChecked(self: *Solver) !void {
+        self.context.clearLastError();
+        c.Z3_solver_pop(self.context.ctx, self.solver, 1);
+        try self.context.checkNoError();
     }
 
     pub fn setTimeoutMs(self: *Solver, timeout_ms: u32) !void {

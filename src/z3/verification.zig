@@ -1835,7 +1835,7 @@ pub const VerificationPass = struct {
 
             // Obligation proving: assumptions ∧ ¬obligation must be UNSAT.
             for (obligation_annotations.items) |ann| {
-                self.solver.push();
+                try self.solver.pushChecked();
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -1898,7 +1898,7 @@ pub const VerificationPass = struct {
                         .counterexample = ce,
                         .allocator = self.allocator,
                     });
-                    self.solver.pop();
+                    try self.solver.popChecked();
                     return result;
                 }
                 if (obligation_status == z3.Z3_L_UNDEF) {
@@ -1912,11 +1912,11 @@ pub const VerificationPass = struct {
                     );
                 }
 
-                self.solver.pop();
+                try self.solver.popChecked();
 
                 if (ann.kind == .LoopInvariant) {
                     if (ann.old_condition) |old_inv| {
-                        self.solver.push();
+                        try self.solver.pushChecked();
                         for (ann.path_constraints) |cst| {
                             try self.solver.assertChecked(cst);
                         }
@@ -1984,7 +1984,7 @@ pub const VerificationPass = struct {
                                 .counterexample = ce,
                                 .allocator = self.allocator,
                             });
-                            self.solver.pop();
+                            try self.solver.popChecked();
                             return result;
                         }
                         if (step_status == z3.Z3_L_UNDEF) {
@@ -1998,7 +1998,7 @@ pub const VerificationPass = struct {
                             );
                         }
 
-                        self.solver.pop();
+                        try self.solver.popChecked();
                     }
                 }
             }
@@ -2007,7 +2007,7 @@ pub const VerificationPass = struct {
             for (loop_post_invariant_annotations.items) |inv_ann| {
                 const exit_condition = inv_ann.loop_exit_condition orelse continue;
                 for (ensure_annotations.items) |ensure_ann| {
-                    self.solver.push();
+                    try self.solver.pushChecked();
                     for (ensure_ann.path_constraints) |cst| {
                         try self.solver.assertChecked(cst);
                     }
@@ -2074,7 +2074,7 @@ pub const VerificationPass = struct {
                             .counterexample = ce,
                             .allocator = self.allocator,
                         });
-                        self.solver.pop();
+                        try self.solver.popChecked();
                         return result;
                     }
                     if (post_status == z3.Z3_L_UNDEF) {
@@ -2091,7 +2091,7 @@ pub const VerificationPass = struct {
                         );
                     }
 
-                    self.solver.pop();
+                    try self.solver.popChecked();
                 }
             }
 
@@ -2105,7 +2105,7 @@ pub const VerificationPass = struct {
 
                 // First check: can the guard EVER be satisfied given previous guards?
                 // If (assumptions AND previous_guards AND this_guard) is UNSAT, error!
-                self.solver.push();
+                try self.solver.pushChecked();
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -2141,7 +2141,7 @@ pub const VerificationPass = struct {
                     self.logAst("guard", ann.condition);
                     self.logSolverState("satisfiability");
                 }
-                self.solver.pop();
+                try self.solver.popChecked();
 
                 if (satisfy_status == z3.Z3_L_FALSE) {
                     // Guard can NEVER be satisfied given previous constraints - error!
@@ -2172,7 +2172,7 @@ pub const VerificationPass = struct {
                 }
 
                 // Second check: can the guard be violated? (to determine if it should be kept)
-                self.solver.push();
+                try self.solver.pushChecked();
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -2249,7 +2249,7 @@ pub const VerificationPass = struct {
                         ann.column,
                     );
                 }
-                self.solver.pop();
+                try self.solver.popChecked();
 
                 try previous_guards.append(ann);
             }
