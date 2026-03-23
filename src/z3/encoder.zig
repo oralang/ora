@@ -3876,7 +3876,11 @@ pub const Encoder = struct {
             if (summary_encoder.global_map.get(slot.name)) |post| {
                 if (!slot.is_write or summary_encoder.hasWrittenGlobalSlot(slot.name)) {
                     slot.post = post;
+                } else if (!summary_encoder.isDegraded()) {
+                    slot.post = slot.pre;
                 }
+            } else if (slot.is_write and !summary_encoder.isDegraded() and !summary_encoder.hasWrittenGlobalSlot(slot.name)) {
+                slot.post = slot.pre;
             }
         }
 
@@ -4339,6 +4343,7 @@ pub const Encoder = struct {
 
         if (self.verify_state) {
             for (slots.items, 0..) |slot, slot_idx| {
+                const slot_preserved_exactly = slot.is_write and slot.post != null and self.astEquivalent(slot.post.?, slot.pre);
                 var post = slot.post orelse slot.pre;
                 if (slot.is_write and slot.post == null) {
                     if (func_op != null) {
@@ -4363,7 +4368,7 @@ pub const Encoder = struct {
                     const key = try self.allocator.dupe(u8, slot.name);
                     try self.global_map.put(key, post);
                 }
-                if (slot.is_write and slot.post != null) {
+                if (slot.is_write and slot.post != null and !slot_preserved_exactly) {
                     try self.markGlobalSlotWritten(slot.name);
                 }
             }

@@ -2680,7 +2680,7 @@ test "summary precondition encoding failure degrades encoder" {
     );
 }
 
-test "known zero-result stateful callee fallback degrades encoder" {
+test "known zero-result stateful callee preserves state exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -2710,6 +2710,7 @@ test "known zero-result stateful callee fallback degrades encoder" {
     const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
     const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
     const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const zero_ast = try encoder.encodeOperation(zero_op);
     const seed_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, zero, stringRef("counter"));
     _ = try encoder.encodeOperation(seed_store);
 
@@ -2724,8 +2725,13 @@ test "known zero-result stateful callee fallback degrades encoder" {
     );
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "known callee state fell back to opaque UF summary"));
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, zero_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "map_store updates global map for later map_get" {
