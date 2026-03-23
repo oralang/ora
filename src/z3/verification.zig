@@ -247,11 +247,63 @@ pub const VerificationPass = struct {
             }
         }
         self.encoded_annotations.deinit();
+        self.releaseActivePathAssumptionsFrom(0);
         self.active_path_assumptions.deinit();
         self.encoder.deinit();
         self.solver.deinit();
         self.context.deinit();
         self.allocator.destroy(self.context);
+    }
+
+    fn releaseActivePathAssumptionsFrom(self: *VerificationPass, start_len: usize) void {
+        if (start_len >= self.active_path_assumptions.items.len) {
+            self.active_path_assumptions.shrinkRetainingCapacity(start_len);
+            return;
+        }
+        for (self.active_path_assumptions.items[start_len..]) |assume| {
+            if (assume.owned_extra_constraints and assume.extra_constraints.len > 0) {
+                self.allocator.free(assume.extra_constraints);
+            }
+        }
+        self.active_path_assumptions.shrinkRetainingCapacity(start_len);
+    }
+
+    fn cloneActivePathAssumeSlice(
+        self: *VerificationPass,
+        assumes: []const ActivePathAssume,
+    ) ![]ActivePathAssume {
+        if (assumes.len == 0) {
+            return try self.allocator.alloc(ActivePathAssume, 0);
+        }
+        var dup = try self.allocator.alloc(ActivePathAssume, assumes.len);
+        for (dup) |*entry| {
+            entry.* = .{
+                .condition = self.encoder.encodeBoolConstant(true),
+                .extra_constraints = &[_]z3.Z3_ast{},
+                .owned_extra_constraints = false,
+            };
+        }
+        errdefer self.freeOwnedActivePathAssumeSlice(dup);
+        for (assumes, 0..) |assume, idx| {
+            dup[idx] = .{
+                .condition = assume.condition,
+                .extra_constraints = if (assume.owned_extra_constraints)
+                    try self.cloneConstraintSlice(assume.extra_constraints)
+                else
+                    assume.extra_constraints,
+                .owned_extra_constraints = assume.owned_extra_constraints,
+            };
+        }
+        return dup;
+    }
+
+    fn freeOwnedActivePathAssumeSlice(self: *VerificationPass, assumes: []ActivePathAssume) void {
+        for (assumes) |assume| {
+            if (assume.owned_extra_constraints and assume.extra_constraints.len > 0) {
+                self.allocator.free(assume.extra_constraints);
+            }
+        }
+        self.allocator.free(assumes);
     }
 
     //===----------------------------------------------------------------------===//
@@ -308,7 +360,7 @@ pub const VerificationPass = struct {
     /// Walk an MLIR region to find verification operations
     fn walkMLIRRegion(self: *VerificationPass, region: mlir.MlirRegion) !void {
         const region_path_assumption_len = self.active_path_assumptions.items.len;
-        defer self.active_path_assumptions.shrinkRetainingCapacity(region_path_assumption_len);
+        defer self.releaseActivePathAssumptionsFrom(region_path_assumption_len);
 
         var predecessor_counts = std.AutoHashMap(usize, usize).init(self.allocator);
         defer predecessor_counts.deinit();
@@ -318,7 +370,7 @@ pub const VerificationPass = struct {
         defer {
             var it = inherited_assumptions.iterator();
             while (it.next()) |entry| {
-                self.allocator.free(entry.value_ptr.*);
+                self.freeOwnedActivePathAssumeSlice(entry.value_ptr.*);
             }
             inherited_assumptions.deinit();
         }
@@ -327,10 +379,11 @@ pub const VerificationPass = struct {
         var current_block = mlir.oraRegionGetFirstBlock(region);
 
         while (!mlir.oraBlockIsNull(current_block)) {
-            self.active_path_assumptions.shrinkRetainingCapacity(region_path_assumption_len);
+            self.releaseActivePathAssumptionsFrom(region_path_assumption_len);
             const block_key = @intFromPtr(current_block.ptr);
-            if (inherited_assumptions.get(block_key)) |assumes| {
-                for (assumes) |assume| {
+            if (inherited_assumptions.fetchRemove(block_key)) |entry| {
+                defer self.allocator.free(entry.value);
+                for (entry.value) |assume| {
                     try self.active_path_assumptions.append(assume);
                 }
             }
@@ -404,9 +457,9 @@ pub const VerificationPass = struct {
                         if (pred_count != 1) continue;
 
                         if (inherited_assumptions.fetchRemove(succ_key)) |removed| {
-                            self.allocator.free(removed.value);
+                            self.freeOwnedActivePathAssumeSlice(removed.value);
                         }
-                        const dup = try self.allocator.dupe(ActivePathAssume, block_assumptions);
+                        const dup = try self.cloneActivePathAssumeSlice(block_assumptions);
                         try inherited_assumptions.put(succ_key, dup);
                     }
                 }
@@ -660,6 +713,8 @@ pub const VerificationPass = struct {
         }
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
         const raw_condition = try self.encoder.encodeValue(condition_value);
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -679,10 +734,12 @@ pub const VerificationPass = struct {
         if (num_regions >= 1) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
-                .extra_constraints = &[_]z3.Z3_ast{},
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
             });
             const then_region = mlir.oraOperationGetRegion(if_op, 0);
             try self.walkMLIRRegion(then_region);
@@ -697,11 +754,13 @@ pub const VerificationPass = struct {
         if (num_regions >= 2) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
                 .condition = not_condition,
-                .extra_constraints = &[_]z3.Z3_ast{},
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
             });
             const else_region = mlir.oraOperationGetRegion(if_op, 1);
             try self.walkMLIRRegion(else_region);
@@ -727,6 +786,8 @@ pub const VerificationPass = struct {
         }
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
         const raw_condition = try self.encoder.encodeValue(condition_value);
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -746,10 +807,12 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(then_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
-                .extra_constraints = &[_]z3.Z3_ast{},
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
             });
 
             const then_region = mlir.oraOperationGetRegion(if_op, 0);
@@ -765,11 +828,13 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(else_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
                 .condition = not_condition,
-                .extra_constraints = &[_]z3.Z3_ast{},
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
             });
 
             const else_region = mlir.oraOperationGetRegion(if_op, 1);
@@ -781,7 +846,17 @@ pub const VerificationPass = struct {
             else_state = try self.captureEncoderBranchState();
         }
 
-        try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+        // Unlike scf.if, only the fallthrough (else) path reaches subsequent
+        // operations in the current block. The then-region returns from the
+        // enclosing function, so carrying an ite-merged state/path forward is
+        // unsound for later obligations.
+        try self.restoreEncoderBranchState(&else_state);
+        const fallthrough_constraints = try self.cloneConstraintSlice(leaked_constraints);
+        try self.active_path_assumptions.append(.{
+            .condition = self.encoder.encodeNot(condition),
+            .extra_constraints = fallthrough_constraints,
+            .owned_extra_constraints = true,
+        });
     }
 
     fn walkOraSwitchRegions(self: *VerificationPass, switch_op: mlir.MlirOperation) anyerror!void {
@@ -798,6 +873,8 @@ pub const VerificationPass = struct {
         }
 
         const scrutinee_value = mlir.oraOperationGetOperand(switch_op, 0);
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
         const scrutinee = try self.encoder.encodeValue(scrutinee_value);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
@@ -841,10 +918,11 @@ pub const VerificationPass = struct {
             branch_conditions[region_idx] = effective_predicate;
 
             const saved_len = self.active_path_assumptions.items.len;
-            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = effective_predicate,
-                .extra_constraints = &[_]z3.Z3_ast{},
+                .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
+                .owned_extra_constraints = true,
             });
             const region = mlir.oraOperationGetRegion(switch_op, @intCast(region_idx));
             try self.walkMLIRRegion(region);
@@ -3476,6 +3554,7 @@ fn parseModelString(allocator: std.mem.Allocator, model_str: []const u8) ?errors
 const ActivePathAssume = struct {
     condition: z3.Z3_ast,
     extra_constraints: []const z3.Z3_ast,
+    owned_extra_constraints: bool = false,
 };
 
 const EncodedAnnotation = struct {
@@ -4312,6 +4391,277 @@ fn buildConditionalReturnContractInvariantModule(mlir_ctx: mlir.MlirContext) mli
     return module;
 }
 
+fn buildConditionalReturnFallthroughModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_fallthrough_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const param_types = [_]mlir.MlirType{i1_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const flag = mlir.oraBlockGetArgument(func_body, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, flag);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_then_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, false_then_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_ret);
+
+    const false_outer_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false_outer_val = mlir.oraOperationGetResult(false_outer_op, 0);
+    const not_flag_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, flag, false_outer_val); // eq flag false
+    const not_flag = mlir.oraOperationGetResult(not_flag_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, not_flag, testStringRef("fallthrough must imply not flag"));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, false_outer_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, not_flag_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn buildDoubleConditionalReturnFallthroughModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("double_conditional_return_fallthrough_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const param_types = [_]mlir.MlirType{ i1_ty, i1_ty };
+    const param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const flag0 = mlir.oraBlockGetArgument(func_body, 0);
+    const flag1 = mlir.oraBlockGetArgument(func_body, 1);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const first_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, flag0);
+    const first_then = mlir.oraConditionalReturnOpGetThenBlock(first_ret);
+    const first_then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(first_then, first_then_ret);
+
+    const second_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, flag1);
+    const second_then = mlir.oraConditionalReturnOpGetThenBlock(second_ret);
+    const second_then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(second_then, second_then_ret);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false0 = mlir.oraOperationGetResult(false0_op, 0);
+    const false1 = mlir.oraOperationGetResult(false1_op, 0);
+    const not_flag0_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, flag0, false0);
+    const not_flag1_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, flag1, false1);
+    const not_flag0 = mlir.oraOperationGetResult(not_flag0_op, 0);
+    const not_flag1 = mlir.oraOperationGetResult(not_flag1_op, 0);
+    const both_ok_op = mlir.oraArithAndIOpCreate(mlir_ctx, loc, not_flag0, not_flag1);
+    const both_ok = mlir.oraOperationGetResult(both_ok_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, both_ok, testStringRef("fallthrough must imply both flags are false"));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, first_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, second_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, false0_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, false1_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, not_flag0_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, not_flag1_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, both_ok_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn buildConditionalReturnStatefulDivModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_stateful_div_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const divisor = mlir.oraBlockGetArgument(func_body, 0);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const is_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, divisor, zero); // eq
+    const is_zero = mlir.oraOperationGetResult(is_zero_op, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, is_zero);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_ret);
+
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const one = mlir.oraOperationGetResult(one_op, 0);
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, one, divisor);
+    const div_val = mlir.oraOperationGetResult(div_op, 0);
+    const store_op = mlir.oraSStoreOpCreate(mlir_ctx, loc, div_val, testStringRef("counter"));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, is_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, one_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, div_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, store_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn buildConditionalReturnMapStoreDivModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_map_store_div_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const param_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const divisor = mlir.oraBlockGetArgument(func_body, 0);
+    const key = mlir.oraBlockGetArgument(func_body, 1);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const is_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, divisor, zero); // eq
+    const is_zero = mlir.oraOperationGetResult(is_zero_op, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, is_zero);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_ret);
+
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const one = mlir.oraOperationGetResult(one_op, 0);
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, one, divisor);
+    const div_val = mlir.oraOperationGetResult(div_op, 0);
+    const map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const map_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("balances"), map_ty);
+    const map_store = mlir.oraMapStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(map_load, 0), key, div_val);
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, is_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, one_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, div_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, map_load);
+    mlir.oraBlockAppendOwnedOperation(func_body, map_store);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn buildConditionalReturnMapGetDivModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_map_get_div_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const key = mlir.oraBlockGetArgument(func_body, 0);
+
+    const borrows_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("borrows"), map_ty);
+    const borrow_val_op = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(borrows_load, 0), key, i256_ty);
+    const borrow_val = mlir.oraOperationGetResult(borrow_val_op, 0);
+    const collateral_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("collateral"), map_ty);
+    const collateral_val_op = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(collateral_load, 0), key, i256_ty);
+    const collateral_val = mlir.oraOperationGetResult(collateral_val_op, 0);
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const is_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, borrow_val, zero); // eq
+    const is_zero = mlir.oraOperationGetResult(is_zero_op, 0);
+    const collateral_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, collateral_val, zero); // eq
+    const collateral_zero = mlir.oraOperationGetResult(collateral_zero_op, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const first_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, is_zero);
+    const first_then = mlir.oraConditionalReturnOpGetThenBlock(first_ret);
+    const first_then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(first_then, first_then_ret);
+
+    const second_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, collateral_zero);
+    const second_then = mlir.oraConditionalReturnOpGetThenBlock(second_ret);
+    const second_then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(second_then, second_then_ret);
+
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const one = mlir.oraOperationGetResult(one_op, 0);
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, one, borrow_val);
+    const div_val = mlir.oraOperationGetResult(div_op, 0);
+    const health_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("health_factors"), map_ty);
+    const map_store = mlir.oraMapStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(health_load, 0), key, div_val);
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, borrows_load);
+    mlir.oraBlockAppendOwnedOperation(func_body, borrow_val_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, collateral_load);
+    mlir.oraBlockAppendOwnedOperation(func_body, collateral_val_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, is_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, collateral_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, first_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, second_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, one_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, div_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, health_load);
+    mlir.oraBlockAppendOwnedOperation(func_body, map_store);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildUntaggedCfAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -4508,6 +4858,63 @@ fn buildPublicCallsPrivateRequiresGuardedAssertModule(mlir_ctx: mlir.MlirContext
 
     mlir.oraBlockAppendOwnedOperation(module_body, public_func_op);
     mlir.oraBlockAppendOwnedOperation(module_body, private_func_op);
+    return module;
+}
+
+fn buildPublicCallsPublicAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const empty_vals = [_]mlir.MlirValue{};
+
+    const helper_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_helper"));
+    const helper_visibility_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"));
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", helper_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", helper_visibility_attr),
+    };
+    const helper_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &empty_types, &empty_locs, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper_func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false_val = mlir.oraOperationGetResult(false_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, false_val, testStringRef("public helper assert"));
+    const helper_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(helper_body, false_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, helper_ret);
+
+    const caller_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"));
+    const caller_visibility_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"));
+    const caller_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", caller_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", caller_visibility_attr),
+    };
+    const caller_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &caller_attrs, caller_attrs.len, &empty_types, &empty_locs, 0);
+    const caller_body = mlir.oraFuncOpGetBodyBlock(caller_func_op);
+
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("public_helper"),
+        &empty_vals,
+        empty_vals.len,
+        &empty_types,
+        empty_types.len,
+    );
+    const caller_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(caller_body, call_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, caller_ret);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, caller_func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, helper_func_op);
     return module;
 }
 
@@ -4933,6 +5340,37 @@ test "private callee obligations are guarded by callee requires in public summar
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
 }
 
+test "public callee obligations stay on the callee instead of bubbling to caller" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildPublicCallsPublicAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var caller_obligations: usize = 0;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        if (std.mem.eql(u8, q.function_name, "public_entry")) caller_obligations += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 0), caller_obligations);
+}
+
 test "path assume annotations are extracted as path assumptions" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -5125,6 +5563,176 @@ test "contract invariants inside ora.conditional_return use path constraints" {
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const module = buildConditionalReturnContractInvariantModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "contract invariants after ora.conditional_return use fallthrough path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnFallthroughModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "contract invariants after sequential ora.conditional_return accumulate fallthrough path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildDoubleConditionalReturnFallthroughModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "stateful obligations after ora.conditional_return use fallthrough path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnStatefulDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "map_store obligations after ora.conditional_return use fallthrough path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnMapStoreDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "map_get-div-map_store obligations respect conditional_return fallthrough" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnMapGetDivModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);

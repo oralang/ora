@@ -2975,7 +2975,9 @@ pub const Encoder = struct {
 
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        self.addSummaryObligations(extra_obligations, callee_requires.items);
+        if (!self.functionIsExternallyVerified(func_op)) {
+            self.addSummaryObligations(extra_obligations, callee_requires.items);
+        }
 
         return encoded;
     }
@@ -3032,17 +3034,22 @@ pub const Encoder = struct {
         // reflects sstore/map_store updates before we snapshot post-state.
         summary_encoder.encodeStateEffectsInOperation(func_op);
 
-        const return_op = self.findFunctionReturnOp(func_op) orelse return false;
-        const ret_operands = mlir.oraOperationGetNumOperands(return_op);
-        const result_count = @min(ret_operands, result_exprs.len);
-        if (result_count == 0 and result_exprs.len > 0) return false;
-
         var any_result = false;
-        for (0..result_count) |i| {
-            const ret_value = mlir.oraOperationGetOperand(return_op, i);
-            const encoded = summary_encoder.encodeValue(ret_value) catch return false;
-            result_exprs[i] = encoded;
-            any_result = true;
+        if (self.findFunctionReturnOp(func_op)) |return_op| {
+            const ret_operands = mlir.oraOperationGetNumOperands(return_op);
+            const result_count = @min(ret_operands, result_exprs.len);
+            if (result_count == 0 and result_exprs.len > 0) return false;
+
+            for (0..result_count) |i| {
+                const ret_value = mlir.oraOperationGetOperand(return_op, i);
+                const encoded = summary_encoder.encodeValue(ret_value) catch return false;
+                result_exprs[i] = encoded;
+                any_result = true;
+            }
+        } else if (result_exprs.len > 0) {
+            // Multiple/conditional returns can still produce useful post-state
+            // summaries even when the result value remains opaque.
+            any_result = false;
         }
 
         const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
@@ -3051,7 +3058,9 @@ pub const Encoder = struct {
 
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        self.addSummaryObligations(extra_obligations, callee_requires.items);
+        if (!self.functionIsExternallyVerified(func_op)) {
+            self.addSummaryObligations(extra_obligations, callee_requires.items);
+        }
 
         for (slots) |*slot| {
             if (summary_encoder.global_map.get(slot.name)) |post| {
@@ -3105,6 +3114,17 @@ pub const Encoder = struct {
                 block = mlir.oraBlockGetNextInRegion(block);
             }
         }
+    }
+
+    fn functionIsExternallyVerified(_: *Encoder, func_op: mlir.MlirOperation) bool {
+        const visibility_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.visibility", 14));
+        if (mlir.oraAttributeIsNull(visibility_attr)) return true;
+        const visibility_ref = mlir.oraStringAttrGetValue(visibility_attr);
+        if (visibility_ref.data == null or visibility_ref.length == 0) return true;
+        const visibility = visibility_ref.data[0..visibility_ref.length];
+        return std.mem.eql(u8, visibility, "pub") or
+            std.mem.eql(u8, visibility, "public") or
+            std.mem.eql(u8, visibility, "external");
     }
 
     fn addSummaryObligations(
