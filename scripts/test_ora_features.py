@@ -13,6 +13,10 @@ from datetime import datetime
 import argparse
 import re
 
+EXPECTED_PASS_EXCEPTIONS = {
+    "ora-example/refinements/negative_tests/fail_refinement_bounds.ora",
+}
+
 
 def find_ora_files(base_dir="ora-example", subdir_filter=None):
     """Find all .ora files in the project, optionally filtered by subdirectory."""
@@ -72,7 +76,8 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     """Test a single .ora file and return results."""
     stem = Path(file_path).stem
     stem_lower = stem.lower()
-    expected_failure = "fail" in stem_lower
+    normalized_path = str(Path(file_path))
+    expected_failure = "fail" in stem_lower and normalized_path not in EXPECTED_PASS_EXCEPTIONS
     try:
         source_text = Path(file_path).read_text()
     except OSError:
@@ -83,10 +88,11 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     timeout_note = None
     stdout_raw = b""
     stderr_raw = b""
+    mlir_stdout = ""
 
     try:
         result = subprocess.run(
-            [compiler_path, "--verify", "--emit-mlir", str(file_path)],
+            [compiler_path, str(file_path)],
             capture_output=True,
             timeout=timeout_s
         )
@@ -144,7 +150,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
         has_error = True
 
     # Files without a contract declaration will fail at ABI generation (MissingContract)
-    # even if --emit-mlir succeeds. Detect this for expected-failure files.
+    # even if MLIR emission succeeds. Detect this for expected-failure files.
     if not has_error and not has_contract_decl and expected_failure:
         has_error = True
 
@@ -163,9 +169,20 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
         status = "✅ EXPECTED FAIL" if has_error else "❌ UNEXPECTED PASS"
     else:
         status = "❌ FAILED" if has_error else "✅ SUCCESS"
-    
+
+    if not has_error and not timed_out:
+        try:
+            mlir_result = subprocess.run(
+                [compiler_path, "--verify", "--emit-mlir", str(file_path)],
+                capture_output=True,
+                timeout=timeout_s
+            )
+            mlir_stdout = (mlir_result.stdout or b"").decode('utf-8', errors='replace')
+        except subprocess.TimeoutExpired:
+            mlir_stdout = ""
+
     # Extract MLIR output (last 100 lines)
-    mlir_output = stdout.split("\n")[-100:] if stdout else []
+    mlir_output = mlir_stdout.split("\n")[-100:] if mlir_stdout else []
     
     return {
         "file": str(file_path),

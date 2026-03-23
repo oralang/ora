@@ -8,6 +8,7 @@ contract StorageReadEffect {
     storage var counter: u256;
     storage var balance: u256;
     storage balances: map<address, u256>;
+    storage allowances: map<address, map<address, u256>>;
 
     // Reading storage variable records read effect
     pub fn testStorageRead() {
@@ -35,16 +36,13 @@ contract StorageReadEffect {
 
     // Storage read in loop records read effect per iteration
     pub fn testStorageReadInLoop() {
-        var i: u256 = 0;
-        while (i < 10) {
+        for (0..10) |_, _| {
             let value: u256 = counter; // Read effect per iteration
-            i += 1;
         }
     }
 
     // Storage read from nested map records read effect
     pub fn testNestedMapRead(owner: address, spender: address) {
-        storage allowances: map<address, map<address, u256>>;
         let allowance: u256 = allowances[owner][spender]; // Nested read effect
     }
 }

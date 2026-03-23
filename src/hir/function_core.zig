@@ -613,7 +613,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                            break :blk appendValueOp(self.block, op);
+                            const value = appendValueOp(self.block, op);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            break :blk value;
                         },
                         .wrapping_add_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
@@ -634,7 +636,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                            break :blk appendValueOp(self.block, op);
+                            const value = appendValueOp(self.block, op);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            break :blk value;
                         },
                         .wrapping_sub_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
@@ -655,7 +659,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                            break :blk appendValueOp(self.block, op);
+                            const value = appendValueOp(self.block, op);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            break :blk value;
                         },
                         .wrapping_mul_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
@@ -1288,7 +1294,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, overflow_op);
         }
 
-        fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
+        pub fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
             const not_op = mlir.oraArithXorIOpCreate(self.parent.context, loc, overflow_flag, true_val);

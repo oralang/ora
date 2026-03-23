@@ -5,6 +5,8 @@
 // ============================================================================
 
 contract NoImplicitCalldataWrite {
+    storage var storage_val: u256;
+
     // ERROR: Cannot write to calldata parameter
     pub fn testInvalidCalldataWrite(x: u256) {
         // This should fail at compile time
@@ -34,8 +36,6 @@ contract NoImplicitCalldataWrite {
     pub fn testValidCalldataCopy(x: u256) {
         let stack_val: u256 = x;        // Valid: calldata -> stack
         memory var mem_val: u256 = x;    // Valid: calldata -> memory
-        storage var storage_val: u256;
         storage_val = x;                // Valid: calldata -> storage (via stack)
     }
 }
-

@@ -7850,6 +7850,117 @@ test "compiler lowers checked arithmetic compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divui"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+}
+
+test "compiler lowers overflow asserts through private generic checked helpers" {
+    const source_text =
+        \\contract FailPrivateGenericCheckedArith {
+        \\    fn add(comptime T: type, a: T, b: T) -> T {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    pub fn uncheckedAdd(a: u256, b: u256) -> u256 {
+        \\        return add(u256, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @add__u256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+}
+
+test "compiler treats scaled arithmetic as scaled in sema" {
+    const source_text =
+        \\fn addScaled(a: Scaled<u256, 18>, b: Scaled<u256, 18>) {
+        \\    let sum = a + b;
+        \\}
+        \\
+        \\fn mulScaled(a: Scaled<u256, 18>, b: Scaled<u256, 6>) {
+        \\    let product = a * b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(root_module.file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const add_fn = ast_file.items[0].Function;
+    const add_body = ast_file.body(add_fn.body).*;
+    const sum_decl = ast_file.statement(add_body.statements[0]).VariableDecl;
+    const sum_type = typecheck.pattern_types[sum_decl.pattern.index()].type;
+    try testing.expect(sum_type.kind() == .refinement);
+    try testing.expectEqualStrings("Scaled", sum_type.refinement.name);
+    try testing.expectEqualStrings("18", sum_type.refinement.args[1].Integer.text);
+
+    const mul_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    const mul_fn = ast_file.items[1].Function;
+    const mul_body = ast_file.body(mul_fn.body).*;
+    const product_decl = ast_file.statement(mul_body.statements[0]).VariableDecl;
+    const product_type = mul_typecheck.pattern_types[product_decl.pattern.index()].type;
+    try testing.expect(product_type.kind() == .refinement);
+    try testing.expectEqualStrings("Scaled", product_type.refinement.name);
+    try testing.expectEqualStrings("24", product_type.refinement.args[1].Integer.text);
+}
+
+test "compiler allows base integer flow into exact and scaled refinements" {
+    const source_text =
+        \\fn exactLiteral() {
+        \\    let total: Exact<u256> = 1000;
+        \\}
+        \\
+        \\fn scaledLiteral() {
+        \\    let amount: Scaled<u256, 18> = 1_000_000_000_000_000_000;
+        \\}
+        \\
+        \\fn exactFromBase(x: u256) {
+        \\    let exact_x: Exact<u256> = x;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(root_module.file_id);
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+}
+
+test "compiler accepts scaled returns from scaled arithmetic" {
+    const source_text =
+        \\fn addScaled(a: Scaled<u256, 18>, b: Scaled<u256, 18>) -> Scaled<u256, 18> {
+        \\    return a + b;
+        \\}
+        \\
+        \\fn mulScaled(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> Scaled<u256, 24> {
+        \\    return a * b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(root_module.file_id);
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+
+    const diagnostics_list = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(@as(usize, 0), diagnostics_list.items.items.len);
+    const diagnostics_list_mul = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expectEqual(@as(usize, 0), diagnostics_list_mul.items.items.len);
 }
 
 test "compiler rethreads nested map assignment to outer map" {

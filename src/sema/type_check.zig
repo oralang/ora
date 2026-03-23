@@ -54,6 +54,15 @@ fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) Lo
 }
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
+    if (expected_type.kind() == .refinement) {
+        if (std.mem.eql(u8, expected_type.refinement.name, "Scaled")) {
+            return scaledFlowCompatible(expected_type.refinement, actual_type);
+        }
+        if (std.mem.eql(u8, expected_type.refinement.name, "Exact")) {
+            return exactFlowCompatible(expected_type.refinement, actual_type);
+        }
+    }
+
     if (expected_type.kind() == .refinement and !refinementSupportsRuntimeGuard(expected_type.refinement)) {
         if (actual_type.kind() != .refinement) return false;
         return typesAssignable(expected_type, actual_type) and typesAssignable(actual_type, expected_type);
@@ -77,6 +86,31 @@ fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
 fn refinementSupportsRuntimeGuard(refinement: model.RefinementType) bool {
     return !std.mem.eql(u8, refinement.name, "Exact") and
         !std.mem.eql(u8, refinement.name, "Scaled");
+}
+
+fn exactFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
+    if (actual_type.kind() == .refinement) {
+        if (!std.mem.eql(u8, actual_type.refinement.name, "Exact")) return false;
+        return typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) and
+            typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*);
+    }
+    return typesAssignable(expected.base_type.*, actual_type) and
+        typesAssignable(actual_type, expected.base_type.*);
+}
+
+fn scaledFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
+    if (actual_type.kind() == .refinement) {
+        if (!std.mem.eql(u8, actual_type.refinement.name, "Scaled")) return false;
+        if (!typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) or
+            !typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*))
+        {
+            return false;
+        }
+        return typesAssignable(.{ .refinement = expected }, actual_type) and
+            typesAssignable(actual_type, .{ .refinement = expected });
+    }
+    return typesAssignable(expected.base_type.*, actual_type) and
+        typesAssignable(actual_type, expected.base_type.*);
 }
 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
@@ -3861,7 +3895,7 @@ const TypeChecker = struct {
     }
 
     fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
-        _ = self;
+        if (scaledArithmeticResultType(self, op, lhs_type, rhs_type)) |ty| return ty;
         return switch (op) {
             .add => if (lhs_type.kind() == .string and rhs_type.kind() == .string)
                 .{ .string = {} }
@@ -3873,6 +3907,52 @@ const TypeChecker = struct {
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
             .lt, .le, .gt, .ge => if (orderedTypesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
         };
+    }
+
+    fn scaledArithmeticResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) ?Type {
+        if (lhs_type.kind() != .refinement or rhs_type.kind() != .refinement) return null;
+        const lhs = lhs_type.refinement;
+        const rhs = rhs_type.refinement;
+        if (!std.mem.eql(u8, lhs.name, "Scaled") or !std.mem.eql(u8, rhs.name, "Scaled")) return null;
+        if (!typesAssignable(lhs.base_type.*, rhs.base_type.*) or !typesAssignable(rhs.base_type.*, lhs.base_type.*)) return null;
+        const lhs_decimals = refinementIntegerArg(lhs, 1) orelse return null;
+        const rhs_decimals = refinementIntegerArg(rhs, 1) orelse return null;
+
+        return switch (op) {
+            .add, .sub, .wrapping_add, .wrapping_sub => if (std.mem.eql(u8, lhs_decimals, rhs_decimals))
+                lhs_type
+            else
+                .{ .unknown = {} },
+            .mul, .wrapping_mul => self.makeScaledRefinementType(lhs.base_type.*, lhs_decimals, rhs_decimals),
+            else => null,
+        };
+    }
+
+    fn refinementIntegerArg(refinement: model.RefinementType, index: usize) ?[]const u8 {
+        if (index >= refinement.args.len) return null;
+        return switch (refinement.args[index]) {
+            .Integer => |literal| literal.text,
+            else => null,
+        };
+    }
+
+    fn makeScaledRefinementType(self: *const TypeChecker, base_type: Type, lhs_decimals: []const u8, rhs_decimals: []const u8) Type {
+        const lhs = std.fmt.parseInt(u32, lhs_decimals, 10) catch return .{ .unknown = {} };
+        const rhs = std.fmt.parseInt(u32, rhs_decimals, 10) catch return .{ .unknown = {} };
+        const total = lhs + rhs;
+        const total_text = std.fmt.allocPrint(self.arena, "{d}", .{total}) catch return .{ .unknown = {} };
+
+        const stored_base = self.arena.create(Type) catch return .{ .unknown = {} };
+        stored_base.* = base_type;
+
+        const args = self.arena.alloc(ast.TypeArg, 2) catch return .{ .unknown = {} };
+        args[0] = ast.TypeArg{ .Type = ast.TypeExprId.fromIndex(0) };
+        args[1] = ast.TypeArg{ .Integer = .{ .range = undefined, .text = total_text } };
+        return .{ .refinement = .{
+            .name = "Scaled",
+            .base_type = stored_base,
+            .args = args,
+        } };
     }
 
     fn exprIsTypeValue(self: *const TypeChecker, expr_id: ast.ExprId) bool {

@@ -4,10 +4,13 @@
 // Tests that writing to storage records a write effect
 // ============================================================================
 
+comptime const std = @import("std");
+
 contract StorageWriteEffect {
     storage var counter: u256;
     storage var balance: u256;
     storage balances: map<address, u256>;
+    storage allowances: map<address, map<address, u256>>;
 
     // Writing to storage variable records write effect
     pub fn testStorageWrite() {
@@ -34,23 +37,22 @@ contract StorageWriteEffect {
 
     // Storage write in loop records write effect per iteration
     pub fn testStorageWriteInLoop() {
-        var i: u256 = 0;
-        while (i < 10) {
+        for (0..10) |i, _| {
             counter = i; // Write effect per iteration
-            i += 1;
         }
     }
 
     // Compound assignment records write effect
-    pub fn testStorageCompoundAssign() {
+    pub fn testStorageCompoundAssign()
+        requires(counter <= std.constants.U256_MAX - 10)
+        requires(balance >= 5)
+    {
         counter += 10;  // Read + Write effect
         balance -= 5;   // Read + Write effect
     }
 
     // Storage write from nested map records write effect
     pub fn testNestedMapWrite(owner: address, spender: address, amount: u256) {
-        storage allowances: map<address, map<address, u256>>;
         allowances[owner][spender] = amount; // Nested write effect
     }
 }
-

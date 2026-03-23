@@ -888,6 +888,7 @@ const FunctionLowerer = struct {
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
+    pub const emitOverflowAssert = FunctionCore.emitOverflowAssert;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;
     pub const lowerLabeledBlockStmt = ControlFlow.lowerLabeledBlockStmt;
@@ -905,6 +906,7 @@ const FunctionLowerer = struct {
     pub const lowerNameExpr = ExprLowering.lowerNameExpr;
     pub const lowerUnary = ExprLowering.lowerUnary;
     pub const lowerBinary = ExprLowering.lowerBinary;
+    pub const maybeEmitCheckedBinaryOverflowAssert = ExprLowering.maybeEmitCheckedBinaryOverflowAssert;
     pub const createCompareOp = ExprLowering.createCompareOp;
     pub const lowerCall = ExprLowering.lowerCall;
     pub const lowerBuiltin = ExprLowering.lowerBuiltin;

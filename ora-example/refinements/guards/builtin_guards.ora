@@ -6,6 +6,8 @@
 
 comptime const std = @import("std");
 contract BuiltinGuards {
+    storage var stored_addr: address;
+
     // ============================================================================
     // NonZeroAddress from Trusted Builtins (No Guard)
     // ============================================================================
@@ -33,7 +35,6 @@ contract BuiltinGuards {
     
     // Address from storage should require guard
     fn testStorageAddressGuard() {
-        storage var stored_addr: address;
         let non_zero: NonZeroAddress = stored_addr; // Guard required
     }
     

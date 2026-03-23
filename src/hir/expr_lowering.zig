@@ -560,7 +560,47 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(op)) {
                 return self.defaultValue(result_type, binary.range);
             }
-            return appendValueOp(self.block, op);
+            const value = appendValueOp(self.block, op);
+            try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
+            return value;
+        }
+
+        pub fn maybeEmitCheckedBinaryOverflowAssert(
+            self: *FunctionLowerer,
+            op: ast.BinaryOp,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            result: mlir.MlirValue,
+            is_signed: bool,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_ty = mlir.oraValueGetType(result);
+            if (!mlir.oraTypeIsAInteger(value_ty)) return;
+
+            const loc = self.parent.location(range);
+            const overflow_flag = switch (op) {
+                .add => if (is_signed)
+                    try @This().computeSignedAddOverflow(self, result, lhs, rhs, loc)
+                else
+                    appendValueOp(self.block, self.createCompareOp(loc, "ult", result, lhs)),
+                .sub => if (is_signed)
+                    try @This().computeSignedSubOverflow(self, result, lhs, rhs, loc)
+                else
+                    appendValueOp(self.block, self.createCompareOp(loc, "ult", lhs, rhs)),
+                .mul => if (is_signed)
+                    try @This().computeSignedMulOverflow(self, result, lhs, rhs, value_ty, loc)
+                else
+                    try @This().computeUnsignedMulOverflow(self, result, lhs, rhs, value_ty, loc),
+                else => return,
+            };
+
+            const message = switch (op) {
+                .add => "checked addition overflow",
+                .sub => "checked subtraction overflow",
+                .mul => "checked multiplication overflow",
+                else => unreachable,
+            };
+            try FunctionLowerer.emitOverflowAssert(self, overflow_flag, message, range);
         }
 
         fn lowerShortCircuitLogical(
