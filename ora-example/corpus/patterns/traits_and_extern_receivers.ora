@@ -1,0 +1,67 @@
+// Trait receiver example
+// Demonstrates:
+// - local trait methods using `self`
+// - intra-impl receiver calls like `self.net()`
+// - ordinary value-method calls like `snapshot.buffered(1)`
+
+trait NetValue {
+    fn net(self) -> u256;
+    fn buffered(self, buffer: u256) -> u256;
+    fn covers(self, debt: u256) -> bool;
+}
+
+struct AccountSnapshot {
+    assets: u256,
+    liabilities: u256,
+}
+
+impl NetValue for AccountSnapshot {
+    fn net(self) -> u256 {
+        if (self.assets >= self.liabilities) {
+            return self.assets - self.liabilities;
+        }
+        return 0;
+    }
+
+    fn buffered(self, buffer: u256) -> u256 {
+        return self.net() + buffer;
+    }
+
+    fn covers(self, debt: u256) -> bool {
+        return self.buffered(1) >= debt;
+    }
+}
+
+fn buffered_quote(assets: u256, reserve: u256) -> u256 {
+    let snapshot: AccountSnapshot = .{
+        .assets = assets,
+        .liabilities = reserve,
+    };
+    return snapshot.buffered(1);
+}
+
+fn compare_snapshots(left_assets: u256, right_assets: u256) -> bool {
+    let left_snapshot: AccountSnapshot = .{
+        .assets = left_assets,
+        .liabilities = 0,
+    };
+    let right_snapshot: AccountSnapshot = .{
+        .assets = right_assets,
+        .liabilities = 0,
+    };
+    return left_snapshot.net() >= right_snapshot.net();
+}
+
+fn debt_is_covered(assets: u256, reserve: u256, debt: u256) -> bool {
+    let snapshot: AccountSnapshot = .{
+        .assets = assets,
+        .liabilities = reserve,
+    };
+    return snapshot.covers(debt);
+}
+
+contract TraitReceiverProbe {
+    pub fn ok() -> bool {
+        return true;
+    }
+}

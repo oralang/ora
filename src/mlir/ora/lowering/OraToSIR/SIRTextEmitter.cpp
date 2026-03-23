@@ -153,6 +153,24 @@ namespace
         return out;
     }
 
+    std::string sanitizeGlobalName(StringRef s)
+    {
+        std::string out;
+        out.reserve(s.size());
+        for (unsigned char c : s)
+        {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+            {
+                out.push_back(static_cast<char>(c));
+            }
+            else
+            {
+                out.push_back('_');
+            }
+        }
+        return out;
+    }
+
     std::string mnemonicFor(Operation &op)
     {
         StringRef name = op.getName().getStringRef();
@@ -404,7 +422,7 @@ namespace
         // NOTE: ErrorDeclOp is handled by early-return above (line ~310).
         if (auto ic = dyn_cast<sir::ICallOp>(op))
         {
-            os << " @" << ic.getCalleeAttr().getValue();
+            os << " @" << sanitizeGlobalName(ic.getCalleeAttr().getValue());
             if (!ic.getArgs().empty())
             {
                 os << " ";
@@ -635,7 +653,7 @@ namespace mlir
                     }
                 }
 
-                os << "fn " << func.getName() << ":\n";
+                os << "fn " << sanitizeGlobalName(func.getName()) << ":\n";
                 for (Block *blockPtr : blocks)
                 {
                     Block &block = *blockPtr;
