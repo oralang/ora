@@ -1869,6 +1869,14 @@ pub const Encoder = struct {
                 try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
         }
 
+        if (std.mem.eql(u8, op_name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(mlir_op)) {
+            const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const op_id = @intFromPtr(mlir_op.ptr);
+            return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
+                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+        }
+
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
             const operands = try self.encodeOperationOperandsWithMode(mlir_op, mode);
             defer self.allocator.free(operands);
@@ -2648,8 +2656,14 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
-            // Conservative summary for try/catch-style control flow.
-            // Result values are modeled as structured-control summaries.
+            if (!self.tryStmtMayEnterCatch(mlir_op)) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
+                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+            }
+            // Conservative summary for throwing try/catch-style control flow.
             return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
         }
 

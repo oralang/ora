@@ -662,6 +662,55 @@ test "func.call summary with non-throwing ora.try_stmt state effects encodes exa
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct non-throwing ora.try_stmt result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const try_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const try_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, try_attr);
+    const expected = try encoder.encodeOperation(try_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, try_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_op, 0)},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeOperation(try_stmt);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with scf.execute_region state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
