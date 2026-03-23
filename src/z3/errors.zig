@@ -41,6 +41,7 @@ pub const VerificationError = struct {
 
     pub fn deinit(self: *VerificationError) void {
         self.allocator.free(self.message);
+        self.allocator.free(self.file);
         if (self.counterexample) |*ce| {
             ce.deinit();
         }

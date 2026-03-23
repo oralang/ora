@@ -1788,8 +1788,14 @@ pub const VerificationPass = struct {
                 },
                 else => {
                     std.debug.print("verification: {s} [base] -> UNKNOWN ({d}ms)\n", .{ fn_name, elapsed_ms });
-                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
-                    // Treat UNKNOWN as non-fatal; leave guards in place.
+                    try self.addUnknownVerificationError(
+                        &result,
+                        try std.fmt.allocPrint(self.allocator, "verification assumptions are unknown in {s}", .{fn_name}),
+                        self.firstLocationFile(annotations),
+                        self.firstLocationLine(annotations),
+                        self.firstLocationColumn(annotations),
+                    );
+                    continue;
                 },
             }
 
@@ -1863,6 +1869,13 @@ pub const VerificationPass = struct {
                 }
                 if (obligation_status == z3.Z3_L_UNDEF) {
                     std.debug.print("note: Z3 returned UNKNOWN while proving {s} in {s}.\n", .{ obligation_label, fn_name });
+                    try self.addUnknownVerificationError(
+                        &result,
+                        try std.fmt.allocPrint(self.allocator, "could not prove {s} in {s}", .{ obligation_label, fn_name }),
+                        ann.file,
+                        ann.line,
+                        ann.column,
+                    );
                 }
 
                 self.solver.pop();
@@ -1942,6 +1955,13 @@ pub const VerificationPass = struct {
                         }
                         if (step_status == z3.Z3_L_UNDEF) {
                             std.debug.print("note: Z3 returned UNKNOWN while proving invariant step in {s}.\n", .{fn_name});
+                            try self.addUnknownVerificationError(
+                                &result,
+                                try std.fmt.allocPrint(self.allocator, "could not prove loop invariant inductive step in {s}", .{fn_name}),
+                                ann.file,
+                                ann.line,
+                                ann.column,
+                            );
                         }
 
                         self.solver.pop();
@@ -2028,6 +2048,13 @@ pub const VerificationPass = struct {
                             "note: Z3 returned UNKNOWN while proving loop-post condition in {s}.\n",
                             .{fn_name},
                         );
+                        try self.addUnknownVerificationError(
+                            &result,
+                            try std.fmt.allocPrint(self.allocator, "could not prove postcondition from loop invariant at loop exit in {s}", .{fn_name}),
+                            ensure_ann.file,
+                            ensure_ann.line,
+                            ensure_ann.column,
+                        );
                     }
 
                     self.solver.pop();
@@ -2101,7 +2128,13 @@ pub const VerificationPass = struct {
                     std.debug.print("verification: {s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
                 } else {
                     std.debug.print("verification: {s} guard {s} [satisfy] -> UNKNOWN ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
-                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
+                    try self.addUnknownVerificationError(
+                        &result,
+                        try std.fmt.allocPrint(self.allocator, "could not prove refinement guard satisfiable in {s}: {s}", .{ fn_name, ann.guard_id.? }),
+                        ann.file,
+                        ann.line,
+                        ann.column,
+                    );
                 }
 
                 // Second check: can the guard be violated? (to determine if it should be kept)
@@ -2173,6 +2206,14 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                     }
+                } else {
+                    try self.addUnknownVerificationError(
+                        &result,
+                        try std.fmt.allocPrint(self.allocator, "could not prove refinement guard removable in {s}: {s}", .{ fn_name, ann.guard_id.? }),
+                        ann.file,
+                        ann.line,
+                        ann.column,
+                    );
                 }
                 self.solver.pop();
 
@@ -2373,6 +2414,14 @@ pub const VerificationPass = struct {
             }
             inconsistent_functions.deinit();
         }
+        var unknown_base_functions = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var fn_it = unknown_base_functions.iterator();
+            while (fn_it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            unknown_base_functions.deinit();
+        }
 
         // First pass: surface base inconsistency and record affected functions.
         for (results, 0..) |entry, idx| {
@@ -2395,8 +2444,17 @@ pub const VerificationPass = struct {
                     .allocator = self.allocator,
                 });
             } else if (entry.status == z3.Z3_L_UNDEF) {
-                std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Keeping runtime guards.\n", .{});
-                // Treat UNKNOWN as non-fatal; leave guards in place.
+                if (!unknown_base_functions.contains(query.function_name)) {
+                    const fn_name_copy = try self.allocator.dupe(u8, query.function_name);
+                    try unknown_base_functions.put(fn_name_copy, {});
+                }
+                try self.addUnknownVerificationError(
+                    &combined,
+                    try std.fmt.allocPrint(self.allocator, "verification assumptions are unknown in {s}", .{query.function_name}),
+                    query.file,
+                    query.line,
+                    query.column,
+                );
             }
         }
 
@@ -2405,6 +2463,7 @@ pub const VerificationPass = struct {
             const query = queries.items[idx];
             if (query.kind == .Base) continue;
             if (inconsistent_functions.contains(query.function_name)) continue;
+            if (unknown_base_functions.contains(query.function_name)) continue;
 
             switch (query.kind) {
                 .Obligation => {
@@ -2424,9 +2483,16 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                     } else if (entry.status == z3.Z3_L_UNDEF) {
-                        std.debug.print(
-                            "note: Z3 returned UNKNOWN while proving {s} in {s}.\n",
-                            .{ obligationKindLabel(query.obligation_kind orelse .Ensures), query.function_name },
+                        try self.addUnknownVerificationError(
+                            &combined,
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "could not prove {s} in {s}",
+                                .{ obligationKindLabel(query.obligation_kind orelse .Ensures), query.function_name },
+                            ),
+                            query.file,
+                            query.line,
+                            query.column,
                         );
                     }
                 },
@@ -2447,9 +2513,16 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                     } else if (entry.status == z3.Z3_L_UNDEF) {
-                        std.debug.print(
-                            "note: Z3 returned UNKNOWN while proving invariant step in {s}.\n",
-                            .{query.function_name},
+                        try self.addUnknownVerificationError(
+                            &combined,
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "could not prove loop invariant inductive step in {s}",
+                                .{query.function_name},
+                            ),
+                            query.file,
+                            query.line,
+                            query.column,
                         );
                     }
                 },
@@ -2470,9 +2543,16 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                     } else if (entry.status == z3.Z3_L_UNDEF) {
-                        std.debug.print(
-                            "note: Z3 returned UNKNOWN while proving loop-post condition in {s}.\n",
-                            .{query.function_name},
+                        try self.addUnknownVerificationError(
+                            &combined,
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "could not prove postcondition from loop invariant at loop exit in {s}",
+                                .{query.function_name},
+                            ),
+                            query.file,
+                            query.line,
+                            query.column,
                         );
                     }
                 },
@@ -2487,6 +2567,14 @@ pub const VerificationPass = struct {
                             .counterexample = null,
                             .allocator = self.allocator,
                         });
+                    } else if (entry.status == z3.Z3_L_UNDEF) {
+                        try self.addUnknownVerificationError(
+                            &combined,
+                            try std.fmt.allocPrint(self.allocator, "could not prove refinement guard satisfiable in {s}: {s}", .{ query.function_name, query.guard_id.? }),
+                            query.file,
+                            query.line,
+                            query.column,
+                        );
                     }
                 },
                 .GuardViolate => {
@@ -2507,6 +2595,14 @@ pub const VerificationPass = struct {
                                 });
                             }
                         }
+                    } else if (entry.status == z3.Z3_L_UNDEF) {
+                        try self.addUnknownVerificationError(
+                            &combined,
+                            try std.fmt.allocPrint(self.allocator, "could not prove refinement guard removable in {s}: {s}", .{ query.function_name, query.guard_id.? }),
+                            query.file,
+                            query.line,
+                            query.column,
+                        );
                     }
                 },
                 .Base => {},
@@ -3463,20 +3559,37 @@ pub const VerificationPass = struct {
     fn degradedVerificationResult(self: *VerificationPass) !errors.VerificationResult {
         var result = errors.VerificationResult.init(self.allocator);
         const reason = self.encoder.degradationReason() orelse "unknown SMT encoding degradation";
-        try result.addError(.{
-            .error_type = .Unknown,
-            .message = try std.fmt.allocPrint(
+        try self.addUnknownVerificationError(
+            &result,
+            try std.fmt.allocPrint(
                 self.allocator,
                 "verification aborted: SMT encoding degraded ({s})",
                 .{reason},
             ),
-            .file = try self.allocator.dupe(u8, ""),
-            .line = 0,
-            .column = 0,
+            "",
+            0,
+            0,
+        );
+        return result;
+    }
+
+    fn addUnknownVerificationError(
+        self: *VerificationPass,
+        result: *errors.VerificationResult,
+        message: []const u8,
+        file: []const u8,
+        line: u32,
+        column: u32,
+    ) !void {
+        try result.addError(.{
+            .error_type = .Unknown,
+            .message = message,
+            .file = try self.allocator.dupe(u8, file),
+            .line = line,
+            .column = column,
             .counterexample = null,
             .allocator = self.allocator,
         });
-        return result;
     }
 
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
@@ -5771,6 +5884,29 @@ test "degraded SMT encoding fails closed" {
     try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "SMT encoding degraded"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "test degradation"));
+}
+
+test "unknown verification errors fail closed" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+
+    try pass.addUnknownVerificationError(
+        &result,
+        try testing.allocator.dupe(u8, "verification assumptions are unknown in f"),
+        "/tmp/test.ora",
+        7,
+        3,
+    );
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expectEqualStrings("/tmp/test.ora", result.errors.items[0].file);
+    try testing.expectEqual(@as(u32, 7), result.errors.items[0].line);
+    try testing.expectEqual(@as(u32, 3), result.errors.items[0].column);
 }
 
 test "parseLocationString strips mlir loc wrapper" {

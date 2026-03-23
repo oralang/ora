@@ -540,6 +540,11 @@ pub const Encoder = struct {
         return try self.mkVariable(name, sort);
     }
 
+    fn degradeToUndef(self: *Encoder, sort: z3.Z3_sort, label: []const u8, id: u64, reason: []const u8) EncodeError!z3.Z3_ast {
+        self.recordDegradation(reason);
+        return try self.mkUndefValue(sort, label, id);
+    }
+
     fn getValueConstUnsigned(self: *Encoder, value: mlir.MlirValue, width: u32) ?u256 {
         if (!mlir.oraValueIsAOpResult(value)) return null;
         const owner = mlir.oraOpResultGetOwner(value);
@@ -1305,7 +1310,10 @@ pub const Encoder = struct {
         if (mlir.oraValueIsAOpResult(mlir_value)) {
             const defining_op = mlir.oraOpResultGetOwner(mlir_value);
             if (!mlir.oraOperationIsNull(defining_op)) {
-                const result_index = self.getResultIndex(defining_op, mlir_value) orelse 0;
+                const result_index = self.getResultIndex(defining_op, mlir_value) orelse {
+                    self.recordDegradation("failed to resolve defining result index");
+                    return error.UnsupportedOperation;
+                };
                 const encoded = try self.encodeOperationResultWithMode(defining_op, result_index, mode);
                 if (mode == .Current) {
                     try self.value_map.put(value_id, encoded);
@@ -1699,7 +1707,10 @@ pub const Encoder = struct {
                 @intCast(mlir.oraIntegerTypeGetWidth(mlir_type))
             else
                 256;
-            const value = self.parseConstAttrValue(value_attr, width) orelse if (is_addr) 0 else self.getConstantValue(mlir_op, width);
+            const value = self.parseConstAttrValue(value_attr, width) orelse blk: {
+                self.recordDegradation("failed to parse MLIR constant attribute");
+                break :blk if (is_addr) 0 else self.getConstantValue(mlir_op, width);
+            };
             return try self.encodeConstantOp(value, width);
         }
 
@@ -2126,6 +2137,7 @@ pub const Encoder = struct {
                     break :blk null;
                 };
                 if (field_names_csv) |csv| {
+                    var struct_update_failed = false;
                     var it = std.mem.splitScalar(u8, csv, ',');
                     var field_index: usize = 0;
                     while (it.next()) |part| : (field_index += 1) {
@@ -2133,25 +2145,33 @@ pub const Encoder = struct {
                         if (trimmed.len == 0 or std.mem.eql(u8, trimmed, field_name)) continue;
                         const unchanged_type = self.lookupStructFieldType(result_type, field_index) catch {
                             self.recordDegradation("failed to resolve struct field type for struct update");
+                            struct_update_failed = true;
                             continue;
                         };
                         if (mlir.oraTypeIsNull(unchanged_type)) {
                             self.recordDegradation("missing struct field type metadata for struct update");
+                            struct_update_failed = true;
                             continue;
                         }
                         const unchanged_sort = self.encodeMLIRType(unchanged_type) catch {
                             self.recordDegradation("failed to encode unchanged struct field sort");
+                            struct_update_failed = true;
                             continue;
                         };
                         const updated_accessor = self.applyFieldFunction(trimmed, result_sort, unchanged_sort, struct_val) catch {
                             self.recordDegradation("failed to encode updated struct field accessor");
+                            struct_update_failed = true;
                             continue;
                         };
                         const original_accessor = self.applyFieldFunction(trimmed, source_sort, unchanged_sort, operands[0]) catch {
                             self.recordDegradation("failed to encode original struct field accessor");
+                            struct_update_failed = true;
                             continue;
                         };
                         self.addConstraint(z3.Z3_mk_eq(self.context.ctx, updated_accessor, original_accessor));
+                    }
+                    if (struct_update_failed) {
+                        self.recordDegradation("struct update frame constraints are incomplete");
                     }
                 } else {
                     self.recordDegradation("missing struct declaration metadata for struct update");
@@ -2447,17 +2467,17 @@ pub const Encoder = struct {
     fn coerceAstToSortOrUndef(self: *Encoder, value: z3.Z3_ast, target_sort: z3.Z3_sort, prefix: []const u8, op_id: usize) EncodeError!z3.Z3_ast {
         const value_sort = z3.Z3_get_sort(self.context.ctx, value);
         if (value_sort == target_sort) return value;
-        return try self.mkUndefValue(target_sort, prefix, op_id);
+        return try self.degradeToUndef(target_sort, prefix, op_id, "failed to coerce AST to target sort");
     }
 
     fn encodeErrorIdValue(self: *Encoder, mlir_op: mlir.MlirOperation, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
-        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
-        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.mkUndefValue(target_sort, "error_id", op_id);
+        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "missing error symbol name");
+        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "failed to resolve error declaration id");
         if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) == z3.Z3_BV_SORT) {
             const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
             return try self.encodeIntegerConstant(error_id, width);
         }
-        return try self.mkUndefValue(target_sort, "error_id", op_id);
+        return try self.degradeToUndef(target_sort, "error_id", op_id, "unsupported error id target sort");
     }
 
     fn lookupErrorDeclId(self: *Encoder, op: mlir.MlirOperation, sym_name: []const u8) ?u256 {
@@ -2921,7 +2941,10 @@ pub const Encoder = struct {
                 self.inferGlobalSortFromFunction(fop, slot_name)
             else
                 null;
-            sort = inferred_sort orelse self.mkBitVectorSort(256);
+            sort = inferred_sort orelse blk: {
+                self.recordDegradation("failed to infer global sort for call summary slot");
+                break :blk self.mkBitVectorSort(256);
+            };
             pre = try self.getOrCreateGlobal(slot_name, sort);
         }
 
@@ -3642,12 +3665,15 @@ pub const Encoder = struct {
     const MlirPrintCollector = struct {
         allocator: std.mem.Allocator,
         buffer: std.ArrayList(u8),
+        failed: bool = false,
     };
 
     fn printMlirChunk(value: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
         const collector: *MlirPrintCollector = @ptrCast(@alignCast(user_data orelse return));
         if (value.data == null or value.length == 0) return;
-        collector.buffer.appendSlice(collector.allocator, value.data[0..value.length]) catch {};
+        collector.buffer.appendSlice(collector.allocator, value.data[0..value.length]) catch {
+            collector.failed = true;
+        };
     }
 
     fn printMlirTypeOwned(self: *Encoder, ty: mlir.MlirType) ![]u8 {
@@ -3657,6 +3683,9 @@ pub const Encoder = struct {
         };
         errdefer collector.buffer.deinit(self.allocator);
         mlir.mlirTypePrint(ty, printMlirChunk, &collector);
+        if (collector.failed) {
+            self.recordDegradation("failed to collect printed MLIR type");
+        }
         return try collector.buffer.toOwnedSlice(self.allocator);
     }
 
@@ -3945,7 +3974,10 @@ pub const Encoder = struct {
         // the value attribute contains the integer constant
         const attr_name_ref = mlir.oraStringRefCreate("value".ptr, "value".len);
         const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
-        return self.parseConstAttrValue(attr, width) orelse 0;
+        return self.parseConstAttrValue(attr, width) orelse blk: {
+            self.recordDegradation("failed to decode constant value");
+            break :blk 0;
+        };
     }
 
     /// Encode MLIR arithmetic operation (arith.addi, arith.subi, etc.)
@@ -4019,8 +4051,10 @@ pub const Encoder = struct {
         const result_value = mlir.oraOperationGetResult(mlir_op, 0);
         const result_type = mlir.oraValueGetType(result_value);
 
-        const in_width = self.getTypeBitWidth(operand_type) orelse return operands[0];
-        const out_width = self.getTypeBitWidth(result_type) orelse return operands[0];
+        const result_sort = try self.encodeMLIRType(result_type);
+        const op_id = @intFromPtr(mlir_op.ptr);
+        const in_width = self.getTypeBitWidth(operand_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine operand cast width");
+        const out_width = self.getTypeBitWidth(result_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine result cast width");
         if (in_width == out_width) return operands[0];
 
         // Convert Bool sort to BitVec<1> if needed (Z3_mk_zero_ext/sign_ext require bitvector operands)
