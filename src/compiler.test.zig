@@ -4438,7 +4438,7 @@ test "compiler allows writes to a different constant keyed map entry" {
     try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'counts'"));
 }
 
-test "compiler rejects callee writes to locked slots" {
+test "compiler allows callee writes under lock so runtime guards can enforce them" {
     const source_text =
         \\contract Locked {
         \\    storage total: u256;
@@ -4461,7 +4461,33 @@ test "compiler rejects callee writes to locked slots" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+}
+
+test "compiler allows helper writes to differently keyed locked array roots" {
+    const source_text =
+        \\contract Locked {
+        \\    storage history: [u256; 8];
+        \\
+        \\    fn write_history(index: u256, value: u256) {
+        \\        history[index] = value;
+        \\    }
+        \\
+        \\    pub fn guarded(locked_index: u256, target_index: u256, value: u256) {
+        \\        @lock(history[locked_index]);
+        \\        write_history(target_index, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'history'"));
 }
 
 test "compiler allows writes after unlock" {
@@ -4611,7 +4637,7 @@ test "compiler composes contract member call effects into caller summaries" {
     }
 }
 
-test "compiler rejects locked writes through contract member calls" {
+test "compiler allows locked writes through contract member calls for runtime guarding" {
     const source_text =
         \\contract Vault {
         \\    storage total: u256;
@@ -4634,7 +4660,7 @@ test "compiler rejects locked writes through contract member calls" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
 test "compiler composes effects through local function aliases" {
@@ -4699,7 +4725,7 @@ test "compiler tracks per-expression composed call effects" {
     }
 }
 
-test "compiler rejects locked writes through local function aliases" {
+test "compiler allows locked writes through local function aliases for runtime guarding" {
     const source_text =
         \\contract Locked {
         \\    storage total: u256;
@@ -4723,7 +4749,7 @@ test "compiler rejects locked writes through local function aliases" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
 test "compiler composes effects through member-derived function aliases" {
@@ -7238,6 +7264,34 @@ test "compiler emits tstore guard before guarded storage writes" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock_placeholder"));
+}
+
+test "compiler emits keyed tstore guard before guarded indexed storage writes" {
+    const source_text =
+        \\contract GuardedWrites {
+        \\    storage history: [u256; 8];
+        \\
+        \\    fn write_history(index: u256, value: u256) {
+        \\        history[index] = value;
+        \\    }
+        \\
+        \\    pub fn touch(index: u256, value: u256) {
+        \\        @lock(history[index]);
+        \\        write_history(index, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "guarded-indexed-write.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"history[]\""));
 }
 
 test "compiler lowers grouped lock paths through real lock ops" {

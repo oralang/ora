@@ -3033,7 +3033,6 @@ const TypeChecker = struct {
                     switch (self.file.item(callee_id).*) {
                         .Function => |function| {
                             try self.ensureFunctionEffectSummary(callee_id, function);
-                            try self.emitLockedWriteDiagnostics(call.range, self.effectWrites(self.item_effects[callee_id.index()]), locked_slots.items);
                         },
                         else => {},
                     }

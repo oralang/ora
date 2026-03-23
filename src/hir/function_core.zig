@@ -1375,6 +1375,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
                         const key_value = try self.lowerExpr(index.index, locals);
+                        if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
+                            try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
+                        }
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         const op = mlir.oraMemrefStoreOpCreate(
                             self.parent.context,
@@ -1391,6 +1394,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
                         const key_value = try self.lowerExpr(index.index, locals);
+                        if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
+                            try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
+                        }
                         try @This().appendMapStore(self, index.range, base_value, key_value, converted);
                         if (self.parent.file.pattern(index.base).* == .Index) {
                             try self.storePattern(index.base, base_value, locals);
@@ -1437,6 +1443,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const guard = mlir.oraTStoreGuardOpCreateWithResource(self.parent.context, loc, zero, strRef(field_name));
             if (mlir.oraOperationIsNull(guard)) return error.MlirOperationCreationFailed;
             appendOp(self.block, guard);
+        }
+
+        fn maybeEmitGuardedIndexedStorageWrite(
+            self: *FunctionLowerer,
+            field_name: []const u8,
+            resource: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const guarded_roots = self.parent.guarded_storage_roots orelse return;
+            if (!guarded_roots.contains(field_name)) return;
+
+            const loc = self.parent.location(range);
+            const key = try std.fmt.allocPrint(self.parent.allocator, "{s}[]", .{field_name});
+            defer self.parent.allocator.free(key);
+
+            const guard = mlir.oraTStoreGuardOpCreateWithResource(self.parent.context, loc, resource, strRef(key));
+            if (mlir.oraOperationIsNull(guard)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, guard);
+        }
+
+        fn guardedStorageRootNameForPattern(self: *FunctionLowerer, pattern_id: ast.PatternId) ?[]const u8 {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| name.name,
+                .Field => null,
+                .Index => |index| @This().guardedStorageRootNameForPattern(self, index.base),
+                .StructDestructure, .Error => null,
+            };
         }
 
         pub fn createBitfieldFieldExtract(
