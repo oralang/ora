@@ -3566,6 +3566,15 @@ pub const Encoder = struct {
                 if (branch_expr != null) return branch_expr;
             }
 
+            if (std.mem.eql(u8, name, "scf.execute_region")) {
+                const region = mlir.oraOperationGetRegion(current, 0);
+                if (!mlir.oraRegionIsNull(region)) {
+                    const block = mlir.oraRegionGetFirstBlock(region);
+                    const nested_expr = try self.extractReturnedExprFromBlock(block, result_index, mode);
+                    if (nested_expr != null) return nested_expr;
+                }
+            }
+
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
@@ -3584,7 +3593,10 @@ pub const Encoder = struct {
             return;
         }
 
-        if (std.mem.eql(u8, op_name, "scf.if") or std.mem.eql(u8, op_name, "ora.switch")) {
+        if (std.mem.eql(u8, op_name, "scf.if") or
+            std.mem.eql(u8, op_name, "ora.switch") or
+            std.mem.eql(u8, op_name, "scf.execute_region"))
+        {
             self.encodeStateEffectsInOperation(op);
             return;
         }

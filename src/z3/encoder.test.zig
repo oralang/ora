@@ -701,6 +701,64 @@ test "func.call summary with scf.execute_region state effects encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee execute_region return encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("executeRegionReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{}, 0, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    mlir.oraBlockAppendOwnedOperation(exec_block, value_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(value_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, exec);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("executeRegionReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded = try encoder.encodeOperation(call);
+    const expected = try encoder.encodeIntegerConstant(11, 256);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "arith div emits safety obligation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
