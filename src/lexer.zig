@@ -560,6 +560,8 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "log", .Log },
     .{ "if", .If },
     .{ "else", .Else },
+    .{ "and", .AmpersandAmpersand },
+    .{ "or", .PipePipe },
     .{ "while", .While },
     .{ "for", .For },
     .{ "break", .Break },

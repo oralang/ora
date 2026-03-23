@@ -5510,6 +5510,24 @@ test "compiler skips generic bitfield and enum templates in HIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
 }
 
+test "compiler lowers keyword logical operators with short-circuit control flow" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\contract Probe {
+        \\    pub fn run(ts: u256) -> bool {
+        \\        return ts > 0 and std.block.timestamp() > ts or ts == 7;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.if"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.andi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.ori"));
+}
+
 test "compiler monomorphizes generic contract function calls in HIR" {
     const source_text =
         \\contract Math {

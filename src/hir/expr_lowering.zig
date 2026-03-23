@@ -466,6 +466,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerBinary(self: *FunctionLowerer, expr_id: ast.ExprId, binary: ast.BinaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (binary.op == .and_and or binary.op == .or_or) {
+                return try @This().lowerShortCircuitLogical(self, expr_id, binary, locals);
+            }
+
             var lhs = try self.lowerExpr(binary.lhs, locals);
             var rhs = try self.lowerExpr(binary.rhs, locals);
             const loc = self.parent.location(binary.range);
@@ -557,6 +561,51 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return self.defaultValue(result_type, binary.range);
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerShortCircuitLogical(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            binary: ast.BinaryExpr,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(exprRange(self.parent.file, expr_id));
+            const result_type = boolType(self.parent.context);
+
+            var lhs = try self.lowerExpr(binary.lhs, locals);
+            lhs = try self.convertValueForFlow(lhs, result_type, binary.range);
+
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, lhs, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            if (binary.op == .and_and) {
+                var then_lowerer = self.*;
+                then_lowerer.block = then_block;
+                var rhs = try then_lowerer.lowerExpr(binary.rhs, locals);
+                rhs = try then_lowerer.convertValueForFlow(rhs, result_type, binary.range);
+                try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{rhs});
+
+                const false_value = appendValueOp(else_block, createIntegerConstant(self.parent.context, loc, result_type, 0));
+                try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{false_value});
+            } else {
+                const true_value = appendValueOp(then_block, createIntegerConstant(self.parent.context, loc, result_type, 1));
+                try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{true_value});
+
+                var else_lowerer = self.*;
+                else_lowerer.block = else_block;
+                var rhs = try else_lowerer.lowerExpr(binary.rhs, locals);
+                rhs = try else_lowerer.convertValueForFlow(rhs, result_type, binary.range);
+                try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{rhs});
+            }
+
+            return mlir.oraOperationGetResult(if_op, 0);
         }
 
         pub fn createCompareOp(self: *FunctionLowerer, loc: mlir.MlirLocation, predicate: []const u8, lhs: mlir.MlirValue, rhs: mlir.MlirValue) mlir.MlirOperation {
