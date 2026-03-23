@@ -379,14 +379,20 @@ fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.Ref
 
     const expected_bounds = refinementBounds(expected) orelse return false;
     const actual_bounds = refinementBounds(actual) orelse return false;
-    if (!typeEql(expected_bounds.base_type, actual_bounds.base_type)) return false;
+    if (!typesAssignable(expected_bounds.base_type, actual_bounds.base_type) or
+        !typesAssignable(actual_bounds.base_type, expected_bounds.base_type))
+    {
+        return false;
+    }
     if (expected_bounds.min_text) |expected_min| {
         const actual_min = actual_bounds.min_text orelse return false;
-        if (compareIntegerText(actual_min, expected_min) == .lt) return false;
+        const cmp = compareIntegerText(actual_min, expected_min);
+        if (cmp == .lt) return false;
     }
     if (expected_bounds.max_text) |expected_max| {
         const actual_max = actual_bounds.max_text orelse return false;
-        if (compareIntegerText(actual_max, expected_max) == .gt) return false;
+        const cmp = compareIntegerText(actual_max, expected_max);
+        if (cmp == .gt) return false;
     }
     return true;
 }
