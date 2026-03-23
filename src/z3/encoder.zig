@@ -74,6 +74,8 @@ pub const Encoder = struct {
     global_old_map: std.StringHashMap(z3.Z3_ast),
     /// Snapshot of global storage symbols at function entry.
     global_entry_map: std.StringHashMap(z3.Z3_ast),
+    /// Global storage roots actually written by this encoder instance.
+    written_global_slots: std.StringHashMap(void),
     /// Map from environment symbol name (e.g. msg.sender) to Z3 AST.
     env_map: std.StringHashMap(z3.Z3_ast),
     /// Scalar memref local state threaded during verification extraction.
@@ -121,6 +123,7 @@ pub const Encoder = struct {
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+            .written_global_slots = std.StringHashMap(void).init(allocator),
             .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .memref_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
             .memref_old_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
@@ -168,6 +171,15 @@ pub const Encoder = struct {
         }
     }
 
+    fn markGlobalSlotWritten(self: *Encoder, name: []const u8) EncodeError!void {
+        if (self.written_global_slots.contains(name)) return;
+        try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
+    }
+
+    fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
+        return self.written_global_slots.contains(name);
+    }
+
     pub fn resetFunctionState(self: *Encoder) void {
         var g_it = self.global_map.iterator();
         while (g_it.next()) |entry| {
@@ -186,6 +198,12 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_entry_map.clearRetainingCapacity();
+
+        var written_it = self.written_global_slots.iterator();
+        while (written_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.written_global_slots.clearRetainingCapacity();
 
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
@@ -232,6 +250,12 @@ pub const Encoder = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.global_entry_map.deinit();
+
+        var written_it = self.written_global_slots.iterator();
+        while (written_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.written_global_slots.deinit();
         var env_it = self.env_map.iterator();
         while (env_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -1897,9 +1921,11 @@ pub const Encoder = struct {
                 _ = try self.getOrCreateOldGlobal(global_name, operand_sort);
             } else if (self.global_map.getPtr(global_name)) |existing| {
                 existing.* = operands[0];
+                try self.markGlobalSlotWritten(global_name);
             } else {
                 const key = try self.allocator.dupe(u8, global_name);
                 try self.global_map.put(key, operands[0]);
+                try self.markGlobalSlotWritten(global_name);
             }
             return operands[0];
         }
@@ -1949,9 +1975,11 @@ pub const Encoder = struct {
                     if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
                         if (self.global_map.getPtr(global_name)) |existing| {
                             existing.* = stored;
+                            try self.markGlobalSlotWritten(global_name);
                         } else {
                             const global_key = try self.allocator.dupe(u8, global_name);
                             try self.global_map.put(global_key, stored);
+                            try self.markGlobalSlotWritten(global_name);
                         }
                     } else {
                         // Nested map write (e.g., root[a][b] = v) may target a map_get
@@ -3134,7 +3162,9 @@ pub const Encoder = struct {
 
         for (slots) |*slot| {
             if (summary_encoder.global_map.get(slot.name)) |post| {
-                slot.post = post;
+                if (!slot.is_write or summary_encoder.hasWrittenGlobalSlot(slot.name)) {
+                    slot.post = post;
+                }
             }
         }
 
@@ -3312,8 +3342,13 @@ pub const Encoder = struct {
 
         if (func_op) |fop| {
             const summarized = try self.tryInlineFunctionCallSummary(callee, fop, operands, slots.items, result_exprs);
-            if (!summarized and num_results > 0) {
-                self.recordDegradation("failed to encode known callee results exactly");
+            if (!summarized) {
+                if (num_results > 0) {
+                    self.recordDegradation("failed to encode known callee results exactly");
+                }
+                if (slots.items.len > 0) {
+                    self.recordDegradation("failed to encode known callee state exactly");
+                }
             }
         }
 
@@ -3336,6 +3371,9 @@ pub const Encoder = struct {
             for (slots.items, 0..) |slot, slot_idx| {
                 var post = slot.post orelse slot.pre;
                 if (slot.is_write and slot.post == null) {
+                    if (func_op != null) {
+                        self.recordDegradation("known callee state fell back to opaque UF summary");
+                    }
                     post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
                 } else if (!slot.is_write) {
                     self.addConstraint(z3.Z3_mk_eq(self.context.ctx, post, slot.pre));
@@ -3354,6 +3392,9 @@ pub const Encoder = struct {
                 } else {
                     const key = try self.allocator.dupe(u8, slot.name);
                     try self.global_map.put(key, post);
+                }
+                if (slot.is_write and slot.post != null) {
+                    try self.markGlobalSlotWritten(slot.name);
                 }
             }
         }
@@ -3519,6 +3560,7 @@ pub const Encoder = struct {
             const global_key = try self.allocator.dupe(u8, global_name);
             try self.global_map.put(global_key, updated);
         }
+        try self.markGlobalSlotWritten(global_name);
     }
 
     fn extractRegionYield(

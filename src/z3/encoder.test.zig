@@ -1610,6 +1610,54 @@ test "known callee with unknown write set degrades encoder" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to recover known callee write set exactly"));
 }
 
+test "known zero-result stateful callee fallback degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("declaredWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    // Intentionally leave the body without encodable writes so summary falls back.
+
+    try encoder.registerFunctionOperation(helper);
+
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const seed_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, zero, stringRef("counter"));
+    _ = try encoder.encodeOperation(seed_store);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("declaredWriter"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "known callee state fell back to opaque UF summary"));
+}
+
 test "map_store updates global map for later map_get" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
