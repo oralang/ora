@@ -1552,6 +1552,64 @@ test "call summary degradation propagates to caller encoder" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "tload encoded as unconstrained transient storage value"));
 }
 
+test "known callee with unknown write set degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writerWithUnknownSlots"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const unresolved_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueWriter"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, unresolved_call);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const seed_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, zero, stringRef("counter"));
+    _ = try encoder.encodeOperation(seed_store);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writerWithUnknownSlots"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to recover known callee write set exactly"));
+}
+
 test "map_store updates global map for later map_get" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

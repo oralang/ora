@@ -3274,6 +3274,9 @@ pub const Encoder = struct {
         if (self.verify_state) {
             if (func_op) |fop| {
                 try self.collectFunctionWriteInfo(fop, &write_slots, &writes_unknown);
+                if (writes_unknown) {
+                    self.recordDegradation("failed to recover known callee write set exactly");
+                }
             }
         }
 
