@@ -603,6 +603,53 @@ test "func.call summary with scf.for state effects degrades encoder" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "loop state summary is not encoded exactly"));
 }
 
+test "func.call summary with ora.try_stmt state effects degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("tryWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{}, 0);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+    const store_val_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const store_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, store_val_attr);
+    mlir.oraBlockAppendOwnedOperation(try_block, store_val_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(store_val_op, 0), stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("tryWriter"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "try state summary is not encoded exactly"));
+}
+
 test "arith div emits safety obligation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

@@ -3613,6 +3613,11 @@ pub const Encoder = struct {
                 return;
             }
 
+            if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+                self.recordDegradation("try state summary is not encoded exactly");
+                return;
+            }
+
             if (std.mem.eql(u8, op_name, "ora.switch")) {
                 if (mlir.oraOperationGetNumOperands(op) < 1) {
                     self.recordDegradation("ora.switch missing scrutinee while encoding state effects");
