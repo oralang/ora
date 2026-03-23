@@ -1471,7 +1471,7 @@ pub const Encoder = struct {
         const op_id = @intFromPtr(mlir_op.ptr);
         const label = try std.fmt.allocPrint(self.allocator, "op_result_{d}", .{result_index});
         defer self.allocator.free(label);
-        return try self.mkUndefValue(result_sort, label, op_id);
+        return try self.degradeToUndef(result_sort, label, op_id, "failed to encode non-zero operation result precisely");
     }
 
     fn encodeScfIfResult(self: *Encoder, mlir_op: mlir.MlirOperation, result_index: u32, mode: EncodeMode) EncodeError!z3.Z3_ast {
@@ -1503,7 +1503,7 @@ pub const Encoder = struct {
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
         const op_id = @intFromPtr(mlir_op.ptr);
-        var merged = try self.mkUndefValue(result_sort, "switch_expr", op_id);
+        var merged = try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
         var remaining = self.encodeBoolConstant(true);
 
         var region_index = num_regions;
@@ -2216,7 +2216,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "memref_alloca", op_id);
+                return try self.degradeToUndef(result_sort, "memref_alloca", op_id, "memref.alloca modeled as unconstrained value");
             }
         }
 
@@ -2254,13 +2254,13 @@ pub const Encoder = struct {
                     }
 
                     const op_id_unknown = @intFromPtr(mlir_op.ptr);
-                    const fresh = try self.mkUndefValue(result_sort, "memref_load", op_id_unknown);
+                    const fresh = try self.degradeToUndef(result_sort, "memref_load", op_id_unknown, "memref.load read from uninitialized tracked local state");
                     try map.put(memref_id, fresh);
                     return fresh;
                 }
 
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "memref_load", op_id);
+                return try self.degradeToUndef(result_sort, "memref_load", op_id, "memref.load with unsupported operand shape");
             }
         }
 
@@ -2283,7 +2283,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "evm_origin", op_id);
+                return try self.degradeToUndef(result_sort, "evm_origin", op_id, "evm.origin encoded as unconstrained environment value");
             }
         }
 
@@ -2304,7 +2304,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "evm_timestamp", op_id);
+                return try self.degradeToUndef(result_sort, "evm_timestamp", op_id, "evm.timestamp encoded as unconstrained environment value");
             }
         }
 
@@ -2315,7 +2315,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "tload", op_id);
+                return try self.degradeToUndef(result_sort, "tload", op_id, "tload encoded as unconstrained transient storage value");
             }
         }
 
