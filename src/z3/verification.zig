@@ -2829,7 +2829,7 @@ pub const VerificationPass = struct {
         }
 
         if (verification_result) |vr| {
-            summary.verification_success = vr.success;
+            summary.verification_success = inferReportVerificationSuccess(summary, verification_result);
             summary.verification_errors = @intCast(vr.errors.items.len);
             summary.verification_diagnostics = @intCast(vr.diagnostics.items.len);
             summary.proven_guards = @intCast(vr.proven_guard_ids.count());
@@ -2849,7 +2849,7 @@ pub const VerificationPass = struct {
             }
             summary.violatable_guards = @intCast(uniq_diag_guards.count());
         } else {
-            summary.verification_success = summary.failed_obligations == 0 and summary.inconsistent_bases == 0;
+            summary.verification_success = inferReportVerificationSuccess(summary, null);
             summary.verification_errors = 0;
             summary.verification_diagnostics = 0;
             summary.proven_guards = @intCast(proven_guard_ids.count());
@@ -4126,6 +4126,16 @@ const PreparedQueryResult = struct {
     err: ?anyerror = null,
     model_str: ?[]const u8 = null,
 };
+
+fn inferReportVerificationSuccess(
+    summary: ReportSummary,
+    verification_result: ?*const errors.VerificationResult,
+) bool {
+    if (verification_result) |vr| return vr.success;
+    return summary.failed_obligations == 0 and
+        summary.inconsistent_bases == 0 and
+        summary.unknown == 0;
+}
 
 fn parseBoolEnv(value: []const u8) bool {
     if (std.mem.eql(u8, value, "1")) return true;
@@ -6238,6 +6248,26 @@ test "parallel result collection skips obligations on inconsistent base" {
     try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
     try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are inconsistent in f"));
+}
+
+test "report success is false without verification result when queries are unknown" {
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unknown = 1,
+    };
+    try testing.expect(!inferReportVerificationSuccess(summary, null));
+}
+
+test "report success follows verification result when present" {
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+    result.success = false;
+
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unknown = 0,
+    };
+    try testing.expect(!inferReportVerificationSuccess(summary, &result));
 }
 
 test "parseLocationString strips mlir loc wrapper" {
