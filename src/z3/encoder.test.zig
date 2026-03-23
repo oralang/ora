@@ -1420,6 +1420,43 @@ test "func.call relation can be disabled" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver.check());
 }
 
+test "call summary degradation propagates to caller encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("helper"))),
+    };
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const result_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &result_types, &result_locs, result_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const tload = mlir.oraTLoadOpCreate(mlir_ctx, loc, stringRef("pending"), i256_ty);
+    const ret_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(tload, 0)};
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &ret_vals, ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(body, tload);
+    mlir.oraBlockAppendOwnedOperation(body, ret);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("helper"), &[_]mlir.MlirValue{}, 0, &result_types, result_types.len);
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "tload encoded as unconstrained transient storage value"));
+}
+
 test "map_store updates global map for later map_get" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

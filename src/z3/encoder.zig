@@ -3024,6 +3024,9 @@ pub const Encoder = struct {
         const ret_value = mlir.oraOperationGetOperand(return_op, result_index);
 
         const encoded = summary_encoder.encodeValueWithMode(ret_value, mode) catch return null;
+        if (summary_encoder.isDegraded()) {
+            self.recordDegradation(summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call result");
+        }
 
         const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
@@ -3108,6 +3111,10 @@ pub const Encoder = struct {
             any_result = false;
         }
 
+        if (summary_encoder.isDegraded()) {
+            self.recordDegradation(summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary");
+        }
+
         const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
         for (extra_constraints) |cst| self.addConstraint(cst);
@@ -3140,7 +3147,10 @@ pub const Encoder = struct {
                 const requires_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.requires", 12));
                 if (!mlir.oraAttributeIsNull(requires_attr) and mlir.oraOperationGetNumOperands(op) >= 1) {
                     const condition_value = mlir.oraOperationGetOperand(op, 0);
-                    const encoded = self.encodeValue(condition_value) catch null;
+                    const encoded = self.encodeValue(condition_value) catch blk: {
+                        self.recordDegradation("failed to encode summary precondition");
+                        break :blk null;
+                    };
                     if (encoded) |cond| {
                         try out.append(self.allocator, self.coerceToBool(cond));
                     }
@@ -3148,7 +3158,10 @@ pub const Encoder = struct {
             } else if (std.mem.eql(u8, op_name, "ora.requires")) {
                 if (mlir.oraOperationGetNumOperands(op) >= 1) {
                     const condition_value = mlir.oraOperationGetOperand(op, 0);
-                    const encoded = self.encodeValue(condition_value) catch null;
+                    const encoded = self.encodeValue(condition_value) catch blk: {
+                        self.recordDegradation("failed to encode summary precondition");
+                        break :blk null;
+                    };
                     if (encoded) |cond| {
                         try out.append(self.allocator, self.coerceToBool(cond));
                     }
