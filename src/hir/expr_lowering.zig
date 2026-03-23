@@ -2602,9 +2602,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, op);
             }
 
-            const op = if (mlir.oraTypeIsAddressType(ty))
-                try self.createValuePlaceholder("ora.address.zero", "0x0", range, ty)
-            else if (mlir.oraTypeIsAInteger(ty) or mlir.oraTypeIsIntegerType(ty))
+            if (mlir.oraTypeIsAddressType(ty)) {
+                return try @This().createZeroAddressValue(self, range);
+            }
+
+            const op = if (mlir.oraTypeIsAInteger(ty) or mlir.oraTypeIsIntegerType(ty))
                 createIntegerConstant(self.parent.context, self.parent.location(range), ty, 0)
             else
                 try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
@@ -2614,6 +2616,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn typeIsVoid(self: *const FunctionLowerer, ty: mlir.MlirType) bool {
             const none = mlir.oraNoneTypeCreate(self.parent.context);
             return mlir.oraTypeEqual(ty, none);
+        }
+
+        fn createZeroAddressValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(range);
+            const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+            const zero_i160 = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, i160_type, 0));
+            const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, zero_i160);
+            if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, addr_op);
         }
 
         fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
