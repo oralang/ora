@@ -2216,7 +2216,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.degradeToUndef(result_sort, "memref_alloca", op_id, "memref.alloca modeled as unconstrained value");
+                return try self.mkUndefValue(result_sort, "memref_alloca", op_id);
             }
         }
 
@@ -2282,8 +2282,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.degradeToUndef(result_sort, "evm_origin", op_id, "evm.origin encoded as unconstrained environment value");
+                return try self.getOrCreateEnv("evm_origin", result_sort);
             }
         }
 
@@ -2303,8 +2302,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.degradeToUndef(result_sort, "evm_timestamp", op_id, "evm.timestamp encoded as unconstrained environment value");
+                return try self.getOrCreateEnv("evm_timestamp", result_sort);
             }
         }
 
