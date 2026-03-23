@@ -63,14 +63,16 @@ pub const Solver = struct {
         c.Z3_solver_pop(self.context.ctx, self.solver, 1);
     }
 
-    pub fn setTimeoutMs(self: *Solver, timeout_ms: u32) void {
-        const params = c.Z3_mk_params(self.context.ctx) orelse return;
+    pub fn setTimeoutMs(self: *Solver, timeout_ms: u32) !void {
+        self.context.clearLastError();
+        const params = c.Z3_mk_params(self.context.ctx) orelse return error.SolverInitFailed;
         c.Z3_params_inc_ref(self.context.ctx, params);
         defer c.Z3_params_dec_ref(self.context.ctx, params);
 
         const sym = c.Z3_mk_string_symbol(self.context.ctx, "timeout");
         c.Z3_params_set_uint(self.context.ctx, params, sym, timeout_ms);
         c.Z3_solver_set_params(self.context.ctx, self.solver, params);
+        try self.context.checkNoError();
     }
 };
 
@@ -84,4 +86,15 @@ test "loadFromSmtlib rejects malformed smtlib" {
     defer solver.deinit();
 
     try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert (= x))"));
+}
+
+test "setTimeoutMs configures solver without Z3 error" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    try solver.setTimeoutMs(50);
+    try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
 }

@@ -171,7 +171,7 @@ pub const VerificationPass = struct {
         encoder.setVerifyState(verify_state);
 
         if (timeout_ms) |ms| {
-            solver.setTimeoutMs(ms);
+            try solver.setTimeoutMs(ms);
         }
 
         const pass = VerificationPass{
@@ -2333,7 +2333,7 @@ pub const VerificationPass = struct {
                 defer solver.deinit();
 
                 if (ctx.timeout_ms) |ms| {
-                    solver.setTimeoutMs(ms);
+                    solver.setTimeoutMs(ms) catch return;
                 }
 
                 while (true) {
