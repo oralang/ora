@@ -3575,6 +3575,12 @@ pub const Encoder = struct {
                 }
             }
 
+            if (std.mem.eql(u8, name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(current)) {
+                const try_block = mlir.oraTryStmtOpGetTryBlock(current);
+                const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
+                if (nested_expr != null) return nested_expr;
+            }
+
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
@@ -3600,6 +3606,63 @@ pub const Encoder = struct {
             self.encodeStateEffectsInOperation(op);
             return;
         }
+    }
+
+    fn operationMayEnterCatch(self: *Encoder, op: mlir.MlirOperation) bool {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.error.unwrap") or
+            std.mem.eql(u8, op_name, "ora.try_stmt") or
+            std.mem.eql(u8, op_name, "ora.try_catch"))
+        {
+            return true;
+        }
+
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const num_results = mlir.oraOperationGetNumResults(op);
+            var idx: usize = 0;
+            while (idx < num_results) : (idx += 1) {
+                const result_ty = mlir.oraValueGetType(mlir.oraOperationGetResult(op, @intCast(idx)));
+                if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(result_ty))) return true;
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    if (self.operationMayEnterCatch(nested)) return true;
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+
+        return false;
+    }
+
+    fn tryStmtMayEnterCatch(self: *Encoder, try_stmt: mlir.MlirOperation) bool {
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        if (mlir.oraRegionIsNull(try_region)) return false;
+        var block = mlir.oraRegionGetFirstBlock(try_region);
+        while (!mlir.oraBlockIsNull(block)) {
+            var op = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(op)) {
+                if (self.operationMayEnterCatch(op)) return true;
+                op = mlir.oraOperationGetNextInBlock(op);
+            }
+            block = mlir.oraBlockGetNextInRegion(block);
+        }
+        return false;
     }
 
     fn extractScfIfReturnedExpr(
@@ -3903,6 +3966,13 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+                if (!self.tryStmtMayEnterCatch(op)) {
+                    const try_region = mlir.oraOperationGetRegion(op, 0);
+                    if (!mlir.oraRegionIsNull(try_region)) {
+                        self.encodeStateEffectsInRegion(try_region);
+                    }
+                    return;
+                }
                 self.recordDegradation("try state summary is not encoded exactly");
                 return;
             }
