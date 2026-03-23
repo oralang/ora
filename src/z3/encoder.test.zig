@@ -966,6 +966,90 @@ test "arith cmpi ult encodes unsigned comparison" {
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvult") != null);
 }
 
+test "arith cmpi slt encodes signed comparison" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, -1);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 2, lhs, rhs); // slt
+    const ast = try encoder.encodeOperation(cmp_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvslt") != null);
+}
+
+test "arith shrui encodes logical right shift" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shr_op = mlir.oraArithShrUIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(shr_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") != null);
+}
+
+test "arith shrsi encodes arithmetic right shift" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, -8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shr_op = mlir.oraArithShrSIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(shr_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") != null);
+}
+
 test "storage store threads into later load" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
