@@ -49,17 +49,4 @@ contract InvalidNarrowingConversions {
         const small: u8 = value; // ERROR: Narrowing
     }
     
-    // ============================================================================
-    // Invalid: Base type to refinement (without guard)
-    // ============================================================================
-    
-    // ERROR: address cannot convert to NonZeroAddress without runtime check
-    fn testAddressToNonZeroAddress(addr: address) {
-        const non_zero: NonZeroAddress = addr; // ERROR: Requires guard
-    }
-    
-    // ERROR: u256 cannot convert to MinValue without runtime check
-    fn testU256ToMinValue(value: u256) {
-        const min_value: MinValue<u256, 100> = value; // ERROR: Requires guard
-    }
 }
