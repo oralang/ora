@@ -576,20 +576,18 @@ const TypeChecker = struct {
                         const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
                         const actual_located = self.exprLocatedType(expr_id);
                         const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                        if (!region_rules.isAssignable(actual, expected)) {
-                            if (!typesAssignable(expected_type, actual_type)) {
-                                try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
-                                    field.name,
-                                    typeDisplayName(expected_type),
-                                    typeDisplayName(actual_type),
-                                });
-                            } else {
-                                try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
-                                    field.name,
-                                    region_rules.regionDisplayName(expected.region),
-                                    region_rules.regionDisplayName(actual.region),
-                                });
-                            }
+                        if (!typesAssignable(expected_type, actual_type)) {
+                            try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
+                                field.name,
+                                typeDisplayName(expected_type),
+                                typeDisplayName(actual_type),
+                            });
+                        } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
+                            try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
+                                field.name,
+                                region_rules.regionDisplayName(expected.region),
+                                region_rules.regionDisplayName(actual.region),
+                            });
                         }
                     }
                 }
@@ -1032,18 +1030,16 @@ const TypeChecker = struct {
                             // Keep lowering/recovery moving after reporting the overflow.
                         } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                             const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                            if (!region_rules.isAssignable(actual, expected)) {
-                                if (!typesAssignable(expected_type, actual_type)) {
-                                    try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                        typeDisplayName(expected_type),
-                                        typeDisplayName(actual_type),
-                                    });
-                                } else {
-                                    try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
-                                        region_rules.regionDisplayName(expected.region),
-                                        region_rules.regionDisplayName(actual.region),
-                                    });
-                                }
+                            if (!typesAssignable(expected_type, actual_type)) {
+                                try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
+                                    typeDisplayName(expected_type),
+                                    typeDisplayName(actual_type),
+                                });
+                            } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
+                                try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
+                                    region_rules.regionDisplayName(expected.region),
+                                    region_rules.regionDisplayName(actual.region),
+                                });
                             }
                         }
                     }
@@ -1138,18 +1134,16 @@ const TypeChecker = struct {
                 } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                     const actual_located = self.exprLocatedType(assign.value);
                     const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                    if (!region_rules.isAssignable(actual, expected)) {
-                        if (!typesAssignable(expected_type, actual_type)) {
-                            try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
-                            });
-                        } else {
-                            try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
-                                region_rules.regionDisplayName(expected.region),
-                                region_rules.regionDisplayName(actual.region),
-                            });
-                        }
+                    if (!typesAssignable(expected_type, actual_type)) {
+                        try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
+                            typeDisplayName(expected_type),
+                            typeDisplayName(actual_type),
+                        });
+                    } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
+                        try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
+                            region_rules.regionDisplayName(expected.region),
+                            region_rules.regionDisplayName(actual.region),
+                        });
                     }
                 }
             },
@@ -5104,4 +5098,65 @@ test "typesAssignable widens error unions by error-set inclusion" {
     try testing.expect(typesAssignable(wide_union, narrow_union));
     try testing.expect(!typesAssignable(narrow_union, wide_union));
     try testing.expect(typesAssignable(wide_union, .{ .named = .{ .name = "ErrorA" } }));
+}
+
+test "typesAssignable rejects integer narrowing and accepts widening" {
+    const testing = std.testing;
+
+    const u8_type: Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const u16_type: Type = .{ .integer = .{ .bits = 16, .signed = false, .spelling = "u16" } };
+    const u256_type: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    try testing.expect(typesAssignable(u16_type, u8_type));
+    try testing.expect(typesAssignable(u256_type, u16_type));
+    try testing.expect(!typesAssignable(u8_type, u16_type));
+    try testing.expect(!typesAssignable(u8_type, u256_type));
+}
+
+test "typesAssignable rejects narrowing refinement conversions" {
+    const testing = std.testing;
+
+    const base = try testing.allocator.create(Type);
+    defer testing.allocator.destroy(base);
+    base.* = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const min100: Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = base,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
+        },
+    } };
+    const min200: Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = base,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "200" } },
+        },
+    } };
+    const range_wide: Type = .{ .refinement = .{
+        .name = "InRange",
+        .base_type = base,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "0" } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "10000" } },
+        },
+    } };
+    const range_narrow: Type = .{ .refinement = .{
+        .name = "InRange",
+        .base_type = base,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "5000" } },
+        },
+    } };
+
+    try testing.expect(typesAssignable(min100, min200));
+    try testing.expect(!typesAssignable(min200, min100));
+    try testing.expect(typesAssignable(range_wide, range_narrow));
+    try testing.expect(!typesAssignable(range_narrow, range_wide));
 }

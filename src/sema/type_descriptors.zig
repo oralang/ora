@@ -194,10 +194,24 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
 }
 
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
+    if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
+    if (typeEql(expected_type, actual_type)) return true;
+
+    if (expected_type.kind() == .refinement and actual_type.kind() == .refinement) {
+        return refinementSubtypeAssignable(expected_type.refinement, actual_type.refinement);
+    }
+    if (expected_type.kind() == .refinement) {
+        return typesAssignable(expected_type.refinement.base_type.*, actual_type);
+    }
+    if (actual_type.kind() == .refinement) {
+        return typesAssignable(expected_type, actual_type.refinement.base_type.*);
+    }
+
     const expected_unwrapped = unwrapRefinement(expected_type);
     const actual_unwrapped = unwrapRefinement(actual_type);
-    if (expected_unwrapped.kind() == .unknown or actual_unwrapped.kind() == .unknown) return true;
-    if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) return true;
+    if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) {
+        return integerAssignable(expected_unwrapped.integer, actual_unwrapped.integer);
+    }
     if (expected_unwrapped.kind() == .tuple and actual_unwrapped.kind() == .tuple) {
         const expected_tuple = expected_unwrapped.tuple;
         const actual_tuple = actual_unwrapped.tuple;
@@ -298,6 +312,12 @@ fn unwrapRefinement(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
 }
 
+const RefinementBounds = struct {
+    base_type: Type,
+    min_text: ?[]const u8 = null,
+    max_text: ?[]const u8 = null,
+};
+
 fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
@@ -340,6 +360,111 @@ fn storeType(allocator: std.mem.Allocator, ty: Type) anyerror!*const Type {
     const stored = try allocator.create(Type);
     stored.* = ty;
     return stored;
+}
+
+fn integerAssignable(expected: model.IntegerType, actual: model.IntegerType) bool {
+    if (expected.signed != null and actual.signed != null and expected.signed.? != actual.signed.?) return false;
+    if (expected.bits == null or actual.bits == null) return true;
+    return actual.bits.? <= expected.bits.?;
+}
+
+fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.RefinementType) bool {
+    if (!typesAssignable(expected.base_type.*, actual.base_type.*) or !typesAssignable(actual.base_type.*, expected.base_type.*)) {
+        return false;
+    }
+    if (std.mem.eql(u8, expected.name, "NonZeroAddress")) {
+        return std.mem.eql(u8, actual.name, "NonZeroAddress");
+    }
+    if (typeEql(.{ .refinement = expected }, .{ .refinement = actual })) return true;
+
+    const expected_bounds = refinementBounds(expected) orelse return false;
+    const actual_bounds = refinementBounds(actual) orelse return false;
+    if (!typeEql(expected_bounds.base_type, actual_bounds.base_type)) return false;
+    if (expected_bounds.min_text) |expected_min| {
+        const actual_min = actual_bounds.min_text orelse return false;
+        if (compareIntegerText(actual_min, expected_min) == .lt) return false;
+    }
+    if (expected_bounds.max_text) |expected_max| {
+        const actual_max = actual_bounds.max_text orelse return false;
+        if (compareIntegerText(actual_max, expected_max) == .gt) return false;
+    }
+    return true;
+}
+
+fn refinementBounds(refinement: model.RefinementType) ?RefinementBounds {
+    if (std.mem.eql(u8, refinement.name, "MinValue")) {
+        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
+        return .{
+            .base_type = refinement.base_type.*,
+            .min_text = refinement.args[1].Integer.text,
+        };
+    }
+    if (std.mem.eql(u8, refinement.name, "MaxValue")) {
+        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
+        return .{
+            .base_type = refinement.base_type.*,
+            .max_text = refinement.args[1].Integer.text,
+        };
+    }
+    if (std.mem.eql(u8, refinement.name, "InRange")) {
+        if (refinement.args.len < 3 or refinement.args[1] != .Integer or refinement.args[2] != .Integer) return null;
+        return .{
+            .base_type = refinement.base_type.*,
+            .min_text = refinement.args[1].Integer.text,
+            .max_text = refinement.args[2].Integer.text,
+        };
+    }
+    if (std.mem.eql(u8, refinement.name, "BasisPoints")) {
+        return .{
+            .base_type = refinement.base_type.*,
+            .min_text = "0",
+            .max_text = "10000",
+        };
+    }
+    if (std.mem.eql(u8, refinement.name, "NonZero")) {
+        return .{
+            .base_type = refinement.base_type.*,
+            .min_text = "1",
+        };
+    }
+    if (std.mem.eql(u8, refinement.name, "Exact")) {
+        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
+        return .{
+            .base_type = refinement.base_type.*,
+            .min_text = refinement.args[1].Integer.text,
+            .max_text = refinement.args[1].Integer.text,
+        };
+    }
+    return null;
+}
+
+fn compareIntegerText(lhs_raw: []const u8, rhs_raw: []const u8) std.math.Order {
+    const lhs = std.mem.trim(u8, lhs_raw, " \t\n\r");
+    const rhs = std.mem.trim(u8, rhs_raw, " \t\n\r");
+    const lhs_negative = lhs.len > 0 and lhs[0] == '-';
+    const rhs_negative = rhs.len > 0 and rhs[0] == '-';
+    if (lhs_negative != rhs_negative) return if (lhs_negative) .lt else .gt;
+
+    const lhs_digits = trimLeadingZeros(if (lhs_negative) lhs[1..] else lhs);
+    const rhs_digits = trimLeadingZeros(if (rhs_negative) rhs[1..] else rhs);
+    if (lhs_digits.len != rhs_digits.len) {
+        if (lhs_negative) {
+            return if (lhs_digits.len > rhs_digits.len) .lt else .gt;
+        }
+        return if (lhs_digits.len < rhs_digits.len) .lt else .gt;
+    }
+    const ordered = std.mem.order(u8, lhs_digits, rhs_digits);
+    return if (lhs_negative) switch (ordered) {
+        .lt => .gt,
+        .eq => .eq,
+        .gt => .lt,
+    } else ordered;
+}
+
+fn trimLeadingZeros(text: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < text.len and text[i] == '0') : (i += 1) {}
+    return if (i == text.len) "0" else text[i..];
 }
 
 fn commonIntegerType(lhs: Type, rhs: Type) ?Type {
