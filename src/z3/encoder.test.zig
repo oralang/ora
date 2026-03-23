@@ -1988,6 +1988,99 @@ test "func.call summary preserves switch-guarded storage writes" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary encodes switch-selected pure returns exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("switchPure"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{i256_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const helper_tag = mlir.oraBlockGetArgument(helper_body, 0);
+
+    const switch_results = [_]mlir.MlirType{i256_ty};
+    const switch_op = mlir.oraSwitchOpCreateWithCases(mlir_ctx, loc, helper_tag, &switch_results, switch_results.len, 2);
+    const case0_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 0);
+    const default_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 1);
+
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const one_val = mlir.oraOperationGetResult(one_op, 0);
+    mlir.oraBlockAppendOwnedOperation(case0_block, one_op);
+    mlir.oraBlockAppendOwnedOperation(case0_block, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{one_val}, 1));
+
+    const two_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const two_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, two_attr);
+    const two_val = mlir.oraOperationGetResult(two_op, 0);
+    mlir.oraBlockAppendOwnedOperation(default_block, two_op);
+    mlir.oraBlockAppendOwnedOperation(default_block, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{two_val}, 1));
+
+    var case_values = [_]i64{ 1, 0 };
+    var range_starts = [_]i64{ 0, 0 };
+    var range_ends = [_]i64{ 0, 0 };
+    var case_kinds = [_]i64{ 0, 2 };
+    mlir.oraSwitchOpSetCasePatterns(switch_op, &case_values, &range_starts, &range_ends, &case_kinds, 1, 2);
+    mlir.oraBlockAppendOwnedOperation(helper_body, switch_op);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const tag1_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const tag1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, tag1_attr);
+    const tag1 = mlir.oraOperationGetResult(tag1_op, 0);
+    const tag1_ast = try encoder.encodeOperation(tag1_op);
+
+    const tag2_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const tag2_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, tag2_attr);
+    const tag2 = mlir.oraOperationGetResult(tag2_op, 0);
+    const tag2_ast = try encoder.encodeOperation(tag2_op);
+
+    const call1 = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("switchPure"),
+        &[_]mlir.MlirValue{tag1},
+        1,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+    const call2 = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("switchPure"),
+        &[_]mlir.MlirValue{tag2},
+        1,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+
+    const encoded1 = try encoder.encodeOperation(call1);
+    const encoded2 = try encoder.encodeOperation(call2);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded1, tag1_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded2, tag2_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary preserves conditional return fallthrough state" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

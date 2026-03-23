@@ -3566,6 +3566,13 @@ pub const Encoder = struct {
                 if (branch_expr != null) return branch_expr;
             }
 
+            if (std.mem.eql(u8, name, "ora.switch")) {
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                const fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                const branch_expr = try self.extractSwitchReturnedExpr(current, result_index, mode, fallthrough_expr);
+                if (branch_expr != null) return branch_expr;
+            }
+
             if (std.mem.eql(u8, name, "scf.execute_region")) {
                 const region = mlir.oraOperationGetRegion(current, 0);
                 if (!mlir.oraRegionIsNull(region)) {
@@ -3789,6 +3796,74 @@ pub const Encoder = struct {
         if (else_expr == null) else_expr = fallthrough_expr;
         if (then_expr == null or else_expr == null) return null;
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
+    }
+
+    fn extractSwitchReturnedExpr(
+        self: *Encoder,
+        switch_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+        fallthrough_expr: ?z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(switch_op);
+        if (num_operands < 1) return null;
+
+        const scrutinee_value = mlir.oraOperationGetOperand(switch_op, 0);
+        const scrutinee = try self.encodeValueWithMode(scrutinee_value, mode);
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(switch_op));
+        if (num_regions == 0) return fallthrough_expr;
+
+        var metadata = try self.getSwitchCaseMetadata(switch_op, num_regions);
+        defer metadata.deinit(self.allocator);
+
+        const saved_len = self.return_path_assumptions.items.len;
+        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+
+        var branch_conditions = try self.allocator.alloc(z3.Z3_ast, num_regions);
+        defer self.allocator.free(branch_conditions);
+        var branch_exprs = try self.allocator.alloc(?z3.Z3_ast, num_regions);
+        defer self.allocator.free(branch_exprs);
+
+        var remaining = self.encodeBoolConstant(true);
+        for (0..num_regions) |region_index| {
+            const raw_predicate = try self.buildOraSwitchCasePredicate(
+                scrutinee,
+                metadata.case_kinds,
+                metadata.case_values,
+                metadata.range_starts,
+                metadata.range_ends,
+                region_index,
+            );
+            const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                remaining
+            else
+                self.encodeAnd(&.{ remaining, raw_predicate });
+            branch_conditions[region_index] = effective_predicate;
+
+            self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+            try self.return_path_assumptions.append(self.allocator, effective_predicate);
+            const region = mlir.oraOperationGetRegion(switch_op, @intCast(region_index));
+            const block = mlir.oraRegionGetFirstBlock(region);
+            branch_exprs[region_index] = try self.extractReturnedExprFromBlock(block, result_index, mode);
+
+            if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+            }
+        }
+
+        var combined = fallthrough_expr;
+        var index = num_regions;
+        while (index > 0) {
+            index -= 1;
+            const branch_expr = branch_exprs[index] orelse fallthrough_expr;
+            if (branch_expr == null) return null;
+            combined = if (combined) |else_expr|
+                try self.encodeControlFlow("scf.if", branch_conditions[index], branch_expr.?, else_expr)
+            else
+                branch_expr;
+        }
+
+        return combined;
     }
 
     fn tryInlineFunctionCallSummary(
