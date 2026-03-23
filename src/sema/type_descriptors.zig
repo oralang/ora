@@ -375,7 +375,7 @@ fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.Ref
     if (std.mem.eql(u8, expected.name, "NonZeroAddress")) {
         return std.mem.eql(u8, actual.name, "NonZeroAddress");
     }
-    if (typeEql(.{ .refinement = expected }, .{ .refinement = actual })) return true;
+    if (refinementSemanticallyEqual(expected, actual)) return true;
 
     const expected_bounds = refinementBounds(expected) orelse return false;
     const actual_bounds = refinementBounds(actual) orelse return false;
@@ -387,6 +387,24 @@ fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.Ref
     if (expected_bounds.max_text) |expected_max| {
         const actual_max = actual_bounds.max_text orelse return false;
         if (compareIntegerText(actual_max, expected_max) == .gt) return false;
+    }
+    return true;
+}
+
+fn refinementSemanticallyEqual(lhs: model.RefinementType, rhs: model.RefinementType) bool {
+    if (!std.mem.eql(u8, lhs.name, rhs.name)) return false;
+    if (lhs.args.len != rhs.args.len) return false;
+    for (lhs.args, rhs.args) |left, right| {
+        switch (left) {
+            .Integer => |left_integer| {
+                if (right != .Integer) return false;
+                if (compareIntegerText(left_integer.text, right.Integer.text) != .eq) return false;
+            },
+            .Type => {
+                if (right != .Type) return false;
+                // Refinement type arguments are semantically represented by base_type above.
+            },
+        }
     }
     return true;
 }

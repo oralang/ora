@@ -12117,6 +12117,30 @@ test "compiler emits tuple ABI return attrs for public error unions" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return_words"));
 }
 
+test "compiler accepts identical refinement types across calls and assignments" {
+    const source_text =
+        \\contract Probe {
+        \\    fn same(x: MinValue<u256, 1>) -> bool {
+        \\        return ok(x);
+        \\    }
+        \\    fn ok(x: MinValue<u256, 1>) -> bool {
+        \\        return true;
+        \\    }
+        \\    storage var max_ltv: InRange<u256, 0, 10000> = 7500;
+        \\    pub fn set(new_ltv: InRange<u256, 0, 10000>) {
+        \\        max_ltv = new_ltv;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler emits struct ABI return attrs for public error unions" {
     const source_text =
         \\struct Snapshot {
