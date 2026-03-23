@@ -356,6 +356,110 @@ pub const Encoder = struct {
         }
     }
 
+    fn mergeStateSnapshotsMany(
+        self: *Encoder,
+        conditions: []const z3.Z3_ast,
+        base: *const StateSnapshot,
+        branch_states: []const StateSnapshot,
+    ) !void {
+        self.clearCurrentStateMaps();
+
+        var global_names = std.ArrayList([]const u8){};
+        defer global_names.deinit(self.allocator);
+
+        var base_g_it = base.global_map.iterator();
+        while (base_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        for (branch_states) |*branch_state| {
+            var branch_it = branch_state.global_map.iterator();
+            while (branch_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        }
+
+        for (global_names.items) |name| {
+            const base_opt = base.global_map.get(name);
+            var fallback = base_opt orelse blk: {
+                for (branch_states) |*branch_state| {
+                    if (branch_state.global_map.get(name)) |value| {
+                        const branch_sort = z3.Z3_get_sort(self.context.ctx, value);
+                        break :blk try self.getOrCreateCurrentGlobal(name, branch_sort);
+                    }
+                }
+                continue;
+            };
+
+            var idx = branch_states.len;
+            while (idx > 0) {
+                idx -= 1;
+                const branch_val = branch_states[idx].global_map.get(name) orelse fallback;
+                fallback = if (branch_val == fallback)
+                    branch_val
+                else
+                    self.encodeIte(conditions[idx], branch_val, fallback);
+            }
+
+            try self.global_map.put(try self.allocator.dupe(u8, name), fallback);
+        }
+
+        var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
+        defer mem_keys.deinit();
+
+        var base_m_it = base.memref_map.iterator();
+        while (base_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        for (branch_states) |*branch_state| {
+            var branch_it = branch_state.memref_map.iterator();
+            while (branch_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        }
+
+        var key_it = mem_keys.iterator();
+        while (key_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const base_opt = base.memref_map.get(key);
+            if (base_opt == null) {
+                var saw_present = false;
+                var saw_missing = false;
+                for (branch_states) |*branch_state| {
+                    if (branch_state.memref_map.get(key) != null) {
+                        saw_present = true;
+                    } else {
+                        saw_missing = true;
+                    }
+                }
+                if (saw_present and saw_missing) {
+                    self.noteDegradation("branch merge lost exact memref initialization state");
+                    continue;
+                }
+            }
+
+            var fallback = base_opt orelse blk: {
+                for (branch_states) |*branch_state| {
+                    if (branch_state.memref_map.get(key)) |value| break :blk value;
+                }
+                continue;
+            };
+
+            var idx = branch_states.len;
+            while (idx > 0) {
+                idx -= 1;
+                const branch_val = branch_states[idx].memref_map.get(key) orelse fallback;
+                fallback = if (branch_val == fallback)
+                    branch_val
+                else
+                    self.encodeIte(conditions[idx], branch_val, fallback);
+            }
+
+            try self.memref_map.put(key, fallback);
+        }
+
+        var written_names = std.ArrayList([]const u8){};
+        defer written_names.deinit(self.allocator);
+        for (branch_states) |*branch_state| {
+            var written_it = branch_state.written_global_slots.iterator();
+            while (written_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
+        }
+        for (written_names.items) |name| {
+            try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
+        }
+    }
+
     pub fn resetFunctionState(self: *Encoder) void {
         var g_it = self.global_map.iterator();
         while (g_it.next()) |entry| {
@@ -3504,6 +3608,90 @@ pub const Encoder = struct {
                 return;
             }
 
+            if (std.mem.eql(u8, op_name, "ora.switch")) {
+                if (mlir.oraOperationGetNumOperands(op) < 1) {
+                    self.recordDegradation("ora.switch missing scrutinee while encoding state effects");
+                    return;
+                }
+
+                const scrutinee_value = mlir.oraOperationGetOperand(op, 0);
+                const scrutinee = self.encodeValue(scrutinee_value) catch {
+                    self.recordDegradation("failed to encode ora.switch scrutinee for state summary");
+                    return;
+                };
+
+                const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+                var metadata = self.getSwitchCaseMetadata(op, num_regions) catch {
+                    self.recordDegradation("failed to recover ora.switch case metadata for state summary");
+                    return;
+                };
+                defer metadata.deinit(self.allocator);
+
+                var base_state = self.captureStateSnapshot() catch {
+                    self.recordDegradation("failed to capture base state for ora.switch summary");
+                    return;
+                };
+                defer base_state.deinit(self.allocator);
+
+                var branch_states = self.allocator.alloc(StateSnapshot, num_regions) catch {
+                    self.recordDegradation("failed to allocate ora.switch branch summary state");
+                    return;
+                };
+                defer self.allocator.free(branch_states);
+                for (branch_states) |*branch_state| branch_state.* = StateSnapshot.init(self.allocator);
+                defer {
+                    for (branch_states) |*branch_state| branch_state.deinit(self.allocator);
+                }
+
+                var branch_conditions = self.allocator.alloc(z3.Z3_ast, num_regions) catch {
+                    self.recordDegradation("failed to allocate ora.switch branch predicates");
+                    return;
+                };
+                defer self.allocator.free(branch_conditions);
+
+                var remaining = self.encodeBoolConstant(true);
+                for (0..num_regions) |region_index| {
+                    self.restoreStateSnapshot(&base_state) catch {
+                        self.recordDegradation("failed to restore base state for ora.switch branch summary");
+                        return;
+                    };
+
+                    const raw_predicate = self.buildOraSwitchCasePredicate(
+                        scrutinee,
+                        metadata.case_kinds,
+                        metadata.case_values,
+                        metadata.range_starts,
+                        metadata.range_ends,
+                        region_index,
+                    ) catch {
+                        self.recordDegradation("failed to encode ora.switch branch predicate for state summary");
+                        return;
+                    };
+                    const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                        remaining
+                    else
+                        self.encodeAnd(&.{ remaining, raw_predicate });
+                    branch_conditions[region_index] = effective_predicate;
+
+                    const region = mlir.oraOperationGetRegion(op, @intCast(region_index));
+                    self.encodeStateEffectsInRegion(region);
+                    branch_states[region_index] = self.captureStateSnapshot() catch {
+                        self.recordDegradation("failed to capture ora.switch branch state summary");
+                        return;
+                    };
+
+                    if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                        remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+                    }
+                }
+
+                self.mergeStateSnapshotsMany(branch_conditions, &base_state, branch_states) catch {
+                    self.recordDegradation("failed to merge ora.switch branch state summary");
+                    return;
+                };
+                return;
+            }
+
             if (std.mem.eql(u8, op_name, "ora.sstore") or
                 std.mem.eql(u8, op_name, "ora.map_store") or
                 std.mem.eql(u8, op_name, "func.call") or
@@ -3519,15 +3707,96 @@ pub const Encoder = struct {
         self.encodeStateEffectsInRegions(op);
     }
 
+    fn encodeStateEffectsInConditionalReturn(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        next_op: mlir.MlirOperation,
+    ) void {
+        if (mlir.oraOperationGetNumOperands(op) < 1) {
+            self.recordDegradation("ora.conditional_return missing condition while encoding state effects");
+            return;
+        }
+
+        const condition_value = mlir.oraOperationGetOperand(op, 0);
+        const condition = self.encodeValue(condition_value) catch {
+            self.recordDegradation("failed to encode ora.conditional_return condition for state summary");
+            return;
+        };
+
+        var base_state = self.captureStateSnapshot() catch {
+            self.recordDegradation("failed to capture base state for ora.conditional_return summary");
+            return;
+        };
+        defer base_state.deinit(self.allocator);
+
+        var then_state = StateSnapshot.init(self.allocator);
+        defer then_state.deinit(self.allocator);
+        var else_state = StateSnapshot.init(self.allocator);
+        defer else_state.deinit(self.allocator);
+
+        self.restoreStateSnapshot(&base_state) catch {
+            self.recordDegradation("failed to restore base state for ora.conditional_return then-branch");
+            return;
+        };
+        const then_region = mlir.oraOperationGetRegion(op, 0);
+        if (!mlir.oraRegionIsNull(then_region)) {
+            self.encodeStateEffectsInRegion(then_region);
+        }
+        then_state = self.captureStateSnapshot() catch {
+            self.recordDegradation("failed to capture ora.conditional_return then-branch state summary");
+            return;
+        };
+
+        self.restoreStateSnapshot(&base_state) catch {
+            self.recordDegradation("failed to restore base state for ora.conditional_return else-branch");
+            return;
+        };
+        const else_region = mlir.oraOperationGetRegion(op, 1);
+        if (!mlir.oraRegionIsNull(else_region)) {
+            self.encodeStateEffectsInRegion(else_region);
+        }
+        const parent_block = mlir.mlirOperationGetBlock(op);
+        if (!mlir.oraBlockIsNull(parent_block) and !mlir.oraOperationIsNull(next_op)) {
+            self.encodeStateEffectsInBlockFrom(parent_block, next_op);
+        }
+        else_state = self.captureStateSnapshot() catch {
+            self.recordDegradation("failed to capture ora.conditional_return else-branch state summary");
+            return;
+        };
+
+        self.mergeStateSnapshotsIf(condition, &base_state, &then_state, &else_state) catch {
+            self.recordDegradation("failed to merge ora.conditional_return branch state summary");
+            return;
+        };
+    }
+
+    fn encodeStateEffectsInBlockFrom(self: *Encoder, block: mlir.MlirBlock, start_op: mlir.MlirOperation) void {
+        if (mlir.oraBlockIsNull(block)) return;
+        var current = start_op;
+        while (!mlir.oraOperationIsNull(current)) {
+            const next = mlir.oraOperationGetNextInBlock(current);
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const op_name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
+                self.encodeStateEffectsInConditionalReturn(current, next);
+                return;
+            }
+
+            self.encodeStateEffectsInOperation(current);
+            current = next;
+        }
+    }
+
     fn encodeStateEffectsInRegion(self: *Encoder, region: mlir.MlirRegion) void {
         if (mlir.oraRegionIsNull(region)) return;
         var block = mlir.oraRegionGetFirstBlock(region);
         while (!mlir.oraBlockIsNull(block)) {
-            var nested = mlir.oraBlockGetFirstOperation(block);
-            while (!mlir.oraOperationIsNull(nested)) {
-                self.encodeStateEffectsInOperation(nested);
-                nested = mlir.oraOperationGetNextInBlock(nested);
-            }
+            self.encodeStateEffectsInBlockFrom(block, mlir.oraBlockGetFirstOperation(block));
             block = mlir.oraBlockGetNextInRegion(block);
         }
     }
