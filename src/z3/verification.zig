@@ -134,7 +134,7 @@ pub const VerificationPass = struct {
         const parallel = if (parallel_env) |val| blk: {
             defer allocator.free(val);
             break :blk parseBoolEnv(val);
-        } else true;
+        } else false;
 
         const workers_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_WORKERS") catch null;
         var max_workers: usize = std.Thread.getCpuCount() catch 1;
@@ -367,6 +367,8 @@ pub const VerificationPass = struct {
                     // entrypoints (e.g. private/internal helpers).
                 } else if (std.mem.eql(u8, op_name, "scf.if")) {
                     try self.walkScfIfRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
+                    try self.walkConditionalReturnRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.switch")) {
                     try self.walkOraSwitchRegions(current_op);
                 } else {
@@ -701,6 +703,75 @@ pub const VerificationPass = struct {
                 .condition = not_condition,
                 .extra_constraints = &[_]z3.Z3_ast{},
             });
+            const else_region = mlir.oraOperationGetRegion(if_op, 1);
+            try self.walkMLIRRegion(else_region);
+            else_state.deinit(self.allocator);
+            else_state = try self.captureEncoderBranchState();
+        } else {
+            else_state.deinit(self.allocator);
+            else_state = try self.captureEncoderBranchState();
+        }
+
+        try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+    }
+
+    fn walkConditionalReturnRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
+        const num_operands = mlir.oraOperationGetNumOperands(if_op);
+        if (num_operands < 1) {
+            const num_regions = mlir.oraOperationGetNumRegions(if_op);
+            for (0..@intCast(num_regions)) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(if_op, @intCast(region_idx));
+                try self.walkMLIRRegion(nested_region);
+            }
+            return;
+        }
+
+        const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        const raw_condition = try self.encoder.encodeValue(condition_value);
+        const condition = self.encoder.coerceBoolean(raw_condition);
+        const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+
+        var base_state = try self.captureEncoderBranchState();
+        defer base_state.deinit(self.allocator);
+
+        var then_state = EncoderBranchState.init(self.allocator);
+        defer then_state.deinit(self.allocator);
+        var else_state = EncoderBranchState.init(self.allocator);
+        defer else_state.deinit(self.allocator);
+
+        const then_block = mlir.oraConditionalReturnOpGetThenBlock(if_op);
+        if (!mlir.oraBlockIsNull(then_block)) {
+            try self.restoreEncoderBranchState(&base_state);
+            const saved_len = self.active_path_assumptions.items.len;
+            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = condition,
+                .extra_constraints = &[_]z3.Z3_ast{},
+            });
+
+            const then_region = mlir.oraOperationGetRegion(if_op, 0);
+            try self.walkMLIRRegion(then_region);
+            then_state.deinit(self.allocator);
+            then_state = try self.captureEncoderBranchState();
+        } else {
+            then_state.deinit(self.allocator);
+            then_state = try self.captureEncoderBranchState();
+        }
+
+        const else_block = mlir.oraConditionalReturnOpGetElseBlock(if_op);
+        if (!mlir.oraBlockIsNull(else_block)) {
+            try self.restoreEncoderBranchState(&base_state);
+            const saved_len = self.active_path_assumptions.items.len;
+            defer self.active_path_assumptions.shrinkRetainingCapacity(saved_len);
+            const not_condition = self.encoder.encodeNot(condition);
+            try self.active_path_assumptions.append(.{
+                .condition = not_condition,
+                .extra_constraints = &[_]z3.Z3_ast{},
+            });
+
             const else_region = mlir.oraOperationGetRegion(if_op, 1);
             try self.walkMLIRRegion(else_region);
             else_state.deinit(self.allocator);
@@ -4201,6 +4272,46 @@ fn buildForContractInvariantModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildConditionalReturnContractInvariantModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_contract_invariant_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const param_types = [_]mlir.MlirType{i256_ty, i256_ty};
+    const param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const lhs = mlir.oraBlockGetArgument(func_body, 0);
+    const rhs = mlir.oraBlockGetArgument(func_body, 1);
+
+    const cond_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, lhs, rhs); // uge
+    const cond = mlir.oraOperationGetResult(cond_op, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, cond);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const then_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, lhs, rhs); // uge
+    const then_cond = mlir.oraOperationGetResult(then_cmp_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, then_cond, testStringRef("must hold under conditional return path"));
+    const then_yield = mlir.oraYieldOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_cmp_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, assert_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_yield);
+
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(func_body, cond_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildUntaggedCfAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -4980,6 +5091,40 @@ test "contract invariants from loop body obligations use loop constraints" {
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const module = buildForContractInvariantModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "contract invariants inside ora.conditional_return use path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnContractInvariantModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);
