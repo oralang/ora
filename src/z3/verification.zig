@@ -2829,7 +2829,7 @@ pub const VerificationPass = struct {
         }
 
         if (verification_result) |vr| {
-            summary.verification_success = inferReportVerificationSuccess(summary, verification_result);
+            summary.verification_success = inferReportVerificationSuccess(summary, verification_result, self.encoder.isDegraded());
             summary.verification_errors = @intCast(vr.errors.items.len);
             summary.verification_diagnostics = @intCast(vr.diagnostics.items.len);
             summary.proven_guards = @intCast(vr.proven_guard_ids.count());
@@ -2849,7 +2849,7 @@ pub const VerificationPass = struct {
             }
             summary.violatable_guards = @intCast(uniq_diag_guards.count());
         } else {
-            summary.verification_success = inferReportVerificationSuccess(summary, null);
+            summary.verification_success = inferReportVerificationSuccess(summary, null, self.encoder.isDegraded());
             summary.verification_errors = 0;
             summary.verification_diagnostics = 0;
             summary.proven_guards = @intCast(proven_guard_ids.count());
@@ -4130,7 +4130,9 @@ const PreparedQueryResult = struct {
 fn inferReportVerificationSuccess(
     summary: ReportSummary,
     verification_result: ?*const errors.VerificationResult,
+    encoding_degraded: bool,
 ) bool {
+    if (encoding_degraded) return false;
     if (verification_result) |vr| return vr.success;
     return summary.failed_obligations == 0 and
         summary.inconsistent_bases == 0 and
@@ -6255,7 +6257,7 @@ test "report success is false without verification result when queries are unkno
         .total_queries = 1,
         .unknown = 1,
     };
-    try testing.expect(!inferReportVerificationSuccess(summary, null));
+    try testing.expect(!inferReportVerificationSuccess(summary, null, false));
 }
 
 test "report success follows verification result when present" {
@@ -6267,7 +6269,15 @@ test "report success follows verification result when present" {
         .total_queries = 1,
         .unknown = 0,
     };
-    try testing.expect(!inferReportVerificationSuccess(summary, &result));
+    try testing.expect(!inferReportVerificationSuccess(summary, &result, false));
+}
+
+test "report success is false when encoder degraded" {
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unknown = 0,
+    };
+    try testing.expect(!inferReportVerificationSuccess(summary, null, true));
 }
 
 test "parseLocationString strips mlir loc wrapper" {
