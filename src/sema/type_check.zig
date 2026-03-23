@@ -54,14 +54,29 @@ fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) Lo
 }
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
+    if (expected_type.kind() == .refinement and !refinementSupportsRuntimeGuard(expected_type.refinement)) {
+        if (actual_type.kind() != .refinement) return false;
+        return typesAssignable(expected_type, actual_type) and typesAssignable(actual_type, expected_type);
+    }
+
     if (typesAssignable(expected_type, actual_type)) return true;
 
     if (expected_type.kind() == .refinement and actual_type.kind() == .refinement) {
+        if (!refinementSupportsRuntimeGuard(expected_type.refinement) or
+            !refinementSupportsRuntimeGuard(actual_type.refinement))
+        {
+            return false;
+        }
         return typesAssignable(expected_type.refinement.base_type.*, actual_type.refinement.base_type.*) and
             typesAssignable(actual_type.refinement.base_type.*, expected_type.refinement.base_type.*);
     }
 
     return false;
+}
+
+fn refinementSupportsRuntimeGuard(refinement: model.RefinementType) bool {
+    return !std.mem.eql(u8, refinement.name, "Exact") and
+        !std.mem.eql(u8, refinement.name, "Scaled");
 }
 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
@@ -5206,4 +5221,38 @@ test "typesAssignable accepts semantically identical refinements from distinct s
 
     try testing.expect(typesAssignable(lhs, rhs));
     try testing.expect(typesAssignable(rhs, lhs));
+}
+
+test "typesFlowCompatible rejects non-guardable refinement mismatches" {
+    const testing = std.testing;
+
+    const base_a = try testing.allocator.create(Type);
+    defer testing.allocator.destroy(base_a);
+    base_a.* = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const base_b = try testing.allocator.create(Type);
+    defer testing.allocator.destroy(base_b);
+    base_b.* = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const scaled18: Type = .{ .refinement = .{
+        .name = "Scaled",
+        .base_type = base_a,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 1 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "18" } },
+        },
+    } };
+    const scaled6: Type = .{ .refinement = .{
+        .name = "Scaled",
+        .base_type = base_b,
+        .args = &.{
+            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 2 } },
+            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "6" } },
+        },
+    } };
+    const plain_u256: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    try testing.expect(!typesFlowCompatible(scaled18, scaled6));
+    try testing.expect(!typesFlowCompatible(scaled18, plain_u256));
+    try testing.expect(typesFlowCompatible(plain_u256, scaled18));
 }
