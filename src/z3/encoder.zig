@@ -3460,6 +3460,15 @@ pub const Encoder = struct {
             else
                 name_ref.data[0..name_ref.length];
 
+            self.applyLocalReturnExtractionStateEffect(current, name, mode) catch |err| switch (err) {
+                error.UnsupportedOperation,
+                error.InvalidOperandCount,
+                error.InvalidControlFlow,
+                error.UnsupportedPredicate,
+                => self.recordDegradation("failed to replay local state effect during pure return extraction"),
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+
             if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
                 const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
                 if (result_index >= num_operands) return null;
@@ -3484,6 +3493,25 @@ pub const Encoder = struct {
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
+    }
+
+    fn applyLocalReturnExtractionStateEffect(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        mode: EncodeMode,
+    ) EncodeError!void {
+        _ = mode;
+
+        if (std.mem.eql(u8, op_name, "memref.store")) {
+            _ = try self.encodeOperation(op);
+            return;
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.if") or std.mem.eql(u8, op_name, "ora.switch")) {
+            self.encodeStateEffectsInOperation(op);
+            return;
+        }
     }
 
     fn extractScfIfReturnedExpr(
@@ -3861,6 +3889,7 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, op_name, "ora.sstore") or
                 std.mem.eql(u8, op_name, "ora.map_store") or
+                std.mem.eql(u8, op_name, "memref.store") or
                 std.mem.eql(u8, op_name, "func.call") or
                 std.mem.eql(u8, op_name, "call") or
                 std.mem.eql(u8, op_name, "ora.assert"))
