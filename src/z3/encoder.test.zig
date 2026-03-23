@@ -231,6 +231,59 @@ test "memref store threads into later scalar load" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "uninitialized memref load degrades encoding" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const null_attr = mlir.MlirAttribute{ .ptr = null };
+    const memref_ty = mlir.oraMemRefTypeCreate(mlir_ctx, i256_ty, 0, null, null_attr, null_attr);
+
+    const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_ty);
+    const slot = mlir.oraOperationGetResult(alloca, 0);
+    _ = try encoder.encodeOperation(alloca);
+    try testing.expect(!encoder.isDegraded());
+
+    const load = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, slot, null, 0, i256_ty);
+    _ = try encoder.encodeOperation(load);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
+}
+
+test "tload degrades encoding" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const tload = mlir.oraTLoadOpCreate(mlir_ctx, loc, stringRef("pending"), i256_ty);
+
+    _ = try encoder.encodeOperation(tload);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "tload encoded as unconstrained transient storage value"));
+}
+
 test "tensor.dim encodes dynamic shape dims consistently and folds static dims" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
