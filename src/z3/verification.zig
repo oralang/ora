@@ -4402,9 +4402,9 @@ fn buildSmtlibForConstraints(
     solver: *Solver,
     constraints: []const z3.Z3_ast,
 ) ![:0]const u8 {
-    solver.reset();
+    try solver.resetChecked();
     for (constraints) |cst| {
-        solver.assert(cst);
+        try solver.assertChecked(cst);
     }
     const raw = z3.Z3_solver_to_string(solver.context.ctx, solver.solver);
     const smtlib = if (raw == null) "" else std.mem.span(raw);
