@@ -2278,6 +2278,9 @@ pub const VerificationPass = struct {
             }
             queries.deinit();
         }
+        if (self.encoder.isDegraded()) {
+            return try self.degradedVerificationResult();
+        }
 
         if (queries.items.len == 0) {
             return errors.VerificationResult.init(self.allocator);
@@ -2295,14 +2298,7 @@ pub const VerificationPass = struct {
         const total_queries = queries.items.len;
         const worker_count = @min(self.max_workers, total_queries);
 
-        const QueryResult = struct {
-            status: z3.Z3_lbool = z3.Z3_L_UNDEF,
-            elapsed_ms: u64 = 0,
-            err: ?anyerror = null,
-            model_str: ?[]const u8 = null, // captured for SAT counterexample-capable queries
-        };
-
-        const results = try worker_allocator.alloc(QueryResult, total_queries);
+        const results = try worker_allocator.alloc(PreparedQueryResult, total_queries);
         for (results) |*entry| {
             entry.* = .{};
         }
@@ -2311,7 +2307,7 @@ pub const VerificationPass = struct {
         const WorkState = struct {
             queries: []const PreparedQuery,
             next_index: std.atomic.Value(usize),
-            results: []QueryResult,
+            results: []PreparedQueryResult,
             allocator: std.mem.Allocator,
             timeout_ms: ?u32,
             trace_smt: bool,
@@ -2439,6 +2435,46 @@ pub const VerificationPass = struct {
         }
         for (threads[0..launched]) |t| t.join();
 
+        const combined = try self.collectPreparedQueryResults(queries.items, results);
+
+        // Free captured model strings
+        for (results) |entry| {
+            if (entry.model_str) |ms| {
+                worker_allocator.free(ms);
+            }
+        }
+
+        if (self.verify_stats) {
+            var total_queries_stats: u64 = 0;
+            var sat: u64 = 0;
+            var unsat: u64 = 0;
+            var unknown: u64 = 0;
+            var total_ms: u64 = 0;
+            for (results) |entry| {
+                total_queries_stats += 1;
+                total_ms += entry.elapsed_ms;
+                switch (entry.status) {
+                    z3.Z3_L_TRUE => sat += 1,
+                    z3.Z3_L_FALSE => unsat += 1,
+                    else => unknown += 1,
+                }
+            }
+            std.debug.print(
+                "verification stats: queries={d} sat={d} unsat={d} unknown={d} total_ms={d}\n",
+                .{ total_queries_stats, sat, unsat, unknown, total_ms },
+            );
+        }
+
+        return combined;
+    }
+
+    fn collectPreparedQueryResults(
+        self: *VerificationPass,
+        queries: []const PreparedQuery,
+        results: []const PreparedQueryResult,
+    ) !errors.VerificationResult {
+        std.debug.assert(queries.len == results.len);
+
         var combined = errors.VerificationResult.init(self.allocator);
         var inconsistent_functions = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -2457,10 +2493,9 @@ pub const VerificationPass = struct {
             unknown_base_functions.deinit();
         }
 
-        // First pass: surface base inconsistency and record affected functions.
         for (results, 0..) |entry, idx| {
             if (entry.err) |err| return err;
-            const query = queries.items[idx];
+            const query = queries[idx];
             if (query.kind != .Base) continue;
 
             if (entry.status == z3.Z3_L_FALSE) {
@@ -2492,9 +2527,8 @@ pub const VerificationPass = struct {
             }
         }
 
-        // Second pass: process all non-base queries, skipping inconsistent bases.
         for (results, 0..) |entry, idx| {
-            const query = queries.items[idx];
+            const query = queries[idx];
             if (query.kind == .Base) continue;
             if (inconsistent_functions.contains(query.function_name)) continue;
             if (unknown_base_functions.contains(query.function_name)) continue;
@@ -2641,34 +2675,6 @@ pub const VerificationPass = struct {
                 },
                 .Base => {},
             }
-        }
-
-        // Free captured model strings
-        for (results) |entry| {
-            if (entry.model_str) |ms| {
-                worker_allocator.free(ms);
-            }
-        }
-
-        if (self.verify_stats) {
-            var total_queries_stats: u64 = 0;
-            var sat: u64 = 0;
-            var unsat: u64 = 0;
-            var unknown: u64 = 0;
-            var total_ms: u64 = 0;
-            for (results) |entry| {
-                total_queries_stats += 1;
-                total_ms += entry.elapsed_ms;
-                switch (entry.status) {
-                    z3.Z3_L_TRUE => sat += 1,
-                    z3.Z3_L_FALSE => unsat += 1,
-                    else => unknown += 1,
-                }
-            }
-            std.debug.print(
-                "verification stats: queries={d} sat={d} unsat={d} unknown={d} total_ms={d}\n",
-                .{ total_queries_stats, sat, unsat, unknown, total_ms },
-            );
         }
 
         return combined;
@@ -4112,6 +4118,13 @@ const PreparedQuery = struct {
         allocator.free(self.smtlib_z);
         allocator.free(self.log_prefix);
     }
+};
+
+const PreparedQueryResult = struct {
+    status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+    elapsed_ms: u64 = 0,
+    err: ?anyerror = null,
+    model_str: ?[]const u8 = null,
 };
 
 fn parseBoolEnv(value: []const u8) bool {
@@ -6137,6 +6150,94 @@ test "unknown verification errors fail closed" {
     try testing.expectEqualStrings("/tmp/test.ora", result.errors.items[0].file);
     try testing.expectEqual(@as(u32, 7), result.errors.items[0].line);
     try testing.expectEqual(@as(u32, 3), result.errors.items[0].column);
+}
+
+test "parallel result collection taints function on unknown base" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const queries = [_]PreparedQuery{
+        .{
+            .kind = .Base,
+            .function_name = "f",
+            .file = "/tmp/test.ora",
+            .line = 1,
+            .column = 1,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [base]"),
+        },
+        .{
+            .kind = .Obligation,
+            .function_name = "f",
+            .obligation_kind = .ContractInvariant,
+            .file = "/tmp/test.ora",
+            .line = 2,
+            .column = 1,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
+        },
+    };
+    defer {
+        var mutable_queries = queries;
+        for (&mutable_queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const results = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_UNDEF },
+        .{ .status = z3.Z3_L_TRUE },
+    };
+
+    var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+    defer collected.deinit();
+
+    try testing.expect(!collected.success);
+    try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
+}
+
+test "parallel result collection skips obligations on inconsistent base" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const queries = [_]PreparedQuery{
+        .{
+            .kind = .Base,
+            .function_name = "f",
+            .file = "/tmp/test.ora",
+            .line = 1,
+            .column = 1,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [base]"),
+        },
+        .{
+            .kind = .Obligation,
+            .function_name = "f",
+            .obligation_kind = .ContractInvariant,
+            .file = "/tmp/test.ora",
+            .line = 2,
+            .column = 1,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
+        },
+    };
+    defer {
+        var mutable_queries = queries;
+        for (&mutable_queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const results = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_FALSE },
+        .{ .status = z3.Z3_L_TRUE },
+    };
+
+    var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+    defer collected.deinit();
+
+    try testing.expect(!collected.success);
+    try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, collected.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are inconsistent in f"));
 }
 
 test "parseLocationString strips mlir loc wrapper" {
