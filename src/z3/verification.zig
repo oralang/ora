@@ -2760,6 +2760,8 @@ pub const VerificationPass = struct {
         var summary = ReportSummary{
             .total_queries = @intCast(queries.items.len),
         };
+        summary.encoding_degraded = self.encoder.isDegraded();
+        summary.degradation_reason = self.encoder.degradationReason();
         var kind_counts = ReportKindCounts{};
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
@@ -2925,6 +2927,10 @@ pub const VerificationPass = struct {
         try writer.print("- Verification success: `{any}`\n", .{summary.verification_success});
         try writer.print("- Verification errors: `{d}`\n", .{summary.verification_errors});
         try writer.print("- Verification diagnostics: `{d}`\n", .{summary.verification_diagnostics});
+        try writer.print("- Encoding degraded: `{any}`\n", .{summary.encoding_degraded});
+        if (summary.degradation_reason) |reason| {
+            try writer.print("- Degradation reason: `{s}`\n", .{reason});
+        }
         try writer.writeAll("\n");
 
         try writer.writeAll("## 3. Query Kind Counts\n");
@@ -3047,6 +3053,13 @@ pub const VerificationPass = struct {
         try writer.print(",\"inconsistent_bases\":{d}", .{summary.inconsistent_bases});
         try writer.print(",\"proven_guards\":{d}", .{summary.proven_guards});
         try writer.print(",\"violatable_guards\":{d}", .{summary.violatable_guards});
+        try writer.writeAll(if (summary.encoding_degraded) ",\"encoding_degraded\":true" else ",\"encoding_degraded\":false");
+        try writer.writeAll(",\"degradation_reason\":");
+        if (summary.degradation_reason) |reason| {
+            try writeJsonStringEscaped(writer, reason);
+        } else {
+            try writer.writeAll("null");
+        }
         try writer.writeByte('}');
         try writer.writeByte(',');
 
@@ -3821,6 +3834,8 @@ const ReportSummary = struct {
     verification_success: bool = true,
     verification_errors: u64 = 0,
     verification_diagnostics: u64 = 0,
+    encoding_degraded: bool = false,
+    degradation_reason: ?[]const u8 = null,
 };
 
 const ReportKindCounts = struct {
@@ -6309,6 +6324,31 @@ test "report success is false when encoder degraded" {
         .unknown = 0,
     };
     try testing.expect(!inferReportVerificationSuccess(summary, null, true));
+}
+
+test "rendered SMT report json includes degradation metadata" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const summary = ReportSummary{
+        .encoding_degraded = true,
+        .degradation_reason = "test degradation",
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"encoding_degraded\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
 }
 
 test "parseModelString preserves user names with double underscore prefix" {
