@@ -3424,6 +3424,13 @@ pub const Encoder = struct {
                 if (branch_expr != null) return branch_expr;
             }
 
+            if (std.mem.eql(u8, name, "ora.conditional_return")) {
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                const fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                const branch_expr = try self.extractConditionalReturnExpr(current, result_index, mode, fallthrough_expr);
+                if (branch_expr != null) return branch_expr;
+            }
+
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
@@ -3447,6 +3454,28 @@ pub const Encoder = struct {
         if (then_expr == null or else_expr == null) return null;
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
+        const condition = try self.encodeValueWithMode(condition_value, mode);
+        return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
+    }
+
+    fn extractConditionalReturnExpr(
+        self: *Encoder,
+        conditional_ret_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+        fallthrough_expr: ?z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands = mlir.oraOperationGetNumOperands(conditional_ret_op);
+        if (num_operands < 1) return null;
+
+        var then_expr = try self.extractReturnedExprFromBlock(mlir.oraConditionalReturnOpGetThenBlock(conditional_ret_op), result_index, mode);
+        var else_expr = try self.extractReturnedExprFromBlock(mlir.oraConditionalReturnOpGetElseBlock(conditional_ret_op), result_index, mode);
+
+        if (then_expr == null) then_expr = fallthrough_expr;
+        if (else_expr == null) else_expr = fallthrough_expr;
+        if (then_expr == null or else_expr == null) return null;
+
+        const condition_value = mlir.oraOperationGetOperand(conditional_ret_op, 0);
         const condition = try self.encodeValueWithMode(condition_value, mode);
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
     }

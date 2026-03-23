@@ -1991,6 +1991,104 @@ test "known branching pure callee result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee conditional return result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_name_attr = mlir.oraStringAttrCreate(mlir_ctx, stringRef("chooseViaConditionalReturn"));
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", helper_name_attr),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i1_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper_func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper_func);
+    const helper_flag = mlir.oraBlockGetArgument(helper_body, 0);
+    const helper_value = mlir.oraBlockGetArgument(helper_body, 1);
+
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, helper_flag);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const else_block = mlir.oraConditionalReturnOpGetElseBlock(conditional_ret);
+    const then_ret_vals = [_]mlir.MlirValue{helper_value};
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraReturnOpCreate(mlir_ctx, loc, &then_ret_vals, then_ret_vals.len));
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const fallback_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const fallback_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, fallback_attr);
+    const fallback_value = mlir.oraOperationGetResult(fallback_op, 0);
+    const helper_ret_vals = [_]mlir.MlirValue{fallback_value};
+    const helper_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &helper_ret_vals, helper_ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(helper_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(helper_body, fallback_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, helper_ret);
+
+    try encoder.registerFunctionOperation(helper_func);
+
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const arg_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const arg_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, arg_attr);
+    const result_types = [_]mlir.MlirType{i256_ty};
+
+    const true_call_operands = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(true_op, 0),
+        mlir.oraOperationGetResult(arg_op, 0),
+    };
+    const true_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("chooseViaConditionalReturn"),
+        &true_call_operands,
+        true_call_operands.len,
+        &result_types,
+        result_types.len,
+    );
+
+    const false_call_operands = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(false_op, 0),
+        mlir.oraOperationGetResult(arg_op, 0),
+    };
+    const false_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("chooseViaConditionalReturn"),
+        &false_call_operands,
+        false_call_operands.len,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded_true = try encoder.encodeOperation(true_call);
+    const encoded_false = try encoder.encodeOperation(false_call);
+    const expected_true = try encoder.encodeValue(mlir.oraOperationGetResult(arg_op, 0));
+    const expected_false = try encoder.encodeIntegerConstant(5, 256);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_true, expected_true)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_false, expected_false)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
