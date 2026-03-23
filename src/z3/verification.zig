@@ -2689,6 +2689,9 @@ pub const VerificationPass = struct {
         if (self.encoded_annotations.items.len == 0) {
             try self.extractAnnotationsFromMLIR(mlir_module);
         }
+        if (self.encoder.isDegraded()) {
+            return try self.buildDegradedSmtReport(source_file, verification_result);
+        }
 
         var queries = try self.buildPreparedQueries();
         defer {
@@ -2696,6 +2699,9 @@ pub const VerificationPass = struct {
                 query.deinit(self.allocator);
             }
             queries.deinit();
+        }
+        if (self.encoder.isDegraded()) {
+            return try self.buildDegradedSmtReport(source_file, verification_result);
         }
 
         const report_runs = try self.allocator.alloc(ReportQueryRun, queries.items.len);
@@ -2875,6 +2881,48 @@ pub const VerificationPass = struct {
             generated_at_unix,
             queries.items,
             report_runs,
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        return .{
+            .markdown = markdown,
+            .json = json,
+        };
+    }
+
+    fn buildDegradedSmtReport(
+        self: *VerificationPass,
+        source_file: []const u8,
+        verification_result: ?*const errors.VerificationResult,
+    ) !SmtReportArtifacts {
+        const generated_at_unix = std.time.timestamp();
+        const summary = ReportSummary{
+            .verification_success = false,
+            .verification_errors = if (verification_result) |vr| @intCast(vr.errors.items.len) else 0,
+            .verification_diagnostics = if (verification_result) |vr| @intCast(vr.diagnostics.items.len) else 0,
+            .proven_guards = if (verification_result) |vr| @intCast(vr.proven_guard_ids.count()) else 0,
+            .encoding_degraded = true,
+            .degradation_reason = self.encoder.degradationReason(),
+        };
+        const kind_counts = ReportKindCounts{};
+
+        const markdown = try self.renderSmtReportMarkdown(
+            source_file,
+            generated_at_unix,
+            &.{},
+            &.{},
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        errdefer self.allocator.free(markdown);
+
+        const json = try self.renderSmtReportJson(
+            source_file,
+            generated_at_unix,
+            &.{},
+            &.{},
             summary,
             kind_counts,
             verification_result,
