@@ -6420,6 +6420,22 @@ test "rendered SMT report json includes degradation metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
 }
 
+test "buildDegradedSmtReport emits degraded report with no queries" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    pass.encoder.encoding_degraded = true;
+    pass.encoder.encoding_degraded_reason = "test degradation";
+
+    var report = try pass.buildDegradedSmtReport("/tmp/test.ora", null);
+    defer report.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, report.markdown, "Encoding degraded: `true`") != null);
+    try testing.expect(std.mem.indexOf(u8, report.markdown, "test degradation") != null);
+    try testing.expect(std.mem.indexOf(u8, report.json, "\"encoding_degraded\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, report.json, "\"total_queries\":0") != null);
+}
+
 test "parseModelString preserves user names with double underscore prefix" {
     const model =
         "__admin -> #x01\n" ++
