@@ -14,11 +14,9 @@ contract LockRuntimeStorageMapGuard {
     pub fn safe_different_slot(locked_user: address, target: address, amount: u256) -> bool {
         newMap[target] = amount;
         balances[locked_user] = 1;
-        @
-        lock(balances[locked_user]);
+        @lock(balances[locked_user]);
         let _current: u256 = balances[locked_user];
-        @
-        unlock(balances[locked_user]);
+        @unlock(balances[locked_user]);
         write_balance(target, amount);
         balances[locked_user] = 1;
         success_counter += 1;
@@ -27,22 +25,18 @@ contract LockRuntimeStorageMapGuard {
     }
     // Locks a slot, reads it, unlocks, then writes.
     pub fn safe_read_then_write(user: address, amount: u256) -> bool {
-        @
-        lock(balances[user]);
+        @lock(balances[user]);
         let _current: u256 = balances[user];
-        @
-        unlock(balances[user]);
+        @unlock(balances[user]);
         write_balance(user, amount);
         success_counter += 1;
         return true;
     }
     pub fn lock_and_read(user: address) -> u256 {
         write_balance(user, 1);
-        @
-        lock(balances[user]);
+        @lock(balances[user]);
         let val: u256 = balances[user];
-        @
-        unlock(balances[user]);
+        @unlock(balances[user]);
         write_balance(user, 1);
         return val;
     }
