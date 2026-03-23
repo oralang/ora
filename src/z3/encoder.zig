@@ -1854,12 +1854,19 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "scf.while") or
-            std.mem.eql(u8, op_name, "scf.for") or
-            std.mem.eql(u8, op_name, "scf.execute_region"))
+            std.mem.eql(u8, op_name, "scf.for"))
         {
             const operands = try self.encodeOperationOperandsWithMode(mlir_op, mode);
             defer self.allocator.free(operands);
             return try self.encodeStructuredControlResult(mlir_op, op_name, operands, result_index);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.execute_region")) {
+            const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const op_id = @intFromPtr(mlir_op.ptr);
+            return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
+                try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
         }
 
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
@@ -2627,10 +2634,17 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "scf.while") or
-            std.mem.eql(u8, op_name, "scf.for") or
-            std.mem.eql(u8, op_name, "scf.execute_region"))
+            std.mem.eql(u8, op_name, "scf.for"))
         {
             return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.execute_region")) {
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const op_id = @intFromPtr(mlir_op.ptr);
+            return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
+                try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
@@ -3930,7 +3944,7 @@ pub const Encoder = struct {
 
         if (summary_encoder.isDegraded()) {
             const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
-            if (any_result) {
+            if (result_exprs.len > 0) {
                 self.recordCalleeResultDegradation(call_op, callee, reason);
             } else {
                 self.recordDegradation(reason);

@@ -771,6 +771,45 @@ test "known pure callee execute_region return encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct scf.execute_region result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+    const expected = try encoder.encodeOperation(value_op);
+
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    mlir.oraBlockAppendOwnedOperation(exec_block, value_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{value},
+        1,
+    ));
+
+    const encoded = try encoder.encodeOperation(exec);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "known pure callee single-iteration scf.for return encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -2468,25 +2507,39 @@ test "known callee result degradation reports callee and callsite" {
     const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
     const body = mlir.oraFuncOpGetBodyBlock(helper);
 
-    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
-    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c2_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 2);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const c2_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c2_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+    mlir.oraBlockAppendOwnedOperation(body, c2_op);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0_op, 0),
+        mlir.oraOperationGetResult(c2_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
     const seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
     const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seven_attr);
-    mlir.oraBlockAppendOwnedOperation(exec_block, seven_op);
-    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+    mlir.oraBlockAppendOwnedOperation(loop_body, seven_op);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraReturnOpCreate(
         mlir_ctx,
         loc,
         &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven_op, 0)},
         1,
     ));
 
-    mlir.oraBlockAppendOwnedOperation(body, exec);
-    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
-        mlir_ctx,
-        loc,
-        &[_]mlir.MlirValue{mlir.oraOperationGetResult(exec, 0)},
-        1,
-    ));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
 
     try encoder.registerFunctionOperation(helper);
 
