@@ -1060,6 +1060,7 @@ pub const VerificationPass = struct {
             const function_name = self.current_function_name orelse "unknown";
             const loc = try self.getLocationInfo(op);
             const path_constraints = try self.captureActivePathConstraints();
+            const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
             defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
 
             for (leaked_obligations) |obligation| {
@@ -1079,6 +1080,7 @@ pub const VerificationPass = struct {
                     .line = loc.line,
                     .column = loc.column,
                     .guard_id = null,
+                    .loop_owner = loop_owner,
                 });
             }
         }
@@ -1140,6 +1142,7 @@ pub const VerificationPass = struct {
         guard_id: ?[]const u8,
     ) !usize {
         const function_name = self.current_function_name orelse "unknown";
+        const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
         const encoded = try self.encoder.encodeValue(condition_value);
         const extra_constraints = try self.encoder.takeConstraints(self.allocator);
         const safety_obligations = try self.encoder.takeObligations(self.allocator);
@@ -1148,6 +1151,7 @@ pub const VerificationPass = struct {
 
         var old_condition: ?z3.Z3_ast = null;
         var old_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
+        var loop_entry_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         var loop_step_condition: ?z3.Z3_ast = null;
         var loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         var loop_exit_condition: ?z3.Z3_ast = null;
@@ -1155,6 +1159,7 @@ pub const VerificationPass = struct {
         if (kind == .LoopInvariant) {
             old_condition = try self.encoder.encodeValueOld(condition_value);
             old_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            loop_entry_extra_constraints = try self.encodeLoopEntryConstraints(op);
             const old_safety = try self.encoder.takeObligations(self.allocator);
             defer if (old_safety.len > 0) self.allocator.free(old_safety);
             for (old_safety) |obligation| {
@@ -1167,6 +1172,7 @@ pub const VerificationPass = struct {
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
                     .old_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_step_condition = null,
                     .loop_step_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_exit_condition = null,
@@ -1175,6 +1181,7 @@ pub const VerificationPass = struct {
                     .line = loc_old.line,
                     .column = loc_old.column,
                     .guard_id = null,
+                    .loop_owner = loop_owner,
                 });
             }
 
@@ -1192,6 +1199,7 @@ pub const VerificationPass = struct {
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
                     .old_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_step_condition = null,
                     .loop_step_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_exit_condition = null,
@@ -1200,6 +1208,7 @@ pub const VerificationPass = struct {
                     .line = loc_step.line,
                     .column = loc_step.column,
                     .guard_id = null,
+                    .loop_owner = loop_owner,
                 });
             }
 
@@ -1217,6 +1226,7 @@ pub const VerificationPass = struct {
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
                     .old_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_step_condition = null,
                     .loop_step_extra_constraints = &[_]z3.Z3_ast{},
                     .loop_exit_condition = null,
@@ -1225,6 +1235,7 @@ pub const VerificationPass = struct {
                     .line = loc_loop.line,
                     .column = loc_loop.column,
                     .guard_id = null,
+                    .loop_owner = loop_owner,
                 });
             }
         }
@@ -1239,6 +1250,7 @@ pub const VerificationPass = struct {
             .path_constraints = path_constraints,
             .old_condition = old_condition,
             .old_extra_constraints = old_extra_constraints,
+            .loop_entry_extra_constraints = loop_entry_extra_constraints,
             .loop_step_condition = loop_step_condition,
             .loop_step_extra_constraints = loop_step_extra_constraints,
             .loop_exit_condition = loop_exit_condition,
@@ -1247,6 +1259,7 @@ pub const VerificationPass = struct {
             .line = loc.line,
             .column = loc.column,
             .guard_id = guard_id,
+            .loop_owner = loop_owner,
         });
 
         // Safety obligations emitted by the encoder (e.g. non-zero divisor,
@@ -1269,6 +1282,7 @@ pub const VerificationPass = struct {
                 .line = loc.line,
                 .column = loc.column,
                 .guard_id = null,
+                .loop_owner = loop_owner,
             });
         }
 
@@ -1302,6 +1316,41 @@ pub const VerificationPass = struct {
             return &[_]z3.Z3_ast{};
         }
         return try self.allocator.dupe(z3.Z3_ast, constraints);
+    }
+
+    fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {
+        const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return &[_]z3.Z3_ast{};
+        const loop_name_ref = mlir.oraOperationGetName(loop_op);
+        defer @import("mlir_c_api").freeStringRef(loop_name_ref);
+        const loop_name = if (loop_name_ref.data == null or loop_name_ref.length == 0)
+            ""
+        else
+            loop_name_ref.data[0..loop_name_ref.length];
+
+        if (!std.mem.eql(u8, loop_name, "scf.while")) {
+            return &[_]z3.Z3_ast{};
+        }
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
+        if (mlir.oraBlockIsNull(before_block)) return &[_]z3.Z3_ast{};
+
+        var constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+        defer constraints.deinit();
+
+        const num_init_operands = mlir.oraOperationGetNumOperands(loop_op);
+        var i: usize = 0;
+        while (i < num_init_operands and i < mlir.oraBlockGetNumArguments(before_block)) : (i += 1) {
+            const before_arg = mlir.oraBlockGetArgument(before_block, i);
+            const init_operand = mlir.oraOperationGetOperand(loop_op, i);
+            const before_ast = try self.encoder.encodeValue(before_arg);
+            const init_ast = try self.encoder.encodeValue(init_operand);
+            const pending = try self.encoder.takeConstraints(self.allocator);
+            defer if (pending.len > 0) self.allocator.free(pending);
+            try addConstraintSlice(&constraints, pending);
+            try constraints.append(z3.Z3_mk_eq(self.context.ctx, before_ast, init_ast));
+        }
+
+        return try constraints.toOwnedSlice();
     }
 
     fn encodeLoopContinueCondition(self: *VerificationPass, invariant_op: mlir.MlirOperation) !?z3.Z3_ast {
@@ -1604,6 +1653,23 @@ pub const VerificationPass = struct {
                 for (ann.extra_constraints) |cst| {
                     self.solver.assert(cst);
                 }
+                if (ann.kind == .LoopInvariant) {
+                    for (ann.loop_entry_extra_constraints) |cst| {
+                        self.solver.assert(cst);
+                    }
+                }
+                if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    for (loop_post_invariant_annotations.items) |peer_inv_ann| {
+                        if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
+                        for (peer_inv_ann.path_constraints) |cst| {
+                            self.solver.assert(cst);
+                        }
+                        for (peer_inv_ann.extra_constraints) |cst| {
+                            self.solver.assert(cst);
+                        }
+                        self.solver.assert(peer_inv_ann.condition);
+                    }
+                }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 self.solver.assert(negated);
 
@@ -1668,6 +1734,21 @@ pub const VerificationPass = struct {
                             self.solver.assert(cst);
                         }
                         self.solver.assert(old_inv);
+                        for (loop_post_invariant_annotations.items) |peer_inv_ann| {
+                            if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
+                            for (peer_inv_ann.path_constraints) |cst| {
+                                self.solver.assert(cst);
+                            }
+                            for (peer_inv_ann.extra_constraints) |cst| {
+                                self.solver.assert(cst);
+                            }
+                            for (peer_inv_ann.old_extra_constraints) |cst| {
+                                self.solver.assert(cst);
+                            }
+                            if (peer_inv_ann.old_condition) |peer_old_inv| {
+                                self.solver.assert(peer_old_inv);
+                            }
+                        }
                         if (ann.loop_step_condition) |step_cond| {
                             self.solver.assert(step_cond);
                         }
@@ -2989,6 +3070,17 @@ pub const VerificationPass = struct {
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                if (ann.kind == .LoopInvariant) {
+                    try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
+                }
+                if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    for (loop_post_invariant_annotations.items) |peer_inv_ann| {
+                        if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
+                        try addConstraintSlice(&obligation_constraints, peer_inv_ann.path_constraints);
+                        try addConstraintSlice(&obligation_constraints, peer_inv_ann.extra_constraints);
+                        try obligation_constraints.append(peer_inv_ann.condition);
+                    }
+                }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try obligation_constraints.append(negated);
 
@@ -3022,6 +3114,15 @@ pub const VerificationPass = struct {
                         try addConstraintSlice(&step_constraints, ann.old_extra_constraints);
                         try addConstraintSlice(&step_constraints, ann.loop_step_extra_constraints);
                         try step_constraints.append(old_inv);
+                        for (loop_post_invariant_annotations.items) |peer_inv_ann| {
+                            if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
+                            try addConstraintSlice(&step_constraints, peer_inv_ann.path_constraints);
+                            try addConstraintSlice(&step_constraints, peer_inv_ann.extra_constraints);
+                            try addConstraintSlice(&step_constraints, peer_inv_ann.old_extra_constraints);
+                            if (peer_inv_ann.old_condition) |peer_old_inv| {
+                                try step_constraints.append(peer_old_inv);
+                            }
+                        }
                         if (ann.loop_step_condition) |step_cond| {
                             try step_constraints.append(step_cond);
                         }
@@ -3314,6 +3415,7 @@ const EncodedAnnotation = struct {
     path_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     old_condition: ?z3.Z3_ast = null,
     old_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
+    loop_entry_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_step_condition: ?z3.Z3_ast = null,
     loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_exit_condition: ?z3.Z3_ast = null,
@@ -3322,6 +3424,7 @@ const EncodedAnnotation = struct {
     line: u32,
     column: u32,
     guard_id: ?[]const u8 = null,
+    loop_owner: ?u64 = null,
 };
 
 fn isAssumptionKind(kind: AnnotationKind) bool {
@@ -3385,6 +3488,9 @@ fn constraintSlicesEquivalent(self: *VerificationPass, lhs: []const z3.Z3_ast, r
 }
 
 fn sameLoopInvariantGroup(self: *VerificationPass, reference: EncodedAnnotation, candidate: EncodedAnnotation) bool {
+    if (reference.loop_owner != null and candidate.loop_owner != null) {
+        return reference.loop_owner == candidate.loop_owner;
+    }
     const ref_exit = reference.loop_exit_condition orelse return false;
     const cand_exit = candidate.loop_exit_condition orelse return false;
     if (!astEquivalent(self, ref_exit, cand_exit)) return false;

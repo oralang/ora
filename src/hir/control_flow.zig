@@ -22,6 +22,7 @@ const blockEndsWithTerminator = support.blockEndsWithTerminator;
 const boolType = support.boolType;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
+const exprRange = support.exprRange;
 const memRefType = support.memRefType;
 const namedBoolAttr = support.namedBoolAttr;
 const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
@@ -536,6 +537,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue_body, continue_flag, null, 0);
             if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
             appendOp(after_block, clear_continue_store);
+            for (while_stmt.invariants) |expr_id| {
+                const value = try body_lowerer.lowerExpr(expr_id, &body_locals);
+                const op = mlir.oraInvariantOpCreate(
+                    self.parent.context,
+                    self.parent.location(exprRange(self.parent.file, expr_id)),
+                    value,
+                );
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                appendOp(after_block, op);
+            }
             _ = try body_lowerer.lowerBody(while_stmt.body, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, while_stmt.range, &body_locals, carried_locals.items);

@@ -11784,6 +11784,33 @@ test "compiler preserves nested while continue by guarding later statements" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
+test "compiler lowers while invariants through ora.invariant" {
+    const source_text =
+        \\pub fn count(limit: u256) -> u256 {
+        \\    let sum = 0;
+        \\    let i = 0;
+        \\    while (i < limit)
+        \\        invariant(i <= limit)
+        \\        invariant(sum <= limit)
+        \\    {
+        \\        i = i + 1;
+        \\        sum = sum + 1;
+        \\    }
+        \\    return sum;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.invariant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+}
+
 test "compiler lowers real HIR while loops with nested inner-loop control" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {

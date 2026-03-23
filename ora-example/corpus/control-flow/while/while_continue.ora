@@ -7,7 +7,10 @@ contract WhileContinue {
     pub fn test_skip_evens() -> u256 {
         var sum: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 10)
+            invariant(i <= 10)
+            invariant(sum <= i * i)
+        {
             i += 1;
             if (i % 2 == 0) {
                 continue;
@@ -21,7 +24,10 @@ contract WhileContinue {
     pub fn test_skip_value() -> u256 {
         var sum: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 10)
+            invariant(i <= 10)
+            invariant(sum <= i * i)
+        {
             i += 1;
             if (i == 5) {
                 continue;
@@ -35,7 +41,10 @@ contract WhileContinue {
     pub fn test_continue_multi_condition() -> u256 {
         var count: u256 = 0;
         var i: u256 = 0;
-        while (i < 20) {
+        while (i < 20)
+            invariant(i <= 20)
+            invariant(count <= i * i)
+        {
             i += 1;
             if (i % 2 == 0) {
                 continue;
@@ -52,7 +61,10 @@ contract WhileContinue {
     pub fn test_continue_with_pre_increment() -> u256 {
         var res: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 10)
+            invariant(i <= 10)
+            invariant(res <= i * i)
+        {
             i += 1; // increment before continue to avoid infinite loop
             if (i < 5) {
                 continue;

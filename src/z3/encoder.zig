@@ -1349,6 +1349,41 @@ pub const Encoder = struct {
                 z3.Z3_mk_bvslt(self.context.ctx, ast, ub_ast);
             self.addConstraint(lower_ok);
             self.addConstraint(upper_ok);
+            return;
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            const after_block = mlir.oraScfWhileOpGetAfterBlock(parent_op);
+            if (mlir.oraBlockIsNull(after_block) or owner_block.ptr != after_block.ptr) return;
+
+            const arg_no = mlir.mlirBlockArgumentGetArgNumber(value);
+            const before_block = mlir.oraScfWhileOpGetBeforeBlock(parent_op);
+            if (mlir.oraBlockIsNull(before_block)) return;
+
+            var op = mlir.oraBlockGetFirstOperation(before_block);
+            while (!mlir.oraOperationIsNull(op)) {
+                const cond_name_ref = mlir.oraOperationGetName(op);
+                defer @import("mlir_c_api").freeStringRef(cond_name_ref);
+                const cond_name = if (cond_name_ref.data == null or cond_name_ref.length == 0)
+                    ""
+                else
+                    cond_name_ref.data[0..cond_name_ref.length];
+
+                if (std.mem.eql(u8, cond_name, "scf.condition")) {
+                    const num_operands = mlir.oraOperationGetNumOperands(op);
+                    if (num_operands < arg_no + 2) return;
+
+                    const continue_value = mlir.oraOperationGetOperand(op, 0);
+                    const carried_value = mlir.oraOperationGetOperand(op, @as(usize, @intCast(arg_no + 1)));
+                    const continue_ast = try self.encodeValueWithMode(continue_value, mode);
+                    const carried_ast = try self.encodeValueWithMode(carried_value, mode);
+
+                    self.addConstraint(self.coerceBoolean(continue_ast));
+                    self.addConstraint(z3.Z3_mk_eq(self.context.ctx, ast, carried_ast));
+                    return;
+                }
+                op = mlir.oraOperationGetNextInBlock(op);
+            }
         }
     }
 
