@@ -3988,17 +3988,44 @@ fn classifyQueryFailure(query: PreparedQuery, run: ReportQueryRun) FailureClassi
                 .confidence = "high",
                 .evidence = "base query is UNSAT",
             }
+        else if (run.status == z3.Z3_L_UNDEF)
+            .{
+                .subtype = "UnknownAssumptions",
+                .confidence = "high",
+                .evidence = "base query returned UNKNOWN",
+            }
         else
             .{},
         .GuardSatisfy => if (run.status == z3.Z3_L_FALSE and query.guard_id != null)
             classifyGuardId(query.guard_id.?, false)
+        else if (run.status == z3.Z3_L_UNDEF)
+            .{
+                .subtype = "UnknownGuardSatisfiability",
+                .confidence = "high",
+                .evidence = "guard satisfiability query returned UNKNOWN",
+            }
         else
             .{},
         .GuardViolate => if (run.status == z3.Z3_L_TRUE and query.guard_id != null)
             classifyGuardId(query.guard_id.?, true)
+        else if (run.status == z3.Z3_L_UNDEF)
+            .{
+                .subtype = "UnknownGuardRemovability",
+                .confidence = "high",
+                .evidence = "guard removability query returned UNKNOWN",
+            }
         else
             .{},
         .Obligation, .LoopInvariantStep, .LoopInvariantPost => blk: {
+            if (run.status == z3.Z3_L_UNDEF) break :blk .{
+                .subtype = switch (query.kind) {
+                    .LoopInvariantStep => "UnknownLoopInvariantStep",
+                    .LoopInvariantPost => "UnknownLoopPostcondition",
+                    else => "UnknownObligation",
+                },
+                .confidence = "high",
+                .evidence = "obligation query returned UNKNOWN",
+            };
             if (run.status != z3.Z3_L_TRUE) break :blk .{};
             const arithmetic = classifyArithmeticPatternFromSmtlib(query.smtlib_z);
             if (arithmetic.subtype != null) break :blk arithmetic;
@@ -4024,6 +4051,10 @@ fn queryMatchesError(err: errors.VerificationError, query: PreparedQuery, run: R
         .PreconditionViolation => query.kind == .Base and run.status == z3.Z3_L_FALSE,
         .RefinementViolation => query.kind == .GuardSatisfy and run.status == z3.Z3_L_FALSE,
         .InvariantViolation, .PostconditionViolation, .ArithmeticOverflow, .ArithmeticUnderflow, .DivisionByZero => (query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost) and run.status == z3.Z3_L_TRUE,
+        .Unknown => switch (query.kind) {
+            .Base => run.status == z3.Z3_L_UNDEF,
+            .Obligation, .LoopInvariantStep, .LoopInvariantPost, .GuardSatisfy, .GuardViolate => run.status == z3.Z3_L_UNDEF,
+        },
         else => false,
     };
 }
@@ -6296,6 +6327,46 @@ test "parseModelString preserves user names with double underscore prefix" {
     try testing.expectEqualStrings("#x01", ce.variables.get("__admin").?);
     try testing.expect(ce.variables.get("__ora_internal") == null);
     try testing.expect(ce.variables.get("undef_tmp") == null);
+}
+
+test "unknown errors map back to unknown queries in reports" {
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .ContractInvariant,
+        .file = "/tmp/test.ora",
+        .line = 9,
+        .column = 2,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_UNDEF,
+        .elapsed_ms = 1,
+    };
+
+    var err_result = errors.VerificationResult.init(testing.allocator);
+    defer err_result.deinit();
+    try err_result.addError(.{
+        .error_type = .Unknown,
+        .message = try testing.allocator.dupe(u8, "could not prove contract invariant in f"),
+        .file = try testing.allocator.dupe(u8, "/tmp/test.ora"),
+        .line = 9,
+        .column = 2,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const idx = findQueryIndexForError(err_result.errors.items[0], (&[_]PreparedQuery{query})[0..], (&[_]ReportQueryRun{run})[0..]);
+    try testing.expectEqual(@as(?usize, 0), idx);
+
+    const classification = classifyQueryFailure(query, run);
+    try testing.expectEqualStrings("UnknownObligation", classification.subtype.?);
 }
 
 test "parseLocationString strips mlir loc wrapper" {
