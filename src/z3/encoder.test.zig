@@ -1301,6 +1301,39 @@ test "func.call preserves state summary for multi-return callee" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "unsigned mul overflow check proves bounded constant multiplier safe" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv256 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const lhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "lhs"),
+        bv256,
+    );
+    const rhs = z3.Z3_mk_numeral(
+        z3_ctx.ctx,
+        "10000",
+        bv256,
+    );
+    const max = z3.Z3_mk_numeral(
+        z3_ctx.ctx,
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        bv256,
+    );
+    const bound = z3.Z3_mk_bv_udiv(z3_ctx.ctx, max, rhs);
+    const overflow = encoder.checkMulOverflow(lhs_sym, rhs);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_bvule(z3_ctx.ctx, lhs_sym, bound));
+    solver.assert(overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call relation can be disabled" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

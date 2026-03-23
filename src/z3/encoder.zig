@@ -886,15 +886,44 @@ pub const Encoder = struct {
     /// Check for overflow in multiplication
     pub fn checkMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
         // Unsigned overflow check:
-        // overflow iff lhs != 0 and ((lhs * rhs) / lhs) != rhs (in modular arithmetic).
+        // overflow iff rhs != 0 and lhs > MAX / rhs.
+        //
+        // This is equivalent to the usual mathematical overflow condition for
+        // fixed-width unsigned integers, but it is much easier for Z3 than the
+        // older recovery-division identity ((lhs * rhs) / lhs) != rhs.
         const sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
-        const lhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, zero));
-        const product = z3.Z3_mk_bv_mul(self.context.ctx, lhs, rhs);
-        const recovered_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, product, lhs);
-        const matches_rhs = z3.Z3_mk_eq(self.context.ctx, recovered_rhs, rhs);
-        const overflow_if_non_zero = z3.Z3_mk_not(self.context.ctx, matches_rhs);
-        return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs_non_zero, overflow_if_non_zero });
+        const rhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, rhs, zero));
+
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const max_value = if (width <= 64)
+            blk: {
+                const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+                break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
+            }
+        else blk: {
+            var bits = std.ArrayList(u8){};
+            defer bits.deinit(self.allocator);
+            bits.appendSlice(self.allocator, "#b") catch {
+                self.recordDegradation("failed to construct max bitvector numeral");
+                break :blk zero;
+            };
+            var i: u32 = 0;
+            while (i < width) : (i += 1) {
+                bits.append(self.allocator, '1') catch {
+                    self.recordDegradation("failed to construct max bitvector numeral");
+                    break :blk zero;
+                };
+            }
+            bits.append(self.allocator, 0) catch {
+                self.recordDegradation("failed to construct max bitvector numeral");
+                break :blk zero;
+            };
+            break :blk z3.Z3_mk_numeral(self.context.ctx, @ptrCast(bits.items.ptr), sort);
+        };
+        const max_div_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, max_value, rhs);
+        const lhs_too_large = z3.Z3_mk_bvugt(self.context.ctx, lhs, max_div_rhs);
+        return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ rhs_non_zero, lhs_too_large });
     }
 
     /// Check for signed overflow in addition.
