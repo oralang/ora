@@ -2175,6 +2175,66 @@ test "known callee with unknown write set degrades encoder" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to recover known callee write set exactly"));
 }
 
+test "summary precondition encoding failure degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("requiresMalformedCmp"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{i256_ty}, &[_]mlir.MlirLocation{loc}, 1);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const helper_arg = mlir.oraBlockGetArgument(helper_body, 0);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const malformed_cmp = mlir.oraCmpOpCreate(mlir_ctx, loc, stringRef(""), helper_arg, mlir.oraOperationGetResult(zero_op, 0), i1_ty);
+    const malformed_cond = mlir.oraOperationGetResult(malformed_cmp, 0);
+    const precond = mlir.oraCfAssertOpCreate(mlir_ctx, loc, malformed_cond, stringRef("bad precondition"));
+    mlir.oraOperationSetAttributeByName(precond, stringRef("ora.requires"), mlir.oraBoolAttrCreate(mlir_ctx, true));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{helper_arg}, 1);
+
+    mlir.oraBlockAppendOwnedOperation(helper_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, malformed_cmp);
+    mlir.oraBlockAppendOwnedOperation(helper_body, precond);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const arg_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const arg_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, arg_attr);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("requiresMalformedCmp"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(arg_op, 0)},
+        1,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    const reason = encoder.degradationReason().?;
+    try testing.expect(
+        std.mem.eql(u8, reason, "failed to encode summary precondition") or
+            std.mem.eql(u8, reason, "ora.cmp missing predicate"),
+    );
+}
+
 test "known zero-result stateful callee fallback degrades encoder" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
