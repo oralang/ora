@@ -3649,10 +3649,7 @@ pub const VerificationPass = struct {
             const name = self.allocator.dupe(u8, std.mem.span(name_ptr)) catch continue;
             defer self.allocator.free(name);
 
-            // Filter out internal/synthetic variables
-            if (std.mem.startsWith(u8, name, "undef_")) continue;
-            if (std.mem.startsWith(u8, name, "old_")) continue;
-            if (std.mem.startsWith(u8, name, "__")) continue;
+            if (shouldHideCounterexampleVariable(name)) continue;
 
             const interp = z3.Z3_model_get_const_interp(self.context.ctx, model, decl);
             if (interp == null) continue;
@@ -3688,10 +3685,7 @@ fn parseModelString(allocator: std.mem.Allocator, model_str: []const u8) ?errors
         const name = trimmed[0..arrow_pos];
         const value = trimmed[arrow_pos + arrow.len ..];
 
-        // Filter internal variables
-        if (std.mem.startsWith(u8, name, "undef_")) continue;
-        if (std.mem.startsWith(u8, name, "old_")) continue;
-        if (std.mem.startsWith(u8, name, "__")) continue;
+        if (shouldHideCounterexampleVariable(name)) continue;
 
         if (value.len == 0) continue;
         ce.addVariable(name, value) catch continue;
@@ -3871,6 +3865,12 @@ const FailureClassification = struct {
     narrowing_bits: ?u32 = null,
     refinement_kind: ?[]const u8 = null,
 };
+
+fn shouldHideCounterexampleVariable(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "undef_") or
+        std.mem.startsWith(u8, name, "old_") or
+        std.mem.startsWith(u8, name, "__ora_");
+}
 
 fn filePathsLikelyMatch(a: []const u8, b: []const u8) bool {
     if (a.len == 0 or b.len == 0) return true;
@@ -6278,6 +6278,24 @@ test "report success is false when encoder degraded" {
         .unknown = 0,
     };
     try testing.expect(!inferReportVerificationSuccess(summary, null, true));
+}
+
+test "parseModelString preserves user names with double underscore prefix" {
+    const model =
+        "__admin -> #x01\n" ++
+        "__ora_internal -> #x02\n" ++
+        "undef_tmp -> #x03\n";
+
+    const ce = parseModelString(testing.allocator, model) orelse return error.TestUnexpectedResult;
+    defer {
+        var mutable = ce;
+        mutable.deinit();
+    }
+
+    try testing.expectEqual(@as(usize, 1), ce.variables.count());
+    try testing.expectEqualStrings("#x01", ce.variables.get("__admin").?);
+    try testing.expect(ce.variables.get("__ora_internal") == null);
+    try testing.expect(ce.variables.get("undef_tmp") == null);
 }
 
 test "parseLocationString strips mlir loc wrapper" {
