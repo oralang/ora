@@ -2089,6 +2089,74 @@ test "known pure callee conditional return result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known callee result degradation reports callee and callsite" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationFileLineColGet(mlir_ctx, stringRef("/tmp/debug.ora"), 42, 7);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_name = "opaqueStructuredPure";
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef(helper_name))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    const seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seven_attr);
+    mlir.oraBlockAppendOwnedOperation(exec_block, seven_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, exec);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(exec, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef(helper_name),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    const reason = encoder.degradationReason().?;
+    try testing.expect(std.mem.containsAtLeast(u8, reason, 1, helper_name));
+    try testing.expect(std.mem.containsAtLeast(u8, reason, 1, "/tmp/debug.ora"));
+    try testing.expect(std.mem.containsAtLeast(u8, reason, 1, "42:7"));
+    try testing.expect(
+        std.mem.containsAtLeast(u8, reason, 1, "opaque summary") or
+            std.mem.containsAtLeast(u8, reason, 1, "known callee") or
+            std.mem.containsAtLeast(u8, reason, 1, "structured control") or
+            std.mem.containsAtLeast(u8, reason, 1, "loop state summary"),
+    );
+}
+
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -2222,7 +2290,12 @@ test "call summary degradation propagates to caller encoder" {
     _ = try encoder.encodeOperation(call);
 
     try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "tload encoded as unconstrained transient storage value"));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        encoder.degradationReason().?,
+        1,
+        "tload encoded as unconstrained transient storage value",
+    ));
 }
 
 test "known callee with unknown write set degrades encoder" {
@@ -2338,8 +2411,8 @@ test "summary precondition encoding failure degrades encoder" {
     try testing.expect(encoder.isDegraded());
     const reason = encoder.degradationReason().?;
     try testing.expect(
-        std.mem.eql(u8, reason, "failed to encode summary precondition") or
-            std.mem.eql(u8, reason, "ora.cmp missing predicate"),
+        std.mem.containsAtLeast(u8, reason, 1, "failed to encode summary precondition") or
+            std.mem.containsAtLeast(u8, reason, 1, "ora.cmp missing predicate"),
     );
 }
 

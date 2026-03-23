@@ -179,6 +179,51 @@ pub const Encoder = struct {
         }
     }
 
+    fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
+        const copy = try self.allocator.dupeZ(u8, message);
+        try self.string_storage.append(self.allocator, copy[0 .. message.len + 1]);
+        return copy[0..message.len];
+    }
+
+    fn getOperationLocationText(self: *Encoder, op: mlir.MlirOperation) !?[]const u8 {
+        const loc = mlir.oraOperationGetLocation(op);
+        if (mlir.oraLocationIsNull(loc)) return null;
+
+        const loc_ref = mlir.oraLocationPrintToString(loc);
+        defer @import("mlir_c_api").freeStringRef(loc_ref);
+        if (loc_ref.data == null or loc_ref.length == 0) return null;
+
+        const loc_text = loc_ref.data[0..loc_ref.length];
+        return try self.allocPersistentMessage(loc_text);
+    }
+
+    fn recordCalleeResultDegradation(self: *Encoder, call_op: mlir.MlirOperation, callee: []const u8, reason: []const u8) void {
+        const loc_text = self.getOperationLocationText(call_op) catch null;
+        const full_reason = if (loc_text) |loc|
+            std.fmt.allocPrint(self.allocator, "{s} for callee '{s}' at {s}", .{ reason, callee, loc })
+        else
+            std.fmt.allocPrint(self.allocator, "{s} for callee '{s}'", .{ reason, callee });
+
+        if (full_reason) |owned| {
+            defer self.allocator.free(owned);
+            const persistent = self.allocPersistentMessage(owned) catch {
+                self.recordDegradation(reason);
+                return;
+            };
+            self.recordDegradation(persistent);
+            return;
+        } else |_| {}
+
+        self.recordDegradation(reason);
+    }
+
+    fn anyResultSlotMissing(result_exprs: []const ?z3.Z3_ast) bool {
+        for (result_exprs) |expr| {
+            if (expr == null) return true;
+        }
+        return false;
+    }
+
     fn markGlobalSlotWritten(self: *Encoder, name: []const u8) EncodeError!void {
         if (self.written_global_slots.contains(name)) return;
         try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
@@ -2893,10 +2938,10 @@ pub const Encoder = struct {
         defer self.allocator.free(callee);
         if (mode == .Old) {
             if (self.function_ops.get(callee)) |func_op| {
-                if (try self.tryInlinePureCallResult(callee, func_op, operands, result_index, mode)) |inlined| {
+                if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
                     return inlined;
                 }
-                self.recordDegradation("failed to encode known pure callee result exactly");
+                self.recordCalleeResultDegradation(mlir_op, callee, "failed to encode known pure callee result exactly");
             }
         }
         return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
@@ -3310,6 +3355,7 @@ pub const Encoder = struct {
 
     fn tryInlinePureCallResult(
         self: *Encoder,
+        call_op: mlir.MlirOperation,
         callee: []const u8,
         func_op: mlir.MlirOperation,
         operands: []const z3.Z3_ast,
@@ -3352,7 +3398,11 @@ pub const Encoder = struct {
 
         const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
         if (summary_encoder.isDegraded()) {
-            self.recordDegradation(summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call result");
+            self.recordCalleeResultDegradation(
+                call_op,
+                callee,
+                summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call result",
+            );
         }
 
         const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
@@ -3482,6 +3532,7 @@ pub const Encoder = struct {
 
     fn tryInlineFunctionCallSummary(
         self: *Encoder,
+        call_op: mlir.MlirOperation,
         callee: []const u8,
         func_op: mlir.MlirOperation,
         operands: []const z3.Z3_ast,
@@ -3542,7 +3593,12 @@ pub const Encoder = struct {
         }
 
         if (summary_encoder.isDegraded()) {
-            self.recordDegradation(summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary");
+            const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
+            if (any_result) {
+                self.recordCalleeResultDegradation(call_op, callee, reason);
+            } else {
+                self.recordDegradation(reason);
+            }
         }
 
         const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
@@ -3978,10 +4034,10 @@ pub const Encoder = struct {
         for (0..num_results) |i| result_exprs[i] = null;
 
         if (func_op) |fop| {
-            const summarized = try self.tryInlineFunctionCallSummary(callee, fop, operands, slots.items, result_exprs);
+            const summarized = try self.tryInlineFunctionCallSummary(mlir_op, callee, fop, operands, slots.items, result_exprs);
             if (!summarized) {
                 if (num_results > 0) {
-                    self.recordDegradation("failed to encode known callee results exactly");
+                    self.recordCalleeResultDegradation(mlir_op, callee, "failed to encode known callee results exactly");
                 }
                 if (slots.items.len > 0) {
                     self.recordDegradation("failed to encode known callee state exactly");
@@ -3998,7 +4054,7 @@ pub const Encoder = struct {
             else
                 try self.encodeCallResultUFSymbol(callee, operands, slots.items, @intCast(i), result_sort);
             if (func_op != null and result_exprs[i] == null) {
-                self.recordDegradation("known callee result fell back to opaque UF summary");
+                self.recordCalleeResultDegradation(mlir_op, callee, "known callee result fell back to opaque UF summary");
             }
             const result_id = @intFromPtr(result_value.ptr);
             try self.value_map.put(result_id, encoded);
