@@ -3608,7 +3608,10 @@ pub const Encoder = struct {
                 return;
             }
 
-            if (std.mem.eql(u8, op_name, "scf.for") or std.mem.eql(u8, op_name, "scf.while")) {
+            if (std.mem.eql(u8, op_name, "scf.for") or
+                std.mem.eql(u8, op_name, "scf.while") or
+                std.mem.eql(u8, op_name, "scf.execute_region"))
+            {
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
             }
