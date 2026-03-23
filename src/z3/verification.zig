@@ -1775,9 +1775,9 @@ pub const VerificationPass = struct {
             self.solver.reset();
             for (assumption_annotations.items) |ann| {
                 for (ann.extra_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
-                self.solver.assert(ann.condition);
+                try self.solver.assertChecked(ann.condition);
             }
             if (self.debug_z3) {
                 var major: u32 = 0;
@@ -1794,7 +1794,7 @@ pub const VerificationPass = struct {
             self.traceCurrentSolverState("query");
             std.debug.print("verification: {s} [base] start\n", .{fn_name});
             timer.reset();
-            const assumption_status = self.solver.check();
+            const assumption_status = try self.solver.checkChecked();
             const elapsed_ms = timer.read() / std.time.ns_per_ms;
             stats_total_queries += 1;
             stats_total_ms += elapsed_ms;
@@ -1837,37 +1837,37 @@ pub const VerificationPass = struct {
             for (obligation_annotations.items) |ann| {
                 self.solver.push();
                 for (ann.path_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
                 for (ann.extra_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
                 if (ann.kind == .LoopInvariant) {
                     for (ann.loop_entry_extra_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         for (peer_inv_ann.path_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (peer_inv_ann.extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
-                        self.solver.assert(peer_inv_ann.condition);
+                        try self.solver.assertChecked(peer_inv_ann.condition);
                     }
                 }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
-                self.solver.assert(negated);
+                try self.solver.assertChecked(negated);
 
                 const obligation_label = obligationKindLabel(ann.kind);
                 self.traceSmt("{s} [{s}] check-start", .{ fn_name, obligation_label });
                 self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} [{s}] start\n", .{ fn_name, obligation_label });
                 timer.reset();
-                const obligation_status = self.solver.check();
+                const obligation_status = try self.solver.checkChecked();
                 const obligation_ms = timer.read() / std.time.ns_per_ms;
                 stats_total_queries += 1;
                 stats_total_ms += obligation_ms;
@@ -1918,43 +1918,43 @@ pub const VerificationPass = struct {
                     if (ann.old_condition) |old_inv| {
                         self.solver.push();
                         for (ann.path_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (ann.extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (ann.old_extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (ann.loop_step_extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
-                        self.solver.assert(old_inv);
+                        try self.solver.assertChecked(old_inv);
                         for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                             if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                             for (peer_inv_ann.path_constraints) |cst| {
-                                self.solver.assert(cst);
+                                try self.solver.assertChecked(cst);
                             }
                             for (peer_inv_ann.extra_constraints) |cst| {
-                                self.solver.assert(cst);
+                                try self.solver.assertChecked(cst);
                             }
                             for (peer_inv_ann.old_extra_constraints) |cst| {
-                                self.solver.assert(cst);
+                                try self.solver.assertChecked(cst);
                             }
                             if (peer_inv_ann.old_condition) |peer_old_inv| {
-                                self.solver.assert(peer_old_inv);
+                                try self.solver.assertChecked(peer_old_inv);
                             }
                         }
                         if (ann.loop_step_condition) |step_cond| {
-                            self.solver.assert(step_cond);
+                            try self.solver.assertChecked(step_cond);
                         }
-                        self.solver.assert(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
+                        try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
 
                         self.traceSmt("{s} [invariant-step] check-start", .{fn_name});
                         self.traceCurrentSolverState("query");
                         std.debug.print("verification: {s} [invariant-step] start\n", .{fn_name});
                         timer.reset();
-                        const step_status = self.solver.check();
+                        const step_status = try self.solver.checkChecked();
                         const step_ms = timer.read() / std.time.ns_per_ms;
                         stats_total_queries += 1;
                         stats_total_ms += step_ms;
@@ -2009,10 +2009,10 @@ pub const VerificationPass = struct {
                 for (ensure_annotations.items) |ensure_ann| {
                     self.solver.push();
                     for (ensure_ann.path_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
                     for (ensure_ann.extra_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
 
                     // Conjoin all invariants for the same loop before discharging
@@ -2022,25 +2022,25 @@ pub const VerificationPass = struct {
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, inv_ann, peer_inv_ann)) continue;
                         for (peer_inv_ann.path_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (peer_inv_ann.extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
                         for (peer_inv_ann.loop_exit_extra_constraints) |cst| {
-                            self.solver.assert(cst);
+                            try self.solver.assertChecked(cst);
                         }
-                        self.solver.assert(peer_inv_ann.condition);
+                        try self.solver.assertChecked(peer_inv_ann.condition);
                     }
 
-                    self.solver.assert(exit_condition);
-                    self.solver.assert(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
+                    try self.solver.assertChecked(exit_condition);
+                    try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
 
                     self.traceSmt("{s} [invariant-post] check-start", .{fn_name});
                     self.traceCurrentSolverState("query");
                     std.debug.print("verification: {s} [invariant-post] start\n", .{fn_name});
                     timer.reset();
-                    const post_status = self.solver.check();
+                    const post_status = try self.solver.checkChecked();
                     const post_ms = timer.read() / std.time.ns_per_ms;
                     stats_total_queries += 1;
                     stats_total_ms += post_ms;
@@ -2107,27 +2107,27 @@ pub const VerificationPass = struct {
                 // If (assumptions AND previous_guards AND this_guard) is UNSAT, error!
                 self.solver.push();
                 for (ann.path_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
                 for (previous_guards.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     for (prev.path_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
                     for (prev.extra_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
-                    self.solver.assert(prev.condition);
+                    try self.solver.assertChecked(prev.condition);
                 }
                 for (ann.extra_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
-                self.solver.assert(ann.condition);
+                try self.solver.assertChecked(ann.condition);
                 self.traceSmt("{s} guard {s} [satisfy] check-start", .{ fn_name, ann.guard_id.? });
                 self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
-                const satisfy_status = self.solver.check();
+                const satisfy_status = try self.solver.checkChecked();
                 const satisfy_ms = timer.read() / std.time.ns_per_ms;
                 stats_total_queries += 1;
                 stats_total_ms += satisfy_ms;
@@ -2174,23 +2174,23 @@ pub const VerificationPass = struct {
                 // Second check: can the guard be violated? (to determine if it should be kept)
                 self.solver.push();
                 for (ann.path_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
                 for (previous_guards.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     for (prev.path_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
                     for (prev.extra_constraints) |cst| {
-                        self.solver.assert(cst);
+                        try self.solver.assertChecked(cst);
                     }
-                    self.solver.assert(prev.condition);
+                    try self.solver.assertChecked(prev.condition);
                 }
                 for (ann.extra_constraints) |cst| {
-                    self.solver.assert(cst);
+                    try self.solver.assertChecked(cst);
                 }
                 const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
-                self.solver.assert(not_guard);
+                try self.solver.assertChecked(not_guard);
                 if (self.debug_z3) {
                     std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
                     self.logAst("guard", ann.condition);
@@ -2200,7 +2200,7 @@ pub const VerificationPass = struct {
                 self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} guard {s} [violate] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
-                const guard_status = self.solver.check();
+                const guard_status = try self.solver.checkChecked();
                 const violate_ms = timer.read() / std.time.ns_per_ms;
                 stats_total_queries += 1;
                 stats_total_ms += violate_ms;
@@ -2395,7 +2395,10 @@ pub const VerificationPass = struct {
                         ctx.results[idx].err = err;
                         continue;
                     };
-                    const status = solver.check();
+                    const status = solver.checkChecked() catch |err| {
+                        ctx.results[idx].err = err;
+                        continue;
+                    };
                     const elapsed_ms = timer.read() / std.time.ns_per_ms;
                     if (ctx.trace_smt) {
                         std.debug.print(
@@ -2430,7 +2433,10 @@ pub const VerificationPass = struct {
 
                     // Capture model string for SAT queries that surface counterexamples.
                     if (status == z3.Z3_L_TRUE and (query.kind == .GuardViolate or query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost)) {
-                        if (solver.getModel()) |model| {
+                        if (solver.getModelChecked() catch |err| {
+                            ctx.results[idx].err = err;
+                            continue;
+                        }) |model| {
                             const raw = z3.Z3_model_to_string(context.ctx, model);
                             if (raw != null) {
                                 const dup = ctx.allocator.dupe(u8, std.mem.span(raw)) catch null;
@@ -2754,7 +2760,7 @@ pub const VerificationPass = struct {
             }
 
             var timer = try std.time.Timer.start();
-            const status = self.solver.check();
+            const status = try self.solver.checkChecked();
             const elapsed_ms = timer.read() / std.time.ns_per_ms;
             if (self.trace_smt) {
                 self.traceSmt(
@@ -2769,7 +2775,7 @@ pub const VerificationPass = struct {
                 query.kind == .LoopInvariantPost or
                 query.kind == .GuardViolate))
             {
-                if (self.solver.getModel()) |model| {
+                if (try self.solver.getModelChecked()) |model| {
                     const raw = z3.Z3_model_to_string(self.context.ctx, model);
                     if (raw != null) {
                         model_copy = try self.allocator.dupe(u8, std.mem.span(raw));
@@ -3715,7 +3721,7 @@ pub const VerificationPass = struct {
     }
 
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
-        const model = self.solver.getModel() orelse return null;
+        const model = (self.solver.getModelChecked() catch return null) orelse return null;
         const num_consts = z3.Z3_model_get_num_consts(self.context.ctx, model);
         if (num_consts == 0) return null;
 

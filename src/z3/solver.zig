@@ -37,12 +37,32 @@ pub const Solver = struct {
         c.Z3_solver_assert(self.context.ctx, self.solver, constraint);
     }
 
+    pub fn assertChecked(self: *Solver, constraint: c.Z3_ast) !void {
+        self.context.clearLastError();
+        c.Z3_solver_assert(self.context.ctx, self.solver, constraint);
+        try self.context.checkNoError();
+    }
+
     pub fn check(self: *Solver) c.Z3_lbool {
         return c.Z3_solver_check(self.context.ctx, self.solver);
     }
 
+    pub fn checkChecked(self: *Solver) !c.Z3_lbool {
+        self.context.clearLastError();
+        const status = c.Z3_solver_check(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return status;
+    }
+
     pub fn getModel(self: *Solver) ?c.Z3_model {
         return c.Z3_solver_get_model(self.context.ctx, self.solver);
+    }
+
+    pub fn getModelChecked(self: *Solver) !?c.Z3_model {
+        self.context.clearLastError();
+        const model = c.Z3_solver_get_model(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return model;
     }
 
     pub fn reset(self: *Solver) void {
