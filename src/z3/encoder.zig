@@ -2564,9 +2564,8 @@ pub const Encoder = struct {
             return try self.mkUndefValue(result_sort, label, op_id);
         }
 
-        const owned_callee = try self.resolveCalleeName(mlir_op);
-        defer if (owned_callee) |name| self.allocator.free(name);
-        const callee = owned_callee orelse "call";
+        const callee = try self.getOpaqueCalleeKey(mlir_op);
+        defer self.allocator.free(callee);
         if (mode == .Old) {
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(callee, func_op, operands, result_index, mode)) |inlined| {
@@ -2627,6 +2626,13 @@ pub const Encoder = struct {
 
         const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(domain_len), domain.ptr, result_sort);
         return z3.Z3_mk_app(self.context.ctx, func_decl, @intCast(domain_len), args.ptr);
+    }
+
+    fn getOpaqueCalleeKey(self: *Encoder, mlir_op: mlir.MlirOperation) ![]u8 {
+        if (try self.resolveCalleeName(mlir_op)) |callee| {
+            return callee;
+        }
+        return try std.fmt.allocPrint(self.allocator, "call_site_{d}", .{@intFromPtr(mlir_op.ptr)});
     }
 
     fn encodeCallStateTransitionUFSymbol(
@@ -3254,9 +3260,8 @@ pub const Encoder = struct {
         const call_id = @intFromPtr(mlir_op.ptr);
         if (self.materialized_calls.contains(call_id)) return;
 
-        const owned_callee = try self.resolveCalleeName(mlir_op);
-        defer if (owned_callee) |name| self.allocator.free(name);
-        const callee = owned_callee orelse "call";
+        const callee = try self.getOpaqueCalleeKey(mlir_op);
+        defer self.allocator.free(callee);
         const func_op = self.function_ops.get(callee);
 
         var write_slots = std.ArrayList([]u8){};

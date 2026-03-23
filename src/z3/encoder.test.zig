@@ -1420,6 +1420,39 @@ test "func.call relation can be disabled" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver.check());
 }
 
+test "unresolved call sites use distinct opaque symbols" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const arg_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const arg_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, arg_attr);
+    const arg = mlir.oraOperationGetResult(arg_op, 0);
+
+    const operands = [_]mlir.MlirValue{arg};
+    const results = [_]mlir.MlirType{i256_ty};
+    const empty = stringRef("");
+    const call_a = mlir.oraFuncCallOpCreate(mlir_ctx, loc, empty, &operands, operands.len, &results, results.len);
+    const call_b = mlir.oraFuncCallOpCreate(mlir_ctx, loc, empty, &operands, operands.len, &results, results.len);
+
+    const ast_a = try encoder.encodeOperation(call_a);
+    const ast_b = try encoder.encodeOperation(call_b);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast_a, ast_b)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver.check());
+}
+
 test "call summary degradation propagates to caller encoder" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
