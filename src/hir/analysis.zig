@@ -289,7 +289,7 @@ fn stmtBodyContainsSwitchBreakInContext(file: *const ast.AstFile, body_id: ast.B
     return false;
 }
 
-fn stmtContainsLoopControl(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
+pub fn stmtContainsLoopControl(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
     return switch (file.statement(statement_id).*) {
         .Break, .Continue => true,
         .If => |if_stmt| bodyContainsLoopControl(file, if_stmt.then_body) or

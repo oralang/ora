@@ -9,6 +9,7 @@ pub const LoopContext = struct {
     parent: ?*const LoopContext,
     label: ?[]const u8 = null,
     break_flag: mlir.MlirValue,
+    continue_flag: mlir.MlirValue = std.mem.zeroes(mlir.MlirValue),
     carried_locals: []const ast.PatternId,
 };
 
@@ -323,6 +324,31 @@ pub fn exprRange(file: *const ast.AstFile, expr_id: ast.ExprId) source.TextRange
         .Group => |node| node.range,
         .Old => |node| node.range,
         .Quantified => |node| node.range,
+        .Error => |node| node.range,
+    };
+}
+
+pub fn stmtRange(file: *const ast.AstFile, stmt_id: ast.StmtId) source.TextRange {
+    return switch (file.statement(stmt_id).*) {
+        .VariableDecl => |node| node.range,
+        .Return => |node| node.range,
+        .Expr => |node| node.range,
+        .Assign => |node| node.range,
+        .If => |node| node.range,
+        .While => |node| node.range,
+        .For => |node| node.range,
+        .Switch => |node| node.range,
+        .Try => |node| node.range,
+        .Break => |node| node.range,
+        .Continue => |node| node.range,
+        .Assert => |node| node.range,
+        .Assume => |node| node.range,
+        .Havoc => |node| node.range,
+        .Log => |node| node.range,
+        .Lock => |node| node.range,
+        .Unlock => |node| node.range,
+        .Block => |node| node.range,
+        .LabeledBlock => |node| node.range,
         .Error => |node| node.range,
     };
 }

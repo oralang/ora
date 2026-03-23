@@ -11755,6 +11755,35 @@ test "compiler lowers real HIR while loops with branch-local break and continue"
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
+test "compiler preserves nested while continue by guarding later statements" {
+    const source_text =
+        \\pub fn count(limit: u256) -> u256 {
+        \\    let sum = 0;
+        \\    let i = 0;
+        \\    while (i < limit) {
+        \\        i = i + 1;
+        \\        if (i == 2) {
+        \\            continue;
+        \\        }
+        \\        sum = sum + i;
+        \\    }
+        \\    return sum;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "memref.alloca() : memref<i1>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store %true"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "-> (i256, i256)"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
+}
+
 test "compiler lowers real HIR while loops with nested inner-loop control" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {

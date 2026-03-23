@@ -452,10 +452,77 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn lowerBody(self: *FunctionLowerer, body_id: ast.BodyId, locals: *LocalEnv) anyerror!bool {
             const body = self.parent.file.body(body_id).*;
+            var seen_loop_control = false;
             for (body.statements) |statement_id| {
-                if (try self.lowerStmt(statement_id, locals)) return true;
+                if (self.loop_context) |loop_context| {
+                    if (loop_context.continue_flag.ptr != null and self.current_scf_carried_locals == null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
+                        if (try @This().lowerStmtGuardedOnLoopContinue(self, statement_id, locals, loop_context)) return true;
+                    } else {
+                        if (try self.lowerStmt(statement_id, locals)) return true;
+                    }
+                    if (analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
+                        seen_loop_control = true;
+                    }
+                } else {
+                    if (try self.lowerStmt(statement_id, locals)) return true;
+                }
             }
             return false;
+        }
+
+        fn lowerStmtGuardedOnLoopContinue(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            locals: *LocalEnv,
+            loop_context: *const LoopContext,
+        ) anyerror!bool {
+            const range = support.stmtRange(self.parent.file, statement_id);
+            const loc = self.parent.location(range);
+            const continue_value = appendValueOp(self.block, blk: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, loop_context.continue_flag, null, 0, boolType(self.parent.context));
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :blk load;
+            });
+            const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const should_run = self.createCompareOp(loc, "eq", continue_value, false_value);
+            if (mlir.oraOperationIsNull(should_run)) return error.MlirOperationCreationFailed;
+
+            const result_types = if (loop_context.carried_locals.len == 0)
+                null
+            else
+                (try self.buildCarriedResultTypes(locals, loop_context.carried_locals)) orelse return error.MlirOperationCreationFailed;
+
+            const if_op = mlir.oraScfIfOpCreate(
+                self.parent.context,
+                loc,
+                appendValueOp(self.block, should_run),
+                if (result_types) |types| types.items.ptr else null,
+                if (result_types) |types| types.items.len else 0,
+                true,
+            );
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            then_lowerer.current_scf_carried_locals = loop_context.carried_locals;
+            var then_locals = try self.cloneLocals(locals);
+            const terminated = try then_lowerer.lowerStmt(statement_id, &then_locals);
+            if (!support.blockEndsWithTerminator(then_block)) {
+                try then_lowerer.appendScfYieldFromLocals(then_block, range, &then_locals, loop_context.carried_locals);
+            }
+            var else_locals = try self.cloneLocals(locals);
+            if (!support.blockEndsWithTerminator(else_block)) {
+                try self.appendScfYieldFromLocals(else_block, range, &else_locals, loop_context.carried_locals);
+            }
+            try FunctionLowerer.writeBackCarriedLocals(locals, loop_context.carried_locals, if_op);
+            return terminated;
         }
 
         pub fn lowerStmt(self: *FunctionLowerer, statement_id: ast.StmtId, locals: *LocalEnv) anyerror!bool {
@@ -959,6 +1026,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         return false;
                     }
                     if (@This().findTargetLoopContext(self, jump.label)) |loop_context| {
+                        if (self.current_scf_carried_locals != null and loop_context.continue_flag.ptr != null) {
+                            const loc = self.parent.location(jump.range);
+                            const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                            const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, loop_context.continue_flag, null, 0);
+                            if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_continue);
+                        }
                         const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                             current_region_locals
                         else if (self.deferred_return_kind == .scf_yield)
