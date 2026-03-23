@@ -1772,7 +1772,7 @@ pub const VerificationPass = struct {
                 }
             }
 
-            self.solver.reset();
+            try self.solver.resetChecked();
             for (assumption_annotations.items) |ann| {
                 for (ann.extra_constraints) |cst| {
                     try self.solver.assertChecked(cst);
@@ -2373,7 +2373,10 @@ pub const VerificationPass = struct {
                             },
                         );
                     }
-                    solver.reset();
+                    solver.resetChecked() catch |err| {
+                        ctx.results[idx].err = err;
+                        continue;
+                    };
                     if (ctx.trace_smt) {
                         std.debug.print("smt-trace: Q{d} load-smt begin\n", .{idx + 1});
                         if (ctx.trace_smtlib) {
@@ -2746,7 +2749,7 @@ pub const VerificationPass = struct {
                 self.tracePreparedQuery(idx, query);
                 self.traceSmt("Q{d} report reset", .{idx + 1});
             }
-            self.solver.reset();
+            try self.solver.resetChecked();
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report load-smt begin", .{idx + 1});
                 if (self.trace_smtlib) {

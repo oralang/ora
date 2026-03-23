@@ -69,6 +69,12 @@ pub const Solver = struct {
         c.Z3_solver_reset(self.context.ctx, self.solver);
     }
 
+    pub fn resetChecked(self: *Solver) !void {
+        self.context.clearLastError();
+        c.Z3_solver_reset(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+    }
+
     pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) !void {
         self.context.clearLastError();
         c.Z3_solver_from_string(self.context.ctx, self.solver, smtlib.ptr);
