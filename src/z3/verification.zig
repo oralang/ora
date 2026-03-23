@@ -5505,6 +5505,79 @@ test "branch merge degrades partial memref initialization" {
     try testing.expect(pass.encoder.memref_map.get(1234) == null);
 }
 
+test "many-branch merge preserves untouched global base state" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var base = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer base.deinit(testing.allocator);
+    var branch_states = [_]VerificationPass.EncoderBranchState{
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+    };
+    defer for (&branch_states) |*state| state.deinit(testing.allocator);
+
+    const bool_sort = z3.Z3_mk_bool_sort(pass.encoder.context.ctx);
+    const i256_sort = z3.Z3_mk_bv_sort(pass.encoder.context.ctx, 256);
+    const conditions = [_]z3.Z3_ast{
+        try pass.encoder.mkVariable("switch_c0", bool_sort),
+        try pass.encoder.mkVariable("switch_c1", bool_sort),
+        try pass.encoder.mkVariable("switch_c2", bool_sort),
+    };
+    const one = z3.Z3_mk_numeral(pass.encoder.context.ctx, "1", i256_sort);
+    const two = z3.Z3_mk_numeral(pass.encoder.context.ctx, "2", i256_sort);
+
+    try branch_states[0].global_map.put(try testing.allocator.dupe(u8, "counter"), one);
+    try branch_states[2].global_map.put(try testing.allocator.dupe(u8, "counter"), two);
+
+    try pass.mergeEncoderBranchStatesMany(&conditions, &base, &branch_states);
+
+    const merged = pass.encoder.global_map.get("counter").?;
+    const untouched_base = pass.encoder.global_entry_map.get("counter").?;
+
+    var solver = try Solver.init(pass.encoder.context, testing.allocator);
+    defer solver.deinit();
+    for (conditions) |cond| {
+        solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
+    }
+    solver.assert(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
+    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "many-branch merge degrades partial memref initialization" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var base = VerificationPass.EncoderBranchState.init(testing.allocator);
+    defer base.deinit(testing.allocator);
+    var branch_states = [_]VerificationPass.EncoderBranchState{
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+        VerificationPass.EncoderBranchState.init(testing.allocator),
+    };
+    defer for (&branch_states) |*state| state.deinit(testing.allocator);
+
+    const bool_sort = z3.Z3_mk_bool_sort(pass.encoder.context.ctx);
+    const i256_sort = z3.Z3_mk_bv_sort(pass.encoder.context.ctx, 256);
+    const conditions = [_]z3.Z3_ast{
+        try pass.encoder.mkVariable("switch_mem_c0", bool_sort),
+        try pass.encoder.mkVariable("switch_mem_c1", bool_sort),
+        try pass.encoder.mkVariable("switch_mem_c2", bool_sort),
+    };
+    const seven = z3.Z3_mk_numeral(pass.encoder.context.ctx, "7", i256_sort);
+
+    try branch_states[0].memref_map.put(777, seven);
+    try branch_states[2].memref_map.put(777, seven);
+
+    try pass.mergeEncoderBranchStatesMany(&conditions, &base, &branch_states);
+
+    try testing.expect(pass.encoder.isDegraded());
+    try testing.expect(std.mem.eql(u8, pass.encoder.degradationReason().?, "branch merge lost exact memref initialization state"));
+    try testing.expect(pass.encoder.memref_map.get(777) == null);
+}
+
 test "private callee obligations are guarded by callee requires in public summaries" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
