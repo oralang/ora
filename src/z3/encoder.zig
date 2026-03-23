@@ -3575,6 +3575,11 @@ pub const Encoder = struct {
                 }
             }
 
+            if (std.mem.eql(u8, name, "scf.for")) {
+                const nested_expr = try self.tryExtractSingleIterationScfForExpr(current, result_index, mode);
+                if (nested_expr != null) return nested_expr;
+            }
+
             if (std.mem.eql(u8, name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(current)) {
                 const try_block = mlir.oraTryStmtOpGetTryBlock(current);
                 const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
@@ -3666,27 +3671,11 @@ pub const Encoder = struct {
     }
 
     fn tryEncodeSingleIterationScfForStateEffects(self: *Encoder, op: mlir.MlirOperation) bool {
-        if (mlir.oraOperationGetNumOperands(op) < 3) return false;
+        const loop_ctx = self.getSingleIterationScfForContext(op) orelse return false;
+        self.bindValue(loop_ctx.iv, loop_ctx.iv_ast) catch return false;
+        defer _ = self.value_bindings.remove(@intFromPtr(loop_ctx.iv.ptr));
 
-        const lb_value = mlir.oraOperationGetOperand(op, 0);
-        const ub_value = mlir.oraOperationGetOperand(op, 1);
-        const step_value = mlir.oraOperationGetOperand(op, 2);
-        const lb = self.getValueConstUnsigned(lb_value, 64) orelse return false;
-        const ub = self.getValueConstUnsigned(ub_value, 64) orelse return false;
-        const step = self.getValueConstUnsigned(step_value, 64) orelse return false;
-        if (step == 0 or lb >= ub) return false;
-        if (lb + step < ub) return false;
-
-        const body = mlir.oraScfForOpGetBodyBlock(op);
-        if (mlir.oraBlockIsNull(body)) return false;
-        if (mlir.oraBlockGetNumArguments(body) != 1) return false;
-
-        const iv = mlir.oraBlockGetArgument(body, 0);
-        const iv_ast = self.encodeIntegerConstant(@intCast(lb), 256) catch return false;
-        self.bindValue(iv, iv_ast) catch return false;
-        defer _ = self.value_bindings.remove(@intFromPtr(iv.ptr));
-
-        var current = mlir.oraBlockGetFirstOperation(body);
+        var current = mlir.oraBlockGetFirstOperation(loop_ctx.body);
         while (!mlir.oraOperationIsNull(current)) {
             const next = mlir.oraOperationGetNextInBlock(current);
             const name_ref = mlir.oraOperationGetName(current);
@@ -3700,6 +3689,50 @@ pub const Encoder = struct {
             current = next;
         }
         return !self.isDegraded();
+    }
+
+    const SingleIterationScfForContext = struct {
+        body: mlir.MlirBlock,
+        iv: mlir.MlirValue,
+        iv_ast: z3.Z3_ast,
+    };
+
+    fn getSingleIterationScfForContext(self: *Encoder, op: mlir.MlirOperation) ?SingleIterationScfForContext {
+        if (mlir.oraOperationGetNumOperands(op) < 3) return null;
+
+        const lb_value = mlir.oraOperationGetOperand(op, 0);
+        const ub_value = mlir.oraOperationGetOperand(op, 1);
+        const step_value = mlir.oraOperationGetOperand(op, 2);
+        const lb = self.getValueConstUnsigned(lb_value, 64) orelse return null;
+        const ub = self.getValueConstUnsigned(ub_value, 64) orelse return null;
+        const step = self.getValueConstUnsigned(step_value, 64) orelse return null;
+        if (step == 0 or lb >= ub) return null;
+        if (lb + step < ub) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        if (mlir.oraBlockGetNumArguments(body) != 1) return null;
+
+        const iv = mlir.oraBlockGetArgument(body, 0);
+        const iv_ast = self.encodeIntegerConstant(@intCast(lb), 256) catch return null;
+        return .{
+            .body = body,
+            .iv = iv,
+            .iv_ast = iv_ast,
+        };
+    }
+
+    fn tryExtractSingleIterationScfForExpr(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const loop_ctx = self.getSingleIterationScfForContext(for_op) orelse return null;
+        try self.bindValue(loop_ctx.iv, loop_ctx.iv_ast);
+        defer _ = self.value_bindings.remove(@intFromPtr(loop_ctx.iv.ptr));
+
+        return try self.extractReturnedExprFromBlock(loop_ctx.body, result_index, mode);
     }
 
     fn extractScfIfReturnedExpr(

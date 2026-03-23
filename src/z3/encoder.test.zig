@@ -771,6 +771,80 @@ test "known pure callee execute_region return encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee single-iteration scf.for return encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("singleIterForReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    const val_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 13);
+    const val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, val_attr);
+    mlir.oraBlockAppendOwnedOperation(loop_body, val_op);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(val_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("singleIterForReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded = try encoder.encodeOperation(call);
+    const expected = try encoder.encodeIntegerConstant(13, 256);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "arith div emits safety obligation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
