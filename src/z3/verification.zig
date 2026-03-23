@@ -5721,6 +5721,73 @@ test "sequential guard verification ignores sibling branch guards" {
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
 }
 
+fn verificationErrorTypeCounts(result: *const errors.VerificationResult) [@typeInfo(errors.VerificationErrorType).@"enum".fields.len]usize {
+    var counts = [_]usize{0} ** @typeInfo(errors.VerificationErrorType).@"enum".fields.len;
+    for (result.errors.items) |err| {
+        counts[@intFromEnum(err.error_type)] += 1;
+    }
+    return counts;
+}
+
+fn expectVerificationResultsEquivalent(lhs: *const errors.VerificationResult, rhs: *const errors.VerificationResult) !void {
+    try testing.expectEqual(lhs.success, rhs.success);
+    try testing.expectEqual(lhs.errors.items.len, rhs.errors.items.len);
+    try testing.expectEqual(lhs.diagnostics.items.len, rhs.diagnostics.items.len);
+    try testing.expectEqualDeep(verificationErrorTypeCounts(lhs), verificationErrorTypeCounts(rhs));
+}
+
+test "parallel verification matches sequential verification on guard-success module" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildBranchPathGuardsModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var sequential = try VerificationPass.init(testing.allocator);
+    defer sequential.deinit();
+    sequential.parallel = false;
+
+    var parallel = try VerificationPass.init(testing.allocator);
+    defer parallel.deinit();
+    parallel.parallel = true;
+
+    var seq_result = try sequential.runVerificationPass(module);
+    defer seq_result.deinit();
+    var par_result = try parallel.runVerificationPass(module);
+    defer par_result.deinit();
+
+    try expectVerificationResultsEquivalent(&seq_result, &par_result);
+}
+
+test "parallel verification matches sequential verification on failing module" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildPublicCallsPrivateAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var sequential = try VerificationPass.init(testing.allocator);
+    defer sequential.deinit();
+    sequential.parallel = false;
+    sequential.setVerifyMode(.Basic);
+
+    var parallel = try VerificationPass.init(testing.allocator);
+    defer parallel.deinit();
+    parallel.parallel = true;
+    parallel.setVerifyMode(.Basic);
+
+    var seq_result = try sequential.runVerificationPass(module);
+    defer seq_result.deinit();
+    var par_result = try parallel.runVerificationPass(module);
+    defer par_result.deinit();
+
+    try expectVerificationResultsEquivalent(&seq_result, &par_result);
+}
+
 test "contract invariants from loop body obligations use loop constraints" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
