@@ -422,7 +422,7 @@ test "compiler lowers trait and impl items into AST" {
     try testing.expect(!trait_item.is_extern);
     try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
     try testing.expectEqual(@as(?compiler.ast.ItemId, null), trait_item.ghost_block);
-    try testing.expect(trait_item.methods[0].has_self);
+    try testing.expectEqual(compiler.ast.ReceiverKind.value_self, trait_item.methods[0].receiver_kind);
     try testing.expectEqualStrings("totalSupply", trait_item.methods[0].name);
     try testing.expectEqual(@as(usize, 0), trait_item.methods[0].parameters.len);
     try testing.expectEqual(compiler.ast.ExternCallKind.none, trait_item.methods[0].extern_call_kind);
@@ -463,6 +463,8 @@ test "compiler parses and lowers extern traits" {
     const trait_item = ast_file.item(ast_file.root_items[0]).Trait;
     try testing.expect(trait_item.is_extern);
     try testing.expectEqual(@as(usize, 2), trait_item.methods.len);
+    try testing.expectEqual(compiler.ast.ReceiverKind.extern_self, trait_item.methods[0].receiver_kind);
+    try testing.expectEqual(compiler.ast.ReceiverKind.extern_self, trait_item.methods[1].receiver_kind);
     try testing.expectEqual(compiler.ast.ExternCallKind.call, trait_item.methods[0].extern_call_kind);
     try testing.expectEqual(compiler.ast.ExternCallKind.staticcall, trait_item.methods[1].extern_call_kind);
     try testing.expectEqual(@as(usize, 2), trait_item.methods[0].errors.len);
@@ -1378,7 +1380,7 @@ test "compiler computes extern trait ABI signatures" {
     const transfer_signature = try compiler.hir.abi.signatureForMethod(
         testing.allocator,
         trait_interface.methods[0].name,
-        trait_interface.methods[0].has_self,
+        trait_interface.methods[0].receiver_kind != .none,
         trait_interface.methods[0].param_types,
     );
     defer testing.allocator.free(transfer_signature);
@@ -1387,7 +1389,7 @@ test "compiler computes extern trait ABI signatures" {
     const balance_signature = try compiler.hir.abi.signatureForMethod(
         testing.allocator,
         trait_interface.methods[1].name,
-        trait_interface.methods[1].has_self,
+        trait_interface.methods[1].receiver_kind != .none,
         trait_interface.methods[1].param_types,
     );
     defer testing.allocator.free(balance_signature);
@@ -1757,6 +1759,45 @@ test "compiler allows bare self in trait and impl methods" {
     try testing.expect(!diagnosticMessagesContain(ast_diags, "bare 'self'"));
 }
 
+test "compiler lowers impl self methods and calls end to end" {
+    const source_text =
+        \\trait CounterLike {
+        \\    fn get(self) -> u256;
+        \\    fn bump(self, amount: u256) -> u256;
+        \\}
+        \\
+        \\struct Counter {
+        \\    total: u256,
+        \\}
+        \\
+        \\impl CounterLike for Counter {
+        \\    fn get(self) -> u256 { return self.total; }
+        \\    fn bump(self, amount: u256) -> u256 {
+        \\        return self.get() + amount;
+        \\    }
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    let c: Counter = .{ .total = 0 };
+        \\    return c.bump(1);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.bump"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Counter.bump"));
+}
+
 test "compiler rejects bare self in ordinary functions" {
     const source_text =
         \\pub fn bad(self) -> u256 {
@@ -1914,16 +1955,16 @@ test "compiler exposes trait and impl interfaces in sema" {
     try testing.expect(trait_interface != null);
     try testing.expectEqual(@as(usize, 2), trait_interface.?.methods.len);
     try testing.expectEqualStrings("totalSupply", trait_interface.?.methods[0].name);
-    try testing.expect(trait_interface.?.methods[0].has_self);
+    try testing.expectEqual(compiler.ast.ReceiverKind.value_self, trait_interface.?.methods[0].receiver_kind);
     try testing.expectEqual(compiler.sema.TypeKind.integer, trait_interface.?.methods[0].return_type.kind());
     try testing.expectEqualStrings("decimals", trait_interface.?.methods[1].name);
-    try testing.expect(!trait_interface.?.methods[1].has_self);
+    try testing.expectEqual(compiler.ast.ReceiverKind.none, trait_interface.?.methods[1].receiver_kind);
 
     const impl_interface = typecheck.implInterfaceByNames("ERC20", "Token");
     try testing.expect(impl_interface != null);
     try testing.expectEqual(@as(usize, 2), impl_interface.?.methods.len);
     try testing.expectEqualStrings("totalSupply", impl_interface.?.methods[0].name);
-    try testing.expect(impl_interface.?.methods[0].has_self);
+    try testing.expectEqual(compiler.ast.ReceiverKind.value_self, impl_interface.?.methods[0].receiver_kind);
     try testing.expectEqualStrings("decimals", impl_interface.?.methods[1].name);
 }
 

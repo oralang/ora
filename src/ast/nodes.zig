@@ -12,6 +12,11 @@ pub const Visibility = enum { public, private };
 pub const BindingKind = enum { let_, var_, constant, immutable };
 pub const StorageClass = enum { none, storage, memory, tstore };
 pub const SpecClauseKind = enum { requires, ensures, invariant };
+pub const ReceiverKind = enum {
+    none,
+    value_self,
+    extern_self,
+};
 pub const UnaryOp = enum { neg, not_, bit_not, try_ };
 pub const BinaryOp = enum {
     add,
@@ -548,7 +553,7 @@ pub const EnumVariant = struct {
 pub const TraitMethod = struct {
     range: source.TextRange,
     name: []const u8,
-    has_self: bool,
+    receiver_kind: ReceiverKind,
     parameters: []Parameter,
     return_type: ?TypeExprId,
     trait_bounds: []TraitBound,

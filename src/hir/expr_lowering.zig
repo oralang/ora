@@ -755,7 +755,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const signature = try abi_support.signatureForMethod(
                 self.parent.allocator,
                 resolved.method.name,
-                resolved.method.has_self,
+                resolved.method.receiver_kind != .none,
                 resolved.method.param_types,
             );
             defer self.parent.allocator.free(signature);
@@ -1176,9 +1176,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Group => |group| return @This().resolveTraitBoundMethodCall(self, group.expr),
                 else => return null,
             };
-            const function = self.function orelse return null;
             const receiver_type = self.parent.typecheck.exprType(field.base);
             const receiver_name = receiver_type.name() orelse return null;
+            if (@This().resolveConcreteValueMethodCall(self, field, receiver_name)) |resolved| return resolved;
+
+            const function = self.function orelse return null;
             const concrete_type = self.parent.substitutedType(receiver_name) orelse return null;
             const target_name = concrete_type.name() orelse return null;
 
@@ -1187,7 +1189,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!std.mem.eql(u8, bound.parameter_name, receiver_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
                 for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or !method.has_self) continue;
+                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .value_self) continue;
                     if (matched_trait != null) return null;
                     matched_trait = bound.trait_name;
                 }
@@ -1209,6 +1211,40 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 };
             }
             return null;
+        }
+
+        fn resolveConcreteValueMethodCall(
+            self: *FunctionLowerer,
+            field: ast.FieldExpr,
+            target_name: []const u8,
+        ) ?ResolvedTraitBoundMethodCall {
+            var matched_impl_item_id: ?ast.ItemId = null;
+            var matched_method_item_id: ?ast.ItemId = null;
+            var matched_function: ?ast.FunctionItem = null;
+
+            for (self.parent.file.items, 0..) |item, item_index| {
+                if (item != .Impl) continue;
+                const impl_item = item.Impl;
+                if (!std.mem.eql(u8, impl_item.target_name, target_name)) continue;
+                for (impl_item.methods) |method_item_id| {
+                    const method_item = self.parent.file.item(method_item_id).*;
+                    if (method_item != .Function) continue;
+                    if (!std.mem.eql(u8, method_item.Function.name, field.name) or
+                        !@This().functionHasRuntimeSelf(self, method_item.Function)) continue;
+                    if (matched_impl_item_id != null) return null;
+                    matched_impl_item_id = ast.ItemId.fromIndex(item_index);
+                    matched_method_item_id = method_item_id;
+                    matched_function = method_item.Function;
+                }
+            }
+
+            return .{
+                .impl_item_id = matched_impl_item_id orelse return null,
+                .method_item_id = matched_method_item_id orelse return null,
+                .function = matched_function orelse return null,
+                .target_name = target_name,
+                .receiver_expr = field.base,
+            };
         }
 
         const ResolvedAssociatedImplMethodCall = struct {
@@ -1283,7 +1319,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
                 const impl_item = self.parent.file.item(impl_interface.impl_item_id).Impl;
                 for (impl_interface.methods, 0..) |method, index| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.has_self) continue;
+                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
                     if (matched_impl_item_id != null) return null;
                     matched_impl_item_id = impl_interface.impl_item_id;
                     matched_method_item_id = impl_item.methods[index];
@@ -1307,7 +1343,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (!std.mem.eql(u8, bound.parameter_name, type_param_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
                 for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.has_self) continue;
+                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
                     if (matched_trait != null) return null;
                     matched_trait = bound.trait_name;
                 }
@@ -2320,6 +2356,36 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     for (contract.members) |member_id| {
                         const member = self.parent.file.item(member_id).*;
                         switch (member) {
+                            .Field => |contract_field| {
+                                if (!std.mem.eql(u8, contract_field.name, field.name)) continue;
+                                if (contract_field.binding_kind == .immutable) {
+                                    if (contract_field.value) |value| {
+                                        return try self.lowerExpr(value, locals);
+                                    }
+                                }
+                                const op = switch (contract_field.storage_class) {
+                                    .storage => mlir.oraSLoadOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(contract_field.range),
+                                        strRef(contract_field.name),
+                                        result_type,
+                                    ),
+                                    .memory => mlir.oraMLoadOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(contract_field.range),
+                                        strRef(contract_field.name),
+                                        result_type,
+                                    ),
+                                    .tstore => mlir.oraTLoadOpCreate(
+                                        self.parent.context,
+                                        self.parent.location(contract_field.range),
+                                        strRef(contract_field.name),
+                                        result_type,
+                                    ),
+                                    .none => std.mem.zeroes(mlir.MlirOperation),
+                                };
+                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                            },
                             .Constant => |constant| {
                                 if (std.mem.eql(u8, constant.name, field.name)) {
                                     return try self.lowerExpr(constant.value, locals);

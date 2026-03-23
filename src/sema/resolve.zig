@@ -122,12 +122,6 @@ const Resolver = struct {
             .Trait => |trait_item| {
                 var trait_env = try Env.init(self.arena, env);
                 for (trait_item.methods) |method| {
-                    if (method.has_self) {
-                        for (method.parameters) |parameter| {
-                            try self.bindPatternIfName(&trait_env, parameter.pattern);
-                            break;
-                        }
-                    }
                     for (method.clauses) |clause| {
                         try self.resolveExpr(clause.expr, &trait_env);
                     }

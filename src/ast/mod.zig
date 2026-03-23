@@ -16,6 +16,7 @@ pub const Visibility = nodes.Visibility;
 pub const BindingKind = nodes.BindingKind;
 pub const StorageClass = nodes.StorageClass;
 pub const SpecClauseKind = nodes.SpecClauseKind;
+pub const ReceiverKind = nodes.ReceiverKind;
 pub const UnaryOp = nodes.UnaryOp;
 pub const BinaryOp = nodes.BinaryOp;
 pub const AssignmentOp = nodes.AssignmentOp;

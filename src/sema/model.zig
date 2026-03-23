@@ -40,7 +40,7 @@ pub const ImplEntry = struct {
 
 pub const TraitMethodSignature = struct {
     name: []const u8,
-    has_self: bool,
+    receiver_kind: ast.ReceiverKind,
     is_comptime: bool = false,
     extern_call_kind: ast.ExternCallKind = .none,
     errors: []const []const u8 = &.{},

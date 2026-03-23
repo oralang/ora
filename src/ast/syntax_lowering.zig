@@ -24,6 +24,7 @@ const BinaryOp = nodes.BinaryOp;
 const AssignmentOp = nodes.AssignmentOp;
 const TypeArg = nodes.TypeArg;
 const Parameter = nodes.Parameter;
+const ReceiverKind = nodes.ReceiverKind;
 const StructField = nodes.StructField;
 const BitfieldField = nodes.BitfieldField;
 const EnumVariant = nodes.EnumVariant;
@@ -82,7 +83,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing contract name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
             const template_parameters = if (template_params_node) |params_node|
-                try Lowering.lowerParameterListNode(self, params_node)
+                try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
             var members: std.ArrayList(ItemId) = .{};
@@ -159,7 +160,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing function name"));
             const visibility: Visibility = if (firstDirectTokenOfKind(node, .Pub) != null) .public else .private;
             const params_node = firstDirectChildOfKind(node, .ParameterList) orelse return Lowering.malformedItem(self, node, "missing function parameter list");
-            const parameters = try Lowering.lowerParameterListNode(self, params_node);
+            const parameters = try Lowering.lowerParameterListNode(self, params_node, allow_bare_self);
             const return_type = firstDirectTypeChild(node) orelse null;
 
             var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
@@ -210,7 +211,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing struct name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
             const template_parameters = if (template_params_node) |params_node|
-                try Lowering.lowerParameterListNode(self, params_node)
+                try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
             var fields: std.ArrayList(StructField) = .{};
@@ -239,7 +240,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing bitfield name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
             const template_parameters = if (template_params_node) |params_node|
-                try Lowering.lowerParameterListNode(self, params_node)
+                try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
             var fields: std.ArrayList(BitfieldField) = .{};
@@ -270,7 +271,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing enum name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
             const template_parameters = if (template_params_node) |params_node|
-                try Lowering.lowerParameterListNode(self, params_node)
+                try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
             var variants: std.ArrayList(EnumVariant) = .{};
@@ -322,6 +323,8 @@ pub fn mixin(Builder: type) type {
                 }
             }
 
+            Lowering.normalizeTraitMethodReceiverKinds(self, methods.items, is_extern);
+
             return Support.pushItem(self, .{ .Trait = .{
                 .range = node.range(),
                 .name = name,
@@ -359,7 +362,7 @@ pub fn mixin(Builder: type) type {
             const name = tokenText(nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedItem(self, node, "missing type alias name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
             const template_parameters = if (template_params_node) |params_node|
-                try Lowering.lowerParameterListNode(self, params_node)
+                try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
             const target_node = firstDirectTypeChild(node) orelse return Lowering.malformedItem(self, node, "missing type alias target");
@@ -387,7 +390,7 @@ pub fn mixin(Builder: type) type {
                 break :blk node;
             };
             var parameters: std.ArrayList(Parameter) = .{};
-            var has_self = false;
+            var receiver_kind: ReceiverKind = .none;
 
             var params_it = params_node.children();
             while (params_it.next()) |child| {
@@ -401,10 +404,10 @@ pub fn mixin(Builder: type) type {
                         else
                             false;
                         if (is_self) {
-                            has_self = true;
+                            receiver_kind = .value_self;
                             continue;
                         }
-                        try parameters.append(self.allocator, try Lowering.lowerParameterNode(self, param_node));
+                        try parameters.append(self.allocator, try Lowering.lowerParameterNode(self, param_node, false));
                     },
                 }
             }
@@ -438,7 +441,7 @@ pub fn mixin(Builder: type) type {
             return .{
                 .range = node.range(),
                 .name = name,
-                .has_self = has_self,
+                .receiver_kind = receiver_kind,
                 .parameters = try parameters.toOwnedSlice(self.allocator),
                 .return_type = if (firstDirectTypeChild(node)) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .trait_bounds = try trait_bounds.toOwnedSlice(self.allocator),
@@ -452,6 +455,14 @@ pub fn mixin(Builder: type) type {
                 else
                     .none,
             };
+        }
+
+        fn normalizeTraitMethodReceiverKinds(self: *Builder, methods: []TraitMethod, is_extern: bool) void {
+            _ = self;
+            if (!is_extern) return;
+            for (methods) |*method| {
+                if (method.receiver_kind == .value_self) method.receiver_kind = .extern_self;
+            }
         }
 
         fn lowerTraitBoundClauseNode(self: *Builder, node: SyntaxNode) !nodes.TraitBound {
@@ -521,7 +532,7 @@ pub fn mixin(Builder: type) type {
             };
         }
 
-        fn lowerParameterListNode(self: *Builder, node: SyntaxNode) ![]Parameter {
+        fn lowerParameterListNode(self: *Builder, node: SyntaxNode, allow_bare_self: bool) ![]Parameter {
             var params: std.ArrayList(Parameter) = .{};
             var it = node.children();
             while (it.next()) |child| {
@@ -529,22 +540,28 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |param_node| {
                         if (param_node.kind() != .Parameter) continue;
-                        try params.append(self.allocator, try Lowering.lowerParameterNode(self, param_node));
+                        try params.append(self.allocator, try Lowering.lowerParameterNode(self, param_node, allow_bare_self));
                     },
                 }
             }
             return params.toOwnedSlice(self.allocator);
         }
 
-        fn lowerParameterNode(self: *Builder, node: SyntaxNode) !Parameter {
+        fn lowerParameterNode(self: *Builder, node: SyntaxNode, allow_bare_self: bool) !Parameter {
             const name_token = nthDirectIdentifierLikeToken(node, 0);
             const pattern = try Support.pushPattern(self, .{ .Name = .{
                 .range = if (name_token) |token| token.range() else node.range(),
                 .name = if (name_token) |token| tokenText(token) else "",
             } });
             if (name_token == null) _ = try Lowering.malformedItem(self, node, "missing parameter name");
+            const is_bare_self = allow_bare_self and
+                name_token != null and
+                std.mem.eql(u8, tokenText(name_token.?), "self") and
+                firstDirectTypeChild(node) == null;
             const type_expr = if (firstDirectTypeChild(node)) |type_node|
                 try Lowering.lowerTypeNode(self, type_node)
+            else if (is_bare_self)
+                try Support.pushTypeExpr(self, .{ .Error = .{ .range = node.range() } })
             else
                 try Lowering.malformedType(self, node, "missing parameter type");
             return .{
@@ -1753,7 +1770,7 @@ pub fn mixin(Builder: type) type {
             return Support.pushItem(self, .{ .ErrorDecl = .{
                 .range = node.range(),
                 .name = tokenText(name_token),
-                .parameters = if (params_node) |list| try Lowering.lowerParameterListNode(self, list) else &.{},
+                .parameters = if (params_node) |list| try Lowering.lowerParameterListNode(self, list, false) else &.{},
             } });
         }
 
