@@ -549,7 +549,7 @@ test "scf.for induction variable is constrained by loop bounds" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "func.call summary with scf.for state effects degrades encoder" {
+test "func.call summary with single-iteration scf.for state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -599,8 +599,14 @@ test "func.call summary with scf.for state effects degrades encoder" {
     const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("loopWriter"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "loop state summary is not encoded exactly"));
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+    const expected = z3.Z3_mk_numeral(z3_ctx.ctx, "7", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "func.call summary with non-throwing ora.try_stmt state effects encodes exactly" {

@@ -3665,6 +3665,43 @@ pub const Encoder = struct {
         return false;
     }
 
+    fn tryEncodeSingleIterationScfForStateEffects(self: *Encoder, op: mlir.MlirOperation) bool {
+        if (mlir.oraOperationGetNumOperands(op) < 3) return false;
+
+        const lb_value = mlir.oraOperationGetOperand(op, 0);
+        const ub_value = mlir.oraOperationGetOperand(op, 1);
+        const step_value = mlir.oraOperationGetOperand(op, 2);
+        const lb = self.getValueConstUnsigned(lb_value, 64) orelse return false;
+        const ub = self.getValueConstUnsigned(ub_value, 64) orelse return false;
+        const step = self.getValueConstUnsigned(step_value, 64) orelse return false;
+        if (step == 0 or lb >= ub) return false;
+        if (lb + step < ub) return false;
+
+        const body = mlir.oraScfForOpGetBodyBlock(op);
+        if (mlir.oraBlockIsNull(body)) return false;
+        if (mlir.oraBlockGetNumArguments(body) != 1) return false;
+
+        const iv = mlir.oraBlockGetArgument(body, 0);
+        const iv_ast = self.encodeIntegerConstant(@intCast(lb), 256) catch return false;
+        self.bindValue(iv, iv_ast) catch return false;
+        defer _ = self.value_bindings.remove(@intFromPtr(iv.ptr));
+
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const next = mlir.oraOperationGetNextInBlock(current);
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const op_name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "scf.yield")) break;
+            self.encodeStateEffectsInOperation(current);
+            current = next;
+        }
+        return !self.isDegraded();
+    }
+
     fn extractScfIfReturnedExpr(
         self: *Encoder,
         if_op: mlir.MlirOperation,
@@ -3958,9 +3995,13 @@ pub const Encoder = struct {
                 return;
             }
 
-            if (std.mem.eql(u8, op_name, "scf.for") or
-                std.mem.eql(u8, op_name, "scf.while"))
-            {
+            if (std.mem.eql(u8, op_name, "scf.for")) {
+                if (self.tryEncodeSingleIterationScfForStateEffects(op)) return;
+                self.recordDegradation("loop state summary is not encoded exactly");
+                return;
+            }
+
+            if (std.mem.eql(u8, op_name, "scf.while")) {
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
             }
