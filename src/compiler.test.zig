@@ -640,7 +640,7 @@ test "compiler reports external proxy misuse" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "trait 'Plain' is not extern"));
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'external proxy' has no field 'missing'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'external<ERC20>' has no field 'missing'"));
 }
 
 test "compiler rejects storage write after extern call on same slot" {
@@ -865,7 +865,7 @@ test "compiler rejects error returns outside function return error set" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "return expects type 'error union', found 'ErrorB'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "return expects type '!u256 | ErrorA', found 'ErrorB'"));
 }
 
 test "compiler rejects error returns with wrong payload types" {
@@ -8342,7 +8342,7 @@ test "compiler rejects integer array literals assigned to bool arrays" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(!typecheck.diagnostics.isEmpty());
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type '[bool; 2]', found '[integer; 2]'"));
 }
 
 test "compiler rejects array length mismatches in assignments" {
@@ -8358,7 +8358,7 @@ test "compiler rejects array length mismatches in assignments" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(!typecheck.diagnostics.isEmpty());
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type 'array', found 'array'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "declaration expects type '[u256; 3]', found '[integer; 4]'"));
 }
 
 test "compiler rejects log statements with wrong arity" {

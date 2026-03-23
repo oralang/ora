@@ -507,7 +507,7 @@ const TypeChecker = struct {
                     if (!self.logIndexedFieldTypeSupported(field_type)) {
                         try self.emitRangeError(field.range, "indexed log field '{s}' has unsupported type '{s}'", .{
                             field.name,
-                            typeDisplayName(field_type),
+                            diagnosticTypeDisplayName(self, field_type),
                         });
                     }
                 }
@@ -605,8 +605,8 @@ const TypeChecker = struct {
                         if (!typesFlowCompatible(expected_type, actual_type)) {
                             try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
                                 field.name,
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
+                                diagnosticTypeDisplayName(self, expected_type),
+                                diagnosticTypeDisplayName(self, actual_type),
                             });
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                             try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
@@ -630,8 +630,8 @@ const TypeChecker = struct {
                     } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
                         try self.emitRangeError(constant.range, "constant '{s}' expects type '{s}', found '{s}'", .{
                             constant.name,
-                            typeDisplayName(expected_type),
-                            typeDisplayName(actual_type),
+                            diagnosticTypeDisplayName(self, expected_type),
+                            diagnosticTypeDisplayName(self, actual_type),
                         });
                     }
                 }
@@ -803,8 +803,8 @@ const TypeChecker = struct {
                     impl_method.name,
                     trait_name,
                     index,
-                    typeDisplayName(trait_type),
-                    typeDisplayName(impl_type),
+                    diagnosticTypeDisplayName(self, trait_type),
+                    diagnosticTypeDisplayName(self, impl_type),
                 });
                 return;
             }
@@ -824,8 +824,8 @@ const TypeChecker = struct {
             try self.emitRangeError(impl_method.range, "method '{s}' has wrong signature for trait '{s}': expected return '{s}', found '{s}'", .{
                 impl_method.name,
                 trait_name,
-                typeDisplayName(trait_return),
-                typeDisplayName(impl_return),
+                diagnosticTypeDisplayName(self, trait_return),
+                diagnosticTypeDisplayName(self, impl_return),
             });
         }
     }
@@ -1058,8 +1058,8 @@ const TypeChecker = struct {
                             const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                             if (!typesFlowCompatible(expected_type, actual_type)) {
                                 try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                    typeDisplayName(expected_type),
-                                    typeDisplayName(actual_type),
+                                    diagnosticTypeDisplayName(self, expected_type),
+                                    diagnosticTypeDisplayName(self, actual_type),
                                 });
                             } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                                 try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
@@ -1081,8 +1081,8 @@ const TypeChecker = struct {
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                         if (!typesFlowCompatible(expected_type, actual_type)) {
                             try self.emitRangeError(ret.range, "return expects type '{s}', found '{s}'", .{
-                                typeDisplayName(expected_type),
-                                typeDisplayName(actual_type),
+                                diagnosticTypeDisplayName(self, expected_type),
+                                diagnosticTypeDisplayName(self, actual_type),
                             });
                         }
                         // No region check — return values are loaded to stack,
@@ -1162,8 +1162,8 @@ const TypeChecker = struct {
                     const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                     if (!typesFlowCompatible(expected_type, actual_type)) {
                         try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                            typeDisplayName(expected_type),
-                            typeDisplayName(actual_type),
+                            diagnosticTypeDisplayName(self, expected_type),
+                            diagnosticTypeDisplayName(self, actual_type),
                         });
                     } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                         try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
@@ -1207,8 +1207,8 @@ const TypeChecker = struct {
                     if (!saw_mismatch and element_type.kind() != .unknown and next_type.kind() != .unknown and !typesAssignable(element_type, next_type) and !typesAssignable(next_type, element_type)) {
                         saw_mismatch = true;
                         try self.emitExprError(expr_id, "array literal elements have incompatible types '{s}' and '{s}'", .{
-                            typeDisplayName(element_type),
-                            typeDisplayName(next_type),
+                            diagnosticTypeDisplayName(self, element_type),
+                            diagnosticTypeDisplayName(self, next_type),
                         });
                     }
                     if (!saw_mismatch) {
@@ -1237,12 +1237,12 @@ const TypeChecker = struct {
                 const gas_type = self.expr_types[proxy.gas_expr.index()];
                 if (address_type.kind() != .unknown and address_type.kind() != .address) {
                     try self.emitExprError(expr_id, "external proxy address must be 'address', found '{s}'", .{
-                        typeDisplayName(address_type),
+                        diagnosticTypeDisplayName(self, address_type),
                     });
                 }
                 if (gas_type.kind() != .unknown and gas_type.kind() != .integer) {
                     try self.emitExprError(expr_id, "external proxy gas must be integer, found '{s}'", .{
-                        typeDisplayName(gas_type),
+                        diagnosticTypeDisplayName(self, gas_type),
                     });
                 }
                 const trait_interface = self.traitInterfaceByName(proxy.trait_name);
@@ -1274,8 +1274,8 @@ const TypeChecker = struct {
                     if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !typesAssignable(result_type, arm_type) and !typesAssignable(arm_type, result_type)) {
                         saw_mismatch = true;
                         try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            typeDisplayName(result_type),
-                            typeDisplayName(arm_type),
+                            diagnosticTypeDisplayName(self, result_type),
+                            diagnosticTypeDisplayName(self, arm_type),
                         });
                     }
                     if (!saw_mismatch) {
@@ -1288,8 +1288,8 @@ const TypeChecker = struct {
                     if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !typesAssignable(result_type, else_type) and !typesAssignable(else_type, result_type)) {
                         saw_mismatch = true;
                         try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            typeDisplayName(result_type),
-                            typeDisplayName(else_type),
+                            diagnosticTypeDisplayName(self, result_type),
+                            diagnosticTypeDisplayName(self, else_type),
                         });
                     }
                     if (!saw_mismatch) {
@@ -1337,7 +1337,7 @@ const TypeChecker = struct {
                 if (result_type.kind() == .unknown and operand_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "invalid unary operator '{s}' for type '{s}'", .{
                         unaryOpName(unary.op),
-                        typeDisplayName(operand_type),
+                        diagnosticTypeDisplayName(self, operand_type),
                     });
                 }
             },
@@ -1362,8 +1362,8 @@ const TypeChecker = struct {
                 if (final_type.kind() == .unknown and result_type.kind() == .unknown and lhs_type.kind() != .unknown and rhs_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "invalid binary operator '{s}' for types '{s}' and '{s}'", .{
                         binaryOpName(binary.op),
-                        typeDisplayName(lhs_type),
-                        typeDisplayName(rhs_type),
+                        diagnosticTypeDisplayName(self, lhs_type),
+                        diagnosticTypeDisplayName(self, rhs_type),
                     });
                 }
             },
@@ -1385,7 +1385,7 @@ const TypeChecker = struct {
                     if (callee_type.kind() != .function) {
                         const bad_type = if (callee_expr_type.kind() != .unknown) callee_expr_type else callee_type;
                         if (bad_type.kind() != .unknown) {
-                            try self.emitExprError(expr_id, "type '{s}' is not callable", .{typeDisplayName(bad_type)});
+                            try self.emitExprError(expr_id, "type '{s}' is not callable", .{diagnosticTypeDisplayName(self, bad_type)});
                         }
                     } else if (result_type.kind() == .unknown) {
                         if (self.calleeFunctionItem(call.callee)) |item_id| {
@@ -1435,7 +1435,7 @@ const TypeChecker = struct {
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
                         try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
-                            typeDisplayName(base_type),
+                            diagnosticTypeDisplayName(self, base_type),
                             field.name,
                         });
                     }
@@ -1448,7 +1448,7 @@ const TypeChecker = struct {
                 const result_type = self.indexAccessType(base_type, index.index);
                 self.expr_types[expr_id.index()] = result_type;
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
-                    try self.emitExprError(expr_id, "type '{s}' is not indexable", .{typeDisplayName(base_type)});
+                    try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
                 }
             },
             .Group => |group| {
@@ -1525,8 +1525,8 @@ const TypeChecker = struct {
             if (actual_type.kind() != .unknown and expected_type.kind() != .unknown and !typesFlowCompatible(expected_type, actual_type)) {
                 try self.emitRangeError(self.exprRange(arg), "log field '{s}' expects type '{s}', found '{s}'", .{
                     field.name,
-                    typeDisplayName(expected_type),
-                    typeDisplayName(actual_type),
+                    diagnosticTypeDisplayName(self, expected_type),
+                    diagnosticTypeDisplayName(self, actual_type),
                 });
             }
         }
@@ -1764,7 +1764,7 @@ const TypeChecker = struct {
                     !typesFlowCompatible(param_type, arg_type))
                 {
                     try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                        typeDisplayName(param_type), typeDisplayName(arg_type),
+                        diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
                     });
                 }
             }
@@ -1782,7 +1782,7 @@ const TypeChecker = struct {
                 !typesFlowCompatible(param_type, arg_type))
             {
                 try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    typeDisplayName(param_type), typeDisplayName(arg_type),
+                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
                 });
             }
         }
@@ -1798,7 +1798,7 @@ const TypeChecker = struct {
                 !typesFlowCompatible(param_type, arg_type))
             {
                 try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    typeDisplayName(param_type), typeDisplayName(arg_type),
+                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
                 });
             }
         }
@@ -1941,14 +1941,14 @@ const TypeChecker = struct {
 
             const target_name = bound_type.name() orelse {
                 try self.emitRangeError(call_range, "type '{s}' does not implement trait '{s}'", .{
-                    typeDisplayName(bound_type),
+                    diagnosticTypeDisplayName(self, bound_type),
                     bound.trait_name,
                 });
                 continue;
             };
             if (self.item_index.lookupImpl(bound.trait_name, target_name) == null) {
                 try self.emitRangeError(call_range, "type '{s}' does not implement trait '{s}'", .{
-                    typeDisplayName(bound_type),
+                    diagnosticTypeDisplayName(self, bound_type),
                     bound.trait_name,
                 });
             }
@@ -4583,7 +4583,7 @@ const TypeChecker = struct {
             const amount_text = try self.integerValueText(amount);
             try self.emitExprError(expr_id, "shift amount {s} out of range for type '{s}'", .{
                 amount_text,
-                typeDisplayName(lhs_type),
+                diagnosticTypeDisplayName(self, lhs_type),
             });
             return true;
         };
@@ -4591,7 +4591,7 @@ const TypeChecker = struct {
             const amount_text = try self.integerValueText(amount);
             try self.emitExprError(expr_id, "shift amount {s} out of range for type '{s}'", .{
                 amount_text,
-                typeDisplayName(lhs_type),
+                diagnosticTypeDisplayName(self, lhs_type),
             });
             return true;
         }
@@ -4609,7 +4609,7 @@ const TypeChecker = struct {
         const value_text = try self.integerValueText(checked_value);
         try self.emitRangeError(range, "constant value {s} does not fit in type '{s}'", .{
             value_text,
-            typeDisplayName(expected_type),
+            diagnosticTypeDisplayName(self, expected_type),
         });
         return true;
     }
@@ -4623,7 +4623,7 @@ const TypeChecker = struct {
         const value_text = try self.integerValueText(value.integer);
         try self.emitExprError(expr_id, "constant value {s} does not fit in cast target type '{s}'", .{
             value_text,
-            typeDisplayName(result_type),
+            diagnosticTypeDisplayName(self, result_type),
         });
         return true;
     }
@@ -4658,8 +4658,8 @@ const TypeChecker = struct {
                 try self.emitExprError(expr_id, "error '{s}' argument '{s}' expects type '{s}', found '{s}'", .{
                     error_decl.name,
                     parameter_name,
-                    typeDisplayName(expected_type),
-                    typeDisplayName(actual_type),
+                    diagnosticTypeDisplayName(self, expected_type),
+                    diagnosticTypeDisplayName(self, actual_type),
                 });
             }
         }
@@ -4825,7 +4825,7 @@ const TypeChecker = struct {
         if (ty.kind() == .unknown or ty.kind() == .bool) return;
         try self.emitExprError(expr_id, "{s} must be 'bool', found '{s}'", .{
             label,
-            typeDisplayName(ty),
+            diagnosticTypeDisplayName(self, ty),
         });
     }
 
@@ -5040,6 +5040,87 @@ fn binaryOpName(op: ast.BinaryOp) []const u8 {
         .shr => ">>",
         .wrapping_shr => ">>%",
     };
+}
+
+fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
+    switch (ty) {
+        .unknown => try buffer.appendSlice(allocator, "unknown"),
+        .void => try buffer.appendSlice(allocator, "void"),
+        .bool => try buffer.appendSlice(allocator, "bool"),
+        .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "integer"),
+        .string => try buffer.appendSlice(allocator, "string"),
+        .address => try buffer.appendSlice(allocator, "address"),
+        .bytes => try buffer.appendSlice(allocator, "bytes"),
+        .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
+        .named => |named| try buffer.appendSlice(allocator, named.name),
+        .function => |function| try buffer.appendSlice(allocator, function.name orelse "function"),
+        .contract => |named| try buffer.appendSlice(allocator, named.name),
+        .struct_ => |named| try buffer.appendSlice(allocator, named.name),
+        .bitfield => |named| try buffer.appendSlice(allocator, named.name),
+        .enum_ => |named| try buffer.appendSlice(allocator, named.name),
+        .anonymous_struct => |struct_type| {
+            try buffer.appendSlice(allocator, "struct { ");
+            for (struct_type.fields, 0..) |field, index| {
+                if (index != 0) try buffer.appendSlice(allocator, ", ");
+                try buffer.writer(allocator).print("{s}: ", .{field.name});
+                try appendDiagnosticTypeDisplayName(allocator, buffer, field.ty);
+            }
+            try buffer.appendSlice(allocator, " }");
+        },
+        .tuple => |elements| {
+            try buffer.append(allocator, '(');
+            for (elements, 0..) |element, index| {
+                if (index != 0) try buffer.appendSlice(allocator, ", ");
+                try appendDiagnosticTypeDisplayName(allocator, buffer, element);
+            }
+            try buffer.append(allocator, ')');
+        },
+        .array => |array| {
+            try buffer.append(allocator, '[');
+            try appendDiagnosticTypeDisplayName(allocator, buffer, array.element_type.*);
+            if (array.len) |len|
+                try buffer.writer(allocator).print("; {d}", .{len});
+            try buffer.append(allocator, ']');
+        },
+        .slice => |slice| {
+            try buffer.appendSlice(allocator, "[]");
+            try appendDiagnosticTypeDisplayName(allocator, buffer, slice.element_type.*);
+        },
+        .map => |map| {
+            try buffer.appendSlice(allocator, "map<");
+            if (map.key_type) |key| try appendDiagnosticTypeDisplayName(allocator, buffer, key.*) else try buffer.appendSlice(allocator, "?");
+            try buffer.appendSlice(allocator, ", ");
+            if (map.value_type) |value| try appendDiagnosticTypeDisplayName(allocator, buffer, value.*) else try buffer.appendSlice(allocator, "?");
+            try buffer.append(allocator, '>');
+        },
+        .error_union => |error_union| {
+            try buffer.append(allocator, '!');
+            try appendDiagnosticTypeDisplayName(allocator, buffer, error_union.payload_type.*);
+            for (error_union.error_types) |error_type| {
+                try buffer.appendSlice(allocator, " | ");
+                try appendDiagnosticTypeDisplayName(allocator, buffer, error_type);
+            }
+        },
+        .refinement => |refinement| {
+            try buffer.appendSlice(allocator, refinement.name);
+            try buffer.append(allocator, '<');
+            try appendDiagnosticTypeDisplayName(allocator, buffer, refinement.base_type.*);
+            for (refinement.args[1..]) |arg| {
+                try buffer.appendSlice(allocator, ", ");
+                switch (arg) {
+                    .Integer => |integer| try buffer.appendSlice(allocator, integer.text),
+                    .Type => try buffer.appendSlice(allocator, "type"),
+                }
+            }
+            try buffer.append(allocator, '>');
+        },
+    }
+}
+
+fn diagnosticTypeDisplayName(self: *TypeChecker, ty: Type) []const u8 {
+    var buffer: std.ArrayList(u8) = .{};
+    appendDiagnosticTypeDisplayName(self.arena, &buffer, ty) catch return typeDisplayName(ty);
+    return buffer.toOwnedSlice(self.arena) catch typeDisplayName(ty);
 }
 
 fn typeDisplayName(ty: Type) []const u8 {
