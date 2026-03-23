@@ -1,4 +1,6 @@
 // Simple storage counter app
+comptime const std = @import("std");
+
 contract Counter {
     storage var counter: u256 = 0;
 
@@ -6,7 +8,9 @@ contract Counter {
         counter = 0;
     }
 
-    pub fn increment() {
+    pub fn increment()
+        requires(counter < std.constants.U256_MAX)
+    {
         counter += 1;
     }
 
