@@ -5769,6 +5769,22 @@ pub const Encoder = struct {
         return mlir.mlirValueEqual(sub_lhs, after_arg) and rhs_const != null and rhs_const.? != 0;
     }
 
+    fn allScfWhileResultsEncodeExactly(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) bool {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(while_op));
+        var result_idx: u32 = 0;
+        while (result_idx < num_results) : (result_idx += 1) {
+            const exact =
+                (self.tryExtractZeroIterationScfWhileResult(while_op, result_idx, mode) catch null) orelse
+                (self.tryExtractCanonicalUnsignedScfWhileResult(while_op, result_idx, mode) catch null) orelse
+                (self.tryExtractCanonicalSignedScfWhileResult(while_op, result_idx, mode) catch null) orelse
+                (self.tryExtractCanonicalIncrementScfWhileResult(while_op, result_idx, mode) catch null) orelse
+                (self.tryExtractCanonicalDecrementScfWhileResult(while_op, result_idx, mode) catch null) orelse
+                (self.tryExtractFiniteScfWhileResult(while_op, result_idx, mode) catch null);
+            if (exact == null) return false;
+        }
+        return true;
+    }
+
     fn findScfYieldOp(self: *Encoder, block: mlir.MlirBlock) ?mlir.MlirOperation {
         _ = self;
         if (mlir.oraBlockIsNull(block)) return null;
@@ -6682,9 +6698,7 @@ pub const Encoder = struct {
                 };
                 if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
                 if (!loop_writes_state) {
-                    if (self.isCanonicalIncrementScfWhile(op) or self.isCanonicalDecrementScfWhile(op)) return;
-                    if ((self.tryExtractCanonicalUnsignedScfWhileResult(op, 0, .Current) catch null) != null) return;
-                    if ((self.tryExtractCanonicalSignedScfWhileResult(op, 0, .Current) catch null) != null) return;
+                    if (self.allScfWhileResultsEncodeExactly(op, .Current)) return;
                 }
                 if (self.tryEncodeFiniteScfWhileStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
