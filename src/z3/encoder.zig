@@ -4942,7 +4942,8 @@ pub const Encoder = struct {
         if (!mlir.oraValueIsAOpResult(condition_value)) return null;
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
-        if ((try self.getCmpPredicate(cmp_op)) != 6) return null; // ult
+        const predicate = try self.getCmpPredicate(cmp_op);
+        if (predicate != 2 and predicate != 6) return null; // slt / ult
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -5013,7 +5014,8 @@ pub const Encoder = struct {
         if (!mlir.oraValueIsAOpResult(condition_value)) return null;
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
-        if ((try self.getCmpPredicate(cmp_op)) != 8) return null; // ugt
+        const predicate = try self.getCmpPredicate(cmp_op);
+        if (predicate != 4 and predicate != 8) return null; // sgt / ugt
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -5068,7 +5070,8 @@ pub const Encoder = struct {
         if (!mlir.oraValueIsAOpResult(condition_value)) return false;
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return false;
-        if ((self.getCmpPredicate(cmp_op) catch return false) != 6) return false; // ult
+        const predicate = self.getCmpPredicate(cmp_op) catch return false;
+        if (predicate != 2 and predicate != 6) return false; // slt / ult
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return false;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -5110,7 +5113,8 @@ pub const Encoder = struct {
         if (!mlir.oraValueIsAOpResult(condition_value)) return false;
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return false;
-        if ((self.getCmpPredicate(cmp_op) catch return false) != 8) return false; // ugt
+        const predicate = self.getCmpPredicate(cmp_op) catch return false;
+        if (predicate != 4 and predicate != 8) return false; // sgt / ugt
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return false;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
