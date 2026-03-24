@@ -25,6 +25,7 @@ const ManagedArrayList = std.array_list.Managed;
 pub const AnnotationKind = enum {
     Requires, // Function precondition
     Ensures, // Function postcondition
+    Guard, // Runtime-enforced precondition / guard clause
     LoopInvariant, // Loop invariant
     ContractInvariant, // Contract-level invariant (future)
     RefinementGuard, // Runtime refinement guard
@@ -1233,8 +1234,16 @@ pub const VerificationPass = struct {
                     tagged_assert = true;
                 }
                 if (!tagged_assert and self.verify_mode == .Full) {
+                    const verification_type_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.verification_type", 21));
+                    const obligation_kind: AnnotationKind = if (!mlir.oraAttributeIsNull(verification_type_attr)) blk: {
+                        const ref = mlir.oraStringAttrGetValue(verification_type_attr);
+                        if (ref.data != null and ref.length > 0 and std.mem.eql(u8, ref.data[0..ref.length], "guard")) {
+                            break :blk .Guard;
+                        }
+                        break :blk .ContractInvariant;
+                    } else .ContractInvariant;
                     // In full mode, treat untagged assert ops as proof obligations.
-                    _ = try self.recordEncodedAnnotation(op, .ContractInvariant, condition_value, null);
+                    _ = try self.recordEncodedAnnotation(op, obligation_kind, condition_value, null);
                 }
             }
         }
@@ -3876,7 +3885,7 @@ fn isAssumptionKind(kind: AnnotationKind) bool {
 
 fn isObligationKind(kind: AnnotationKind) bool {
     return switch (kind) {
-        .Ensures, .LoopInvariant, .ContractInvariant => true,
+        .Guard, .Ensures, .LoopInvariant, .ContractInvariant => true,
         else => false,
     };
 }
@@ -3889,6 +3898,7 @@ fn isGlobalContractInvariantAnnotation(ann: EncodedAnnotation) bool {
 
 fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
     return switch (kind) {
+        .Guard, .Requires => .PreconditionViolation,
         .Ensures => .PostconditionViolation,
         .LoopInvariant, .ContractInvariant => .InvariantViolation,
         else => .Unknown,
@@ -3897,6 +3907,7 @@ fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
 
 fn obligationKindLabel(kind: AnnotationKind) []const u8 {
     return switch (kind) {
+        .Guard => "guard",
         .Ensures => "ensures",
         .LoopInvariant => "invariant",
         .ContractInvariant => "contract invariant",
@@ -4182,6 +4193,8 @@ fn classifyQueryFailure(query: PreparedQuery, run: ReportQueryRun) FailureClassi
             if (arithmetic.subtype != null) break :blk arithmetic;
             break :blk .{
                 .subtype = switch (query.obligation_kind orelse .ContractInvariant) {
+                    .Guard => "GuardViolation",
+                    .Requires => "PreconditionViolation",
                     .Ensures => "PostconditionViolation",
                     .LoopInvariant => "LoopInvariantViolation",
                     .ContractInvariant => "ContractInvariantViolation",
@@ -5185,6 +5198,41 @@ fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildGuardOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_assert_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const cond_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, cond_attr);
+    const cond = mlir.oraOperationGetResult(cond_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("guard failed: cond"));
+    mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_type"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard")));
+    mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_clause")));
+    const assume_op = mlir.oraAssumeOpCreate(mlir_ctx, loc, cond);
+    mlir.oraOperationSetAttributeByName(assume_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_clause")));
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, cond_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assume_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildCheckedMulOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -6055,6 +6103,38 @@ test "full verify mode treats untagged ora.assert as obligation" {
         }
     }
     try testing.expect(saw_contract_obligation);
+}
+
+test "full verify mode classifies guard-tagged ora.assert as guard obligation" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGuardOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_guard_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind == .Obligation and q.obligation_kind == .Guard) {
+            saw_guard_obligation = true;
+            break;
+        }
+    }
+    try testing.expect(saw_guard_obligation);
 }
 
 test "full verify mode simplifies checked multiply assert obligations before SMT-LIB emission" {

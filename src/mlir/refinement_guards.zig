@@ -131,6 +131,8 @@ fn handleVerificationOp(
     if (std.mem.eql(u8, op_name, "ora.assert")) {
         const context_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_context"));
         const context = getStringAttr(context_attr);
+        const verification_type_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_type"));
+        const verification_type = getStringAttr(verification_type_attr);
         const is_ghost = context != null and std.mem.eql(u8, context.?, "ghost_assertion");
         if (!is_ghost) {
             const condition = c.oraOperationGetOperand(op, 0);
@@ -139,6 +141,12 @@ fn handleVerificationOp(
             const loc = c.oraOperationGetLocation(op);
             const assert_op = c.oraCfAssertOpCreate(ctx, loc, condition, h.strRef(message));
             if (assert_op.ptr != null) {
+                if (context) |ctx_str| {
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.namedStringAttr(ctx, "ora.verification_context", ctx_str).attribute);
+                }
+                if (verification_type) |type_str| {
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.namedStringAttr(ctx, "ora.verification_type", type_str).attribute);
+                }
                 h.insertOpBefore(block, assert_op, op);
             }
         }

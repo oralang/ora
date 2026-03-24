@@ -127,6 +127,8 @@ fn handleVerificationOp(
     if (std.mem.eql(u8, op_name, "ora.assert")) {
         const context_attr = mlir.oraOperationGetAttributeByName(op, strRef("ora.verification_context"));
         const context = getStringAttr(context_attr);
+        const verification_type_attr = mlir.oraOperationGetAttributeByName(op, strRef("ora.verification_type"));
+        const verification_type = getStringAttr(verification_type_attr);
         const is_ghost = context != null and std.mem.eql(u8, context.?, "ghost_assertion");
         if (!is_ghost) {
             const condition = mlir.oraOperationGetOperand(op, 0);
@@ -134,7 +136,15 @@ fn handleVerificationOp(
             const message = getStringAttr(message_attr) orelse "Assertion failed";
             const loc = mlir.oraOperationGetLocation(op);
             const assert_op = mlir.oraCfAssertOpCreate(ctx, loc, condition, strRef(message));
-            if (assert_op.ptr != null) insertOpBefore(block, assert_op, op);
+            if (assert_op.ptr != null) {
+                if (context) |ctx_str| {
+                    mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_context"), mlir.oraStringAttrCreate(ctx, strRef(ctx_str)));
+                }
+                if (verification_type) |type_str| {
+                    mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_type"), mlir.oraStringAttrCreate(ctx, strRef(type_str)));
+                }
+                insertOpBefore(block, assert_op, op);
+            }
         }
         if (debug_enabled) std.debug.print("[verification-cleanup] removed assert ({s})\n", .{context orelse "unknown"});
         mlir.oraOperationErase(op);

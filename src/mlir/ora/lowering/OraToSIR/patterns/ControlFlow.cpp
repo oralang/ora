@@ -4425,7 +4425,9 @@ LogicalResult ConvertCfCondBrOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Lower cf.assert -> sir.cond_br + sir.invalid
+// Lower cf.assert -> sir.cond_br + sir.invalid / sir.revert
+// Guard-tagged asserts are expected user-facing runtime failures and should
+// revert cleanly. Untagged asserts remain invalid/panic-like.
 // -----------------------------------------------------------------------------
 LogicalResult ConvertCfAssertOp::matchAndRewrite(
     mlir::cf::AssertOp op,
@@ -4440,7 +4442,23 @@ LogicalResult ConvertCfAssertOp::matchAndRewrite(
     auto failBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
 
     rewriter.setInsertionPointToStart(failBlock);
-    rewriter.create<sir::InvalidOp>(loc);
+    auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
+    if (verificationType && verificationType.getValue() == "guard")
+    {
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+        auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+        Value zeroU256 = rewriter.create<sir::ConstOp>(loc, u256Type,
+            mlir::IntegerAttr::get(ui64Type, 0));
+        Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
+        Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256Type,
+            mlir::IntegerAttr::get(ui64Type, 0));
+        rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
+    }
+    else
+    {
+        rewriter.create<sir::InvalidOp>(loc);
+    }
 
     rewriter.setInsertionPointToEnd(parentBlock);
     Value cond = toCondU256(rewriter, loc, adaptor.getArg());

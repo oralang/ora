@@ -2986,6 +2986,31 @@ test "compiler does not duplicate guard lowering when function already starts wi
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
+test "compiler lowers guard clauses to runtime revert through OraToSIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(amount: u256) -> bool
+        \\        guard amount < 10;
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
+}
+
 test "compiler HIR output runs through Z3 verification" {
     const source_text =
         \\pub fn keep(next: u256) -> u256
