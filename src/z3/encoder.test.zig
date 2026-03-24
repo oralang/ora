@@ -10076,6 +10076,247 @@ test "known pure callee canonical signed multi-result scf.while return encodes d
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct canonical signed scf.while with nonzero control index encodes derived result exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_sum_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const init_ctrl_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const sum_delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const ctrl_delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_sum_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_sum_attr);
+    const init_ctrl_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_ctrl_attr);
+    const sum_delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, sum_delta_attr);
+    const ctrl_delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, ctrl_delta_attr);
+    const bound_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("signedControlSecondBound"), i256_ty);
+
+    const init_vals = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(init_sum_op, 0),
+        mlir.oraOperationGetResult(init_ctrl_op, 0),
+    };
+    const result_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+
+    const before_ctrl = mlir.oraBlockGetArgument(before_block, 1);
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 2, before_ctrl, mlir.oraOperationGetResult(bound_op, 0)); // slt
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{
+            mlir.oraBlockGetArgument(before_block, 0),
+            before_ctrl,
+        },
+        2,
+    ));
+
+    const after_sum = mlir.oraBlockGetArgument(after_block, 0);
+    const after_ctrl = mlir.oraBlockGetArgument(after_block, 1);
+    const next_sum = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_sum, mlir.oraOperationGetResult(sum_delta_op, 0));
+    const next_ctrl = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_ctrl, mlir.oraOperationGetResult(ctrl_delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_sum);
+    mlir.oraBlockAppendOwnedOperation(after_block, next_ctrl);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{
+            mlir.oraOperationGetResult(next_sum, 0),
+            mlir.oraOperationGetResult(next_ctrl, 0),
+        },
+        2,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    const init_sum_ast = try encoder.encodeOperation(init_sum_op);
+    const init_ctrl_ast = try encoder.encodeOperation(init_ctrl_op);
+    const sum_delta_ast = try encoder.encodeOperation(sum_delta_op);
+    const ctrl_delta_ast = try encoder.encodeOperation(ctrl_delta_op);
+    const bound_ast = try encoder.encodeOperation(bound_op);
+    const zero = try encoder.encodeIntegerConstant(0, 256);
+    const one = try encoder.encodeIntegerConstant(1, 256);
+    const bound_le_init = z3.Z3_mk_bvsle(z3_ctx.ctx, bound_ast, init_ctrl_ast);
+    const distance = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        bound_le_init,
+        zero,
+        z3.Z3_mk_bv_sub(z3_ctx.ctx, bound_ast, init_ctrl_ast),
+    );
+    const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
+    const step_count = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        distance_is_zero,
+        zero,
+        z3.Z3_mk_bv_add(
+            z3_ctx.ctx,
+            z3.Z3_mk_bv_udiv(z3_ctx.ctx, z3.Z3_mk_bv_sub(z3_ctx.ctx, distance, one), ctrl_delta_ast),
+            one,
+        ),
+    );
+    const total_delta = try encoder.encodeArithmeticOp(.Mul, step_count, sum_delta_ast);
+    const expected = try encoder.encodeArithmeticOp(.Add, init_sum_ast, total_delta);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "known pure callee canonical signed scf.while with nonzero control index return encodes derived result exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("signedWhileControlSecondReturn"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{i256_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const init_sum_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const init_ctrl_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const sum_delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const ctrl_delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_sum_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_sum_attr);
+    const init_ctrl_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_ctrl_attr);
+    const sum_delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, sum_delta_attr);
+    const ctrl_delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, ctrl_delta_attr);
+    mlir.oraBlockAppendOwnedOperation(body, init_sum_op);
+    mlir.oraBlockAppendOwnedOperation(body, init_ctrl_op);
+    mlir.oraBlockAppendOwnedOperation(body, sum_delta_op);
+    mlir.oraBlockAppendOwnedOperation(body, ctrl_delta_op);
+
+    const bound = mlir.oraBlockGetArgument(body, 0);
+    const init_vals = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(init_sum_op, 0),
+        mlir.oraOperationGetResult(init_ctrl_op, 0),
+    };
+    const result_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+
+    const before_ctrl = mlir.oraBlockGetArgument(before_block, 1);
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 2, before_ctrl, bound); // slt
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{
+            mlir.oraBlockGetArgument(before_block, 0),
+            before_ctrl,
+        },
+        2,
+    ));
+
+    const after_sum = mlir.oraBlockGetArgument(after_block, 0);
+    const after_ctrl = mlir.oraBlockGetArgument(after_block, 1);
+    const next_sum = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_sum, mlir.oraOperationGetResult(sum_delta_op, 0));
+    const next_ctrl = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_ctrl, mlir.oraOperationGetResult(ctrl_delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_sum);
+    mlir.oraBlockAppendOwnedOperation(after_block, next_ctrl);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{
+            mlir.oraOperationGetResult(next_sum, 0),
+            mlir.oraOperationGetResult(next_ctrl, 0),
+        },
+        2,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(while_op, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const caller_bound = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("callerSignedControlSecondBound"), i256_ty);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("signedWhileControlSecondReturn"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(caller_bound, 0)},
+        1,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+    const encoded = try encoder.encodeOperation(call);
+    try testing.expect(!encoder.isDegraded());
+
+    const init_sum_ast = try encoder.encodeOperation(init_sum_op);
+    const init_ctrl_ast = try encoder.encodeOperation(init_ctrl_op);
+    const sum_delta_ast = try encoder.encodeOperation(sum_delta_op);
+    const ctrl_delta_ast = try encoder.encodeOperation(ctrl_delta_op);
+    const bound_ast = try encoder.encodeOperation(caller_bound);
+    const zero = try encoder.encodeIntegerConstant(0, 256);
+    const one = try encoder.encodeIntegerConstant(1, 256);
+    const bound_le_init = z3.Z3_mk_bvsle(z3_ctx.ctx, bound_ast, init_ctrl_ast);
+    const distance = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        bound_le_init,
+        zero,
+        z3.Z3_mk_bv_sub(z3_ctx.ctx, bound_ast, init_ctrl_ast),
+    );
+    const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
+    const step_count = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        distance_is_zero,
+        zero,
+        z3.Z3_mk_bv_add(
+            z3_ctx.ctx,
+            z3.Z3_mk_bv_udiv(z3_ctx.ctx, z3.Z3_mk_bv_sub(z3_ctx.ctx, distance, one), ctrl_delta_ast),
+            one,
+        ),
+    );
+    const total_delta = try encoder.encodeArithmeticOp(.Mul, step_count, sum_delta_ast);
+    const expected = try encoder.encodeArithmeticOp(.Add, init_sum_ast, total_delta);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "quantified operation encodes to z3 quantifier" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
