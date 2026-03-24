@@ -53,6 +53,13 @@ const sidebars: SidebarsConfig = {
             'book/full-vault',
           ],
         },
+        {
+          type: 'category',
+          label: 'Appendices',
+          items: [
+            'book/ora-vs-solidity',
+          ],
+        },
       ],
     },
     'getting-started',
