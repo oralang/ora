@@ -16,7 +16,7 @@ const Context = @import("context.zig").Context;
 const mlir_helpers = @import("mlir_helpers.zig");
 
 const finite_scf_for_unroll_limit: usize = 8;
-const finite_scf_while_unroll_limit: usize = 8;
+const finite_scf_while_unroll_limit: usize = 16;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
@@ -4882,18 +4882,20 @@ pub const Encoder = struct {
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
             const condition_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
-            if (self.astEquivalent(condition_ast, self.encodeBoolConstant(false))) {
-                const num_operands = mlir.oraOperationGetNumOperands(condition_op);
-                const value_operand_index: u32 = result_index + 1;
-                if (value_operand_index >= num_operands) {
+            if (self.astSimplifiesToBool(condition_ast)) |condition_const| {
+                if (!condition_const) {
+                    const num_operands = mlir.oraOperationGetNumOperands(condition_op);
+                    const value_operand_index: u32 = result_index + 1;
+                    if (value_operand_index >= num_operands) {
+                        self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                        return null;
+                    }
+                    const result = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, value_operand_index), mode);
                     self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
-                    return null;
+                    return result;
                 }
-                const result = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, value_operand_index), mode);
-                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
-                return result;
             }
-            if (!self.astEquivalent(condition_ast, self.encodeBoolConstant(true))) {
+            if ((self.astSimplifiesToBool(condition_ast) orelse return null) != true) {
                 self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
                 return null;
             }
@@ -4931,11 +4933,13 @@ pub const Encoder = struct {
                 self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
                 return false;
             };
-            if (self.astEquivalent(condition_ast, self.encodeBoolConstant(false))) {
-                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
-                return true;
+            if (self.astSimplifiesToBool(condition_ast)) |condition_const| {
+                if (!condition_const) {
+                    self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                    return true;
+                }
             }
-            if (!self.astEquivalent(condition_ast, self.encodeBoolConstant(true))) {
+            if ((self.astSimplifiesToBool(condition_ast) orelse return false) != true) {
                 self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
                 return false;
             }

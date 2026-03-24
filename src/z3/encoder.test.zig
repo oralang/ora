@@ -2207,6 +2207,73 @@ test "direct finite five-iteration scf.while result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct finite ten-iteration scf.while result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const ten_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const ten_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, ten_attr);
+
+    const init_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(zero_op, 0)};
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+
+    const before_count = mlir.oraBlockGetArgument(before_block, 0);
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, before_count, mlir.oraOperationGetResult(ten_op, 0)); // ult
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_count},
+        1,
+    ));
+
+    const after_count = mlir.oraBlockGetArgument(after_block, 0);
+    const next_count = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_count, mlir.oraOperationGetResult(one_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_count);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_count, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeOperation(zero_op);
+    _ = try encoder.encodeOperation(one_op);
+    _ = try encoder.encodeOperation(ten_op);
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    const expected = try encoder.encodeIntegerConstant(10, 256);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+
 test "direct non-throwing ora.try_stmt result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
