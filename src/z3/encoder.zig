@@ -2235,6 +2235,15 @@ pub const Encoder = struct {
                 return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
             }
+            if (try self.tryExtractTryRegionCatchPredicate(mlir_op, mode)) |catch_pred| {
+                if (try self.extractRegionYieldValue(mlir_op, 0, result_index)) |yield_value| {
+                    if (try self.trySummarizeTryValue(yield_value, mode)) |summary| {
+                        if (try self.extractRegionYield(mlir_op, 1, result_index, mode)) |catch_expr| {
+                            return try self.encodeControlFlow("scf.if", catch_pred, catch_expr, summary.ok_expr);
+                        }
+                    }
+                }
+            }
             if (try self.tryExtractDirectErrorUnwrapTryStmtResult(mlir_op, result_index, mode)) |encoded| {
                 return encoded;
             }
@@ -3102,6 +3111,15 @@ pub const Encoder = struct {
             if (!self.tryStmtMayEnterCatch(mlir_op)) {
                 return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+            }
+            if (try self.tryExtractTryRegionCatchPredicate(mlir_op, mode)) |catch_pred| {
+                if (try self.extractRegionYieldValue(mlir_op, 0, 0)) |yield_value| {
+                    if (try self.trySummarizeTryValue(yield_value, mode)) |summary| {
+                        if (try self.extractRegionYield(mlir_op, 1, 0, mode)) |catch_expr| {
+                            return try self.encodeControlFlow("scf.if", catch_pred, catch_expr, summary.ok_expr);
+                        }
+                    }
+                }
             }
             return (try self.tryExtractEquivalentTryStmtResult(mlir_op, 0, mode)) orelse
                 try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
@@ -5003,6 +5021,163 @@ pub const Encoder = struct {
         ok_expr: z3.Z3_ast,
     };
 
+    fn trySummarizeTryValue(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?DirectTryUnwrapInfo {
+        if (!mlir.oraValueIsAOpResult(value)) {
+            return .{
+                .is_err = self.encodeBoolConstant(false),
+                .ok_expr = try self.encodeValueWithMode(value, mode),
+            };
+        }
+
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        if (self.operationNameEq(owner, "ora.error.unwrap")) {
+            const unwrap_operand = mlir.oraOperationGetOperand(owner, 0);
+            const operand_type = mlir.oraValueGetType(unwrap_operand);
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
+            if (mlir.oraTypeIsNull(success_type)) return null;
+
+            const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
+            const eu = try self.getErrorUnionSort(operand_type, success_type);
+            const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{operand_expr});
+            const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
+            return .{ .is_err = is_err, .ok_expr = ok_expr };
+        }
+
+        if (self.operationNameEq(owner, "scf.if")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            if (mlir.oraOperationGetNumOperands(owner) < 1) return null;
+
+            const condition_value = mlir.oraOperationGetOperand(owner, 0);
+            const condition = try self.encodeValueWithMode(condition_value, mode);
+            const then_value = try self.extractRegionYieldValue(owner, 0, result_index) orelse return null;
+            const else_value = try self.extractRegionYieldValue(owner, 1, result_index) orelse return null;
+            const then_summary = (try self.trySummarizeTryValue(then_value, mode)) orelse return null;
+            const else_summary = (try self.trySummarizeTryValue(else_value, mode)) orelse return null;
+
+            const catch_pred = self.encodeOr(&.{
+                self.encodeAnd(&.{ condition, then_summary.is_err }),
+                self.encodeAnd(&.{ self.encodeNot(condition), else_summary.is_err }),
+            });
+            const ok_expr = self.encodeIte(condition, then_summary.ok_expr, else_summary.ok_expr);
+            return .{ .is_err = catch_pred, .ok_expr = ok_expr };
+        }
+
+        return .{
+            .is_err = self.encodeBoolConstant(false),
+            .ok_expr = try self.encodeValueWithMode(value, mode),
+        };
+    }
+
+    fn tryExtractCatchPredicateFromBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        if (mlir.oraBlockIsNull(block)) return continuation;
+        return try self.tryExtractCatchPredicateFromSequence(
+            mlir.oraBlockGetFirstOperation(block),
+            mode,
+            continuation,
+        );
+    }
+
+    fn tryExtractCatchPredicateFromSequence(
+        self: *Encoder,
+        start_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        if (mlir.oraOperationIsNull(start_op)) return continuation;
+
+        const name_ref = self.getOperationName(start_op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        const next = mlir.oraOperationGetNextInBlock(start_op);
+
+        if (std.mem.eql(u8, name, "ora.yield") or std.mem.eql(u8, name, "scf.yield")) {
+            return continuation;
+        }
+
+        if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
+            return self.encodeBoolConstant(false);
+        }
+
+        if (std.mem.eql(u8, name, "ora.error.unwrap")) {
+            if (mlir.oraOperationGetNumOperands(start_op) < 1) return null;
+            const operand = mlir.oraOperationGetOperand(start_op, 0);
+            const operand_type = mlir.oraValueGetType(operand);
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
+            if (mlir.oraTypeIsNull(success_type)) return null;
+
+            const operand_expr = try self.encodeValueWithMode(operand, mode);
+            const eu = try self.getErrorUnionSort(operand_type, success_type);
+            const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{operand_expr});
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
+            return self.encodeOr(&.{ is_err, self.encodeAnd(&.{ self.encodeNot(is_err), rest }) });
+        }
+
+        if (std.mem.eql(u8, name, "scf.if")) {
+            if (mlir.oraOperationGetNumOperands(start_op) < 1) return null;
+            const condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(start_op, 0), mode);
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
+            const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetThenBlock(start_op), mode, rest)) orelse return null;
+            const else_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetElseBlock(start_op), mode, rest)) orelse return null;
+            return self.encodeOr(&.{
+                self.encodeAnd(&.{ condition, then_pred }),
+                self.encodeAnd(&.{ self.encodeNot(condition), else_pred }),
+            });
+        }
+
+        if (std.mem.eql(u8, name, "scf.execute_region")) {
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
+            const region = mlir.oraOperationGetRegion(start_op, 0);
+            if (mlir.oraRegionIsNull(region)) return null;
+            const block = mlir.oraRegionGetFirstBlock(region);
+            return try self.tryExtractCatchPredicateFromBlock(block, mode, rest);
+        }
+
+        if (std.mem.eql(u8, name, "ora.sstore") or
+            std.mem.eql(u8, name, "ora.map_store") or
+            std.mem.eql(u8, name, "ora.tstore") or
+            std.mem.eql(u8, name, "memref.store"))
+        {
+            return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+        }
+
+        if (std.mem.eql(u8, name, "scf.for") or
+            std.mem.eql(u8, name, "scf.while") or
+            std.mem.eql(u8, name, "ora.switch") or
+            std.mem.eql(u8, name, "ora.conditional_return") or
+            std.mem.eql(u8, name, "ora.try_stmt"))
+        {
+            return null;
+        }
+
+        return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+    }
+
+    fn tryExtractTryRegionCatchPredicate(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        if (mlir.oraRegionIsNull(try_region)) return null;
+        const try_block = mlir.oraRegionGetFirstBlock(try_region);
+        return try self.tryExtractCatchPredicateFromBlock(try_block, mode, self.encodeBoolConstant(false));
+    }
+
     fn tryGetDirectErrorUnwrapPredicateFromBlock(
         self: *Encoder,
         block: mlir.MlirBlock,
@@ -5156,6 +5331,38 @@ pub const Encoder = struct {
         const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
         const info = (try self.tryGetDirectErrorUnwrapTryInfo(try_stmt, result_index, mode)) orelse return null;
         return try self.encodeControlFlow("scf.if", info.is_err, catch_expr, info.ok_expr);
+    }
+
+    fn extractRegionYieldValue(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        region_index: u32,
+        result_index: u32,
+    ) EncodeError!?mlir.MlirValue {
+        _ = self;
+        const region = mlir.oraOperationGetRegion(mlir_op, region_index);
+        if (mlir.oraRegionIsNull(region)) return null;
+        const block = mlir.oraRegionGetFirstBlock(region);
+        if (mlir.oraBlockIsNull(block)) return null;
+
+        var current = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, name, "scf.yield") or std.mem.eql(u8, name, "ora.yield")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (num_operands > result_index) {
+                    return mlir.oraOperationGetOperand(current, result_index);
+                }
+                return null;
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
     }
 
     fn extractScfIfReturnedExpr(
@@ -5639,6 +5846,18 @@ pub const Encoder = struct {
                     self.recordDegradation("failed to capture ora.try_stmt catch-state summary");
                     return;
                 };
+
+                const branch_condition = self.tryExtractTryRegionCatchPredicate(op, .Current) catch {
+                    self.recordDegradation("failed to extract branch-conditioned ora.try_stmt catch predicate");
+                    return;
+                };
+                if (branch_condition) |catch_pred| {
+                    self.mergeStateSnapshotsIf(catch_pred, &base_state, &catch_state, &try_state) catch {
+                        self.recordDegradation("failed to merge branch-conditioned ora.try_stmt state summary");
+                        return;
+                    };
+                    return;
+                }
 
                 if (self.stateSnapshotsEquivalent(&try_state, &catch_state)) {
                     self.restoreStateSnapshot(&try_state) catch {
