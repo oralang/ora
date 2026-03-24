@@ -891,6 +891,10 @@ pub const Encoder = struct {
         try self.value_bindings.put(value_id, ast);
     }
 
+    fn unbindValue(self: *Encoder, value: mlir.MlirValue) void {
+        _ = self.value_bindings.remove(@intFromPtr(value.ptr));
+    }
+
     pub fn encodeValueOld(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
         return self.encodeValueWithMode(mlir_value, .Old);
     }
@@ -6381,14 +6385,123 @@ pub const Encoder = struct {
             return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
         }
 
-        if (std.mem.eql(u8, name, "scf.for") or
-            std.mem.eql(u8, name, "scf.while") or
-            std.mem.eql(u8, name, "ora.try_stmt"))
-        {
+        if (std.mem.eql(u8, name, "scf.for")) {
+            if (try self.tryExtractSingleIterationScfForCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
+            return null;
+        }
+
+        if (std.mem.eql(u8, name, "scf.while")) {
+            if (try self.tryExtractSingleIterationScfWhileCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
+            return null;
+        }
+
+        if (std.mem.eql(u8, name, "ora.try_stmt")) {
             return null;
         }
 
         return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+    }
+
+    fn tryExtractSingleIterationScfForCatchPredicate(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 3) return null;
+
+        const lb_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 0)) orelse return null;
+        const ub_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 1)) orelse return null;
+        const step_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 2)) orelse return null;
+        if (step_const == 0 or lb_const >= ub_const) return null;
+        if (step_const < ub_const - lb_const) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+
+        const body_arg_count: usize = @intCast(mlir.oraBlockGetNumArguments(body));
+        if (body_arg_count == 0) return null;
+
+        const iv_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 0), mode);
+        try self.bindValue(mlir.oraBlockGetArgument(body, 0), iv_ast);
+        defer self.unbindValue(mlir.oraBlockGetArgument(body, 0));
+
+        const iter_bind_count = @min(body_arg_count - 1, num_operands - 3);
+        for (0..iter_bind_count) |idx| {
+            const iter_value = mlir.oraOperationGetOperand(for_op, @intCast(idx + 3));
+            const iter_ast = try self.encodeValueWithMode(iter_value, mode);
+            try self.bindValue(mlir.oraBlockGetArgument(body, @intCast(idx + 1)), iter_ast);
+        }
+        defer {
+            for (0..iter_bind_count) |idx| {
+                self.unbindValue(mlir.oraBlockGetArgument(body, @intCast(idx + 1)));
+            }
+        }
+
+        self.invalidateBlockValueCaches(body);
+        return try self.tryExtractCatchPredicateFromBlock(body, mode, continuation);
+    }
+
+    fn tryExtractSingleIterationScfWhileCatchPredicate(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const before_bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block) or mlir.oraBlockIsNull(after_block)) {
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        }
+
+        self.invalidateBlockValueCaches(before_block);
+        self.invalidateBlockValueCaches(after_block);
+
+        const condition_op = self.findScfConditionOp(while_op) orelse return null;
+        if (mlir.oraOperationGetNumOperands(condition_op) < 1) {
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        }
+        const initial_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+        if (!self.isBoolConst(initial_condition, true)) {
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        }
+
+        const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+        const body_pred = (try self.tryExtractCatchPredicateFromBlock(after_block, mode, continuation)) orelse {
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        };
+        const yielded = (try self.extractScfWhileYieldValues(while_op, mode)) orelse {
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        };
+        defer self.allocator.free(yielded);
+
+        self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+        self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+
+        const second_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, yielded);
+        defer self.unbindScfWhileBeforeArgs(while_op, second_bind_count);
+
+        self.invalidateBlockValueCaches(before_block);
+        self.invalidateBlockValueCaches(after_block);
+
+        const next_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+        if (!self.isBoolConst(next_condition, false)) return null;
+
+        return body_pred;
     }
 
     fn tryExtractTryRegionCatchPredicate(
