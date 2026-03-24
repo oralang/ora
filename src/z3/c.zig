@@ -73,6 +73,7 @@ pub const Z3_solver_to_string = c.Z3_solver_to_string;
 pub const Z3_solver_from_string = c.Z3_solver_from_string;
 pub const Z3_solver_set_params = c.Z3_solver_set_params;
 pub const Z3_ast_to_string = c.Z3_ast_to_string;
+pub const Z3_simplify = c.Z3_simplify;
 pub const Z3_get_version = c.Z3_get_version;
 pub const Z3_mk_params = c.Z3_mk_params;
 pub const Z3_params_inc_ref = c.Z3_params_inc_ref;

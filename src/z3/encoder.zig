@@ -3714,7 +3714,10 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "scf.if") or
             std.mem.eql(u8, op_name, "ora.switch") or
-            std.mem.eql(u8, op_name, "scf.execute_region"))
+            std.mem.eql(u8, op_name, "scf.execute_region") or
+            std.mem.eql(u8, op_name, "scf.for") or
+            std.mem.eql(u8, op_name, "scf.while") or
+            std.mem.eql(u8, op_name, "ora.try_stmt"))
         {
             self.encodeStateEffectsInOperation(op);
             return;
