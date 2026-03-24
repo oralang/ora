@@ -1922,7 +1922,7 @@ pub const VerificationPass = struct {
                         .allocator = self.allocator,
                     });
                     try self.solver.popChecked();
-                    return result;
+                    continue;
                 }
                 if (obligation_status == z3.Z3_L_UNDEF) {
                     std.debug.print("note: Z3 returned UNKNOWN while proving {s} in {s}.\n", .{ obligation_label, fn_name });
@@ -2008,7 +2008,7 @@ pub const VerificationPass = struct {
                                 .allocator = self.allocator,
                             });
                             try self.solver.popChecked();
-                            return result;
+                            continue;
                         }
                         if (step_status == z3.Z3_L_UNDEF) {
                             std.debug.print("note: Z3 returned UNKNOWN while proving invariant step in {s}.\n", .{fn_name});
@@ -2098,7 +2098,7 @@ pub const VerificationPass = struct {
                             .allocator = self.allocator,
                         });
                         try self.solver.popChecked();
-                        return result;
+                        continue;
                     }
                     if (post_status == z3.Z3_L_UNDEF) {
                         std.debug.print(
@@ -4601,6 +4601,66 @@ fn buildForInvariantConjunctionModule(mlir_ctx: mlir.MlirContext) mlir.MlirModul
     return module;
 }
 
+fn buildForInvariantFailingEnsureModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("for_invariant_failing_ensure_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c4_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 4);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c4_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c4_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    mlir.oraBlockAppendOwnedOperation(func_body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, c4_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, c1_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, false_op);
+
+    const lb = mlir.oraOperationGetResult(c0_op, 0);
+    const ub = mlir.oraOperationGetResult(c4_op, 0);
+    const step = mlir.oraOperationGetResult(c1_op, 0);
+    const empty_init_args = [_]mlir.MlirValue{};
+    const for_op = mlir.oraScfForOpCreate(mlir_ctx, loc, lb, ub, step, &empty_init_args, empty_init_args.len, false);
+    mlir.oraBlockAppendOwnedOperation(func_body, for_op);
+
+    const for_body = mlir.oraScfForOpGetBodyBlock(for_op);
+    const for_term = mlir.oraBlockGetTerminator(for_body);
+    const inv_op = mlir.oraInvariantOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(true_op, 0));
+    if (mlir.oraOperationIsNull(for_term)) {
+        mlir.oraBlockAppendOwnedOperation(for_body, inv_op);
+    } else {
+        mlir.oraBlockInsertOwnedOperationBefore(for_body, inv_op, for_term);
+    }
+
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(false_op, 0));
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures_op);
+
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildForContractInvariantModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -5651,6 +5711,35 @@ test "invariant-post query conjoins loop invariants from same loop" {
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
     try testing.expect(found_post_query);
+}
+
+test "sequential verification continues past failing ensures to check loop-post" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildForInvariantFailingEnsureModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+
+    var ensures_errors: usize = 0;
+    var loop_post_errors: usize = 0;
+    for (result.errors.items) |err| {
+        if (std.mem.indexOf(u8, err.message, "failed to prove ensures") != null) {
+            ensures_errors += 1;
+        }
+        if (std.mem.indexOf(u8, err.message, "failed to prove postcondition from loop invariant at loop exit") != null) {
+            loop_post_errors += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), ensures_errors);
+    try testing.expectEqual(@as(usize, 1), loop_post_errors);
 }
 
 test "full verify mode treats untagged cf.assert as obligation" {
