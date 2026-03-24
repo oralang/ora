@@ -1180,7 +1180,11 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                _ = try self.recordEncodedAnnotation(op, .LoopInvariant, condition_value, null);
+                const invariant_kind: AnnotationKind = if (self.findEnclosingLoopOp(op) != null)
+                    .LoopInvariant
+                else
+                    .ContractInvariant;
+                _ = try self.recordEncodedAnnotation(op, invariant_kind, condition_value, null);
             }
         } else if (std.mem.eql(u8, op_name, "ora.refinement_guard")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
@@ -1750,7 +1754,14 @@ pub const VerificationPass = struct {
             by_function.deinit();
         }
 
+        var global_contract_invariants = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+        defer global_contract_invariants.deinit();
+
         for (self.encoded_annotations.items) |ann| {
+            if (isGlobalContractInvariantAnnotation(ann)) {
+                try global_contract_invariants.append(ann);
+                continue;
+            }
             const entry = try by_function.getOrPut(ann.function_name);
             if (!entry.found_existing) {
                 entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
@@ -1793,6 +1804,11 @@ pub const VerificationPass = struct {
                 } else if (isAssumptionKind(ann.kind)) {
                     try assumption_annotations.append(ann);
                 }
+            }
+
+            for (global_contract_invariants.items) |ann| {
+                try assumption_annotations.append(ann);
+                try obligation_annotations.append(ann);
             }
 
             try self.solver.resetChecked();
@@ -3396,7 +3412,14 @@ pub const VerificationPass = struct {
             by_function.deinit();
         }
 
+        var global_contract_invariants = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+        defer global_contract_invariants.deinit();
+
         for (self.encoded_annotations.items) |ann| {
+            if (isGlobalContractInvariantAnnotation(ann)) {
+                try global_contract_invariants.append(ann);
+                continue;
+            }
             const entry = try by_function.getOrPut(ann.function_name);
             if (!entry.found_existing) {
                 entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
@@ -3438,6 +3461,11 @@ pub const VerificationPass = struct {
                 } else if (isAssumptionKind(ann.kind)) {
                     try assumption_annotations.append(ann);
                 }
+            }
+
+            for (global_contract_invariants.items) |ann| {
+                try assumption_annotations.append(ann);
+                try obligation_annotations.append(ann);
             }
 
             var assumption_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
@@ -3850,6 +3878,12 @@ fn isObligationKind(kind: AnnotationKind) bool {
         .Ensures, .LoopInvariant, .ContractInvariant => true,
         else => false,
     };
+}
+
+fn isGlobalContractInvariantAnnotation(ann: EncodedAnnotation) bool {
+    return ann.kind == .ContractInvariant and
+        ann.loop_owner == null and
+        std.mem.eql(u8, ann.function_name, "unknown");
 }
 
 fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
@@ -5530,6 +5564,36 @@ fn buildPathAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, path_assume_value: i
     return module;
 }
 
+fn buildGlobalContractInvariantModule(mlir_ctx: mlir.MlirContext, invariant_value: i64) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const inv_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, invariant_value);
+    const inv_cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, inv_attr);
+    const inv_op = mlir.oraInvariantOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(inv_cond_op, 0));
+    mlir.oraBlockAppendOwnedOperation(module_body, inv_cond_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, inv_op);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("global_invariant_target"));
+    const visibility_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", visibility_attr),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+
+    return module;
+}
+
 fn buildBranchPathGuardsModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -5740,6 +5804,40 @@ test "sequential verification continues past failing ensures to check loop-post"
     }
     try testing.expectEqual(@as(usize, 1), ensures_errors);
     try testing.expectEqual(@as(usize, 1), loop_post_errors);
+}
+
+test "global contract invariants attach to real functions instead of unknown" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGlobalContractInvariantModule(mlir_ctx, 1);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_target_contract_invariant = false;
+    for (queries.items) |q| {
+        try testing.expect(!std.mem.eql(u8, q.function_name, "unknown"));
+        if (std.mem.eql(u8, q.function_name, "global_invariant_target") and
+            q.kind == .Obligation and
+            q.obligation_kind == .ContractInvariant)
+        {
+            found_target_contract_invariant = true;
+        }
+    }
+    try testing.expect(found_target_contract_invariant);
 }
 
 test "full verify mode treats untagged cf.assert as obligation" {
