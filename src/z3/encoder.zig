@@ -2208,6 +2208,9 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
+                if (try self.tryExtractIdentityScfForResult(mlir_op, result_index, mode)) |identity_result| {
+                    return identity_result;
+                }
                 return (try self.tryExtractFiniteScfForResult(mlir_op, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
@@ -4631,6 +4634,46 @@ pub const Encoder = struct {
 
         if (result_index >= carried.len) return null;
         return carried[result_index];
+    }
+
+    fn tryExtractIdentityScfForResult(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 3) return null;
+        const num_iter_args = num_operands - 3;
+        if (result_index >= num_iter_args) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        const num_body_args: usize = @intCast(mlir.oraBlockGetNumArguments(body));
+        if (num_body_args != num_iter_args + 1) return null;
+
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return")) return null;
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                const num_yield_operands: usize = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_yield_operands) return null;
+                const yielded = mlir.oraOperationGetOperand(current, result_index);
+                const carried_arg = mlir.oraBlockGetArgument(body, result_index + 1);
+                if (!mlir.mlirValueEqual(yielded, carried_arg)) return null;
+                return try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, result_index + 3), mode);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
     }
 
     fn tryEncodeFiniteScfForStateEffects(self: *Encoder, op: mlir.MlirOperation) bool {
