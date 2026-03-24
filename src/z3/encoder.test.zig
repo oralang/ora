@@ -711,6 +711,80 @@ test "direct non-throwing ora.try_stmt result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct ora.switch_expr with default encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const scrutinee_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const scrutinee_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, scrutinee_attr);
+    const scrutinee = mlir.oraOperationGetResult(scrutinee_op, 0);
+
+    const switch_expr = mlir.oraSwitchExprOpCreateWithCases(
+        mlir_ctx,
+        loc,
+        scrutinee,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+        2,
+    );
+    const case_values = [_]i64{5};
+    const range_starts = [_]i64{0};
+    const range_ends = [_]i64{0};
+    const case_kinds = [_]i64{0};
+    mlir.oraSwitchOpSetCasePatterns(
+        switch_expr,
+        &case_values,
+        &range_starts,
+        &range_ends,
+        &case_kinds,
+        1,
+        case_values.len,
+    );
+
+    const case_block = mlir.oraSwitchExprOpGetCaseBlock(switch_expr, 0);
+    const default_block = mlir.oraSwitchExprOpGetCaseBlock(switch_expr, 1);
+
+    const case_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const case_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, case_attr);
+    const case_expected = try encoder.encodeOperation(case_op);
+    mlir.oraBlockAppendOwnedOperation(case_block, case_op);
+    mlir.oraBlockAppendOwnedOperation(case_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(case_op, 0)},
+        1,
+    ));
+
+    const default_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+    const default_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, default_attr);
+    mlir.oraBlockAppendOwnedOperation(default_block, default_op);
+    mlir.oraBlockAppendOwnedOperation(default_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(default_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(switch_expr, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, case_expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with scf.execute_region state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

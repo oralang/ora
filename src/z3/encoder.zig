@@ -1942,7 +1942,16 @@ pub const Encoder = struct {
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
         const op_id = @intFromPtr(mlir_op.ptr);
-        var merged = try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
+        var merged = blk: {
+            if (metadata.default_case_index) |default_case_index| {
+                if (default_case_index >= 0) {
+                    if (try self.extractRegionYield(mlir_op, @intCast(default_case_index), result_index, mode)) |default_expr| {
+                        break :blk default_expr;
+                    }
+                }
+            }
+            break :blk try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
+        };
         var remaining = self.encodeBoolConstant(true);
 
         var region_index = num_regions;
