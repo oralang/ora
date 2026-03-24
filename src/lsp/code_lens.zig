@@ -95,12 +95,14 @@ fn collectLenses(
 
 fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.SpecClause) ![]u8 {
     var requires_count: u32 = 0;
+    var guard_count: u32 = 0;
     var ensures_count: u32 = 0;
     var invariant_count: u32 = 0;
 
     for (clauses) |clause| {
         switch (clause.kind) {
             .requires => requires_count += 1,
+            .guard => guard_count += 1,
             .ensures => ensures_count += 1,
             .invariant => invariant_count += 1,
         }
@@ -113,6 +115,11 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
     var first = true;
     if (requires_count > 0) {
         try writer.print("{d} requires", .{requires_count});
+        first = false;
+    }
+    if (guard_count > 0) {
+        if (!first) try writer.writeAll(", ");
+        try writer.print("{d} guard", .{guard_count});
         first = false;
     }
     if (ensures_count > 0) {

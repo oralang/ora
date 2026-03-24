@@ -47,7 +47,7 @@ test "lsp hover: returns null when no symbol is under cursor" {
 
     const maybe_hover = try hover.hoverAt(testing.allocator, source, .{
         .line = 0,
-        .character = 0,
+        .character = 17,
     });
     try testing.expect(maybe_hover == null);
 }

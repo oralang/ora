@@ -349,7 +349,7 @@ pub fn encodeTokens(allocator: Allocator, tokens: []const SemanticToken) ![]u32 
 
 fn isVerificationKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Ghost, .Assert, .Forall, .Exists, .Where => true,
+        .Requires, .Guard, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Ghost, .Assert, .Forall, .Exists, .Where => true,
         else => false,
     };
 }

@@ -5395,7 +5395,7 @@ fn buildPublicCallsPrivateCheckedSubGuardedModule(mlir_ctx: mlir.MlirContext) ml
     const underflow_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, lhs, rhs); // ult
     const underflow = mlir.oraOperationGetResult(underflow_op, 0);
     const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
-    const ok_op = mlir.oraArithXOrIOpCreate(mlir_ctx, loc, underflow, mlir.oraOperationGetResult(true_op, 0));
+    const ok_op = mlir.oraArithXorIOpCreate(mlir_ctx, loc, underflow, mlir.oraOperationGetResult(true_op, 0));
     const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(ok_op, 0), testStringRef("checked subtraction overflow"));
     const private_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{sub_val}, 1);
 

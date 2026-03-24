@@ -24,11 +24,13 @@ pub const Kind = enum {
 pub const Item = struct {
     label: []u8,
     detail: ?[]u8 = null,
+    documentation: ?[]u8 = null,
     kind: Kind,
 
     pub fn deinit(self: *Item, allocator: Allocator) void {
         allocator.free(self.label);
         if (self.detail) |detail| allocator.free(detail);
+        if (self.documentation) |doc| allocator.free(doc);
     }
 };
 
@@ -68,6 +70,7 @@ const keyword_candidates = [_][]const u8{
     "false",
     // Formal verification
     "requires",
+    "guard",
     "ensures",
     "invariant",
     "ghost",
@@ -121,6 +124,7 @@ pub fn completionAt(
         try seen.put(keyword, {});
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, keyword),
+            .documentation = if (keywordDocumentation(keyword)) |doc| try allocator.dupe(u8, doc) else null,
             .kind = .keyword,
         });
     }
@@ -133,6 +137,7 @@ pub fn completionAt(
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, symbol.name),
             .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+            .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
             .kind = symbolKindToCompletionKind(symbol.kind),
         });
     }
@@ -178,19 +183,18 @@ fn memberCompletion(
     const base_symbol = index.symbols[base_idx];
     switch (base_symbol.kind) {
         .contract, .struct_decl, .bitfield_decl, .enum_decl => {
-            for (index.symbols, 0..) |symbol, i| {
-                _ = i;
+            for (index.symbols) |symbol| {
                 if (symbol.parent == null or symbol.parent.? != base_idx) continue;
                 if (!matchesPrefix(symbol.name, prefix)) continue;
 
                 try items.append(allocator, .{
                     .label = try allocator.dupe(u8, symbol.name),
                     .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                    .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                     .kind = symbolKindToCompletionKind(symbol.kind),
                 });
             }
         },
-        // For variables/fields/params, try to resolve their type and offer that type's children.
         .variable, .field, .parameter, .constant => {
             if (base_symbol.detail) |type_name| {
                 const trimmed = std.mem.trim(u8, type_name, " ");
@@ -202,6 +206,7 @@ fn memberCompletion(
                         try items.append(allocator, .{
                             .label = try allocator.dupe(u8, symbol.name),
                             .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                            .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                             .kind = symbolKindToCompletionKind(symbol.kind),
                         });
                     }
@@ -313,6 +318,44 @@ fn positionToByteOffsetOnLine(source: []const u8, position: frontend.Position) u
 
     const requested_col: usize = @intCast(position.character);
     return @min(line_start + requested_col, line_end);
+}
+
+fn keywordDocumentation(keyword: []const u8) ?[]const u8 {
+    const map = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "contract", "Declares a smart contract type." },
+        .{ "struct", "Declares a named struct type." },
+        .{ "enum", "Declares an enumeration type." },
+        .{ "bitfield", "Declares a packed bitfield type for efficient storage." },
+        .{ "fn", "Declares a function." },
+        .{ "pub", "Makes a declaration publicly visible." },
+        .{ "let", "Declares an immutable local binding." },
+        .{ "var", "Declares a mutable variable." },
+        .{ "const", "Declares a compile-time constant." },
+        .{ "storage", "Storage qualifier — persists on-chain between calls." },
+        .{ "transient", "Transient storage qualifier — cleared after each transaction." },
+        .{ "memory", "Memory qualifier — temporary data within a call." },
+        .{ "import", "Imports declarations from another module." },
+        .{ "log", "Declares an event (emits an EVM log)." },
+        .{ "error", "Declares a custom error type." },
+        .{ "trait", "Declares an interface trait." },
+        .{ "impl", "Implements a trait for a type." },
+        .{ "comptime", "Evaluates an expression at compile time." },
+        .{ "requires", "Precondition — must hold when the function is called." },
+        .{ "guard", "Runtime-enforced precondition — checked at runtime and assumed after it passes." },
+        .{ "ensures", "Postcondition — guaranteed to hold when the function returns." },
+        .{ "invariant", "Contract or loop invariant — preserved across state transitions." },
+        .{ "ghost", "Ghost declaration — exists only for verification, not compiled." },
+        .{ "assert", "Verification assertion — checked by the prover." },
+        .{ "assume", "Verification assumption — taken as given by the prover." },
+        .{ "havoc", "Assigns an arbitrary value for verification." },
+        .{ "old", "Refers to the pre-state value of an expression in postconditions." },
+        .{ "result", "Refers to the return value in postconditions." },
+        .{ "forall", "Universal quantifier — for all values satisfying a predicate." },
+        .{ "exists", "Existential quantifier — there exists a value satisfying a predicate." },
+        .{ "where", "Type constraint or refinement clause." },
+        .{ "extern", "Declares an external contract interface." },
+    });
+    return map.get(keyword);
 }
 
 fn isIdentifierStart(ch: u8) bool {

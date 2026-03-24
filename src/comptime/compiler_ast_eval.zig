@@ -1342,7 +1342,7 @@ const ConstEvaluator = struct {
         defer self.call_depth -= 1;
 
         for (function.clauses) |clause| {
-            if (clause.kind != .requires) continue;
+            if (clause.kind != .requires and clause.kind != .guard) continue;
             const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
             const truthy = self.constConditionTruthy(condition) orelse return null;
             if (!truthy) return null;
@@ -1406,7 +1406,7 @@ const ConstEvaluator = struct {
         defer self.call_depth -= 1;
 
         for (function.clauses) |clause| {
-            if (clause.kind != .requires) continue;
+            if (clause.kind != .requires and clause.kind != .guard) continue;
             const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
             const truthy = self.constConditionTruthy(condition) orelse return null;
             if (!truthy) return null;

@@ -302,6 +302,7 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
         try writer.writeByte('\n');
         try writer.writeAll(switch (clause.kind) {
             .requires => "    requires(",
+            .guard => "    guard(",
             .ensures => "    ensures(",
             .invariant => "    invariant(",
         });
