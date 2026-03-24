@@ -4989,6 +4989,48 @@ pub const Encoder = struct {
         return try self.encodeControlFlow("scf.if", initial_condition, bound_ast, init_ast);
     }
 
+    fn isCanonicalIncrementScfWhile(self: *Encoder, while_op: mlir.MlirOperation) bool {
+        if (mlir.oraOperationGetNumOperands(while_op) != 1) return false;
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block) or mlir.oraBlockIsNull(after_block)) return false;
+        if (mlir.oraBlockGetNumArguments(before_block) != 1 or mlir.oraBlockGetNumArguments(after_block) != 1) return false;
+
+        const condition_op = self.findScfConditionOp(while_op) orelse return false;
+        if (mlir.oraOperationGetNumOperands(condition_op) != 2) return false;
+
+        const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+        const condition_value = mlir.oraOperationGetOperand(condition_op, 0);
+        if (!mlir.oraValueIsAOpResult(condition_value)) return false;
+        const cmp_op = mlir.oraOpResultGetOwner(condition_value);
+        if (!self.operationNameEq(cmp_op, "arith.cmpi")) return false;
+        if ((self.getCmpPredicate(cmp_op) catch return false) != 6) return false; // ult
+        if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return false;
+
+        const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
+        const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
+        if (!mlir.mlirValueEqual(cmp_lhs, before_arg)) return false;
+        if (mlir.mlirValueEqual(cmp_rhs, before_arg)) return false;
+        if (!mlir.mlirValueEqual(mlir.oraOperationGetOperand(condition_op, 1), before_arg)) return false;
+
+        const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+        const yield_op = self.findScfYieldOp(after_block) orelse return false;
+        if (mlir.oraOperationGetNumOperands(yield_op) != 1) return false;
+        const yield_value = mlir.oraOperationGetOperand(yield_op, 0);
+        if (!mlir.oraValueIsAOpResult(yield_value)) return false;
+        const yield_owner = mlir.oraOpResultGetOwner(yield_value);
+        if (!self.operationNameEq(yield_owner, "arith.addi")) return false;
+        if (mlir.oraOperationGetNumOperands(yield_owner) != 2) return false;
+
+        const add_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
+        const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
+        const lhs_const = self.tryGetConstIntValue(add_lhs);
+        const rhs_const = self.tryGetConstIntValue(add_rhs);
+        return (lhs_const != null and lhs_const.? == 1 and mlir.mlirValueEqual(add_rhs, after_arg)) or
+            (rhs_const != null and rhs_const.? == 1 and mlir.mlirValueEqual(add_lhs, after_arg));
+    }
+
     fn findScfYieldOp(self: *Encoder, block: mlir.MlirBlock) ?mlir.MlirOperation {
         _ = self;
         if (mlir.oraBlockIsNull(block)) return null;
@@ -5896,7 +5938,12 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "scf.while")) {
+                const loop_writes_state = self.operationMayWriteTrackedState(op) catch {
+                    self.recordDegradation("failed to recover scf.while write set for state summary");
+                    return;
+                };
                 if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
+                if (!loop_writes_state and self.isCanonicalIncrementScfWhile(op)) return;
                 if (self.tryEncodeFiniteScfWhileStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
