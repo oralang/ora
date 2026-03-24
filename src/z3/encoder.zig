@@ -5170,27 +5170,31 @@ pub const Encoder = struct {
         const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const one_from_lhs = self.tryGetConstIntValue(add_lhs);
         const one_from_rhs = self.tryGetConstIntValue(add_rhs);
-        const is_lhs_one = one_from_lhs != null and one_from_lhs.? == 1;
-        const is_rhs_one = one_from_rhs != null and one_from_rhs.? == 1;
-        const add_other =
-            if (is_lhs_one and mlir.mlirValueEqual(add_rhs, after_arg))
-                add_rhs
-            else if (is_rhs_one and mlir.mlirValueEqual(add_lhs, after_arg))
+        const delta_value =
+            if (one_from_lhs != null and one_from_lhs.? != 0 and mlir.mlirValueEqual(add_rhs, after_arg))
                 add_lhs
+            else if (one_from_rhs != null and one_from_rhs.? != 0 and mlir.mlirValueEqual(add_lhs, after_arg))
+                add_rhs
             else
                 return null;
-        if (!mlir.mlirValueEqual(add_other, after_arg)) return null;
+        const delta_const = self.tryGetConstIntValue(delta_value) orelse return null;
+        const delta_u64 = std.math.cast(u64, delta_const) orelse return null;
 
         const init_value = mlir.oraOperationGetOperand(while_op, 0);
         const init_ast = try self.encodeValueWithMode(init_value, mode);
+        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
 
+        if (predicate == 6) {
+            return try self.encodeUnsignedCanonicalWhileIncrementResult(init_ast, bound_ast, delta_u64);
+        }
+
+        if (delta_u64 != 1) return null;
         const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, &[_]z3.Z3_ast{init_ast});
         defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
         self.invalidateBlockValueCaches(before_block);
         self.invalidateBlockValueCaches(after_block);
 
         const initial_condition = try self.encodeValueWithMode(condition_value, mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
         return try self.encodeControlFlow("scf.if", initial_condition, bound_ast, init_ast);
     }
 
@@ -5241,19 +5245,83 @@ pub const Encoder = struct {
         const sub_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
         const sub_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const rhs_const = self.tryGetConstIntValue(sub_rhs);
-        if (!mlir.mlirValueEqual(sub_lhs, after_arg) or rhs_const == null or rhs_const.? != 1) return null;
+        if (!mlir.mlirValueEqual(sub_lhs, after_arg) or rhs_const == null or rhs_const.? == 0) return null;
+        const delta_u64 = std.math.cast(u64, rhs_const.?) orelse return null;
 
         const init_value = mlir.oraOperationGetOperand(while_op, 0);
         const init_ast = try self.encodeValueWithMode(init_value, mode);
+        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
 
+        if (predicate == 8) {
+            return try self.encodeUnsignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
+        }
+
+        if (delta_u64 != 1) return null;
         const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, &[_]z3.Z3_ast{init_ast});
         defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
         self.invalidateBlockValueCaches(before_block);
         self.invalidateBlockValueCaches(after_block);
 
         const initial_condition = try self.encodeValueWithMode(condition_value, mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
         return try self.encodeControlFlow("scf.if", initial_condition, bound_ast, init_ast);
+    }
+
+    fn encodeUnsignedCanonicalWhileIncrementResult(
+        self: *Encoder,
+        init_ast: z3.Z3_ast,
+        bound_ast: z3.Z3_ast,
+        delta: u64,
+    ) EncodeError!z3.Z3_ast {
+        const distance = try self.encodeUnsignedPositiveDistance(init_ast, bound_ast);
+        const step_count = try self.encodeUnsignedPositiveStepCount(distance, delta);
+        const delta_sort = z3.Z3_get_sort(self.context.ctx, init_ast);
+        const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, delta_sort);
+        const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+        return try self.encodeArithmeticOp(.Add, init_ast, total_delta);
+    }
+
+    fn encodeUnsignedCanonicalWhileDecrementResult(
+        self: *Encoder,
+        init_ast: z3.Z3_ast,
+        bound_ast: z3.Z3_ast,
+        delta: u64,
+    ) EncodeError!z3.Z3_ast {
+        const distance = try self.encodeUnsignedPositiveDistance(bound_ast, init_ast);
+        const step_count = try self.encodeUnsignedPositiveStepCount(distance, delta);
+        const delta_sort = z3.Z3_get_sort(self.context.ctx, init_ast);
+        const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, delta_sort);
+        const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+        return try self.encodeArithmeticOp(.Sub, init_ast, total_delta);
+    }
+
+    fn encodeUnsignedPositiveDistance(
+        self: *Encoder,
+        lower_ast: z3.Z3_ast,
+        upper_ast: z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, upper_ast);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const upper_le_lower = z3.Z3_mk_bvule(self.context.ctx, upper_ast, lower_ast);
+        const raw_distance = z3.Z3_mk_bv_sub(self.context.ctx, upper_ast, lower_ast);
+        return z3.Z3_mk_ite(self.context.ctx, upper_le_lower, zero, raw_distance);
+    }
+
+    fn encodeUnsignedPositiveStepCount(
+        self: *Encoder,
+        distance_ast: z3.Z3_ast,
+        delta: u64,
+    ) EncodeError!z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, distance_ast);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        if (delta == 1) return distance_ast;
+
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+        const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+        const distance_is_zero = z3.Z3_mk_eq(self.context.ctx, distance_ast, zero);
+        const adjusted_distance = z3.Z3_mk_bv_sub(self.context.ctx, distance_ast, one);
+        const quotient = z3.Z3_mk_bv_udiv(self.context.ctx, adjusted_distance, delta_ast);
+        const rounded = z3.Z3_mk_bv_add(self.context.ctx, quotient, one);
+        return z3.Z3_mk_ite(self.context.ctx, distance_is_zero, zero, rounded);
     }
 
     fn isCanonicalIncrementScfWhile(self: *Encoder, while_op: mlir.MlirOperation) bool {
@@ -5295,6 +5363,10 @@ pub const Encoder = struct {
         const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const lhs_const = self.tryGetConstIntValue(add_lhs);
         const rhs_const = self.tryGetConstIntValue(add_rhs);
+        if (predicate == 6) {
+            return (lhs_const != null and lhs_const.? != 0 and mlir.mlirValueEqual(add_rhs, after_arg)) or
+                (rhs_const != null and rhs_const.? != 0 and mlir.mlirValueEqual(add_lhs, after_arg));
+        }
         return (lhs_const != null and lhs_const.? == 1 and mlir.mlirValueEqual(add_rhs, after_arg)) or
             (rhs_const != null and rhs_const.? == 1 and mlir.mlirValueEqual(add_lhs, after_arg));
     }
@@ -5337,6 +5409,9 @@ pub const Encoder = struct {
         const sub_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
         const sub_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const rhs_const = self.tryGetConstIntValue(sub_rhs);
+        if (predicate == 8) {
+            return mlir.mlirValueEqual(sub_lhs, after_arg) and rhs_const != null and rhs_const.? != 0;
+        }
         return mlir.mlirValueEqual(sub_lhs, after_arg) and rhs_const != null and rhs_const.? == 1;
     }
 
