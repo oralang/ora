@@ -3908,6 +3908,35 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn isStaticallyFalseScfWhile(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!bool {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block)) return false;
+
+        var current = mlir.oraBlockGetFirstOperation(before_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const next = mlir.oraOperationGetNextInBlock(current);
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "scf.condition")) {
+                const num_operands = mlir.oraOperationGetNumOperands(current);
+                if (num_operands < 1) return false;
+
+                const condition_value = mlir.oraOperationGetOperand(current, 0);
+                const condition_ast = try self.encodeValueWithMode(condition_value, mode);
+                return self.astEquivalent(condition_ast, self.encodeBoolConstant(false));
+            }
+
+            current = next;
+        }
+
+        return false;
+    }
+
     fn extractScfIfReturnedExpr(
         self: *Encoder,
         if_op: mlir.MlirOperation,
@@ -4280,6 +4309,7 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "scf.while")) {
+                if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
             }
