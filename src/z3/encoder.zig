@@ -4591,21 +4591,16 @@ pub const Encoder = struct {
         ok_expr: z3.Z3_ast,
     };
 
-    fn tryGetDirectErrorUnwrapTryInfo(
+    fn tryGetDirectErrorUnwrapBlockInfo(
         self: *Encoder,
-        try_stmt: mlir.MlirOperation,
+        block: mlir.MlirBlock,
         result_index: u32,
         mode: EncodeMode,
     ) EncodeError!?DirectTryUnwrapInfo {
-        if (result_index != 0) return null;
-
-        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
-        if (mlir.oraRegionIsNull(try_region)) return null;
-        const try_block = mlir.oraRegionGetFirstBlock(try_region);
-        if (mlir.oraBlockIsNull(try_block)) return null;
+        if (result_index != 0 or mlir.oraBlockIsNull(block)) return null;
 
         var unwrap_op: ?mlir.MlirOperation = null;
-        var current = mlir.oraBlockGetFirstOperation(try_block);
+        var current = mlir.oraBlockGetFirstOperation(block);
         while (!mlir.oraOperationIsNull(current)) {
             const name_ref = self.getOperationName(current);
             defer @import("mlir_c_api").freeStringRef(name_ref);
@@ -4662,6 +4657,18 @@ pub const Encoder = struct {
 
         return null;
     }
+
+    fn tryGetDirectErrorUnwrapTryInfo(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?DirectTryUnwrapInfo {
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        if (mlir.oraRegionIsNull(try_region)) return null;
+        return try self.tryGetDirectErrorUnwrapBlockInfo(mlir.oraRegionGetFirstBlock(try_region), result_index, mode);
+    }
+
 
     fn tryExtractDirectErrorUnwrapTryStmtResult(
         self: *Encoder,
