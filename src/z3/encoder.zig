@@ -4586,16 +4586,20 @@ pub const Encoder = struct {
         return try_expr;
     }
 
-    fn tryExtractDirectErrorUnwrapTryStmtResult(
+    const DirectTryUnwrapInfo = struct {
+        is_err: z3.Z3_ast,
+        ok_expr: z3.Z3_ast,
+    };
+
+    fn tryGetDirectErrorUnwrapTryInfo(
         self: *Encoder,
         try_stmt: mlir.MlirOperation,
         result_index: u32,
         mode: EncodeMode,
-    ) EncodeError!?z3.Z3_ast {
+    ) EncodeError!?DirectTryUnwrapInfo {
         if (result_index != 0) return null;
 
         const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
-        const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
         if (mlir.oraRegionIsNull(try_region)) return null;
         const try_block = mlir.oraRegionGetFirstBlock(try_region);
         if (mlir.oraBlockIsNull(try_block)) return null;
@@ -4627,7 +4631,7 @@ pub const Encoder = struct {
                 const eu = try self.getErrorUnionSort(operand_type, success_type);
                 const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{operand_expr});
                 const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
-                return try self.encodeControlFlow("scf.if", is_err, catch_expr, ok_expr);
+                return .{ .is_err = is_err, .ok_expr = ok_expr };
             }
 
             if (std.mem.eql(u8, name, "ora.error.unwrap")) {
@@ -4657,6 +4661,17 @@ pub const Encoder = struct {
         }
 
         return null;
+    }
+
+    fn tryExtractDirectErrorUnwrapTryStmtResult(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
+        const info = (try self.tryGetDirectErrorUnwrapTryInfo(try_stmt, result_index, mode)) orelse return null;
+        return try self.encodeControlFlow("scf.if", info.is_err, catch_expr, info.ok_expr);
     }
 
     fn extractScfIfReturnedExpr(
@@ -5052,6 +5067,51 @@ pub const Encoder = struct {
                     if (!mlir.oraRegionIsNull(try_region)) {
                         self.encodeStateEffectsInRegion(try_region);
                     }
+                    return;
+                }
+
+                if (self.tryGetDirectErrorUnwrapTryInfo(op, 0, .Current) catch null) |info| {
+                    var base_state = self.captureStateSnapshot() catch {
+                        self.recordDegradation("failed to capture base state for direct ora.try_stmt summary");
+                        return;
+                    };
+                    defer base_state.deinit(self.allocator);
+
+                    var try_state = StateSnapshot.init(self.allocator);
+                    defer try_state.deinit(self.allocator);
+                    var catch_state = StateSnapshot.init(self.allocator);
+                    defer catch_state.deinit(self.allocator);
+
+                    self.restoreStateSnapshot(&base_state) catch {
+                        self.recordDegradation("failed to restore base state for direct ora.try_stmt try-summary");
+                        return;
+                    };
+                    const try_region = mlir.oraOperationGetRegion(op, 0);
+                    if (!mlir.oraRegionIsNull(try_region)) {
+                        self.encodeStateEffectsInRegion(try_region);
+                    }
+                    try_state = self.captureStateSnapshot() catch {
+                        self.recordDegradation("failed to capture direct ora.try_stmt try-state summary");
+                        return;
+                    };
+
+                    self.restoreStateSnapshot(&base_state) catch {
+                        self.recordDegradation("failed to restore base state for direct ora.try_stmt catch-summary");
+                        return;
+                    };
+                    const catch_region = mlir.oraOperationGetRegion(op, 1);
+                    if (!mlir.oraRegionIsNull(catch_region)) {
+                        self.encodeStateEffectsInRegion(catch_region);
+                    }
+                    catch_state = self.captureStateSnapshot() catch {
+                        self.recordDegradation("failed to capture direct ora.try_stmt catch-state summary");
+                        return;
+                    };
+
+                    self.mergeStateSnapshotsIf(info.is_err, &base_state, &catch_state, &try_state) catch {
+                        self.recordDegradation("failed to merge direct ora.try_stmt state summary");
+                        return;
+                    };
                     return;
                 }
 
