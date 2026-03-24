@@ -2919,6 +2919,37 @@ test "compiler extracts verification facts and lowers HIR handles" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
 }
 
+test "compiler verification facts include guard clauses" {
+    const source_text =
+        \\pub fn keep(next: u256) -> bool
+        \\    requires next >= 0
+        \\    guard next < 10
+        \\    ensures result
+        \\{
+        \\    return true;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const function_id = ast_file.root_items[0];
+
+    const function_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = function_id });
+    const body_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .body = ast_file.item(function_id).Function.body });
+
+    try testing.expectEqual(@as(usize, 3), function_facts.facts.len);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, function_facts.facts[0].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, function_facts.facts[1].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, function_facts.facts[2].kind);
+
+    try testing.expectEqual(@as(usize, 3), body_facts.facts.len);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, body_facts.facts[0].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, body_facts.facts[1].kind);
+    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, body_facts.facts[2].kind);
+}
+
 test "compiler lowers guard clauses through runtime assert and assume" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
