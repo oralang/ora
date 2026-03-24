@@ -15,6 +15,8 @@ const mlir = @import("mlir_c_api").c;
 const Context = @import("context.zig").Context;
 const mlir_helpers = @import("mlir_helpers.zig");
 
+const finite_scf_for_unroll_limit: usize = 8;
+
 /// MLIR to SMT encoder
 pub const Encoder = struct {
     const SwitchCaseMetadata = struct {
@@ -3906,7 +3908,7 @@ pub const Encoder = struct {
         var iter = lb;
         while (iter < ub) : (iter += step) {
             trip_count += 1;
-            if (trip_count > 4) return null;
+            if (trip_count > finite_scf_for_unroll_limit) return null;
             if (iter > std.math.maxInt(u64) - step) break;
         }
 
