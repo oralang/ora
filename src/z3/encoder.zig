@@ -1934,6 +1934,9 @@ pub const Encoder = struct {
                 return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
             }
+            if (try self.tryExtractDirectErrorUnwrapTryStmtResult(mlir_op, result_index, mode)) |encoded| {
+                return encoded;
+            }
             return (try self.tryExtractEquivalentTryStmtResult(mlir_op, result_index, mode)) orelse
                 try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
         }
@@ -4581,6 +4584,79 @@ pub const Encoder = struct {
         const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
         if (!self.astEquivalent(try_expr, catch_expr)) return null;
         return try_expr;
+    }
+
+    fn tryExtractDirectErrorUnwrapTryStmtResult(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        if (result_index != 0) return null;
+
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
+        if (mlir.oraRegionIsNull(try_region)) return null;
+        const try_block = mlir.oraRegionGetFirstBlock(try_region);
+        if (mlir.oraBlockIsNull(try_block)) return null;
+
+        var unwrap_op: ?mlir.MlirOperation = null;
+        var current = mlir.oraBlockGetFirstOperation(try_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.yield") or std.mem.eql(u8, name, "scf.yield")) {
+                if (unwrap_op == null) return null;
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (num_operands <= result_index) return null;
+                const yielded = mlir.oraOperationGetOperand(current, result_index);
+                const unwrap_result = mlir.oraOperationGetResult(unwrap_op.?, 0);
+                if (yielded.ptr != unwrap_result.ptr) return null;
+
+                const unwrap_operand = mlir.oraOperationGetOperand(unwrap_op.?, 0);
+                const operand_type = mlir.oraValueGetType(unwrap_operand);
+                const success_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
+                if (mlir.oraTypeIsNull(success_type)) return null;
+
+                const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
+                const eu = try self.getErrorUnionSort(operand_type, success_type);
+                const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{operand_expr});
+                const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
+                return try self.encodeControlFlow("scf.if", is_err, catch_expr, ok_expr);
+            }
+
+            if (std.mem.eql(u8, name, "ora.error.unwrap")) {
+                if (unwrap_op != null) return null;
+                unwrap_op = current;
+                current = mlir.oraOperationGetNextInBlock(current);
+                continue;
+            }
+
+            if (std.mem.eql(u8, name, "ora.sstore") or
+                std.mem.eql(u8, name, "ora.map_store") or
+                std.mem.eql(u8, name, "memref.store") or
+                std.mem.eql(u8, name, "scf.if") or
+                std.mem.eql(u8, name, "ora.switch") or
+                std.mem.eql(u8, name, "ora.conditional_return") or
+                std.mem.eql(u8, name, "scf.execute_region") or
+                std.mem.eql(u8, name, "scf.for") or
+                std.mem.eql(u8, name, "scf.while") or
+                std.mem.eql(u8, name, "ora.try_stmt") or
+                std.mem.eql(u8, name, "ora.return") or
+                std.mem.eql(u8, name, "func.return"))
+            {
+                return null;
+            }
+
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
     }
 
     fn extractScfIfReturnedExpr(
