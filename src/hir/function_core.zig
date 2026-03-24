@@ -112,6 +112,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
                 }
+                try @This().emitGuardClauses(self, function, &self.locals);
                 for (self.extra_verification_clauses) |clause| {
                     if (clause.kind != .requires) continue;
                     const condition = try self.lowerExpr(clause.expr, &self.locals);
@@ -119,6 +120,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
                 }
+                try @This().emitExtraGuardClauses(self, &self.locals);
 
                 var locals = try self.cloneLocals(&self.locals);
                 const terminated = try self.lowerBody(function.body, &locals);
@@ -166,6 +168,146 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                 appendOp(self.block, ensure);
             }
+        }
+
+        fn emitGuardClauses(self: *FunctionLowerer, function: ast.FunctionItem, locals: *LocalEnv) anyerror!void {
+            for (function.clauses) |clause| {
+                if (clause.kind != .guard) continue;
+                if (@This().functionBodyAlreadyGuards(self, function.body, clause.expr)) continue;
+                try @This().emitRuntimeGuard(self, clause, locals);
+            }
+        }
+
+        fn emitExtraGuardClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
+            for (self.extra_verification_clauses) |clause| {
+                if (clause.kind != .guard) continue;
+                try @This().emitRuntimeGuard(self, .{
+                    .range = clause.range,
+                    .kind = .guard,
+                    .expr = clause.expr,
+                }, locals);
+            }
+        }
+
+        fn emitRuntimeGuard(self: *FunctionLowerer, clause: ast.SpecClause, locals: *LocalEnv) anyerror!void {
+            const condition = try self.lowerExpr(clause.expr, locals);
+            const loc = self.parent.location(clause.range);
+            const message = try @This().guardMessage(self, clause.expr);
+            defer self.parent.allocator.free(message);
+
+            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, strRef(message));
+            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "guard").attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "guard_clause").attribute);
+            appendOp(self.block, assert_op);
+
+            const assume_op = mlir.oraAssumeOpCreate(self.parent.context, loc, condition);
+            if (mlir.oraOperationIsNull(assume_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(assume_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "guard_clause").attribute);
+            appendOp(self.block, assume_op);
+        }
+
+        fn functionBodyAlreadyGuards(self: *FunctionLowerer, body_id: ast.BodyId, guard_expr: ast.ExprId) bool {
+            const body = self.parent.file.body(body_id).*;
+            if (body.statements.len == 0) return false;
+            const first_stmt = self.parent.file.statement(body.statements[0]).*;
+            return switch (first_stmt) {
+                .If => |if_stmt| @This().ifStmtMatchesGuard(self, if_stmt, body.statements.len == 1, guard_expr),
+                else => false,
+            };
+        }
+
+        fn ifStmtMatchesGuard(self: *FunctionLowerer, if_stmt: ast.IfStmt, covers_entire_body: bool, guard_expr: ast.ExprId) bool {
+            if (if_stmt.else_body != null) return false;
+            if (covers_entire_body and @This().exprStructurallyEqual(self, if_stmt.condition, guard_expr)) {
+                return true;
+            }
+            const negated_guard = @This().unwrapLogicalNot(self, if_stmt.condition) orelse return false;
+            if (!@This().exprStructurallyEqual(self, negated_guard, guard_expr)) return false;
+
+            const then_body = self.parent.file.body(if_stmt.then_body).*;
+            if (then_body.statements.len != 1) return false;
+            return switch (self.parent.file.statement(then_body.statements[0]).*) {
+                .Return => true,
+                else => false,
+            };
+        }
+
+        fn unwrapLogicalNot(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.ExprId {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().unwrapLogicalNot(self, group.expr),
+                .Unary => |unary| if (unary.op == .not_) unary.operand else null,
+                else => null,
+            };
+        }
+
+        fn exprStructurallyEqual(self: *FunctionLowerer, lhs_id: ast.ExprId, rhs_id: ast.ExprId) bool {
+            const lhs = self.parent.file.expression(lhs_id).*;
+            const rhs = self.parent.file.expression(rhs_id).*;
+            return switch (lhs) {
+                .Group => |group| @This().exprStructurallyEqual(self, group.expr, rhs_id),
+                .IntegerLiteral => |lit| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .IntegerLiteral => |other| std.mem.eql(u8, lit.text, other.text),
+                    else => false,
+                },
+                .BoolLiteral => |lit| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .BoolLiteral => |other| lit.value == other.value,
+                    else => false,
+                },
+                .Name => |name| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Name => |other| std.mem.eql(u8, name.name, other.name),
+                    else => false,
+                },
+                .Unary => |unary| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Unary => |other| unary.op == other.op and @This().exprStructurallyEqual(self, unary.operand, other.operand),
+                    else => false,
+                },
+                .Binary => |binary| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Binary => |other| binary.op == other.op and
+                        @This().exprStructurallyEqual(self, binary.lhs, other.lhs) and
+                        @This().exprStructurallyEqual(self, binary.rhs, other.rhs),
+                    else => false,
+                },
+                .Field => |field| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Field => |other| std.mem.eql(u8, field.name, other.name) and @This().exprStructurallyEqual(self, field.base, other.base),
+                    else => false,
+                },
+                .Index => |index| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Index => |other| @This().exprStructurallyEqual(self, index.base, other.base) and @This().exprStructurallyEqual(self, index.index, other.index),
+                    else => false,
+                },
+                .Call => |call| switch (rhs) {
+                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
+                    .Call => |other| blk: {
+                        if (!@This().exprStructurallyEqual(self, call.callee, other.callee)) break :blk false;
+                        if (call.args.len != other.args.len) break :blk false;
+                        for (call.args, other.args) |arg, other_arg| {
+                            if (!@This().exprStructurallyEqual(self, arg, other_arg)) break :blk false;
+                        }
+                        break :blk true;
+                    },
+                    else => false,
+                },
+                else => lhs_id.index() == rhs_id.index(),
+            };
+        }
+
+        fn guardMessage(self: *FunctionLowerer, expr_id: ast.ExprId) ![]u8 {
+            const range = support.exprRange(self.parent.file, expr_id);
+            const source_text = self.parent.sources.file(self.parent.file.file_id).text;
+            const start: usize = @intCast(range.start);
+            const end: usize = @intCast(range.end);
+            const expr_text = if (end <= source_text.len and start <= end) source_text[start..end] else "guard";
+            return std.fmt.allocPrint(self.parent.allocator, "guard failed: {s}", .{expr_text});
         }
 
         fn insertParameterRefinementGuards(self: *FunctionLowerer, function: ast.FunctionItem) anyerror!void {

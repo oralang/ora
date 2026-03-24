@@ -11,7 +11,7 @@ const PatternId = ids.PatternId;
 pub const Visibility = enum { public, private };
 pub const BindingKind = enum { let_, var_, constant, immutable };
 pub const StorageClass = enum { none, storage, memory, tstore };
-pub const SpecClauseKind = enum { requires, ensures, invariant };
+pub const SpecClauseKind = enum { requires, guard, ensures, invariant };
 pub const ReceiverKind = enum {
     none,
     value_self,

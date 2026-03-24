@@ -1808,6 +1808,7 @@ pub fn mixin(Builder: type) type {
         fn lowerSpecClauseNode(self: *Builder, node: SyntaxNode) !nodes.SpecClause {
             const kind: nodes.SpecClauseKind = if (firstDirectToken(node)) |token| switch (token.kind()) {
                 .Requires => .requires,
+                .Guard => .guard,
                 .Ensures => .ensures,
                 else => blk: {
                     _ = try Lowering.malformedExpr(self, node, "invalid specification keyword");
@@ -2190,7 +2191,7 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
 
 fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
         else => false,
     };
 }

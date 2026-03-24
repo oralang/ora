@@ -370,6 +370,34 @@ test "compiler syntax bounds spec clauses loop invariants and item members" {
     try testing.expect(nthChildNodeOfKind(for_stmt.?, .InvariantClause, 0) != null);
 }
 
+test "compiler syntax parses guard clauses alongside requires and ensures" {
+    const source_text =
+        \\pub fn run(values: u256) -> u256
+        \\    requires values >= 0
+        \\    guard values < 100
+        \\    ensures result >= 0
+        \\{
+        \\    return values;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const function = nthChildNodeOfKind(root, .FunctionItem, 0);
+    try testing.expect(function != null);
+
+    const requires_clause = nthChildNodeOfKind(function.?, .SpecClause, 0);
+    const guard_clause = nthChildNodeOfKind(function.?, .SpecClause, 1);
+    const ensures_clause = nthChildNodeOfKind(function.?, .SpecClause, 2);
+    try testing.expect(requires_clause != null);
+    try testing.expect(guard_clause != null);
+    try testing.expect(ensures_clause != null);
+}
+
 test "compiler syntax parses trait and impl blocks" {
     const source_text =
         \\trait ERC20 {
@@ -2889,6 +2917,42 @@ test "compiler extracts verification facts and lowers HIR handles" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.requires"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
+}
+
+test "compiler lowers guard clauses through runtime assert and assume" {
+    const source_text =
+        \\pub fn safe_add(amount: u256) -> bool
+        \\    guard amount < 10;
+        \\{
+        \\    return true;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assume"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"guard_clause\""));
+}
+
+test "compiler does not duplicate guard lowering when function already starts with same filter" {
+    const source_text =
+        \\pub fn safe_add(amount: u256) -> bool
+        \\    guard amount < 10;
+        \\{
+        \\    if (!(amount < 10)) {
+        \\        return false;
+        \\    }
+        \\    return true;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard failed: amount < 10\""));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
 test "compiler HIR output runs through Z3 verification" {
@@ -12355,7 +12419,6 @@ test "compiler emits tuple ABI return attrs for public error unions" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"tuple\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_return_words"));
 }
-
 
 test "compiler emits struct ABI return attrs for public error unions" {
     const source_text =
