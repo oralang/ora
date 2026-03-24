@@ -259,6 +259,27 @@ pub const Encoder = struct {
         return false;
     }
 
+    fn astContainsConjunct(self: *Encoder, haystack: z3.Z3_ast, needle: z3.Z3_ast) bool {
+        if (astEquivalent(self, haystack, needle)) return true;
+        if (z3.Z3_get_ast_kind(self.context.ctx, haystack) != z3.Z3_APP_AST) return false;
+        const app = z3.Z3_to_app(self.context.ctx, haystack);
+        const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+        if (z3.Z3_get_decl_kind(self.context.ctx, decl) != z3.Z3_OP_AND) return false;
+        const num_args = z3.Z3_get_app_num_args(self.context.ctx, app);
+        var idx: c_uint = 0;
+        while (idx < num_args) : (idx += 1) {
+            if (self.astContainsConjunct(z3.Z3_get_app_arg(self.context.ctx, app, idx), needle)) return true;
+        }
+        return false;
+    }
+
+    fn activeReturnPathImplies(self: *Encoder, needle: z3.Z3_ast) bool {
+        for (self.return_path_assumptions.items) |assume| {
+            if (self.astContainsConjunct(assume, needle)) return true;
+        }
+        return false;
+    }
+
     pub fn mergeInitPredicate(self: *Encoder, condition: z3.Z3_ast, then_init: z3.Z3_ast, else_init: z3.Z3_ast) z3.Z3_ast {
         const cond = self.coerceToBool(condition);
         if (astEquivalent(self, then_init, else_init)) return then_init;
@@ -1346,12 +1367,10 @@ pub const Encoder = struct {
         const rhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, rhs, zero));
 
         const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
-        const max_value = if (width <= 64)
-            blk: {
-                const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
-                break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
-            }
-        else blk: {
+        const max_value = if (width <= 64) blk: {
+            const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+            break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
+        } else blk: {
             var remaining = width;
             var assembled: ?z3.Z3_ast = null;
             while (remaining > 0) {
@@ -3194,7 +3213,7 @@ pub const Encoder = struct {
                     const memref_id = @intFromPtr(memref_value.ptr);
                     const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
                     if (map.get(memref_id)) |stored| {
-                        if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathContains(stored.initialized)) {
+                        if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathImplies(stored.initialized)) {
                             return stored.value;
                         }
                         const op_id_unknown_conditional = @intFromPtr(mlir_op.ptr);
@@ -6454,7 +6473,6 @@ pub const Encoder = struct {
         if (mlir.oraRegionIsNull(try_region)) return null;
         return try self.tryGetDirectErrorUnwrapPredicateFromBlock(mlir.oraRegionGetFirstBlock(try_region), mode);
     }
-
 
     fn tryExtractDirectErrorUnwrapTryStmtResult(
         self: *Encoder,

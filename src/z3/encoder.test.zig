@@ -4184,7 +4184,6 @@ test "known pure callee canonical unsigned scf.while with nonzero control index 
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-
 test "direct non-throwing ora.try_stmt result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -8997,6 +8996,118 @@ test "known pure callee non-throwing ora.try_stmt local memref result encodes ex
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee branch-local memref initialization encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const null_attr = mlir.MlirAttribute{ .ptr = null };
+    const memref_i256_ty = mlir.oraMemRefTypeCreate(mlir_ctx, i256_ty, 0, null, null_attr, null_attr);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("branchInitThenLoad"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{i1_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+    const flag = mlir.oraBlockGetArgument(body, 0);
+
+    const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_i256_ty);
+    const slot = mlir.oraOperationGetResult(alloca, 0);
+
+    const no_results = [_]mlir.MlirType{};
+    const if_op = mlir.oraScfIfOpCreate(mlir_ctx, loc, flag, &no_results, no_results.len, true);
+    const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+    const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+
+    const nine_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const nine_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, nine_attr);
+    mlir.oraBlockAppendOwnedOperation(then_block, nine_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraMemrefStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(nine_op, 0),
+        slot,
+        &[_]mlir.MlirValue{},
+        0,
+    ));
+    const then_load = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, slot, &[_]mlir.MlirValue{}, 0, i256_ty);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_load);
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(then_load, 0)},
+        1,
+    ));
+
+    const five_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const five_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, five_attr);
+    mlir.oraBlockAppendOwnedOperation(else_block, five_op);
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(five_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, alloca);
+    mlir.oraBlockAppendOwnedOperation(body, if_op);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const result_types = [_]mlir.MlirType{i256_ty};
+
+    const true_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("branchInitThenLoad"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(true_op, 0)},
+        1,
+        &result_types,
+        result_types.len,
+    );
+    const false_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("branchInitThenLoad"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(false_op, 0)},
+        1,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded_true = try encoder.encodeOperation(true_call);
+    const encoded_false = try encoder.encodeOperation(false_call);
+    const expected_true = try encoder.encodeIntegerConstant(9, 256);
+    const expected_false = try encoder.encodeIntegerConstant(5, 256);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_true, expected_true)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_false, expected_false)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "known pure callee non-throwing ora.try_stmt does not preempt later explicit return" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -9075,7 +9186,6 @@ test "known pure callee non-throwing ora.try_stmt does not preempt later explici
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
-
 
 test "known callee result degradation reports callee and callsite" {
     var z3_ctx = try Context.init(testing.allocator);

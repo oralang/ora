@@ -118,6 +118,11 @@ pub const Z3_mk_numeral = c.Z3_mk_numeral;
 pub const Z3_mk_func_decl = c.Z3_mk_func_decl;
 pub const Z3_mk_app = c.Z3_mk_app;
 pub const Z3_to_app = c.Z3_to_app;
+pub const Z3_get_ast_kind = c.Z3_get_ast_kind;
+pub const Z3_get_app_num_args = c.Z3_get_app_num_args;
+pub const Z3_get_app_arg = c.Z3_get_app_arg;
+pub const Z3_get_app_decl = c.Z3_get_app_decl;
+pub const Z3_get_decl_kind = c.Z3_get_decl_kind;
 
 // Boolean operations
 pub const Z3_mk_and = c.Z3_mk_and;
@@ -152,6 +157,8 @@ pub const Z3_get_array_sort_range = c.Z3_get_array_sort_range;
 pub const Z3_BOOL_SORT = c.Z3_BOOL_SORT;
 pub const Z3_BV_SORT = c.Z3_BV_SORT;
 pub const Z3_ARRAY_SORT = c.Z3_ARRAY_SORT;
+pub const Z3_APP_AST = c.Z3_APP_AST;
+pub const Z3_OP_AND = c.Z3_OP_AND;
 
 // Model evaluation and iteration
 pub const Z3_model_inc_ref = c.Z3_model_inc_ref;
