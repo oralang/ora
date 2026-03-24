@@ -279,7 +279,7 @@ test "tload encodes exact transient slot value" {
     const tload = mlir.oraTLoadOpCreate(mlir_ctx, loc, stringRef("pending"), i256_ty);
 
     const loaded = try encoder.encodeOperation(tload);
-    const expected = try encoder.getOrCreateGlobal("transient:pending", z3.Z3_get_sort(z3_ctx.ctx, loaded));
+    const expected = encoder.global_map.get("transient:pending").?;
 
     try testing.expect(!encoder.isDegraded());
     try testing.expectEqualStrings(
@@ -941,6 +941,80 @@ test "func.call summary with direct symbolic ora.try_stmt state effects encodes 
     const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
     const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
     const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicTryWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{}, 0);
+    _ = try encoder.encodeOperation(call_helper);
+
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+    const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, counter));
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
+}
+
+test "func.call summary with direct symbolic no-result ora.try_stmt state effects encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicNoResultTryWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper_param_types = [_]mlir.MlirType{eu_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{}, 0);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const maybe_arg = mlir.oraBlockGetArgument(body, 0);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, maybe_arg, i256_ty);
+    mlir.oraBlockAppendOwnedOperation(try_block, unwrap_op);
+    const try_store_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const try_store_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, try_store_attr);
+    mlir.oraBlockAppendOwnedOperation(try_block, try_store_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(try_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const catch_store_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33);
+    const catch_store_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_store_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_store_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(catch_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
+    const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicNoResultTryWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{}, 0);
     _ = try encoder.encodeOperation(call_helper);
 
     try testing.expect(!encoder.isDegraded());
@@ -3145,12 +3219,12 @@ test "ora.assert simplifies checked addition overflow pattern" {
     const lhs_ast = try encoder.encodeValue(lhs);
     const rhs_ast = try encoder.encodeValue(rhs);
     const expected = z3.Z3_mk_not(z3_ctx.ctx, encoder.checkAddOverflow(lhs_ast, rhs_ast));
-    const expected_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, expected));
-
     var found_expected = false;
     for (obligations) |obligation| {
-        const obligation_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, obligation));
-        if (std.mem.eql(u8, obligation_text, expected_text)) {
+        var solver = try Solver.init(&z3_ctx, testing.allocator);
+        defer solver.deinit();
+        solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, obligation, expected)));
+        if (solver.check() == z3.Z3_L_FALSE) {
             found_expected = true;
             break;
         }
@@ -3198,12 +3272,12 @@ test "ora.assert simplifies checked subtraction overflow pattern" {
     const lhs_ast = try encoder.encodeValue(lhs);
     const rhs_ast = try encoder.encodeValue(rhs);
     const expected = z3.Z3_mk_not(z3_ctx.ctx, encoder.checkSubUnderflow(lhs_ast, rhs_ast));
-    const expected_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, expected));
-
     var found_expected = false;
     for (obligations) |obligation| {
-        const obligation_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, obligation));
-        if (std.mem.eql(u8, obligation_text, expected_text)) {
+        var solver = try Solver.init(&z3_ctx, testing.allocator);
+        defer solver.deinit();
+        solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, obligation, expected)));
+        if (solver.check() == z3.Z3_L_FALSE) {
             found_expected = true;
             break;
         }

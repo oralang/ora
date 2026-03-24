@@ -3761,6 +3761,33 @@ pub const Encoder = struct {
                     }
                 }
             }
+            if (std.mem.eql(u8, op_name, "ora.tload") or std.mem.eql(u8, op_name, "ora.tstore")) {
+                const key_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("key", 3));
+                if (!mlir.oraAttributeIsNull(key_attr)) {
+                    const key_ref = mlir.oraStringAttrGetValue(key_attr);
+                    if (key_ref.data != null and key_ref.length > 0 and std.mem.startsWith(u8, slot_name, "transient:")) {
+                        const key_name = key_ref.data[0..key_ref.length];
+                        const transient_name = slot_name["transient:".len..];
+                        if (std.mem.eql(u8, key_name, transient_name)) {
+                            if (std.mem.eql(u8, op_name, "ora.tload")) {
+                                const num_results = mlir.oraOperationGetNumResults(op);
+                                if (num_results >= 1) {
+                                    const result_value = mlir.oraOperationGetResult(op, 0);
+                                    out.* = self.encodeMLIRType(mlir.oraValueGetType(result_value)) catch null;
+                                    if (out.* != null) return;
+                                }
+                            } else {
+                                const num_operands = mlir.oraOperationGetNumOperands(op);
+                                if (num_operands >= 1) {
+                                    const value = mlir.oraOperationGetOperand(op, 0);
+                                    out.* = self.encodeMLIRType(mlir.oraValueGetType(value)) catch null;
+                                    if (out.* != null) return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
@@ -4059,7 +4086,11 @@ pub const Encoder = struct {
     ) EncodeError!void {
         _ = mode;
 
-        if (std.mem.eql(u8, op_name, "memref.store")) {
+        if (std.mem.eql(u8, op_name, "memref.store") or
+            std.mem.eql(u8, op_name, "ora.sstore") or
+            std.mem.eql(u8, op_name, "ora.map_store") or
+            std.mem.eql(u8, op_name, "ora.tstore"))
+        {
             _ = try self.encodeOperation(op);
             return;
         }
@@ -4926,6 +4957,64 @@ pub const Encoder = struct {
         ok_expr: z3.Z3_ast,
     };
 
+    fn tryGetDirectErrorUnwrapPredicateFromBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        mode: EncodeMode,
+    ) EncodeError!?DirectTryUnwrapInfo {
+        if (mlir.oraBlockIsNull(block)) return null;
+
+        var unwrap_op: ?mlir.MlirOperation = null;
+        var current = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.yield") or std.mem.eql(u8, name, "scf.yield")) {
+                if (unwrap_op == null) return null;
+
+                const unwrap_operand = mlir.oraOperationGetOperand(unwrap_op.?, 0);
+                const operand_type = mlir.oraValueGetType(unwrap_operand);
+                const success_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
+                if (mlir.oraTypeIsNull(success_type)) return null;
+
+                const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
+                const eu = try self.getErrorUnionSort(operand_type, success_type);
+                const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{operand_expr});
+                const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
+                return .{ .is_err = is_err, .ok_expr = ok_expr };
+            }
+
+            if (std.mem.eql(u8, name, "ora.error.unwrap")) {
+                if (unwrap_op != null) return null;
+                unwrap_op = current;
+                current = mlir.oraOperationGetNextInBlock(current);
+                continue;
+            }
+
+            if (std.mem.eql(u8, name, "scf.if") or
+                std.mem.eql(u8, name, "ora.switch") or
+                std.mem.eql(u8, name, "ora.conditional_return") or
+                std.mem.eql(u8, name, "scf.execute_region") or
+                std.mem.eql(u8, name, "scf.for") or
+                std.mem.eql(u8, name, "scf.while") or
+                std.mem.eql(u8, name, "ora.try_stmt") or
+                std.mem.eql(u8, name, "ora.return") or
+                std.mem.eql(u8, name, "func.return"))
+            {
+                return null;
+            }
+
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
+    }
+
     fn tryGetDirectErrorUnwrapBlockInfo(
         self: *Encoder,
         block: mlir.MlirBlock,
@@ -5002,6 +5091,16 @@ pub const Encoder = struct {
         const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
         if (mlir.oraRegionIsNull(try_region)) return null;
         return try self.tryGetDirectErrorUnwrapBlockInfo(mlir.oraRegionGetFirstBlock(try_region), result_index, mode);
+    }
+
+    fn tryGetDirectErrorUnwrapTryPredicate(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError!?DirectTryUnwrapInfo {
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        if (mlir.oraRegionIsNull(try_region)) return null;
+        return try self.tryGetDirectErrorUnwrapPredicateFromBlock(mlir.oraRegionGetFirstBlock(try_region), mode);
     }
 
 
@@ -5320,6 +5419,10 @@ pub const Encoder = struct {
         defer @import("mlir_c_api").freeStringRef(name_ref);
         if (name_ref.data != null and name_ref.length > 0) {
             const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "func.func")) {
+                self.encodeStateEffectsInRegions(op);
+                return;
+            }
             if (std.mem.eql(u8, op_name, "scf.if")) {
                 if (mlir.oraOperationGetNumOperands(op) < 1) {
                     self.recordDegradation("scf.if missing condition while encoding state effects");
@@ -5412,7 +5515,7 @@ pub const Encoder = struct {
                     return;
                 }
 
-                if (self.tryGetDirectErrorUnwrapTryInfo(op, 0, .Current) catch null) |info| {
+                if (self.tryGetDirectErrorUnwrapTryPredicate(op, .Current) catch null) |info| {
                     var base_state = self.captureStateSnapshot() catch {
                         self.recordDegradation("failed to capture base state for direct ora.try_stmt summary");
                         return;
