@@ -2208,6 +2208,9 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
+                if (try self.tryExtractCanonicalIncrementScfForResult(mlir_op, result_index, mode)) |increment_result| {
+                    return increment_result;
+                }
                 if (try self.tryExtractIdentityScfForResult(mlir_op, result_index, mode)) |identity_result| {
                     return identity_result;
                 }
@@ -4147,7 +4150,8 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "scf.for")) {
-                const nested_expr = (try self.tryExtractIdentityScfForResult(current, result_index, mode)) orelse
+                const nested_expr = (try self.tryExtractCanonicalIncrementScfForResult(current, result_index, mode)) orelse
+                    (try self.tryExtractIdentityScfForResult(current, result_index, mode)) orelse
                     (try self.tryExtractFiniteScfForResult(current, result_index, mode));
                 if (nested_expr != null) return nested_expr;
             }
@@ -4635,6 +4639,69 @@ pub const Encoder = struct {
 
         if (result_index >= carried.len) return null;
         return carried[result_index];
+    }
+
+    fn tryExtractCanonicalIncrementScfForResult(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 4) return null;
+        const num_iter_args = num_operands - 3;
+        if (num_iter_args != 1 or result_index != 0) return null;
+
+        const lb_value = mlir.oraOperationGetOperand(for_op, 0);
+        const step_value = mlir.oraOperationGetOperand(for_op, 2);
+        const lb_const = self.tryGetConstIntValue(lb_value);
+        const step_const = self.tryGetConstIntValue(step_value);
+        if (lb_const == null or lb_const.? != 0 or step_const == null or step_const.? != 1) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        if (mlir.oraBlockGetNumArguments(body) != 2) return null;
+        const carried_arg = mlir.oraBlockGetArgument(body, 1);
+
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return")) return null;
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                if (mlir.oraOperationGetNumOperands(current) != 1) return null;
+                const yielded = mlir.oraOperationGetOperand(current, 0);
+                if (!mlir.oraValueIsAOpResult(yielded)) return null;
+                const yield_owner = mlir.oraOpResultGetOwner(yielded);
+                if (!self.operationNameEq(yield_owner, "arith.addi")) return null;
+                if (mlir.oraOperationGetNumOperands(yield_owner) != 2) return null;
+
+                const add_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
+                const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
+                const lhs_const = self.tryGetConstIntValue(add_lhs);
+                const rhs_const = self.tryGetConstIntValue(add_rhs);
+                const other =
+                    if (lhs_const != null and lhs_const.? == 1 and mlir.mlirValueEqual(add_rhs, carried_arg))
+                        add_rhs
+                    else if (rhs_const != null and rhs_const.? == 1 and mlir.mlirValueEqual(add_lhs, carried_arg))
+                        add_lhs
+                    else
+                        return null;
+                if (!mlir.mlirValueEqual(other, carried_arg)) return null;
+
+                const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 3), mode);
+                const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
+                return try self.encodeArithmeticOp(.Add, init_ast, ub_ast);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
     }
 
     fn tryExtractIdentityScfForResult(
