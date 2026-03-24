@@ -1343,7 +1343,10 @@ pub const VerificationPass = struct {
     ) !usize {
         const function_name = self.current_function_name orelse "unknown";
         const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
-        const encoded = try self.encoder.encodeValue(condition_value);
+        const encoded = if (try self.encoder.tryEncodeAssertCondition(op, .Current)) |specialized|
+            specialized
+        else
+            try self.encoder.encodeValue(condition_value);
         const extra_constraints = try self.encoder.takeConstraints(self.allocator);
         const safety_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
@@ -1357,7 +1360,10 @@ pub const VerificationPass = struct {
         var loop_exit_condition: ?z3.Z3_ast = null;
         var loop_exit_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         if (kind == .LoopInvariant) {
-            old_condition = try self.encoder.encodeValueOld(condition_value);
+            old_condition = if (try self.encoder.tryEncodeAssertCondition(op, .Old)) |specialized_old|
+                specialized_old
+            else
+                try self.encoder.encodeValueOld(condition_value);
             old_extra_constraints = try self.encoder.takeConstraints(self.allocator);
             loop_entry_extra_constraints = try self.encodeLoopEntryConstraints(op);
             const old_safety = try self.encoder.takeObligations(self.allocator);
@@ -5035,6 +5041,79 @@ fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildCheckedMulOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("checked_mul_assert_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, 1);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const lhs = mlir.oraBlockGetArgument(func_body, 0);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10000);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_const, 0);
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const bool_true = mlir.oraOperationGetResult(true_const, 0);
+
+    const mul_op = mlir.oraArithMulIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const mul = mlir.oraOperationGetResult(mul_op, 0);
+    const rhs_non_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 1, rhs, zero); // ne
+    const rhs_non_zero = mlir.oraOperationGetResult(rhs_non_zero_op, 0);
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, mul, rhs);
+    mlir.oraOperationSetAttributeByName(div_op, testStringRef("ora.guard_internal"), mlir.oraBoolAttrCreate(mlir_ctx, true));
+    const recovered = mlir.oraOperationGetResult(div_op, 0);
+    const overflow_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 1, recovered, lhs); // ne
+    const overflow_cmp = mlir.oraOperationGetResult(overflow_cmp_op, 0);
+    const and_op = mlir.oraArithAndIOpCreate(mlir_ctx, loc, overflow_cmp, rhs_non_zero);
+    const overflow_flag = mlir.oraOperationGetResult(and_op, 0);
+    const not_overflow_op = mlir.oraArithXorIOpCreate(mlir_ctx, loc, overflow_flag, bool_true);
+    const not_overflow = mlir.oraOperationGetResult(not_overflow_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, not_overflow, testStringRef("checked multiplication overflow"));
+
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, rhs_const);
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_const);
+    mlir.oraBlockAppendOwnedOperation(func_body, true_const);
+    mlir.oraBlockAppendOwnedOperation(func_body, mul_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, rhs_non_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, div_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, overflow_cmp_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, and_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, not_overflow_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn findFirstOpByNameInBlock(block: mlir.MlirBlock, name: []const u8) ?mlir.MlirOperation {
+    var op = mlir.oraBlockGetFirstOperation(block);
+    while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], name)) {
+            return op;
+        }
+    }
+    return null;
+}
+
 fn buildPublicCallsPrivateAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -5546,6 +5625,62 @@ test "full verify mode treats untagged ora.assert as obligation" {
         }
     }
     try testing.expect(saw_contract_obligation);
+}
+
+test "full verify mode simplifies checked multiply assert obligations before SMT-LIB emission" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildCheckedMulOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        try testing.expect(std.mem.indexOf(u8, q.smtlib_z, "(bvudiv") != null);
+        try testing.expect(std.mem.indexOf(u8, q.smtlib_z, "(bvmul") == null);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "checked multiply assert specialization matches verification test module directly" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildCheckedMulOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    const module_body = mlir.oraModuleGetBody(module);
+    const func_op = findFirstOpByNameInBlock(module_body, "func.func") orelse return error.TestUnexpectedResult;
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const assert_op = findFirstOpByNameInBlock(func_body, "ora.assert") orelse return error.TestUnexpectedResult;
+
+    const specialized = try pass.encoder.tryEncodeAssertCondition(assert_op, .Current);
+    try testing.expect(specialized != null);
+
+    const specialized_text = z3.Z3_ast_to_string(pass.encoder.context.ctx, specialized.?);
+    try testing.expect(std.mem.indexOf(u8, std.mem.span(specialized_text), "(bvmul") == null);
 }
 
 test "basic verify mode ignores untagged ora.assert as obligation" {
