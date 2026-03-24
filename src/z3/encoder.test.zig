@@ -765,6 +765,79 @@ test "func.call summary with zero-iteration scf.for preserves state exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary with symbolic no-write scf.for preserves state exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicNoWriteFor"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{index_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+
+    const ub = mlir.oraBlockGetArgument(body, 0);
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0_op, 0),
+        ub,
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const counter_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const pre_counter = z3.Z3_mk_const(z3_ctx.ctx, z3.Z3_mk_string_symbol(z3_ctx.ctx, "pre_counter_symbolic_for"), counter_sort);
+    try encoder.global_map.put(try testing.allocator.dupe(u8, "counter"), pre_counter);
+
+    const symbolic_ub = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("ubValue"), index_ty);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("symbolicNoWriteFor"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(symbolic_ub, 0)},
+        1,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    const post_counter = encoder.global_map.get("counter").?;
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, post_counter, pre_counter)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with non-throwing ora.try_stmt state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

@@ -3781,6 +3781,19 @@ pub const Encoder = struct {
         }
     }
 
+    fn operationMayWriteTrackedState(self: *Encoder, op: mlir.MlirOperation) EncodeError!bool {
+        var write_slots = std.ArrayList([]u8){};
+        defer {
+            for (write_slots.items) |slot_name| self.allocator.free(slot_name);
+            write_slots.deinit(self.allocator);
+        }
+        var writes_unknown = false;
+        var visited_funcs = std.AutoHashMap(u64, void).init(self.allocator);
+        defer visited_funcs.deinit();
+        try self.collectWriteInfoFromOperation(op, &write_slots, &writes_unknown, &visited_funcs);
+        return writes_unknown or write_slots.items.len > 0;
+    }
+
     fn inferGlobalSortFromFunction(self: *Encoder, func_op: mlir.MlirOperation, slot_name: []const u8) ?z3.Z3_sort {
         var found: ?z3.Z3_sort = null;
         self.findGlobalSortInOperation(func_op, slot_name, &found);
@@ -5780,6 +5793,11 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "scf.for")) {
+                const loop_writes_state = self.operationMayWriteTrackedState(op) catch {
+                    self.recordDegradation("failed to recover scf.for write set for state summary");
+                    return;
+                };
+                if (!loop_writes_state) return;
                 if (self.isZeroIterationScfFor(op)) return;
                 if (self.tryEncodeFiniteScfForStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
