@@ -2299,23 +2299,26 @@ pub const Encoder = struct {
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
         const op_id = @intFromPtr(mlir_op.ptr);
-        var merged = blk: {
-            if (metadata.default_case_index) |default_case_index| {
-                if (default_case_index >= 0) {
-                    if (try self.extractRegionYield(mlir_op, @intCast(default_case_index), result_index, mode)) |default_expr| {
-                        break :blk default_expr;
-                    }
-                }
+        var branch_exprs = try self.allocator.alloc(z3.Z3_ast, num_regions);
+        defer self.allocator.free(branch_exprs);
+        var branch_predicates = try self.allocator.alloc(z3.Z3_ast, num_regions);
+        defer self.allocator.free(branch_predicates);
+
+        var default_expr: ?z3.Z3_ast = null;
+        if (metadata.default_case_index) |default_case_index| {
+            if (default_case_index >= 0) {
+                default_expr = try self.extractRegionYield(mlir_op, @intCast(default_case_index), result_index, mode);
             }
-            break :blk try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
-        };
+        }
+
         var remaining = self.encodeBoolConstant(true);
 
         var region_index = num_regions;
         while (region_index > 0) {
             region_index -= 1;
 
-            const branch_expr = (try self.extractRegionYield(mlir_op, @intCast(region_index), result_index, mode)) orelse merged;
+            const branch_expr = (try self.extractRegionYield(mlir_op, @intCast(region_index), result_index, mode)) orelse default_expr orelse
+                try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
             const raw_predicate = try self.buildOraSwitchCasePredicate(
                 scrutinee,
                 metadata.case_kinds,
@@ -2328,14 +2331,57 @@ pub const Encoder = struct {
                 remaining
             else
                 self.encodeAnd(&.{ remaining, raw_predicate });
-            merged = self.encodeIte(effective_predicate, branch_expr, merged);
+            branch_exprs[region_index] = branch_expr;
+            branch_predicates[region_index] = effective_predicate;
 
             if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
                 remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
             }
         }
 
+        const exhaustive_without_default = metadata.default_case_index == null and self.switchCasesCoverI1Domain(scrutinee_value, metadata);
+
+        var merged = blk: {
+            if (default_expr) |expr| break :blk expr;
+            if (exhaustive_without_default or self.astEquivalent(remaining, self.encodeBoolConstant(false))) {
+                var chosen: ?z3.Z3_ast = null;
+                var idx: usize = 0;
+                while (idx < num_regions) : (idx += 1) {
+                    if (!self.astEquivalent(branch_predicates[idx], self.encodeBoolConstant(false))) {
+                        chosen = branch_exprs[idx];
+                        break;
+                    }
+                }
+                if (chosen) |expr| break :blk expr;
+            }
+            break :blk try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
+        };
+
+        region_index = num_regions;
+        while (region_index > 0) {
+            region_index -= 1;
+            merged = self.encodeIte(branch_predicates[region_index], branch_exprs[region_index], merged);
+        }
+
         return merged;
+    }
+
+    fn switchCasesCoverI1Domain(
+        self: *Encoder,
+        scrutinee_value: mlir.MlirValue,
+        metadata: SwitchCaseMetadata,
+    ) bool {
+        const scrutinee_ty = mlir.oraValueGetType(scrutinee_value);
+        if ((self.getTypeBitWidth(scrutinee_ty) orelse 0) != 1) return false;
+
+        var saw_zero = false;
+        var saw_one = false;
+        for (metadata.case_kinds, metadata.case_values) |kind, value| {
+            if (kind != 0) return false;
+            if (value == 0) saw_zero = true;
+            if (value == 1) saw_one = true;
+        }
+        return saw_zero and saw_one;
     }
 
     fn encodeOperationOperandsWithMode(
