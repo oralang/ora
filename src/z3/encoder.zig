@@ -6123,6 +6123,31 @@ pub const Encoder = struct {
             return (try self.trySummarizeTryValue(yielded_value, mode)) orelse null;
         }
 
+        if (self.operationNameEq(owner, "scf.for")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const exact =
+                (try self.tryExtractFiniteScfForResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalIncrementScfForResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalScfForDerivedResult(owner, result_index, mode));
+            if (exact) |ok_expr| {
+                return .{ .is_err = self.encodeBoolConstant(false), .ok_expr = ok_expr };
+            }
+        }
+
+        if (self.operationNameEq(owner, "scf.while")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const exact =
+                (try self.tryExtractZeroIterationScfWhileResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalUnsignedScfWhileResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalSignedScfWhileResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalIncrementScfWhileResult(owner, result_index, mode)) orelse
+                (try self.tryExtractCanonicalDecrementScfWhileResult(owner, result_index, mode)) orelse
+                (try self.tryExtractFiniteScfWhileResult(owner, result_index, mode));
+            if (exact) |ok_expr| {
+                return .{ .is_err = self.encodeBoolConstant(false), .ok_expr = ok_expr };
+            }
+        }
+
         if (self.operationNameEq(owner, "ora.try_stmt")) {
             const catch_region = mlir.oraOperationGetRegion(owner, 1);
             if (!self.regionMayEnterCatch(catch_region)) {
