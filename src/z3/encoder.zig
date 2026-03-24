@@ -840,6 +840,12 @@ pub const Encoder = struct {
         }
     }
 
+    fn copyReturnPathAssumptionsFrom(self: *Encoder, other: *const Encoder) !void {
+        for (other.return_path_assumptions.items) |assume| {
+            try self.return_path_assumptions.append(self.allocator, assume);
+        }
+    }
+
     fn copyGlobalStateMapFrom(self: *Encoder, other: *const Encoder, use_old: bool) !void {
         const source = if (use_old) &other.global_old_map else &other.global_map;
         const destination = if (use_old) &self.global_old_map else &self.global_map;
@@ -4251,6 +4257,7 @@ pub const Encoder = struct {
         try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
+        try summary_encoder.copyReturnPathAssumptionsFrom(self);
         try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
         try summary_encoder.copyGlobalEntryMapFrom(self);
         try summary_encoder.pushInlineFunction(callee);
@@ -4287,7 +4294,7 @@ pub const Encoder = struct {
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
         if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee_requires.items);
+            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
         }
 
         return encoded;
@@ -7201,6 +7208,7 @@ pub const Encoder = struct {
         try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
+        try summary_encoder.copyReturnPathAssumptionsFrom(self);
         try summary_encoder.pushInlineFunction(callee);
 
         for (slots) |slot| {
@@ -7263,7 +7271,7 @@ pub const Encoder = struct {
         const extra_obligations = try summary_encoder.takeObligations(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
         if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee_requires.items);
+            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
         }
 
         for (slots) |*slot| {
@@ -7347,14 +7355,28 @@ pub const Encoder = struct {
         self: *Encoder,
         obligations: []const z3.Z3_ast,
         requires: []const z3.Z3_ast,
+        path_guards: []const z3.Z3_ast,
     ) void {
         if (obligations.len == 0) return;
-        if (requires.len == 0) {
+        if (requires.len == 0 and path_guards.len == 0) {
             for (obligations) |obl| self.addObligation(obl);
             return;
         }
 
-        const precondition_guard = self.encodeAnd(requires);
+        var guard_terms = std.ArrayList(z3.Z3_ast){};
+        defer guard_terms.deinit(self.allocator);
+        guard_terms.appendSlice(self.allocator, requires) catch {
+            self.recordDegradation("failed to allocate summary obligation guards");
+            for (obligations) |obl| self.addObligation(obl);
+            return;
+        };
+        guard_terms.appendSlice(self.allocator, path_guards) catch {
+            self.recordDegradation("failed to allocate summary obligation guards");
+            for (obligations) |obl| self.addObligation(obl);
+            return;
+        };
+
+        const precondition_guard = self.encodeAnd(guard_terms.items);
         for (obligations) |obl| {
             self.addObligation(self.encodeImplies(precondition_guard, obl));
         }
