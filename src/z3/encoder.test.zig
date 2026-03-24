@@ -3774,6 +3774,50 @@ test "scf.while zero-iteration result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "scf.while carried false init result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false_val = mlir.oraOperationGetResult(false_op, 0);
+    const expected = try encoder.encodeOperation(false_op);
+
+    const init_vals = [_]mlir.MlirValue{false_val};
+    const result_types = [_]mlir.MlirType{i1_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        before_arg,
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "quantified operation encodes to z3 quantifier" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

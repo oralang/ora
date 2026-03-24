@@ -3934,6 +3934,8 @@ pub const Encoder = struct {
     ) EncodeError!?z3.Z3_ast {
         const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
         if (mlir.oraBlockIsNull(before_block)) return null;
+        const bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
+        defer self.unbindScfWhileBeforeArgs(while_op, bind_count);
 
         var current = mlir.oraBlockGetFirstOperation(before_block);
         while (!mlir.oraOperationIsNull(current)) {
@@ -3965,9 +3967,35 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn bindScfWhileBeforeArgs(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!usize {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block)) return 0;
+
+        const num_args: usize = @intCast(mlir.oraBlockGetNumArguments(before_block));
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(while_op));
+        const bind_count = @min(num_args, num_operands);
+        for (0..bind_count) |index| {
+            const arg = mlir.oraBlockGetArgument(before_block, @intCast(index));
+            const init_value = mlir.oraOperationGetOperand(while_op, @intCast(index));
+            try self.bindValue(arg, try self.encodeValueWithMode(init_value, mode));
+        }
+        return bind_count;
+    }
+
+    fn unbindScfWhileBeforeArgs(self: *Encoder, while_op: mlir.MlirOperation, bind_count: usize) void {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block)) return;
+        for (0..bind_count) |index| {
+            const arg = mlir.oraBlockGetArgument(before_block, @intCast(index));
+            _ = self.value_bindings.remove(@intFromPtr(arg.ptr));
+        }
+    }
+
     fn isStaticallyFalseScfWhile(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!bool {
         const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
         if (mlir.oraBlockIsNull(before_block)) return false;
+        const bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
+        defer self.unbindScfWhileBeforeArgs(while_op, bind_count);
 
         var current = mlir.oraBlockGetFirstOperation(before_block);
         while (!mlir.oraOperationIsNull(current)) {
