@@ -3928,6 +3928,63 @@ test "direct symbolic canonical increment scf.for result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct symbolic canonical decrement scf.for result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 13);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const ub_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("forDecrementUb"), index_ty);
+    const expected_init = try encoder.encodeOperation(init_op);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0_op, 0),
+        mlir.oraOperationGetResult(ub_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)},
+        1,
+        false,
+    );
+    const body = mlir.oraScfForOpGetBodyBlock(loop);
+    const carried_arg = mlir.oraBlockGetArgument(body, 1);
+    const next_op = mlir.oraArithSubIOpCreate(mlir_ctx, loc, carried_arg, mlir.oraOperationGetResult(c1_op, 0));
+    mlir.oraBlockAppendOwnedOperation(body, next_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(loop, 0));
+    try testing.expect(!encoder.isDegraded());
+    const ub_ast = try encoder.encodeOperation(ub_op);
+    const expected = try encoder.encodeArithmeticOp(.Sub, expected_init, ub_ast);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "known pure callee finite five-iteration scf.for return encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -4191,6 +4248,95 @@ test "known pure callee symbolic canonical increment scf.for return encodes exac
     const init_ast = try encoder.encodeOperation(init_op);
     const ub_ast = try encoder.encodeOperation(ub_op);
     const expected = try encoder.encodeArithmeticOp(.Add, init_ast, ub_ast);
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "known pure callee symbolic canonical decrement scf.for return encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicDecrementForReturn"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{index_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 13);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+    mlir.oraBlockAppendOwnedOperation(body, init_op);
+
+    const ub = mlir.oraBlockGetArgument(body, 0);
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0_op, 0),
+        ub,
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)},
+        1,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    const carried = mlir.oraBlockGetArgument(loop_body, 1);
+    const next_op = mlir.oraArithSubIOpCreate(mlir_ctx, loc, carried, mlir.oraOperationGetResult(c1_op, 0));
+    mlir.oraBlockAppendOwnedOperation(loop_body, next_op);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(loop, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const ub_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("pureDecrementForUb"), index_ty);
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("symbolicDecrementForReturn"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(ub_op, 0)},
+        1,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded = try encoder.encodeOperation(call);
+    try testing.expect(!encoder.isDegraded());
+
+    const init_ast = try encoder.encodeOperation(init_op);
+    const ub_ast = try encoder.encodeOperation(ub_op);
+    const expected = try encoder.encodeArithmeticOp(.Sub, init_ast, ub_ast);
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
