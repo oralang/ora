@@ -6123,6 +6123,16 @@ pub const Encoder = struct {
             return (try self.trySummarizeTryValue(yielded_value, mode)) orelse null;
         }
 
+        if (self.operationNameEq(owner, "ora.try_stmt")) {
+            const catch_region = mlir.oraOperationGetRegion(owner, 1);
+            if (!self.regionMayEnterCatch(catch_region)) {
+                return .{
+                    .is_err = self.encodeBoolConstant(false),
+                    .ok_expr = try self.encodeValueWithMode(value, mode),
+                };
+            }
+        }
+
         if (self.operationNameEq(owner, "ora.switch_expr") or self.operationNameEq(owner, "ora.switch")) {
             const result_index = self.getResultIndex(owner, value) orelse return null;
             if (mlir.oraOperationGetNumOperands(owner) < 1) return null;
