@@ -4456,6 +4456,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.if") or
             std.mem.eql(u8, op_name, "ora.conditional_return") or
             std.mem.eql(u8, op_name, "ora.switch") or
+            std.mem.eql(u8, op_name, "ora.switch_expr") or
             std.mem.eql(u8, op_name, "scf.execute_region") or
             std.mem.eql(u8, op_name, "scf.for") or
             std.mem.eql(u8, op_name, "scf.while") or
