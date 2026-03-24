@@ -6441,9 +6441,24 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, name, "ora.try_stmt")) {
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
             const catch_region = mlir.oraOperationGetRegion(start_op, 1);
             if (!self.regionMayEnterCatch(catch_region)) {
-                return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+                return rest;
+            }
+            const catch_block = mlir.oraRegionGetFirstBlock(catch_region);
+            const catch_pred = (try self.tryExtractCatchPredicateFromBlock(catch_block, mode, rest)) orelse return null;
+            if (try self.tryStmtAlwaysEntersCatch(start_op, mode)) {
+                return catch_pred;
+            }
+            if (!self.tryStmtMayEnterCatch(start_op)) {
+                return rest;
+            }
+            if (try self.tryExtractTryRegionCatchPredicate(start_op, mode)) |try_catch_pred| {
+                return self.encodeOr(&.{
+                    self.encodeAnd(&.{ try_catch_pred, catch_pred }),
+                    self.encodeAnd(&.{ self.encodeNot(try_catch_pred), rest }),
+                });
             }
             return null;
         }
