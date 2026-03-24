@@ -3787,6 +3787,14 @@ pub const Encoder = struct {
             return false;
         }
 
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            if (self.isZeroIterationScfFor(op)) return false;
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return false;
+        }
+
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
             const num_results = mlir.oraOperationGetNumResults(op);
             var idx: usize = 0;
