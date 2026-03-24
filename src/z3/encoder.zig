@@ -232,6 +232,13 @@ pub const Encoder = struct {
         return z3.c.Z3_is_eq_ast(self.context.ctx, lhs, rhs);
     }
 
+    fn astSimplifiesToBool(self: *Encoder, ast: z3.Z3_ast) ?bool {
+        const simplified = z3.Z3_simplify(self.context.ctx, ast);
+        if (self.astEquivalent(simplified, self.boolTrue())) return true;
+        if (self.astEquivalent(simplified, self.boolFalse())) return false;
+        return null;
+    }
+
     fn boolTrue(self: *Encoder) z3.Z3_ast {
         return z3.Z3_mk_true(self.context.ctx);
     }
@@ -1919,6 +1926,10 @@ pub const Encoder = struct {
             const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
+            if (try self.tryStmtAlwaysEntersCatch(mlir_op, mode)) {
+                return (try self.extractRegionYield(mlir_op, 1, result_index, mode)) orelse
+                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
+            }
             if (!self.tryStmtMayEnterCatch(mlir_op)) {
                 return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
@@ -3741,6 +3752,105 @@ pub const Encoder = struct {
         return false;
     }
 
+    fn valueIsStaticallyErrorUnionError(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?bool {
+        const value_type = mlir.oraValueGetType(value);
+        const success_type = mlir.oraErrorUnionTypeGetSuccessType(value_type);
+        if (mlir.oraTypeIsNull(success_type)) return null;
+
+        const encoded = try self.encodeValueWithMode(value, mode);
+        const eu = try self.getErrorUnionSort(value_type, success_type);
+        const is_err = z3.Z3_mk_app(self.context.ctx, eu.proj_is_error, 1, &[_]z3.Z3_ast{encoded});
+        return self.astSimplifiesToBool(is_err);
+    }
+
+    fn regionAlwaysEntersCatch(
+        self: *Encoder,
+        region: mlir.MlirRegion,
+        mode: EncodeMode,
+    ) EncodeError!bool {
+        if (mlir.oraRegionIsNull(region)) return false;
+
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) {
+            var op = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(op)) {
+                if (try self.operationAlwaysEntersCatch(op, mode)) return true;
+
+                const name_ref = mlir.oraOperationGetName(op);
+                defer @import("mlir_c_api").freeStringRef(name_ref);
+                const op_name = if (name_ref.data == null or name_ref.length == 0)
+                    ""
+                else
+                    name_ref.data[0..name_ref.length];
+
+                if (std.mem.eql(u8, op_name, "ora.return") or
+                    std.mem.eql(u8, op_name, "func.return") or
+                    std.mem.eql(u8, op_name, "ora.yield") or
+                    std.mem.eql(u8, op_name, "scf.yield"))
+                {
+                    return false;
+                }
+
+                op = mlir.oraOperationGetNextInBlock(op);
+            }
+            block = mlir.oraBlockGetNextInRegion(block);
+        }
+
+        return false;
+    }
+
+    fn operationAlwaysEntersCatch(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError!bool {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.error.unwrap")) {
+            if (mlir.oraOperationGetNumOperands(op) < 1) return false;
+            const operand = mlir.oraOperationGetOperand(op, 0);
+            return (try self.valueIsStaticallyErrorUnionError(operand, mode)) == true;
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            return try self.tryStmtAlwaysEntersCatch(op, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.execute_region")) {
+            return try self.regionAlwaysEntersCatch(mlir.oraOperationGetRegion(op, 0), mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.if")) {
+            if (mlir.oraOperationGetNumOperands(op) < 1) return false;
+            const condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(op, 0), mode);
+            const selected_region: u32 = if ((self.astSimplifiesToBool(condition) orelse return false)) 0 else 1;
+            return try self.regionAlwaysEntersCatch(mlir.oraOperationGetRegion(op, selected_region), mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
+            if (mlir.oraOperationGetNumOperands(op) < 1) return false;
+            const condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(op, 0), mode);
+            const selected_region: u32 = if ((self.astSimplifiesToBool(condition) orelse return false)) 0 else 1;
+            return try self.regionAlwaysEntersCatch(mlir.oraOperationGetRegion(op, selected_region), mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.switch")) {
+            const case_index = self.getSelectedOraSwitchCaseIndex(op) orelse return false;
+            return try self.regionAlwaysEntersCatch(mlir.oraOperationGetRegion(op, @intCast(case_index)), mode);
+        }
+
+        return false;
+    }
+
     fn operationMayEnterCatch(self: *Encoder, op: mlir.MlirOperation) bool {
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
@@ -3868,6 +3978,15 @@ pub const Encoder = struct {
             block = mlir.oraBlockGetNextInRegion(block);
         }
         return false;
+    }
+
+    fn tryStmtAlwaysEntersCatch(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError!bool {
+        const try_region = mlir.oraOperationGetRegion(try_stmt, 0);
+        return try self.regionAlwaysEntersCatch(try_region, mode);
     }
 
     fn isZeroIterationScfFor(self: *Encoder, op: mlir.MlirOperation) bool {
@@ -4844,6 +4963,14 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+                if ((self.tryStmtAlwaysEntersCatch(op, .Current) catch false)) {
+                    const catch_region = mlir.oraOperationGetRegion(op, 1);
+                    if (!mlir.oraRegionIsNull(catch_region)) {
+                        self.encodeStateEffectsInRegion(catch_region);
+                    }
+                    return;
+                }
+
                 if (!self.tryStmtMayEnterCatch(op)) {
                     const try_region = mlir.oraOperationGetRegion(op, 0);
                     if (!mlir.oraRegionIsNull(try_region)) {
