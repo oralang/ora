@@ -1968,6 +1968,77 @@ pub const Encoder = struct {
         return z3.Z3_mk_not(self.context.ctx, overflow);
     }
 
+    fn tryEncodeCheckedAddAssert(self: *Encoder, condition_value: mlir.MlirValue, mode: EncodeMode) EncodeError!?z3.Z3_ast {
+        if (!mlir.oraValueIsAOpResult(condition_value)) return null;
+        const xori_op = mlir.oraOpResultGetOwner(condition_value);
+        if (!self.operationNameEq(xori_op, "arith.xori")) return null;
+        if (mlir.oraOperationGetNumOperands(xori_op) != 2) return null;
+
+        var cmp_value: ?mlir.MlirValue = null;
+        var found_bool_inversion = false;
+        for (0..2) |i| {
+            const operand = mlir.oraOperationGetOperand(xori_op, i);
+            if (self.isI1ConstantValue(operand)) {
+                found_bool_inversion = true;
+            } else if (mlir.oraValueIsAOpResult(operand) and self.operationNameEq(mlir.oraOpResultGetOwner(operand), "arith.cmpi")) {
+                cmp_value = operand;
+            }
+        }
+        if (!found_bool_inversion or cmp_value == null) return null;
+
+        const cmp_op = mlir.oraOpResultGetOwner(cmp_value.?);
+        if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
+        const predicate = self.getCmpPredicate(cmp_op) catch return null;
+        if (predicate != 6) return null; // ult
+
+        const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
+        const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
+        if (!mlir.oraValueIsAOpResult(cmp_lhs)) return null;
+        const add_op = mlir.oraOpResultGetOwner(cmp_lhs);
+        if (!self.operationNameEq(add_op, "arith.addi")) return null;
+        if (mlir.oraOperationGetNumOperands(add_op) != 2) return null;
+        const lhs_value = mlir.oraOperationGetOperand(add_op, 0);
+        const rhs_value = mlir.oraOperationGetOperand(add_op, 1);
+        if (!mlir.mlirValueEqual(cmp_rhs, lhs_value) and !mlir.mlirValueEqual(cmp_rhs, rhs_value)) return null;
+
+        const lhs_ast = try self.encodeValueWithMode(lhs_value, mode);
+        const rhs_ast = try self.encodeValueWithMode(rhs_value, mode);
+        const overflow = self.checkAddOverflow(lhs_ast, rhs_ast);
+        return z3.Z3_mk_not(self.context.ctx, overflow);
+    }
+
+    fn tryEncodeCheckedSubAssert(self: *Encoder, condition_value: mlir.MlirValue, mode: EncodeMode) EncodeError!?z3.Z3_ast {
+        if (!mlir.oraValueIsAOpResult(condition_value)) return null;
+        const xori_op = mlir.oraOpResultGetOwner(condition_value);
+        if (!self.operationNameEq(xori_op, "arith.xori")) return null;
+        if (mlir.oraOperationGetNumOperands(xori_op) != 2) return null;
+
+        var cmp_value: ?mlir.MlirValue = null;
+        var found_bool_inversion = false;
+        for (0..2) |i| {
+            const operand = mlir.oraOperationGetOperand(xori_op, i);
+            if (self.isI1ConstantValue(operand)) {
+                found_bool_inversion = true;
+            } else if (mlir.oraValueIsAOpResult(operand) and self.operationNameEq(mlir.oraOpResultGetOwner(operand), "arith.cmpi")) {
+                cmp_value = operand;
+            }
+        }
+        if (!found_bool_inversion or cmp_value == null) return null;
+
+        const cmp_op = mlir.oraOpResultGetOwner(cmp_value.?);
+        if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
+        const predicate = self.getCmpPredicate(cmp_op) catch return null;
+        if (predicate != 6) return null; // ult
+
+        const lhs_value = mlir.oraOperationGetOperand(cmp_op, 0);
+        const rhs_value = mlir.oraOperationGetOperand(cmp_op, 1);
+
+        const lhs_ast = try self.encodeValueWithMode(lhs_value, mode);
+        const rhs_ast = try self.encodeValueWithMode(rhs_value, mode);
+        const underflow = self.checkSubUnderflow(lhs_ast, rhs_ast);
+        return z3.Z3_mk_not(self.context.ctx, underflow);
+    }
+
     pub fn tryEncodeAssertCondition(self: *Encoder, assert_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!?z3.Z3_ast {
         if (!self.operationNameEq(assert_op, "ora.assert") and !self.operationNameEq(assert_op, "cf.assert")) return null;
         if (mlir.oraOperationGetNumOperands(assert_op) < 1) return null;
@@ -1977,27 +2048,49 @@ pub const Encoder = struct {
                 std.mem.eql(u8, message, "checked multiplication overflow")
             else
                 self.opPrintContains(assert_op, "\"checked multiplication overflow\"");
-        if (!has_checked_mul_message) return null;
-        const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
-        const specialized = try self.tryEncodeCheckedUnsignedMulAssert(condition_value, mode);
-        if (specialized == null) {
-            const debug_enabled = blk: {
-                const value = std.process.getEnvVarOwned(self.allocator, "ORA_Z3_DEBUG_ASSERT_SIMPLIFY") catch null;
-                defer if (value) |buf| self.allocator.free(buf);
-                break :blk if (value) |buf|
-                    std.mem.eql(u8, buf, "1") or std.ascii.eqlIgnoreCase(buf, "true")
-                else
-                    false;
-            };
-            if (debug_enabled) {
-                const printed = mlir.oraOperationPrintToString(assert_op);
-                defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
-                if (printed.data != null and printed.length > 0) {
-                    std.debug.print("smt-debug: assert simplify miss: {s}\n", .{printed.data[0..printed.length]});
+        if (has_checked_mul_message) {
+            const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
+            const specialized = try self.tryEncodeCheckedUnsignedMulAssert(condition_value, mode);
+            if (specialized == null) {
+                const debug_enabled = blk: {
+                    const value = std.process.getEnvVarOwned(self.allocator, "ORA_Z3_DEBUG_ASSERT_SIMPLIFY") catch null;
+                    defer if (value) |buf| self.allocator.free(buf);
+                    break :blk if (value) |buf|
+                        std.mem.eql(u8, buf, "1") or std.ascii.eqlIgnoreCase(buf, "true")
+                    else
+                        false;
+                };
+                if (debug_enabled) {
+                    const printed = mlir.oraOperationPrintToString(assert_op);
+                    defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
+                    if (printed.data != null and printed.length > 0) {
+                        std.debug.print("smt-debug: assert simplify miss: {s}\n", .{printed.data[0..printed.length]});
+                    }
                 }
             }
+            return specialized;
         }
-        return specialized;
+
+        const has_checked_add_message =
+            if (self.getStringAttrValue(message_attr)) |message|
+                std.mem.eql(u8, message, "checked addition overflow")
+            else
+                self.opPrintContains(assert_op, "\"checked addition overflow\"");
+        if (has_checked_add_message) {
+            const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
+            return try self.tryEncodeCheckedAddAssert(condition_value, mode);
+        }
+
+        const has_checked_sub_message =
+            if (self.getStringAttrValue(message_attr)) |message|
+                std.mem.eql(u8, message, "checked subtraction overflow")
+            else
+                self.opPrintContains(assert_op, "\"checked subtraction overflow\"");
+        if (has_checked_sub_message) {
+            const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
+            return try self.tryEncodeCheckedSubAssert(condition_value, mode);
+        }
+        return null;
     }
 
     fn addBlockArgumentConstraints(self: *Encoder, value: mlir.MlirValue, ast: z3.Z3_ast, mode: EncodeMode) EncodeError!void {

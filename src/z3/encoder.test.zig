@@ -3099,6 +3099,114 @@ test "ora.assert simplifies checked unsigned multiplication overflow pattern" {
     try testing.expect(found_expected);
 }
 
+test "ora.assert simplifies checked addition overflow pattern" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_placeholder_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("lhs"), i256_ty);
+    const lhs = mlir.oraOperationGetResult(lhs_placeholder_op, 0);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const bool_true = mlir.oraOperationGetResult(true_const, 0);
+
+    const add_op = mlir.oraArithAddIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const sum = mlir.oraOperationGetResult(add_op, 0);
+    const overflow_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, sum, lhs); // ult
+    const overflow_cmp = mlir.oraOperationGetResult(overflow_cmp_op, 0);
+    const not_overflow_op = mlir.oraArithXorIOpCreate(mlir_ctx, loc, overflow_cmp, bool_true);
+    const not_overflow = mlir.oraOperationGetResult(not_overflow_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, not_overflow, stringRef("checked addition overflow"));
+
+    _ = try encoder.encodeOperation(assert_op);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expect(obligations.len >= 1);
+
+    const lhs_ast = try encoder.encodeValue(lhs);
+    const rhs_ast = try encoder.encodeValue(rhs);
+    const expected = z3.Z3_mk_not(z3_ctx.ctx, encoder.checkAddOverflow(lhs_ast, rhs_ast));
+    const expected_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, expected));
+
+    var found_expected = false;
+    for (obligations) |obligation| {
+        const obligation_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, obligation));
+        if (std.mem.eql(u8, obligation_text, expected_text)) {
+            found_expected = true;
+            break;
+        }
+    }
+    try testing.expect(found_expected);
+}
+
+test "ora.assert simplifies checked subtraction overflow pattern" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_placeholder_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("lhs"), i256_ty);
+    const lhs = mlir.oraOperationGetResult(lhs_placeholder_op, 0);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const bool_true = mlir.oraOperationGetResult(true_const, 0);
+
+    const underflow_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, lhs, rhs); // ult
+    const underflow_cmp = mlir.oraOperationGetResult(underflow_cmp_op, 0);
+    const not_underflow_op = mlir.oraArithXorIOpCreate(mlir_ctx, loc, underflow_cmp, bool_true);
+    const not_underflow = mlir.oraOperationGetResult(not_underflow_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, not_underflow, stringRef("checked subtraction overflow"));
+
+    _ = try encoder.encodeOperation(assert_op);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expect(obligations.len >= 1);
+
+    const lhs_ast = try encoder.encodeValue(lhs);
+    const rhs_ast = try encoder.encodeValue(rhs);
+    const expected = z3.Z3_mk_not(z3_ctx.ctx, encoder.checkSubUnderflow(lhs_ast, rhs_ast));
+    const expected_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, expected));
+
+    var found_expected = false;
+    for (obligations) |obligation| {
+        const obligation_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, obligation));
+        if (std.mem.eql(u8, obligation_text, expected_text)) {
+            found_expected = true;
+            break;
+        }
+    }
+    try testing.expect(found_expected);
+}
+
 test "arith divsi encodes signed division" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
