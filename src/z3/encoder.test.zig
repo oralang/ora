@@ -1216,6 +1216,67 @@ test "func.call summary with canonical unsigned multi-result nonzero-control no-
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary with zero-result symbolic no-write scf.while degrades exact state modeling" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicNoWriteZeroResultWhile"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{i1_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const cond = mlir.oraBlockGetArgument(body, 0);
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        cond,
+        &[_]mlir.MlirValue{},
+        0,
+    ));
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{},
+        0,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call_cond = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("zeroResultWhileCond"), i1_ty);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("symbolicNoWriteZeroResultWhile"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(call_cond, 0)},
+        1,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+}
+
 test "func.call summary with non-throwing ora.try_stmt state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
