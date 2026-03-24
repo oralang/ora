@@ -2209,6 +2209,9 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
+                if (try self.tryExtractCanonicalScfForDerivedResult(mlir_op, result_index, mode)) |derived_result| {
+                    return derived_result;
+                }
                 if (try self.tryExtractCanonicalIncrementScfForResult(mlir_op, result_index, mode)) |increment_result| {
                     return increment_result;
                 }
@@ -4155,11 +4158,15 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "scf.for")) {
-                const nested_expr = (try self.tryExtractCanonicalIncrementScfForResult(current, result_index, mode)) orelse
-                    (try self.tryExtractCanonicalDecrementScfForResult(current, result_index, mode)) orelse
-                    (try self.tryExtractIdentityScfForResult(current, result_index, mode)) orelse
-                    (try self.tryExtractFiniteScfForResult(current, result_index, mode));
-                if (nested_expr != null) return nested_expr;
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                if (mlir.oraOperationIsNull(next_op)) {
+                    const nested_expr = (try self.tryExtractCanonicalScfForDerivedResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalIncrementScfForResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalDecrementScfForResult(current, result_index, mode)) orelse
+                        (try self.tryExtractIdentityScfForResult(current, result_index, mode)) orelse
+                        (try self.tryExtractFiniteScfForResult(current, result_index, mode));
+                    if (nested_expr != null) return nested_expr;
+                }
             }
 
             if (std.mem.eql(u8, name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(current)) {
@@ -4706,6 +4713,72 @@ pub const Encoder = struct {
                 const delta_ast = try self.encodeValueWithMode(delta_value, mode);
                 const delta_total_ast = try self.encodeArithmeticOp(.Mul, trip_count_ast, delta_ast);
                 return try self.encodeArithmeticOp(.Add, init_ast, delta_total_ast);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
+    }
+
+    fn tryExtractCanonicalScfForDerivedResult(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 4) return null;
+        const num_iter_args = num_operands - 3;
+        if (num_iter_args == 0 or result_index >= num_iter_args) return null;
+
+        const lb_value = mlir.oraOperationGetOperand(for_op, 0);
+        const ub_value = mlir.oraOperationGetOperand(for_op, 1);
+        const step_value = mlir.oraOperationGetOperand(for_op, 2);
+        const step_const = self.tryGetConstIntValue(step_value);
+        if (step_const == null or step_const.? == 0) return null;
+        const step_u64 = std.math.cast(u64, step_const.?) orelse return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        if (mlir.oraBlockGetNumArguments(body) != num_iter_args + 1) return null;
+
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return")) return null;
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                if (mlir.oraOperationGetNumOperands(current) != num_iter_args) return null;
+
+                const target_after_arg = mlir.oraBlockGetArgument(body, result_index + 1);
+                const target_yield = mlir.oraOperationGetOperand(current, result_index);
+                const target_update = self.classifyCanonicalWhileCarriedUpdate(target_yield, target_after_arg) orelse return null;
+
+                const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, result_index + 3), mode);
+                const lb_ast = try self.encodeValueWithMode(lb_value, mode);
+                const ub_ast = try self.encodeValueWithMode(ub_value, mode);
+                const trip_count_ast = try self.encodeCanonicalPositiveStepScfForTripCount(lb_ast, ub_ast, step_u64);
+
+                return switch (target_update) {
+                    .identity => init_ast,
+                    .add_const => |delta| blk: {
+                        const sort = z3.Z3_get_sort(self.context.ctx, init_ast);
+                        const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                        const total_delta = try self.encodeArithmeticOp(.Mul, trip_count_ast, delta_ast);
+                        break :blk try self.encodeArithmeticOp(.Add, init_ast, total_delta);
+                    },
+                    .sub_const => |delta| blk: {
+                        const sort = z3.Z3_get_sort(self.context.ctx, init_ast);
+                        const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                        const total_delta = try self.encodeArithmeticOp(.Mul, trip_count_ast, delta_ast);
+                        break :blk try self.encodeArithmeticOp(.Sub, init_ast, total_delta);
+                    },
+                };
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
