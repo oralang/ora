@@ -3764,6 +3764,18 @@ pub const Encoder = struct {
                 self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 1));
         }
 
+        if (std.mem.eql(u8, op_name, "ora.switch")) {
+            if (self.getSelectedOraSwitchCaseIndex(op)) |case_index| {
+                return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, @intCast(case_index)));
+            }
+
+            const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+            for (0..num_regions) |region_idx| {
+                if (self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, @intCast(region_idx)))) return true;
+            }
+            return false;
+        }
+
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
             const num_results = mlir.oraOperationGetNumResults(op);
             var idx: usize = 0;
@@ -3779,6 +3791,43 @@ pub const Encoder = struct {
         }
 
         return false;
+    }
+
+    fn getSelectedOraSwitchCaseIndex(self: *Encoder, op: mlir.MlirOperation) ?usize {
+        if (mlir.oraOperationGetNumOperands(op) < 1) return null;
+
+        const scrutinee_value = mlir.oraOperationGetOperand(op, 0);
+        const scrutinee_ty = mlir.oraValueGetType(scrutinee_value);
+        const bit_width = self.getTypeBitWidth(scrutinee_ty) orelse return null;
+        const scrutinee_const = self.getValueConstUnsigned(scrutinee_value, bit_width) orelse return null;
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        if (num_regions == 0) return null;
+
+        var metadata = self.getSwitchCaseMetadata(op, num_regions) catch return null;
+        defer metadata.deinit(self.allocator);
+
+        for (0..num_regions) |case_index| {
+            switch (metadata.case_kinds[case_index]) {
+                0 => {
+                    const case_value = std.math.cast(u64, metadata.case_values[case_index]) orelse continue;
+                    if (scrutinee_const == case_value) return case_index;
+                },
+                1 => {
+                    const start_value = std.math.cast(u64, metadata.range_starts[case_index]) orelse continue;
+                    const end_value = std.math.cast(u64, metadata.range_ends[case_index]) orelse continue;
+                    if (scrutinee_const >= start_value and scrutinee_const <= end_value) return case_index;
+                },
+                2 => {},
+                else => {},
+            }
+        }
+
+        if (metadata.default_case_index) |default_case_index| {
+            return std.math.cast(usize, default_case_index);
+        }
+
+        return null;
     }
 
     fn tryStmtMayEnterCatch(self: *Encoder, try_stmt: mlir.MlirOperation) bool {

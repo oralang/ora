@@ -894,6 +894,91 @@ test "func.call summary with dead catch-capable try branch preserves state exact
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary with dead catch-capable switch branch preserves state exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("deadCatchSwitchWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const tag_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const tag_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, tag_attr);
+    mlir.oraBlockAppendOwnedOperation(body, tag_op);
+
+    const switch_op = mlir.oraSwitchOpCreateWithCases(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(tag_op, 0),
+        &[_]mlir.MlirType{},
+        0,
+        2,
+    );
+    const case0_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 0);
+    const default_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 1);
+
+    const err_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const err_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, err_attr);
+    mlir.oraBlockAppendOwnedOperation(case0_block, err_val_op);
+    const err_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_val_op, 0), eu_ty);
+    mlir.oraBlockAppendOwnedOperation(case0_block, err_op);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(case0_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(case0_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seven_attr);
+    mlir.oraBlockAppendOwnedOperation(default_block, seven_op);
+    mlir.oraBlockAppendOwnedOperation(default_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(seven_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(default_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    var case_values = [_]i64{ 1, 0 };
+    var range_starts = [_]i64{ 0, 0 };
+    var range_ends = [_]i64{ 0, 0 };
+    var case_kinds = [_]i64{ 0, 2 };
+    mlir.oraSwitchOpSetCasePatterns(switch_op, &case_values, &range_starts, &range_ends, &case_kinds, 1, 2);
+
+    mlir.oraBlockAppendOwnedOperation(body, switch_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("deadCatchSwitchWriter"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+    const expected = z3.Z3_mk_numeral(z3_ctx.ctx, "7", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with zero-iteration scf.while preserves state exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -1226,6 +1311,99 @@ test "direct ora.try_stmt ignores catch-capable dead branch" {
         mlir_ctx,
         loc,
         &[_]mlir.MlirValue{mlir.oraOperationGetResult(if_op, 0)},
+        1,
+    ));
+
+    const catch_val_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const catch_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_val_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_val_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_val_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(try_stmt, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "direct ora.try_stmt ignores catch-capable dead switch branch" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const tag_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const tag_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, tag_attr);
+    mlir.oraBlockAppendOwnedOperation(try_block, tag_op);
+
+    const switch_op = mlir.oraSwitchOpCreateWithCases(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(tag_op, 0),
+        &[_]mlir.MlirType{i256_ty},
+        1,
+        2,
+    );
+    const case0_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 0);
+    const default_block = mlir.oraSwitchOpGetCaseBlock(switch_op, 1);
+
+    const err_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const err_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, err_attr);
+    mlir.oraBlockAppendOwnedOperation(case0_block, err_val_op);
+    const err_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_val_op, 0), eu_ty);
+    mlir.oraBlockAppendOwnedOperation(case0_block, err_op);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(case0_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(case0_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap_op, 0)},
+        1,
+    ));
+
+    const seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seven_attr);
+    const expected = try encoder.encodeOperation(seven_op);
+    mlir.oraBlockAppendOwnedOperation(default_block, seven_op);
+    mlir.oraBlockAppendOwnedOperation(default_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven_op, 0)},
+        1,
+    ));
+
+    var case_values = [_]i64{ 1, 0 };
+    var range_starts = [_]i64{ 0, 0 };
+    var range_ends = [_]i64{ 0, 0 };
+    var case_kinds = [_]i64{ 0, 2 };
+    mlir.oraSwitchOpSetCasePatterns(switch_op, &case_values, &range_starts, &range_ends, &case_kinds, 1, 2);
+
+    mlir.oraBlockAppendOwnedOperation(try_block, switch_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(switch_op, 0)},
         1,
     ));
 
