@@ -3411,8 +3411,55 @@ test "scf.while result encoding degrades exact SMT modeling" {
     const encoded = try encoder.encodeValue(while_result);
 
     const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
-    try testing.expect(std.mem.indexOf(u8, encoded_text, "scf.while_summary_") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "scf_while_result_") != null);
     try testing.expect(encoder.isDegraded());
+}
+
+test "scf.while zero-iteration result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const init = mlir.oraOperationGetResult(init_op, 0);
+    const expected = try encoder.encodeOperation(init_op);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false_val = mlir.oraOperationGetResult(false_op, 0);
+
+    const init_vals = [_]mlir.MlirValue{init};
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, false_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        false_val,
+        &[_]mlir.MlirValue{init},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "quantified operation encodes to z3 quantifier" {

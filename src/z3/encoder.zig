@@ -1856,6 +1856,14 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.while") or
             std.mem.eql(u8, op_name, "scf.for"))
         {
+            if (std.mem.eql(u8, op_name, "scf.while")) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return (try self.tryExtractZeroIterationScfWhileResult(mlir_op, result_index, mode)) orelse
+                    try self.degradeToUndef(result_sort, "scf_while_result", op_id, "scf.while result requires loop summary");
+            }
+
             if (std.mem.eql(u8, op_name, "scf.for")) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
@@ -2661,6 +2669,14 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.while") or
             std.mem.eql(u8, op_name, "scf.for"))
         {
+            if (std.mem.eql(u8, op_name, "scf.while")) {
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                const op_id = @intFromPtr(mlir_op.ptr);
+                return (try self.tryExtractZeroIterationScfWhileResult(mlir_op, 0, mode)) orelse
+                    try self.degradeToUndef(result_sort, "scf_while_result", op_id, "scf.while result requires loop summary");
+            }
+
             if (std.mem.eql(u8, op_name, "scf.for")) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
@@ -3850,6 +3866,45 @@ pub const Encoder = struct {
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
+        return null;
+    }
+
+    fn tryExtractZeroIterationScfWhileResult(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block)) return null;
+
+        var current = mlir.oraBlockGetFirstOperation(before_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const next = mlir.oraOperationGetNextInBlock(current);
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "scf.condition")) {
+                const num_operands = mlir.oraOperationGetNumOperands(current);
+                if (num_operands < 1) return null;
+
+                const condition_value = mlir.oraOperationGetOperand(current, 0);
+                const condition_ast = try self.encodeValueWithMode(condition_value, mode);
+                const false_ast = self.encodeBoolConstant(false);
+                if (!self.astEquivalent(condition_ast, false_ast)) return null;
+
+                const value_operand_index: u32 = result_index + 1;
+                if (value_operand_index >= num_operands) return null;
+                return try self.encodeValueWithMode(mlir.oraOperationGetOperand(current, value_operand_index), mode);
+            }
+
+            current = next;
+        }
+
         return null;
     }
 
