@@ -609,6 +609,76 @@ test "func.call summary with single-iteration scf.for state effects encodes exac
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary with zero-iteration scf.for preserves state exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("zeroIterForWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c5_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 5);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c5_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c5_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c5_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c5_op, 0),
+        mlir.oraOperationGetResult(c5_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    const store_val_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const store_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, store_val_attr);
+    mlir.oraBlockAppendOwnedOperation(loop_body, store_val_op);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(store_val_op, 0), stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const counter_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const pre_counter = z3.Z3_mk_const(z3_ctx.ctx, z3.Z3_mk_string_symbol(z3_ctx.ctx, "pre_counter_zero_for"), counter_sort);
+    try encoder.global_map.put(try testing.allocator.dupe(u8, "counter"), pre_counter);
+
+    const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("zeroIterForWriter"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    const post_counter = encoder.global_map.get("counter").?;
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, post_counter, pre_counter)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with non-throwing ora.try_stmt state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -1078,6 +1148,50 @@ test "known pure callee single-iteration scf.for return encodes exactly" {
 
     const encoded = try encoder.encodeOperation(call);
     const expected = try encoder.encodeIntegerConstant(13, 256);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "direct zero-iteration scf.for iter-arg result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const c5_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 5);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 13);
+    const c5_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c5_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const expected = try encoder.encodeOperation(init_op);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c5_op, 0),
+        mlir.oraOperationGetResult(c5_op, 0),
+        mlir.oraOperationGetResult(c1_op, 0),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)},
+        1,
+        false,
+    );
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(loop, 0));
     try testing.expect(!encoder.isDegraded());
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);

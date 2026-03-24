@@ -1868,7 +1868,8 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return (try self.tryExtractSingleIterationScfForYield(mlir_op, result_index, mode)) orelse
+                return (try self.tryExtractZeroIterationScfForResult(mlir_op, result_index, mode)) orelse
+                    (try self.tryExtractSingleIterationScfForYield(mlir_op, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
 
@@ -2681,7 +2682,8 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return (try self.tryExtractSingleIterationScfForYield(mlir_op, 0, mode)) orelse
+                return (try self.tryExtractZeroIterationScfForResult(mlir_op, 0, mode)) orelse
+                    (try self.tryExtractSingleIterationScfForYield(mlir_op, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
 
@@ -3767,6 +3769,19 @@ pub const Encoder = struct {
         return !self.isDegraded();
     }
 
+    fn isZeroIterationScfFor(self: *Encoder, op: mlir.MlirOperation) bool {
+        if (mlir.oraOperationGetNumOperands(op) < 3) return false;
+
+        const lb_value = mlir.oraOperationGetOperand(op, 0);
+        const ub_value = mlir.oraOperationGetOperand(op, 1);
+        const step_value = mlir.oraOperationGetOperand(op, 2);
+        const lb = self.getValueConstUnsigned(lb_value, 64) orelse return false;
+        const ub = self.getValueConstUnsigned(ub_value, 64) orelse return false;
+        const step = self.getValueConstUnsigned(step_value, 64) orelse return false;
+        if (step == 0) return false;
+        return lb >= ub;
+    }
+
     const SingleIterationScfForContext = struct {
         body: mlir.MlirBlock,
         iv: mlir.MlirValue,
@@ -3867,6 +3882,18 @@ pub const Encoder = struct {
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
+    }
+
+    fn tryExtractZeroIterationScfForResult(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        if (!self.isZeroIterationScfFor(for_op)) return null;
+        const init_operand_index: u32 = result_index + 3;
+        if (init_operand_index >= mlir.oraOperationGetNumOperands(for_op)) return null;
+        return try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, init_operand_index), mode);
     }
 
     fn tryExtractZeroIterationScfWhileResult(
@@ -4303,6 +4330,7 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "scf.for")) {
+                if (self.isZeroIterationScfFor(op)) return;
                 if (self.tryEncodeSingleIterationScfForStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
