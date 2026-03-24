@@ -6029,6 +6029,90 @@ pub const Encoder = struct {
             return (try self.trySummarizeTryValue(yielded_value, mode)) orelse null;
         }
 
+        if (self.operationNameEq(owner, "ora.switch_expr") or self.operationNameEq(owner, "ora.switch")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            if (mlir.oraOperationGetNumOperands(owner) < 1) return null;
+
+            const scrutinee_value = mlir.oraOperationGetOperand(owner, 0);
+            const scrutinee = try self.encodeValueWithMode(scrutinee_value, mode);
+            const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(owner));
+            var metadata = try self.getSwitchCaseMetadata(owner, num_regions);
+            defer metadata.deinit(self.allocator);
+
+            var branch_ok_exprs = try self.allocator.alloc(z3.Z3_ast, num_regions);
+            defer self.allocator.free(branch_ok_exprs);
+            var branch_err_preds = try self.allocator.alloc(z3.Z3_ast, num_regions);
+            defer self.allocator.free(branch_err_preds);
+            var branch_predicates = try self.allocator.alloc(z3.Z3_ast, num_regions);
+            defer self.allocator.free(branch_predicates);
+
+            var default_summary: ?DirectTryUnwrapInfo = null;
+            if (metadata.default_case_index) |default_case_index| {
+                if (default_case_index >= 0) {
+                    const default_value = (try self.extractRegionYieldValue(owner, @intCast(default_case_index), result_index)) orelse return null;
+                    default_summary = (try self.trySummarizeTryValue(default_value, mode)) orelse return null;
+                }
+            }
+
+            var remaining = self.encodeBoolConstant(true);
+            var region_index = num_regions;
+            while (region_index > 0) {
+                region_index -= 1;
+
+                const branch_summary = blk: {
+                    if (try self.extractRegionYieldValue(owner, @intCast(region_index), result_index)) |branch_value| {
+                        if (try self.trySummarizeTryValue(branch_value, mode)) |summary| break :blk summary;
+                    }
+                    if (default_summary) |summary| break :blk summary;
+                    return null;
+                };
+
+                const raw_predicate = try self.buildOraSwitchCasePredicate(
+                    scrutinee,
+                    metadata.case_kinds,
+                    metadata.case_values,
+                    metadata.range_starts,
+                    metadata.range_ends,
+                    region_index,
+                );
+                const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                    remaining
+                else
+                    self.encodeAnd(&.{ remaining, raw_predicate });
+
+                branch_ok_exprs[region_index] = branch_summary.ok_expr;
+                branch_err_preds[region_index] = branch_summary.is_err;
+                branch_predicates[region_index] = effective_predicate;
+
+                if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                    remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+                }
+            }
+
+            var catch_pred = self.encodeBoolConstant(false);
+            var merged_ok_expr = blk: {
+                if (default_summary) |summary| break :blk summary.ok_expr;
+                if (metadata.default_case_index == null and self.switchCasesCoverI1Domain(scrutinee_value, metadata)) {
+                    var idx: usize = 0;
+                    while (idx < num_regions) : (idx += 1) {
+                        if (!self.astEquivalent(branch_predicates[idx], self.encodeBoolConstant(false))) {
+                            break :blk branch_ok_exprs[idx];
+                        }
+                    }
+                }
+                return null;
+            };
+
+            region_index = num_regions;
+            while (region_index > 0) {
+                region_index -= 1;
+                catch_pred = self.encodeOr(&.{ catch_pred, self.encodeAnd(&.{ branch_predicates[region_index], branch_err_preds[region_index] }) });
+                merged_ok_expr = self.encodeIte(branch_predicates[region_index], branch_ok_exprs[region_index], merged_ok_expr);
+            }
+
+            return .{ .is_err = catch_pred, .ok_expr = merged_ok_expr };
+        }
+
         return .{
             .is_err = self.encodeBoolConstant(false),
             .ok_expr = try self.encodeValueWithMode(value, mode),

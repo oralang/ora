@@ -4505,6 +4505,99 @@ test "direct execute_region symbolic ora.try_stmt result encodes exactly" {
     try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
 }
 
+test "direct switch_expr symbolic ora.try_stmt result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const cond = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
+    const maybe_value = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const switch_expr = mlir.oraSwitchExprOpCreateWithCases(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cond, 0),
+        &[_]mlir.MlirType{i256_ty},
+        1,
+        2,
+    );
+    const case_values = [_]i64{ 0, 1 };
+    const range_starts = [_]i64{ 0, 0 };
+    const range_ends = [_]i64{ 0, 0 };
+    const case_kinds = [_]i64{ 0, 0 };
+    mlir.oraSwitchOpSetCasePatterns(
+        switch_expr,
+        &case_values,
+        &range_starts,
+        &range_ends,
+        &case_kinds,
+        -1,
+        case_values.len,
+    );
+    const false_block = mlir.oraSwitchExprOpGetCaseBlock(switch_expr, 0);
+    const true_block = mlir.oraSwitchExprOpGetCaseBlock(switch_expr, 1);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, false_attr);
+    mlir.oraBlockAppendOwnedOperation(false_block, false_op);
+    mlir.oraBlockAppendOwnedOperation(false_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(false_op, 0)},
+        1,
+    ));
+
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_value, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(true_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(true_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(try_block, switch_expr);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(switch_expr, 0)},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 23);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(try_stmt, 0));
+    try testing.expect(!encoder.isDegraded());
+    const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "condValue") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
+}
+
 test "direct ora.try_stmt ignores catch-capable dead branch" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
