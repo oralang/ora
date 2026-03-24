@@ -3128,6 +3128,10 @@ pub const Encoder = struct {
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
+            if (try self.tryStmtAlwaysEntersCatch(mlir_op, mode)) {
+                return (try self.extractRegionYield(mlir_op, 1, 0, mode)) orelse
+                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
+            }
             if (!self.tryStmtMayEnterCatch(mlir_op)) {
                 return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
