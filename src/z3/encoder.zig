@@ -3721,6 +3721,20 @@ pub const Encoder = struct {
         }
     }
 
+    fn regionMayEnterCatch(self: *Encoder, region: mlir.MlirRegion) bool {
+        if (mlir.oraRegionIsNull(region)) return false;
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) {
+            var nested = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(nested)) {
+                if (self.operationMayEnterCatch(nested)) return true;
+                nested = mlir.oraOperationGetNextInBlock(nested);
+            }
+            block = mlir.oraBlockGetNextInRegion(block);
+        }
+        return false;
+    }
+
     fn operationMayEnterCatch(self: *Encoder, op: mlir.MlirOperation) bool {
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
@@ -3730,10 +3744,24 @@ pub const Encoder = struct {
             name_ref.data[0..name_ref.length];
 
         if (std.mem.eql(u8, op_name, "ora.error.unwrap") or
-            std.mem.eql(u8, op_name, "ora.try_stmt") or
             std.mem.eql(u8, op_name, "ora.try_catch"))
         {
             return true;
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            return self.tryStmtMayEnterCatch(op);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.if")) {
+            if (mlir.oraOperationGetNumOperands(op) >= 1) {
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
+                if (self.getValueConstUnsigned(condition_value, 1)) |cond| {
+                    return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, if (cond != 0) 0 else 1));
+                }
+            }
+            return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 0)) or
+                self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 1));
         }
 
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
@@ -3747,17 +3775,7 @@ pub const Encoder = struct {
 
         const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
         for (0..num_regions) |region_idx| {
-            const region = mlir.oraOperationGetRegion(op, region_idx);
-            if (mlir.oraRegionIsNull(region)) continue;
-            var block = mlir.oraRegionGetFirstBlock(region);
-            while (!mlir.oraBlockIsNull(block)) {
-                var nested = mlir.oraBlockGetFirstOperation(block);
-                while (!mlir.oraOperationIsNull(nested)) {
-                    if (self.operationMayEnterCatch(nested)) return true;
-                    nested = mlir.oraOperationGetNextInBlock(nested);
-                }
-                block = mlir.oraBlockGetNextInRegion(block);
-            }
+            if (self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, region_idx))) return true;
         }
 
         return false;
