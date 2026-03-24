@@ -4689,20 +4689,21 @@ pub const Encoder = struct {
                 const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
                 const lhs_const = self.tryGetConstIntValue(add_lhs);
                 const rhs_const = self.tryGetConstIntValue(add_rhs);
-                const other =
-                    if (lhs_const != null and lhs_const.? == 1 and mlir.mlirValueEqual(add_rhs, carried_arg))
-                        add_rhs
-                    else if (rhs_const != null and rhs_const.? == 1 and mlir.mlirValueEqual(add_lhs, carried_arg))
+                const delta_value =
+                    if (lhs_const != null and lhs_const.? != 0 and mlir.mlirValueEqual(add_rhs, carried_arg))
                         add_lhs
+                    else if (rhs_const != null and rhs_const.? != 0 and mlir.mlirValueEqual(add_lhs, carried_arg))
+                        add_rhs
                     else
                         return null;
-                if (!mlir.mlirValueEqual(other, carried_arg)) return null;
 
                 const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 3), mode);
                 const lb_ast = try self.encodeValueWithMode(lb_value, mode);
                 const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
                 const trip_count_ast = try self.encodeCanonicalPositiveStepScfForTripCount(lb_ast, ub_ast, step_u64);
-                return try self.encodeArithmeticOp(.Add, init_ast, trip_count_ast);
+                const delta_ast = try self.encodeValueWithMode(delta_value, mode);
+                const delta_total_ast = try self.encodeArithmeticOp(.Mul, trip_count_ast, delta_ast);
+                return try self.encodeArithmeticOp(.Add, init_ast, delta_total_ast);
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
@@ -4753,13 +4754,15 @@ pub const Encoder = struct {
                 const sub_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
                 const sub_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
                 const rhs_const = self.tryGetConstIntValue(sub_rhs);
-                if (!mlir.mlirValueEqual(sub_lhs, carried_arg) or rhs_const == null or rhs_const.? != 1) return null;
+                if (!mlir.mlirValueEqual(sub_lhs, carried_arg) or rhs_const == null or rhs_const.? == 0) return null;
 
                 const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 3), mode);
                 const lb_ast = try self.encodeValueWithMode(lb_value, mode);
                 const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
                 const trip_count_ast = try self.encodeCanonicalPositiveStepScfForTripCount(lb_ast, ub_ast, step_u64);
-                return try self.encodeArithmeticOp(.Sub, init_ast, trip_count_ast);
+                const delta_ast = try self.encodeValueWithMode(sub_rhs, mode);
+                const delta_total_ast = try self.encodeArithmeticOp(.Mul, trip_count_ast, delta_ast);
+                return try self.encodeArithmeticOp(.Sub, init_ast, delta_total_ast);
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
