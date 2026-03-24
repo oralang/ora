@@ -1245,6 +1245,7 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "memref.alloca") or
             std.mem.eql(u8, op_name, "memref.store") or
             std.mem.eql(u8, op_name, "ora.sstore") or
+            std.mem.eql(u8, op_name, "ora.tstore") or
             std.mem.eql(u8, op_name, "ora.map_store") or
             std.mem.eql(u8, op_name, "func.call") or
             std.mem.eql(u8, op_name, "call");
@@ -4951,6 +4952,55 @@ fn buildConditionalReturnStatefulDivModule(mlir_ctx: mlir.MlirContext) mlir.Mlir
     return module;
 }
 
+fn buildConditionalReturnTStoreDivModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("conditional_return_tstore_div_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const divisor = mlir.oraBlockGetArgument(func_body, 0);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const is_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, divisor, zero); // eq
+    const is_zero = mlir.oraOperationGetResult(is_zero_op, 0);
+
+    const empty_vals = [_]mlir.MlirValue{};
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, is_zero);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const then_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+    mlir.oraBlockAppendOwnedOperation(then_block, then_ret);
+
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    const one = mlir.oraOperationGetResult(one_op, 0);
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, one, divisor);
+    const div_val = mlir.oraOperationGetResult(div_op, 0);
+    const tstore_op = mlir.oraTStoreOpCreate(mlir_ctx, loc, div_val, testStringRef("pending"));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, is_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(func_body, one_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, div_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, tstore_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildConditionalReturnMapStoreDivModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -6750,6 +6800,40 @@ test "stateful obligations after ora.conditional_return use fallthrough path con
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const module = buildConditionalReturnStatefulDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_contract_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        found_contract_obligation = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_contract_obligation);
+}
+
+test "tstore obligations after ora.conditional_return use fallthrough path constraints" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnTStoreDivModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);
