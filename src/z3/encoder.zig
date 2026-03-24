@@ -1887,7 +1887,7 @@ pub const Encoder = struct {
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
                 return (try self.tryExtractZeroIterationScfWhileResult(mlir_op, result_index, mode)) orelse
-                    (try self.tryExtractSingleIterationScfWhileResult(mlir_op, result_index, mode)) orelse
+                    (try self.tryExtractFiniteScfWhileResult(mlir_op, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_while_result", op_id, "scf.while result requires loop summary");
             }
 
@@ -2705,7 +2705,7 @@ pub const Encoder = struct {
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
                 return (try self.tryExtractZeroIterationScfWhileResult(mlir_op, 0, mode)) orelse
-                    (try self.tryExtractSingleIterationScfWhileResult(mlir_op, 0, mode)) orelse
+                    (try self.tryExtractFiniteScfWhileResult(mlir_op, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_while_result", op_id, "scf.while result requires loop summary");
             }
 
@@ -4111,6 +4111,20 @@ pub const Encoder = struct {
         return bind_count;
     }
 
+    fn getScfWhileInitValues(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        mode: EncodeMode,
+    ) EncodeError![]z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(while_op));
+        var values = try self.allocator.alloc(z3.Z3_ast, num_operands);
+        errdefer self.allocator.free(values);
+        for (0..num_operands) |index| {
+            values[index] = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(index)), mode);
+        }
+        return values;
+    }
+
     fn unbindScfWhileBeforeArgs(self: *Encoder, while_op: mlir.MlirOperation, bind_count: usize) void {
         const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
         if (mlir.oraBlockIsNull(before_block)) return;
@@ -4218,7 +4232,24 @@ pub const Encoder = struct {
         return bind_count;
     }
 
-    fn tryExtractSingleIterationScfWhileResult(
+    fn bindScfWhileBeforeArgsFromValues(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        values: []const z3.Z3_ast,
+    ) EncodeError!usize {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block)) return 0;
+
+        const num_args: usize = @intCast(mlir.oraBlockGetNumArguments(before_block));
+        const bind_count = @min(num_args, values.len);
+        for (0..bind_count) |index| {
+            const arg = mlir.oraBlockGetArgument(before_block, @intCast(index));
+            try self.bindValue(arg, values[index]);
+        }
+        return bind_count;
+    }
+
+    fn tryExtractFiniteScfWhileResult(
         self: *Encoder,
         while_op: mlir.MlirOperation,
         result_index: u32,
@@ -4226,70 +4257,110 @@ pub const Encoder = struct {
     ) EncodeError!?z3.Z3_ast {
         const condition_op = self.findScfConditionOp(while_op) orelse return null;
 
-        const initial_bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
-        defer self.unbindScfWhileBeforeArgs(while_op, initial_bind_count);
+        var carried = try self.getScfWhileInitValues(while_op, mode);
+        defer self.allocator.free(carried);
 
-        const initial_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
-        if (!self.astEquivalent(initial_condition, self.encodeBoolConstant(true))) return null;
+        var iteration_count: usize = 0;
+        while (iteration_count < 4) : (iteration_count += 1) {
+            const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, carried);
+            const condition_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+            if (self.astEquivalent(condition_ast, self.encodeBoolConstant(false))) {
+                const num_operands = mlir.oraOperationGetNumOperands(condition_op);
+                const value_operand_index: u32 = result_index + 1;
+                if (value_operand_index >= num_operands) {
+                    self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                    return null;
+                }
+                const result = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, value_operand_index), mode);
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return result;
+            }
+            if (!self.astEquivalent(condition_ast, self.encodeBoolConstant(true))) {
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return null;
+            }
 
-        const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
-        defer self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+            const yielded = (try self.extractScfWhileYieldValues(while_op, mode)) orelse {
+                self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return null;
+            };
 
-        const yielded = (try self.extractScfWhileYieldValues(while_op, mode)) orelse return null;
-        defer self.allocator.free(yielded);
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            self.allocator.free(carried);
+            carried = yielded;
+        }
 
-        self.unbindScfWhileBeforeArgs(while_op, initial_bind_count);
-        const rebound_count = try self.bindScfWhileBeforeArgsFromYielded(while_op, yielded);
-        defer self.unbindScfWhileBeforeArgs(while_op, rebound_count);
-
-        const next_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
-        if (!self.astEquivalent(next_condition, self.encodeBoolConstant(false))) return null;
-
-        const num_operands = mlir.oraOperationGetNumOperands(condition_op);
-        const value_operand_index: u32 = result_index + 1;
-        if (value_operand_index >= num_operands) return null;
-        return try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, value_operand_index), mode);
+        return null;
     }
 
-    fn tryEncodeSingleIterationScfWhileStateEffects(self: *Encoder, while_op: mlir.MlirOperation) bool {
+    fn tryEncodeFiniteScfWhileStateEffects(self: *Encoder, while_op: mlir.MlirOperation) bool {
         const condition_op = self.findScfConditionOp(while_op) orelse return false;
-
-        const initial_bind_count = self.bindScfWhileBeforeArgs(while_op, .Current) catch return false;
-        defer self.unbindScfWhileBeforeArgs(while_op, initial_bind_count);
-
-        const initial_condition = self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), .Current) catch return false;
-        if (!self.astEquivalent(initial_condition, self.encodeBoolConstant(true))) return false;
-
-        const after_bind_count = self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, .Current) catch return false;
-        defer self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+        var carried = self.getScfWhileInitValues(while_op, .Current) catch return false;
+        defer self.allocator.free(carried);
 
         const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
         if (mlir.oraBlockIsNull(after_block)) return false;
 
-        var current = mlir.oraBlockGetFirstOperation(after_block);
-        while (!mlir.oraOperationIsNull(current)) {
-            const next = mlir.oraOperationGetNextInBlock(current);
-            const name_ref = mlir.oraOperationGetName(current);
-            defer @import("mlir_c_api").freeStringRef(name_ref);
-            const op_name = if (name_ref.data == null or name_ref.length == 0)
-                ""
-            else
-                name_ref.data[0..name_ref.length];
-            if (std.mem.eql(u8, op_name, "scf.yield")) break;
-            self.encodeStateEffectsInOperation(current);
-            current = next;
+        var iteration_count: usize = 0;
+        while (iteration_count < 4) : (iteration_count += 1) {
+            const before_bind_count = self.bindScfWhileBeforeArgsFromValues(while_op, carried) catch return false;
+            const condition_ast = self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), .Current) catch {
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            };
+            if (self.astEquivalent(condition_ast, self.encodeBoolConstant(false))) {
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return true;
+            }
+            if (!self.astEquivalent(condition_ast, self.encodeBoolConstant(true))) {
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            }
+
+            const after_bind_count = self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, .Current) catch {
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            };
+
+            var current = mlir.oraBlockGetFirstOperation(after_block);
+            while (!mlir.oraOperationIsNull(current)) {
+                const next = mlir.oraOperationGetNextInBlock(current);
+                const name_ref = mlir.oraOperationGetName(current);
+                defer @import("mlir_c_api").freeStringRef(name_ref);
+                const op_name = if (name_ref.data == null or name_ref.length == 0)
+                    ""
+                else
+                    name_ref.data[0..name_ref.length];
+                if (std.mem.eql(u8, op_name, "scf.yield")) break;
+                self.encodeStateEffectsInOperation(current);
+                current = next;
+            }
+            if (self.isDegraded()) {
+                self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            }
+
+            const yielded = (self.extractScfWhileYieldValues(while_op, .Current) catch {
+                self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            }) orelse {
+                self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+                self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+                return false;
+            };
+
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            self.allocator.free(carried);
+            carried = yielded;
         }
-        if (self.isDegraded()) return false;
 
-        const yielded = (self.extractScfWhileYieldValues(while_op, .Current) catch return false) orelse return false;
-        defer self.allocator.free(yielded);
-
-        self.unbindScfWhileBeforeArgs(while_op, initial_bind_count);
-        const rebound_count = self.bindScfWhileBeforeArgsFromYielded(while_op, yielded) catch return false;
-        defer self.unbindScfWhileBeforeArgs(while_op, rebound_count);
-
-        const next_condition = self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), .Current) catch return false;
-        return self.astEquivalent(next_condition, self.encodeBoolConstant(false));
+        return false;
     }
 
     fn isStaticallyFalseScfWhile(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!bool {
@@ -4712,7 +4783,7 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, op_name, "scf.while")) {
                 if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
-                if (self.tryEncodeSingleIterationScfWhileStateEffects(op)) return;
+                if (self.tryEncodeFiniteScfWhileStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
             }
