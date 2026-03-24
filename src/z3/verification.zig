@@ -4680,7 +4680,7 @@ fn buildConditionalReturnContractInvariantModule(mlir_ctx: mlir.MlirContext) mli
         testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
     };
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
-    const param_types = [_]mlir.MlirType{i256_ty, i256_ty};
+    const param_types = [_]mlir.MlirType{ i256_ty, i256_ty };
     const param_locs = [_]mlir.MlirLocation{ loc, loc };
     const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
     const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
@@ -5171,6 +5171,60 @@ fn buildPublicCallsPrivateAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModu
     return module;
 }
 
+fn buildPublicCallsPrivateAssertReturningModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const one_type = [_]mlir.MlirType{i256_ty};
+    const one_loc = [_]mlir.MlirLocation{loc};
+    const empty_vals = [_]mlir.MlirValue{};
+
+    const private_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private_helper_ret"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private"))),
+    };
+    const private_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &private_attrs, private_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const private_body = mlir.oraFuncOpGetBodyBlock(private_func_op);
+
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0));
+    const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7));
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(false_op, 0), testStringRef("private result assert should flow to caller"));
+    const private_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven_op, 0)}, 1);
+
+    mlir.oraBlockAppendOwnedOperation(private_body, false_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, seven_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, assert_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, private_ret);
+
+    const public_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const public_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &public_attrs, public_attrs.len, &one_type, &one_loc, one_type.len);
+    const public_body = mlir.oraFuncOpGetBodyBlock(public_func_op);
+
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("private_helper_ret"),
+        &empty_vals,
+        empty_vals.len,
+        &one_type,
+        one_type.len,
+    );
+    const public_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(call_op, 0)}, 1);
+
+    mlir.oraBlockAppendOwnedOperation(public_body, call_op);
+    mlir.oraBlockAppendOwnedOperation(public_body, public_ret);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, public_func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, private_func_op);
+    return module;
+}
+
 fn buildPublicCallsPrivateRequiresGuardedAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -5244,6 +5298,71 @@ fn buildPublicCallsPrivateRequiresGuardedAssertModule(mlir_ctx: mlir.MlirContext
         empty_types.len,
     );
     const public_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(public_body, call_op);
+    mlir.oraBlockAppendOwnedOperation(public_body, public_ret);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, public_func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, private_func_op);
+    return module;
+}
+
+fn buildPublicCallsPrivateRequiresGuardedAssertReturningModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const one_type = [_]mlir.MlirType{i256_ty};
+    const one_loc = [_]mlir.MlirLocation{loc};
+
+    const private_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private_helper_ret"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private"))),
+    };
+    const private_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &private_attrs, private_attrs.len, &one_type, &one_loc, one_type.len);
+    const private_body = mlir.oraFuncOpGetBodyBlock(private_func_op);
+    const private_arg = mlir.oraBlockGetArgument(private_body, 0);
+
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1));
+    const max_minus_one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, -2));
+    const precond_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 7, private_arg, mlir.oraOperationGetResult(max_minus_one_op, 0)); // ule
+    const precond_assert = mlir.oraCfAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(precond_cmp_op, 0), testStringRef("private result precondition"));
+    mlir.oraOperationSetAttributeByName(precond_assert, testStringRef("ora.requires"), mlir.oraBoolAttrCreate(mlir_ctx, true));
+
+    const add_op = mlir.oraArithAddIOpCreate(mlir_ctx, loc, private_arg, mlir.oraOperationGetResult(one_op, 0));
+    const overflow_cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, mlir.oraOperationGetResult(add_op, 0), private_arg); // uge
+    const body_assert = mlir.oraAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(overflow_cmp_op, 0), testStringRef("private result assert should be guarded by requires"));
+    const private_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(add_op, 0)}, 1);
+
+    mlir.oraBlockAppendOwnedOperation(private_body, one_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, max_minus_one_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, precond_cmp_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, precond_assert);
+    mlir.oraBlockAppendOwnedOperation(private_body, add_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, overflow_cmp_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, body_assert);
+    mlir.oraBlockAppendOwnedOperation(private_body, private_ret);
+
+    const public_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const public_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &public_attrs, public_attrs.len, &one_type, &one_loc, one_type.len);
+    const public_body = mlir.oraFuncOpGetBodyBlock(public_func_op);
+    const public_arg = mlir.oraBlockGetArgument(public_body, 0);
+    const call_args = [_]mlir.MlirValue{public_arg};
+
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("private_helper_ret"),
+        &call_args,
+        call_args.len,
+        &one_type,
+        one_type.len,
+    );
+    const public_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(call_op, 0)}, 1);
 
     mlir.oraBlockAppendOwnedOperation(public_body, call_op);
     mlir.oraBlockAppendOwnedOperation(public_body, public_ret);
@@ -5750,6 +5869,42 @@ test "private callee assert is enforced through reachable public call path" {
     try testing.expect(result.errors.items.len > 0);
 }
 
+test "private result callee assert is enforced through reachable public call path" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Basic);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildPublicCallsPrivateAssertReturningModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_public_obligation = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
+        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
+            saw_public_obligation = true;
+            break;
+        }
+    }
+    try testing.expect(saw_public_obligation);
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+    try testing.expect(!result.success);
+    try testing.expect(result.errors.items.len > 0);
+}
+
 test "branch merge preserves untouched global base state" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -5907,6 +6062,42 @@ test "private callee obligations are guarded by callee requires in public summar
         for (queries.items) |*q| {
             q.deinit(testing.allocator);
         }
+        queries.deinit();
+    }
+
+    var saw_public_obligation = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
+        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
+            saw_public_obligation = true;
+            break;
+        }
+    }
+    try testing.expect(saw_public_obligation);
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+}
+
+test "private result callee obligations are guarded by callee requires in public summaries" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Basic);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildPublicCallsPrivateRequiresGuardedAssertReturningModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
         queries.deinit();
     }
 
