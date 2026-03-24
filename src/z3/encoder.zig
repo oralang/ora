@@ -4145,6 +4145,15 @@ pub const Encoder = struct {
                 }
             }
 
+            if (std.mem.eql(u8, name, "scf.while")) {
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                if (mlir.oraOperationIsNull(next_op)) {
+                    if (try self.tryExtractGuaranteedFirstIterationScfWhileReturnedExpr(current, result_index, mode)) |loop_returned_expr| {
+                        return loop_returned_expr;
+                    }
+                }
+            }
+
             self.applyLocalReturnExtractionStateEffect(current, name, mode) catch |err| switch (err) {
                 error.UnsupportedOperation,
                 error.InvalidOperandCount,
@@ -4237,6 +4246,14 @@ pub const Encoder = struct {
             return;
         }
 
+        if (std.mem.eql(u8, op_name, "ora.assert") or
+            std.mem.eql(u8, op_name, "func.call") or
+            std.mem.eql(u8, op_name, "call"))
+        {
+            _ = try self.encodeOperation(op);
+            return;
+        }
+
         if (std.mem.eql(u8, op_name, "scf.if") or
             std.mem.eql(u8, op_name, "ora.switch") or
             std.mem.eql(u8, op_name, "scf.execute_region") or
@@ -4266,6 +4283,32 @@ pub const Encoder = struct {
         const body = mlir.oraScfForOpGetBodyBlock(for_op);
         if (mlir.oraBlockIsNull(body)) return null;
         return try self.extractReturnedExprFromBlock(body, result_index, mode);
+    }
+
+    fn tryExtractGuaranteedFirstIterationScfWhileReturnedExpr(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const before_bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
+        defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block) or mlir.oraBlockIsNull(after_block)) return null;
+
+        self.invalidateBlockValueCaches(before_block);
+        self.invalidateBlockValueCaches(after_block);
+
+        const condition_op = self.findScfConditionOp(while_op) orelse return null;
+        if (mlir.oraOperationGetNumOperands(condition_op) < 1) return null;
+        const condition_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+        if (!self.isBoolConst(condition_ast, true)) return null;
+
+        const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+        defer self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+        return try self.extractReturnedExprFromBlock(after_block, result_index, mode);
     }
 
     fn regionMayEnterCatch(self: *Encoder, region: mlir.MlirRegion) bool {
@@ -6718,10 +6761,6 @@ pub const Encoder = struct {
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
 
-        // Materialize stateful effects from the callee body so summary state
-        // reflects sstore/map_store updates before we snapshot post-state.
-        summary_encoder.encodeStateEffectsInOperation(func_op);
-
         var any_result = false;
         for (0..result_exprs.len) |i| {
             const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
@@ -6729,6 +6768,16 @@ pub const Encoder = struct {
                 result_exprs[i] = expr;
                 any_result = true;
             }
+        }
+
+        // Result-only summaries can rely on exact returned-path replay for
+        // obligations/local effects. Full state-summary materialization is
+        // still required when the caller tracks state slots or when the callee
+        // has no results.
+        if (slots.len > 0 or result_exprs.len == 0) {
+            // Materialize stateful effects from the callee body so summary state
+            // reflects sstore/map_store updates before we snapshot post-state.
+            summary_encoder.encodeStateEffectsInOperation(func_op);
         }
 
         if (summary_encoder.isDegraded()) {
