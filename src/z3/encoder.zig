@@ -4147,7 +4147,8 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "scf.for")) {
-                const nested_expr = try self.tryExtractFiniteScfForResult(current, result_index, mode);
+                const nested_expr = (try self.tryExtractIdentityScfForResult(current, result_index, mode)) orelse
+                    (try self.tryExtractFiniteScfForResult(current, result_index, mode));
                 if (nested_expr != null) return nested_expr;
             }
 
