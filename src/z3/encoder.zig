@@ -1895,8 +1895,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return (try self.tryExtractZeroIterationScfForResult(mlir_op, result_index, mode)) orelse
-                    (try self.tryExtractSingleIterationScfForYield(mlir_op, result_index, mode)) orelse
+                return (try self.tryExtractFiniteScfForResult(mlir_op, result_index, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
 
@@ -2714,8 +2713,7 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return (try self.tryExtractZeroIterationScfForResult(mlir_op, 0, mode)) orelse
-                    (try self.tryExtractSingleIterationScfForYield(mlir_op, 0, mode)) orelse
+                return (try self.tryExtractFiniteScfForResult(mlir_op, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
 
@@ -3686,7 +3684,7 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "scf.for")) {
-                const nested_expr = try self.tryExtractSingleIterationScfForExpr(current, result_index, mode);
+                const nested_expr = try self.tryExtractFiniteScfForResult(current, result_index, mode);
                 if (nested_expr != null) return nested_expr;
             }
 
@@ -3780,27 +3778,6 @@ pub const Encoder = struct {
         return false;
     }
 
-    fn tryEncodeSingleIterationScfForStateEffects(self: *Encoder, op: mlir.MlirOperation) bool {
-        const loop_ctx = self.getSingleIterationScfForContext(op) orelse return false;
-        self.bindValue(loop_ctx.iv, loop_ctx.iv_ast) catch return false;
-        defer _ = self.value_bindings.remove(@intFromPtr(loop_ctx.iv.ptr));
-
-        var current = mlir.oraBlockGetFirstOperation(loop_ctx.body);
-        while (!mlir.oraOperationIsNull(current)) {
-            const next = mlir.oraOperationGetNextInBlock(current);
-            const name_ref = mlir.oraOperationGetName(current);
-            defer @import("mlir_c_api").freeStringRef(name_ref);
-            const op_name = if (name_ref.data == null or name_ref.length == 0)
-                ""
-            else
-                name_ref.data[0..name_ref.length];
-            if (std.mem.eql(u8, op_name, "scf.yield")) break;
-            self.encodeStateEffectsInOperation(current);
-            current = next;
-        }
-        return !self.isDegraded();
-    }
-
     fn isZeroIterationScfFor(self: *Encoder, op: mlir.MlirOperation) bool {
         if (mlir.oraOperationGetNumOperands(op) < 3) return false;
 
@@ -3814,60 +3791,68 @@ pub const Encoder = struct {
         return lb >= ub;
     }
 
-    const SingleIterationScfForContext = struct {
+    const FiniteScfForContext = struct {
         body: mlir.MlirBlock,
-        iv: mlir.MlirValue,
-        iv_ast: z3.Z3_ast,
         num_body_args: usize,
+        lower_bound: u64,
+        step: u64,
+        trip_count: usize,
     };
 
-    fn getSingleIterationScfForContext(self: *Encoder, op: mlir.MlirOperation) ?SingleIterationScfForContext {
+    fn getFiniteScfForContext(self: *Encoder, op: mlir.MlirOperation) ?FiniteScfForContext {
         if (mlir.oraOperationGetNumOperands(op) < 3) return null;
 
         const lb_value = mlir.oraOperationGetOperand(op, 0);
         const ub_value = mlir.oraOperationGetOperand(op, 1);
         const step_value = mlir.oraOperationGetOperand(op, 2);
-        const lb = self.getValueConstUnsigned(lb_value, 64) orelse return null;
-        const ub = self.getValueConstUnsigned(ub_value, 64) orelse return null;
-        const step = self.getValueConstUnsigned(step_value, 64) orelse return null;
-        if (step == 0 or lb >= ub) return null;
-        if (lb + step < ub) return null;
+        const lb_u256 = self.getValueConstUnsigned(lb_value, 64) orelse return null;
+        const ub_u256 = self.getValueConstUnsigned(ub_value, 64) orelse return null;
+        const step_u256 = self.getValueConstUnsigned(step_value, 64) orelse return null;
+        const lb = std.math.cast(u64, lb_u256) orelse return null;
+        const ub = std.math.cast(u64, ub_u256) orelse return null;
+        const step = std.math.cast(u64, step_u256) orelse return null;
+        if (step == 0) return null;
+
+        var trip_count: usize = 0;
+        var iter = lb;
+        while (iter < ub) : (iter += step) {
+            trip_count += 1;
+            if (trip_count > 4) return null;
+            if (iter > std.math.maxInt(u64) - step) break;
+        }
 
         const body = mlir.oraScfForOpGetBodyBlock(op);
         if (mlir.oraBlockIsNull(body)) return null;
         const num_body_args: usize = @intCast(mlir.oraBlockGetNumArguments(body));
         if (num_body_args < 1) return null;
 
-        const iv = mlir.oraBlockGetArgument(body, 0);
-        const iv_ast = self.encodeIntegerConstant(@intCast(lb), 256) catch return null;
         return .{
             .body = body,
-            .iv = iv,
-            .iv_ast = iv_ast,
             .num_body_args = num_body_args,
+            .lower_bound = lb,
+            .step = step,
+            .trip_count = trip_count,
         };
     }
 
-    fn bindSingleIterationScfForLoopArgs(
+    fn bindFiniteScfForLoopArgs(
         self: *Encoder,
-        loop_ctx: SingleIterationScfForContext,
-        for_op: mlir.MlirOperation,
-        mode: EncodeMode,
+        loop_ctx: FiniteScfForContext,
+        iv_value: u64,
+        carried_values: []const z3.Z3_ast,
     ) EncodeError!void {
-        try self.bindValue(loop_ctx.iv, loop_ctx.iv_ast);
+        const iv = mlir.oraBlockGetArgument(loop_ctx.body, 0);
+        try self.bindValue(iv, try self.encodeIntegerConstant(@intCast(iv_value), 256));
 
         var arg_index: usize = 1;
         while (arg_index < loop_ctx.num_body_args) : (arg_index += 1) {
-            const init_operand_index: u32 = @intCast(arg_index + 2);
-            if (init_operand_index >= mlir.oraOperationGetNumOperands(for_op)) return error.InvalidOperandCount;
             const body_arg = mlir.oraBlockGetArgument(loop_ctx.body, @intCast(arg_index));
-            const init_value = mlir.oraOperationGetOperand(for_op, init_operand_index);
-            const init_ast = try self.encodeValueWithMode(init_value, mode);
-            try self.bindValue(body_arg, init_ast);
+            if (arg_index - 1 >= carried_values.len) return error.InvalidOperandCount;
+            try self.bindValue(body_arg, carried_values[arg_index - 1]);
         }
     }
 
-    fn unbindSingleIterationScfForLoopArgs(self: *Encoder, loop_ctx: SingleIterationScfForContext) void {
+    fn unbindFiniteScfForLoopArgs(self: *Encoder, loop_ctx: FiniteScfForContext) void {
         var arg_index: usize = 0;
         while (arg_index < loop_ctx.num_body_args) : (arg_index += 1) {
             const body_arg = mlir.oraBlockGetArgument(loop_ctx.body, @intCast(arg_index));
@@ -3875,29 +3860,26 @@ pub const Encoder = struct {
         }
     }
 
-    fn tryExtractSingleIterationScfForExpr(
+    fn getScfForInitCarriedValues(
         self: *Encoder,
         for_op: mlir.MlirOperation,
-        result_index: u32,
         mode: EncodeMode,
-    ) EncodeError!?z3.Z3_ast {
-        const loop_ctx = self.getSingleIterationScfForContext(for_op) orelse return null;
-        try self.bindSingleIterationScfForLoopArgs(loop_ctx, for_op, mode);
-        defer self.unbindSingleIterationScfForLoopArgs(loop_ctx);
-
-        return try self.extractReturnedExprFromBlock(loop_ctx.body, result_index, mode);
+    ) EncodeError![]z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 3) return self.allocator.alloc(z3.Z3_ast, 0);
+        const num_iter_args = num_operands - 3;
+        var values = try self.allocator.alloc(z3.Z3_ast, num_iter_args);
+        for (0..num_iter_args) |index| {
+            values[index] = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, @intCast(index + 3)), mode);
+        }
+        return values;
     }
 
-    fn tryExtractSingleIterationScfForYield(
+    fn extractScfForYieldValues(
         self: *Encoder,
-        for_op: mlir.MlirOperation,
-        result_index: u32,
+        loop_ctx: FiniteScfForContext,
         mode: EncodeMode,
-    ) EncodeError!?z3.Z3_ast {
-        const loop_ctx = self.getSingleIterationScfForContext(for_op) orelse return null;
-        try self.bindSingleIterationScfForLoopArgs(loop_ctx, for_op, mode);
-        defer self.unbindSingleIterationScfForLoopArgs(loop_ctx);
-
+    ) EncodeError!?[]z3.Z3_ast {
         var current = mlir.oraBlockGetFirstOperation(loop_ctx.body);
         while (!mlir.oraOperationIsNull(current)) {
             const name_ref = self.getOperationName(current);
@@ -3907,25 +3889,92 @@ pub const Encoder = struct {
             else
                 name_ref.data[0..name_ref.length];
             if (std.mem.eql(u8, name, "scf.yield")) {
-                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
-                if (result_index >= num_operands) return null;
-                return try self.encodeValueWithMode(mlir.oraOperationGetOperand(current, result_index), mode);
+                const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(current));
+                var values = try self.allocator.alloc(z3.Z3_ast, num_operands);
+                errdefer self.allocator.free(values);
+                for (0..num_operands) |index| {
+                    values[index] = try self.encodeValueWithMode(mlir.oraOperationGetOperand(current, @intCast(index)), mode);
+                }
+                return values;
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
         return null;
     }
 
-    fn tryExtractZeroIterationScfForResult(
+    fn tryExtractFiniteScfForResult(
         self: *Encoder,
         for_op: mlir.MlirOperation,
         result_index: u32,
         mode: EncodeMode,
     ) EncodeError!?z3.Z3_ast {
-        if (!self.isZeroIterationScfFor(for_op)) return null;
-        const init_operand_index: u32 = result_index + 3;
-        if (init_operand_index >= mlir.oraOperationGetNumOperands(for_op)) return null;
-        return try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, init_operand_index), mode);
+        const loop_ctx = self.getFiniteScfForContext(for_op) orelse return null;
+        var carried = try self.getScfForInitCarriedValues(for_op, mode);
+        defer self.allocator.free(carried);
+
+        if (loop_ctx.trip_count == 0) {
+            if (result_index >= carried.len) return null;
+            return carried[result_index];
+        }
+
+        for (0..loop_ctx.trip_count) |iter_index| {
+            try self.bindFiniteScfForLoopArgs(loop_ctx, loop_ctx.lower_bound + iter_index * loop_ctx.step, carried);
+            if (try self.extractReturnedExprFromBlock(loop_ctx.body, result_index, mode)) |returned_expr| {
+                self.unbindFiniteScfForLoopArgs(loop_ctx);
+                return returned_expr;
+            }
+            const yielded = (try self.extractScfForYieldValues(loop_ctx, mode)) orelse {
+                self.unbindFiniteScfForLoopArgs(loop_ctx);
+                return null;
+            };
+            self.unbindFiniteScfForLoopArgs(loop_ctx);
+            self.allocator.free(carried);
+            carried = yielded;
+        }
+
+        if (result_index >= carried.len) return null;
+        return carried[result_index];
+    }
+
+    fn tryEncodeFiniteScfForStateEffects(self: *Encoder, op: mlir.MlirOperation) bool {
+        const loop_ctx = self.getFiniteScfForContext(op) orelse return false;
+        var carried = self.getScfForInitCarriedValues(op, .Current) catch return false;
+        defer self.allocator.free(carried);
+
+        for (0..loop_ctx.trip_count) |iter_index| {
+            self.bindFiniteScfForLoopArgs(loop_ctx, loop_ctx.lower_bound + iter_index * loop_ctx.step, carried) catch return false;
+
+            var current = mlir.oraBlockGetFirstOperation(loop_ctx.body);
+            while (!mlir.oraOperationIsNull(current)) {
+                const next = mlir.oraOperationGetNextInBlock(current);
+                const name_ref = mlir.oraOperationGetName(current);
+                defer @import("mlir_c_api").freeStringRef(name_ref);
+                const op_name = if (name_ref.data == null or name_ref.length == 0)
+                    ""
+                else
+                    name_ref.data[0..name_ref.length];
+                if (std.mem.eql(u8, op_name, "scf.yield")) break;
+                self.encodeStateEffectsInOperation(current);
+                current = next;
+            }
+            if (self.isDegraded()) {
+                self.unbindFiniteScfForLoopArgs(loop_ctx);
+                return false;
+            }
+
+            const yielded = self.extractScfForYieldValues(loop_ctx, .Current) catch {
+                self.unbindFiniteScfForLoopArgs(loop_ctx);
+                return false;
+            } orelse {
+                self.unbindFiniteScfForLoopArgs(loop_ctx);
+                return false;
+            };
+            self.unbindFiniteScfForLoopArgs(loop_ctx);
+            self.allocator.free(carried);
+            carried = yielded;
+        }
+
+        return true;
     }
 
     fn tryExtractZeroIterationScfWhileResult(
@@ -4578,7 +4627,7 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, op_name, "scf.for")) {
                 if (self.isZeroIterationScfFor(op)) return;
-                if (self.tryEncodeSingleIterationScfForStateEffects(op)) return;
+                if (self.tryEncodeFiniteScfForStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
             }

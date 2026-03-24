@@ -3028,19 +3028,19 @@ test "known callee result degradation reports callee and callsite" {
     const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
     const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
     const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
-    const c2_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 2);
+    const c6_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 6);
     const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
     const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
-    const c2_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c2_attr);
+    const c6_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c6_attr);
     mlir.oraBlockAppendOwnedOperation(body, c0_op);
     mlir.oraBlockAppendOwnedOperation(body, c1_op);
-    mlir.oraBlockAppendOwnedOperation(body, c2_op);
+    mlir.oraBlockAppendOwnedOperation(body, c6_op);
 
     const loop = mlir.oraScfForOpCreate(
         mlir_ctx,
         loc,
         mlir.oraOperationGetResult(c0_op, 0),
-        mlir.oraOperationGetResult(c2_op, 0),
+        mlir.oraOperationGetResult(c6_op, 0),
         mlir.oraOperationGetResult(c1_op, 0),
         &[_]mlir.MlirValue{},
         0,
