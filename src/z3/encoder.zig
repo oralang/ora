@@ -968,6 +968,71 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn encodeShapedReadFromBase(
+        self: *Encoder,
+        base: z3.Z3_ast,
+        indices: []const z3.Z3_ast,
+        result_sort: z3.Z3_sort,
+    ) EncodeError!z3.Z3_ast {
+        var current = base;
+        for (indices) |raw_index| {
+            const current_sort = z3.Z3_get_sort(self.context.ctx, current);
+            if (!self.isArraySort(current_sort)) return error.UnsupportedOperation;
+            const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, current_sort);
+            const index = self.coerceAstToSort(raw_index, index_sort);
+            current = self.encodeSelect(current, index);
+        }
+        return self.coerceAstToSort(current, result_sort);
+    }
+
+    fn encodeShapedWriteToBase(
+        self: *Encoder,
+        base: z3.Z3_ast,
+        value: z3.Z3_ast,
+        indices: []const z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (indices.len == 0) return value;
+
+        var containers = try self.allocator.alloc(z3.Z3_ast, indices.len);
+        defer self.allocator.free(containers);
+        var cast_indices = try self.allocator.alloc(z3.Z3_ast, indices.len);
+        defer self.allocator.free(cast_indices);
+
+        var cursor = base;
+        for (indices, 0..) |raw_index, i| {
+            const container_sort = z3.Z3_get_sort(self.context.ctx, cursor);
+            if (!self.isArraySort(container_sort)) return error.UnsupportedOperation;
+
+            containers[i] = cursor;
+            const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
+            cast_indices[i] = self.coerceAstToSort(raw_index, index_sort);
+
+            if (i + 1 < indices.len) {
+                cursor = self.encodeSelect(cursor, cast_indices[i]);
+            }
+        }
+
+        const leaf_container = containers[indices.len - 1];
+        const leaf_sort = z3.Z3_get_sort(self.context.ctx, leaf_container);
+        const leaf_range = z3.Z3_get_array_sort_range(self.context.ctx, leaf_sort);
+        var updated = self.encodeStore(
+            leaf_container,
+            cast_indices[indices.len - 1],
+            self.coerceAstToSort(value, leaf_range),
+        );
+
+        if (indices.len == 1) return updated;
+
+        var rev_index = indices.len - 1;
+        while (rev_index > 0) {
+            rev_index -= 1;
+            const container = containers[rev_index];
+            updated = self.encodeStore(container, cast_indices[rev_index], updated);
+        }
+
+        return updated;
+    }
+
     pub fn encodeValueOld(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
         return self.encodeValueWithMode(mlir_value, .Old);
     }
@@ -3272,6 +3337,19 @@ pub const Encoder = struct {
                 } else {
                     try self.memref_map.put(memref_id, tracked);
                 }
+            } else if (num_operands > 2) {
+                const memref_value = mlir.oraOperationGetOperand(mlir_op, 1);
+                const memref_id = @intFromPtr(memref_value.ptr);
+                const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
+                const base = if (map.get(memref_id)) |tracked|
+                    tracked.value
+                else
+                    operands[1];
+                const updated = try self.encodeShapedWriteToBase(base, operands[0], operands[2..]);
+                try map.put(memref_id, .{
+                    .value = updated,
+                    .initialized = self.boolTrue(),
+                });
             }
             return operands[0];
         }
@@ -3333,6 +3411,14 @@ pub const Encoder = struct {
                 }
 
                 if (num_operands > 1) {
+                    const memref_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                    const memref_id = @intFromPtr(memref_value.ptr);
+                    const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
+                    if (map.get(memref_id)) |stored| {
+                        if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathImplies(stored.initialized)) {
+                            return try self.encodeShapedReadFromBase(stored.value, operands[1..], result_sort);
+                        }
+                    }
                     return try self.encodeTensorExtractOp(operands, mlir_op);
                 }
 

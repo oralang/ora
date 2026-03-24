@@ -329,6 +329,54 @@ test "scalar memref load recovers dominating store before scf.while" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "indexed memref store threads into later indexed load" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const null_attr = mlir.MlirAttribute{ .ptr = null };
+    const shape: [1]i64 = .{5};
+    const memref_ty = mlir.oraMemRefTypeCreate(mlir_ctx, i256_ty, 1, &shape, null_attr, null_attr);
+
+    const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_ty);
+    const slot = mlir.oraOperationGetResult(alloca, 0);
+    _ = try encoder.encodeOperation(alloca);
+
+    const idx_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 2);
+    const idx_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, idx_attr);
+    const idx = mlir.oraOperationGetResult(idx_op, 0);
+    _ = try encoder.encodeOperation(idx_op);
+
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 42);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+    _ = try encoder.encodeOperation(value_op);
+
+    const store = mlir.oraMemrefStoreOpCreate(mlir_ctx, loc, value, slot, &[_]mlir.MlirValue{idx}, 1);
+    _ = try encoder.encodeOperation(store);
+
+    const load = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, slot, &[_]mlir.MlirValue{idx}, 1, i256_ty);
+    const loaded = try encoder.encodeOperation(load);
+    const expected = try encoder.encodeValue(value);
+
+    try testing.expect(!encoder.isDegraded());
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "tload encodes exact transient slot value" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
