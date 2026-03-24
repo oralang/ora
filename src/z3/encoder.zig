@@ -5265,7 +5265,6 @@ pub const Encoder = struct {
         const condition_op = self.findScfConditionOp(while_op) orelse return null;
         if (mlir.oraOperationGetNumOperands(condition_op) != num_operands + 1) return null;
 
-        const control_before_arg = mlir.oraBlockGetArgument(before_block, 0);
         const condition_value = mlir.oraOperationGetOperand(condition_op, 0);
         if (!mlir.oraValueIsAOpResult(condition_value)) return null;
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
@@ -5276,7 +5275,16 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-        if (!mlir.mlirValueEqual(cmp_lhs, control_before_arg) or mlir.mlirValueEqual(cmp_rhs, control_before_arg)) return null;
+
+        var control_index_opt: ?usize = null;
+        for (0..num_operands) |idx| {
+            const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(idx));
+            if (mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) {
+                control_index_opt = idx;
+                break;
+            }
+        }
+        const control_index = control_index_opt orelse return null;
 
         for (0..num_operands) |idx| {
             const false_value = mlir.oraOperationGetOperand(condition_op, @intCast(idx + 1));
@@ -5287,11 +5295,11 @@ pub const Encoder = struct {
         const yield_op = self.findScfYieldOp(after_block) orelse return null;
         if (mlir.oraOperationGetNumOperands(yield_op) != num_operands) return null;
 
-        const control_after_arg = mlir.oraBlockGetArgument(after_block, 0);
-        const control_yield = mlir.oraOperationGetOperand(yield_op, 0);
+        const control_after_arg = mlir.oraBlockGetArgument(after_block, @intCast(control_index));
+        const control_yield = mlir.oraOperationGetOperand(yield_op, @intCast(control_index));
         const control_update = self.classifyCanonicalWhileCarriedUpdate(control_yield, control_after_arg) orelse return null;
 
-        const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, 0), mode);
+        const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(control_index)), mode);
         const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
         const step_count = switch (control_update) {
             .add_const => |delta| if (predicate == 6) try self.encodeUnsignedPositiveStepCount(
