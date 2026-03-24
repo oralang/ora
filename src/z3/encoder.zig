@@ -7016,7 +7016,7 @@ pub const Encoder = struct {
                 return;
             }
 
-            if (std.mem.eql(u8, op_name, "ora.switch")) {
+            if (std.mem.eql(u8, op_name, "ora.switch") or std.mem.eql(u8, op_name, "ora.switch_expr")) {
                 if (mlir.oraOperationGetNumOperands(op) < 1) {
                     self.recordDegradation("ora.switch missing scrutinee while encoding state effects");
                     return;
