@@ -6406,6 +6406,10 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, name, "ora.try_stmt")) {
+            const catch_region = mlir.oraOperationGetRegion(start_op, 1);
+            if (!self.regionMayEnterCatch(catch_region)) {
+                return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+            }
             return null;
         }
 
