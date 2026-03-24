@@ -6171,6 +6171,60 @@ test "parallel verification matches sequential verification on failing module" {
     try expectVerificationResultsEquivalent(&seq_result, &par_result);
 }
 
+test "parallel verification matches sequential verification on loop invariant module" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildForContractInvariantModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var sequential = try VerificationPass.init(testing.allocator);
+    defer sequential.deinit();
+    sequential.parallel = false;
+    sequential.setVerifyMode(.Full);
+
+    var parallel = try VerificationPass.init(testing.allocator);
+    defer parallel.deinit();
+    parallel.parallel = true;
+    parallel.setVerifyMode(.Full);
+
+    var seq_result = try sequential.runVerificationPass(module);
+    defer seq_result.deinit();
+    var par_result = try parallel.runVerificationPass(module);
+    defer par_result.deinit();
+
+    try expectVerificationResultsEquivalent(&seq_result, &par_result);
+}
+
+test "parallel verification matches sequential verification on conditional return stateful module" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnStatefulDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var sequential = try VerificationPass.init(testing.allocator);
+    defer sequential.deinit();
+    sequential.parallel = false;
+    sequential.setVerifyMode(.Full);
+
+    var parallel = try VerificationPass.init(testing.allocator);
+    defer parallel.deinit();
+    parallel.parallel = true;
+    parallel.setVerifyMode(.Full);
+
+    var seq_result = try sequential.runVerificationPass(module);
+    defer seq_result.deinit();
+    var par_result = try parallel.runVerificationPass(module);
+    defer par_result.deinit();
+
+    try expectVerificationResultsEquivalent(&seq_result, &par_result);
+}
+
 test "contract invariants from loop body obligations use loop constraints" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
