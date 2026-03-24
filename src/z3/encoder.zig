@@ -3180,16 +3180,35 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.degradeToUndef(result_sort, "tload", op_id, "tload encoded as unconstrained transient storage value");
+                const key = self.getStringAttr(mlir_op, "key") orelse return error.UnsupportedOperation;
+                const transient_name = try self.transientSlotName(key);
+                defer self.allocator.free(transient_name);
+                if (mode == .Old) {
+                    return try self.getOrCreateOldGlobal(transient_name, result_sort);
+                }
+                return try self.getOrCreateGlobal(transient_name, result_sort);
             }
         }
 
         if (std.mem.eql(u8, op_name, "ora.tstore")) {
-            const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results == 0) {
-                return self.encodeBoolConstant(true);
+            if (operands.len < 1) return error.InvalidOperandCount;
+            const key = self.getStringAttr(mlir_op, "key") orelse return error.UnsupportedOperation;
+            const transient_name = try self.transientSlotName(key);
+            defer self.allocator.free(transient_name);
+
+            const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+            const operand_type = mlir.oraValueGetType(operand_value);
+            const operand_sort = try self.encodeMLIRType(operand_type);
+            if (mode == .Old) {
+                _ = try self.getOrCreateOldGlobal(transient_name, operand_sort);
+            } else if (self.global_map.getPtr(transient_name)) |existing| {
+                existing.* = operands[0];
+                try self.markGlobalSlotWritten(transient_name);
+            } else {
+                try self.global_map.put(try self.allocator.dupe(u8, transient_name), operands[0]);
+                try self.markGlobalSlotWritten(transient_name);
             }
+            return operands[0];
         }
 
         // unsupported operation - fail verification/compilation immediately.
@@ -3572,6 +3591,10 @@ pub const Encoder = struct {
         try write_slots.append(self.allocator, try self.allocator.dupe(u8, slot_name));
     }
 
+    fn transientSlotName(self: *Encoder, key: []const u8) EncodeError![]u8 {
+        return try std.fmt.allocPrint(self.allocator, "transient:{s}", .{key});
+    }
+
     fn functionHasWriteEffect(self: *Encoder, func_op: mlir.MlirOperation) bool {
         _ = self;
         const effect_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.effect", 10));
@@ -3640,6 +3663,14 @@ pub const Encoder = struct {
                 return;
             };
             try self.appendWriteSlotUnique(write_slots, global_name);
+        } else if (std.mem.eql(u8, op_name, "ora.tstore")) {
+            const key = self.getStringAttr(op, "key") orelse {
+                writes_unknown.* = true;
+                return;
+            };
+            const transient_name = try self.transientSlotName(key);
+            defer self.allocator.free(transient_name);
+            try self.appendWriteSlotUnique(write_slots, transient_name);
         } else if (std.mem.eql(u8, op_name, "ora.map_store")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands < 1) {
@@ -5559,6 +5590,7 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, op_name, "ora.sstore") or
+                std.mem.eql(u8, op_name, "ora.tstore") or
                 std.mem.eql(u8, op_name, "ora.map_store") or
                 std.mem.eql(u8, op_name, "memref.store") or
                 std.mem.eql(u8, op_name, "func.call") or

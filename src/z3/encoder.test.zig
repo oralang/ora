@@ -261,7 +261,7 @@ test "uninitialized memref load degrades encoding" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
 }
 
-test "tload degrades encoding" {
+test "tload encodes exact transient slot value" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -278,10 +278,14 @@ test "tload degrades encoding" {
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const tload = mlir.oraTLoadOpCreate(mlir_ctx, loc, stringRef("pending"), i256_ty);
 
-    _ = try encoder.encodeOperation(tload);
+    const loaded = try encoder.encodeOperation(tload);
+    const expected = try encoder.getOrCreateGlobal("transient:pending", z3.Z3_get_sort(z3_ctx.ctx, loaded));
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "tload encoded as unconstrained transient storage value"));
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqualStrings(
+        std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, expected)),
+        std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, loaded)),
+    );
 }
 
 test "tensor.dim encodes dynamic shape dims consistently and folds static dims" {
@@ -5069,24 +5073,28 @@ test "call summary degradation propagates to caller encoder" {
     const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &result_types, &result_locs, result_types.len);
     const body = mlir.oraFuncOpGetBodyBlock(helper);
 
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const init_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const init_value = mlir.oraOperationGetResult(init_const, 0);
+    const tstore = mlir.oraTStoreOpCreate(mlir_ctx, loc, init_value, stringRef("pending"));
     const tload = mlir.oraTLoadOpCreate(mlir_ctx, loc, stringRef("pending"), i256_ty);
     const ret_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(tload, 0)};
     const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &ret_vals, ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(body, init_const);
+    mlir.oraBlockAppendOwnedOperation(body, tstore);
     mlir.oraBlockAppendOwnedOperation(body, tload);
     mlir.oraBlockAppendOwnedOperation(body, ret);
 
     try encoder.registerFunctionOperation(helper);
 
     const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("helper"), &[_]mlir.MlirValue{}, 0, &result_types, result_types.len);
-    _ = try encoder.encodeOperation(call);
+    const call_result = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.containsAtLeast(
-        u8,
-        encoder.degradationReason().?,
-        1,
-        "tload encoded as unconstrained transient storage value",
-    ));
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqualStrings(
+        "#x0000000000000000000000000000000000000000000000000000000000000007",
+        std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, call_result)),
+    );
 }
 
 test "known callee with unknown write set degrades encoder" {
