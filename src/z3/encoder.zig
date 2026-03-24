@@ -4136,6 +4136,15 @@ pub const Encoder = struct {
             else
                 name_ref.data[0..name_ref.length];
 
+            if (std.mem.eql(u8, name, "scf.for")) {
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                if (mlir.oraOperationIsNull(next_op)) {
+                    if (try self.tryExtractGuaranteedFirstIterationScfForReturnedExpr(current, result_index, mode)) |loop_returned_expr| {
+                        return loop_returned_expr;
+                    }
+                }
+            }
+
             self.applyLocalReturnExtractionStateEffect(current, name, mode) catch |err| switch (err) {
                 error.UnsupportedOperation,
                 error.InvalidOperandCount,
@@ -4238,6 +4247,25 @@ pub const Encoder = struct {
             self.encodeStateEffectsInOperation(op);
             return;
         }
+    }
+
+    fn tryExtractGuaranteedFirstIterationScfForReturnedExpr(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 3) return null;
+
+        const lb_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 0)) orelse return null;
+        const ub_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 1)) orelse return null;
+        const step_const = self.tryGetConstIntValue(mlir.oraOperationGetOperand(for_op, 2)) orelse return null;
+        if (step_const <= 0 or lb_const >= ub_const) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        return try self.extractReturnedExprFromBlock(body, result_index, mode);
     }
 
     fn regionMayEnterCatch(self: *Encoder, region: mlir.MlirRegion) bool {

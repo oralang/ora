@@ -9202,46 +9202,31 @@ test "known callee result degradation reports callee and callsite" {
     const loc = mlir.oraLocationFileLineColGet(mlir_ctx, stringRef("/tmp/debug.ora"), 42, 7);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
 
-    const helper_name = "opaqueStructuredPure";
+    const helper_name = "opaqueWhilePure";
     const helper_attrs = [_]mlir.MlirNamedAttribute{
         namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef(helper_name))),
     };
     const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
     const body = mlir.oraFuncOpGetBodyBlock(helper);
 
-    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
-    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
-    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
-    const c9_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 9);
-    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
-    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
-    const c9_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c9_attr);
-    mlir.oraBlockAppendOwnedOperation(body, c0_op);
-    mlir.oraBlockAppendOwnedOperation(body, c1_op);
-    mlir.oraBlockAppendOwnedOperation(body, c9_op);
-
-    const loop = mlir.oraScfForOpCreate(
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    mlir.oraBlockAppendOwnedOperation(body, init_op);
+    const while_op = mlir.oraScfWhileOpCreate(
         mlir_ctx,
         loc,
-        mlir.oraOperationGetResult(c0_op, 0),
-        mlir.oraOperationGetResult(c9_op, 0),
-        mlir.oraOperationGetResult(c1_op, 0),
-        &[_]mlir.MlirValue{},
-        0,
-        false,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)},
+        1,
+        &[_]mlir.MlirType{i256_ty},
+        1,
     );
-    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
-    const seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
-    const seven_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seven_attr);
-    mlir.oraBlockAppendOwnedOperation(loop_body, seven_op);
-    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraReturnOpCreate(
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
         mlir_ctx,
         loc,
-        &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven_op, 0)},
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(while_op, 0)},
         1,
     ));
-
-    mlir.oraBlockAppendOwnedOperation(body, loop);
 
     try encoder.registerFunctionOperation(helper);
 
@@ -9267,6 +9252,78 @@ test "known callee result degradation reports callee and callsite" {
             std.mem.containsAtLeast(u8, reason, 1, "structured control") or
             std.mem.containsAtLeast(u8, reason, 1, "loop state summary"),
     );
+}
+
+test "known pure callee first-iteration scf.for return encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("firstForReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c0 = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, mlir.oraIntegerAttrCreateI64FromType(index_ty, 0));
+    const c1 = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, mlir.oraIntegerAttrCreateI64FromType(index_ty, 1));
+    const c4 = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, mlir.oraIntegerAttrCreateI64FromType(index_ty, 4));
+    mlir.oraBlockAppendOwnedOperation(body, c0);
+    mlir.oraBlockAppendOwnedOperation(body, c1);
+    mlir.oraBlockAppendOwnedOperation(body, c4);
+
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(c0, 0),
+        mlir.oraOperationGetResult(c4, 0),
+        mlir.oraOperationGetResult(c1, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    const seven = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7));
+    mlir.oraBlockAppendOwnedOperation(loop_body, seven);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(seven, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, loop);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("firstForReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+    const encoded = try encoder.encodeOperation(call);
+    const expected = try encoder.encodeIntegerConstant(7, 256);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
