@@ -3764,6 +3764,17 @@ pub const Encoder = struct {
                 self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 1));
         }
 
+        if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
+            if (mlir.oraOperationGetNumOperands(op) >= 1) {
+                const condition_value = mlir.oraOperationGetOperand(op, 0);
+                if (self.getValueConstUnsigned(condition_value, 1)) |cond| {
+                    return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, if (cond != 0) 0 else 1));
+                }
+            }
+            return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 0)) or
+                self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, 1));
+        }
+
         if (std.mem.eql(u8, op_name, "ora.switch")) {
             if (self.getSelectedOraSwitchCaseIndex(op)) |case_index| {
                 return self.regionMayEnterCatch(mlir.oraOperationGetRegion(op, @intCast(case_index)));
