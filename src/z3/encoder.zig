@@ -5060,10 +5060,7 @@ pub const Encoder = struct {
                 continue;
             }
 
-            if (std.mem.eql(u8, name, "ora.sstore") or
-                std.mem.eql(u8, name, "ora.map_store") or
-                std.mem.eql(u8, name, "memref.store") or
-                std.mem.eql(u8, name, "scf.if") or
+            if (std.mem.eql(u8, name, "scf.if") or
                 std.mem.eql(u8, name, "ora.switch") or
                 std.mem.eql(u8, name, "ora.conditional_return") or
                 std.mem.eql(u8, name, "scf.execute_region") or
