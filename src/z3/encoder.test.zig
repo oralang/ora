@@ -192,6 +192,78 @@ test "encodeSLoad for map returns array sort" {
     try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(sort_kind)));
 }
 
+test "struct_field_update preserves untouched fields exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.struct<\"Pair__u256\">"));
+
+    const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256"));
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("left")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("right")),
+    };
+    const field_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+    };
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_types"), mlir.oraArrayAttrCreate(mlir_ctx, field_type_attrs.len, &field_type_attrs));
+    try encoder.registerStructDeclOperation(struct_decl);
+
+    const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+    ), 0);
+    const two = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
+    ), 0);
+    const seven = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    ), 0);
+
+    const fields = [_]mlir.MlirValue{ one, two };
+    const init_op = mlir.oraStructInstantiateOpCreate(mlir_ctx, loc, stringRef("Pair__u256"), &fields, fields.len, struct_ty);
+    const pair = mlir.oraOperationGetResult(init_op, 0);
+    const update_op = mlir.oraStructFieldUpdateOpCreate(mlir_ctx, loc, pair, stringRef("left"), seven);
+    const updated_pair = mlir.oraOperationGetResult(update_op, 0);
+
+    const extract_left = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("left"), i256_ty);
+    const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("right"), i256_ty);
+    const left_ast = try encoder.encodeOperation(extract_left);
+    const right_ast = try encoder.encodeOperation(extract_right);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, left_ast, try encoder.encodeValue(seven))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "memref store threads into later scalar load" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -6413,13 +6485,13 @@ test "direct ora.try_stmt composes nested escaping catch predicate exactly" {
     defer solver.deinit();
 
     solver.push();
-    defer solver.pop(1);
+    defer solver.pop();
     solver.assert(cond);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, nine)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 
     solver.push();
-    defer solver.pop(1);
+    defer solver.pop();
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, cond));
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, seven)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
