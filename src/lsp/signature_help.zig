@@ -125,8 +125,8 @@ fn findFunctionSymbol(symbols: []const semantic_index.Symbol, name: []const u8) 
     return best;
 }
 
-fn buildSignatureInfo(allocator: Allocator, symbol: *const semantic_index.Symbol, active_param: u32) !SignatureInfo {
-    const detail = symbol.detail orelse return error.OutOfMemory;
+fn buildSignatureInfo(allocator: Allocator, symbol: *const semantic_index.Symbol, active_param: u32) !?SignatureInfo {
+    const detail = symbol.detail orelse return null;
 
     // Parse parameter labels from the detail string, e.g. "(x: u256, y: address) -> bool"
     var params = std.ArrayList(ParameterInfo){};

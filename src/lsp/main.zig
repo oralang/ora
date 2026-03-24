@@ -356,6 +356,10 @@ pub const Handler = struct {
                 .label = try arena.dupe(u8, item.label),
                 .kind = completionKindToLsp(item.kind),
                 .detail = if (item.detail) |detail| try arena.dupe(u8, detail) else null,
+                .documentation = if (item.documentation) |doc| .{ .MarkupContent = .{
+                    .kind = .markdown,
+                    .value = try arena.dupe(u8, doc),
+                } } else null,
             };
         }
 

@@ -35,6 +35,16 @@
         "path": "./syntaxes/ora.tmLanguage.json"
       }
     ],
+    "commands": [
+      {
+        "command": "ora.restartServer",
+        "title": "Ora: Restart Language Server"
+      },
+      {
+        "command": "ora.verify",
+        "title": "Ora: Verify Contract"
+      }
+    ],
     "configuration": {
       "title": "Ora",
       "properties": {
@@ -49,8 +59,13 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "ora",
+    "smart-contracts",
+    "evm",
+    "formal-verification"
+  ],
+  "author": "oralang",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {

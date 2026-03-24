@@ -100,6 +100,11 @@ pub const Formatter = struct {
             .RightParen => try self.formatRightParen(),
             .LeftBracket => try self.formatLeftBracket(token),
             .RightBracket => try self.formatRightBracket(),
+            .StringLiteral, .RawStringLiteral, .CharacterLiteral => {
+                try self.emitPreTokenSpacing(token);
+                try self.writer.write(self.originalSpan(token));
+                try self.emitPostTokenSpacing(token, next);
+            },
             else => {
                 try self.emitPreTokenSpacing(token);
                 try self.writer.write(token.lexeme);
@@ -165,13 +170,12 @@ pub const Formatter = struct {
 
     fn formatRightBrace(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
         _ = token;
-        _ = next;
         self.writer.dedent();
         if (self.writer.current_line_length > 0) {
             try self.writer.newline();
         }
         try self.writer.write("}");
-        self.pending_space = false;
+        self.pending_space = if (next) |n| isBraceTrailer(n.type) else false;
     }
 
     fn formatSemicolon(self: *Formatter) FormatError!void {
@@ -264,6 +268,13 @@ pub const Formatter = struct {
         self.pending_space = false;
     }
 
+    fn originalSpan(self: *const Formatter, token: lib.Token) []const u8 {
+        const start: usize = @intCast(token.range.start_offset);
+        const end: usize = @intCast(token.range.end_offset);
+        if (start <= end and end <= self.source.len) return self.source[start..end];
+        return token.lexeme;
+    }
+
     fn ensureSpaceBefore(self: *Formatter) FormatError!void {
         if (self.writer.current_line_length == 0 or self.writer.needs_indent) return;
         const written = self.writer.getWritten();
@@ -271,6 +282,13 @@ pub const Formatter = struct {
         try self.writer.space();
     }
 };
+
+fn isBraceTrailer(token: lib.TokenType) bool {
+    return switch (token) {
+        .Else, .Catch => true,
+        else => false,
+    };
+}
 
 fn needsLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) bool {
     _ = previous;

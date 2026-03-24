@@ -11,6 +11,7 @@
     { "include": "#verification" },
     { "include": "#storage" },
     { "include": "#constants" },
+    { "include": "#builtins" },
     { "include": "#operators" }
   ],
   "repository": {
@@ -57,7 +58,7 @@
         },
         {
           "name": "support.type.collection.ora",
-          "match": "\\b(Map|Slice|Bytes)\\b"
+          "match": "\\b(map|Map|Slice|Bytes)\\b"
         }
       ]
     },
@@ -75,6 +76,11 @@
           "name": "storage.modifier.ora",
           "match": "\\b(storage|memory|transient|immutable)\\b"
         }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        { "name": "support.function.builtin.ora", "match": "@[a-zA-Z_]\\w*" }
       ]
     },
     "constants": {
