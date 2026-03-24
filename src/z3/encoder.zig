@@ -16,6 +16,7 @@ const Context = @import("context.zig").Context;
 const mlir_helpers = @import("mlir_helpers.zig");
 
 const finite_scf_for_unroll_limit: usize = 8;
+const finite_scf_while_unroll_limit: usize = 8;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
@@ -4311,7 +4312,7 @@ pub const Encoder = struct {
         defer self.allocator.free(carried);
 
         var iteration_count: usize = 0;
-        while (iteration_count < 4) : (iteration_count += 1) {
+        while (iteration_count < finite_scf_while_unroll_limit) : (iteration_count += 1) {
             const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, carried);
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
@@ -4357,7 +4358,7 @@ pub const Encoder = struct {
         if (mlir.oraBlockIsNull(after_block)) return false;
 
         var iteration_count: usize = 0;
-        while (iteration_count < 4) : (iteration_count += 1) {
+        while (iteration_count < finite_scf_while_unroll_limit) : (iteration_count += 1) {
             const before_bind_count = self.bindScfWhileBeforeArgsFromValues(while_op, carried) catch return false;
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
             self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));

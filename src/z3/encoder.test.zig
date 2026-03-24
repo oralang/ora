@@ -1614,6 +1614,112 @@ test "direct finite two-iteration scf.while result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct finite five-iteration scf.while result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const false_val = mlir.oraOperationGetResult(false_op, 0);
+    const true_val = mlir.oraOperationGetResult(true_op, 0);
+    const zero_val = mlir.oraOperationGetResult(zero_op, 0);
+
+    const init_vals = [_]mlir.MlirValue{
+        true_val,
+        true_val,
+        true_val,
+        true_val,
+        true_val,
+        zero_val,
+    };
+    const result_types = [_]mlir.MlirType{ i1_ty, i1_ty, i1_ty, i1_ty, i1_ty, i256_ty };
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+
+    const before_f0 = mlir.oraBlockGetArgument(before_block, 0);
+    const before_f1 = mlir.oraBlockGetArgument(before_block, 1);
+    const before_f2 = mlir.oraBlockGetArgument(before_block, 2);
+    const before_f3 = mlir.oraBlockGetArgument(before_block, 3);
+    const before_f4 = mlir.oraBlockGetArgument(before_block, 4);
+    const before_sum = mlir.oraBlockGetArgument(before_block, 5);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        before_f0,
+        &[_]mlir.MlirValue{ before_f0, before_f1, before_f2, before_f3, before_f4, before_sum },
+        6,
+    ));
+
+    const after_f1 = mlir.oraBlockGetArgument(after_block, 1);
+    const after_f2 = mlir.oraBlockGetArgument(after_block, 2);
+    const after_f3 = mlir.oraBlockGetArgument(after_block, 3);
+    const after_f4 = mlir.oraBlockGetArgument(after_block, 4);
+    const after_sum = mlir.oraBlockGetArgument(after_block, 5);
+    const one_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, one_attr);
+    mlir.oraBlockAppendOwnedOperation(after_block, one_op);
+    const next_sum = mlir.oraArithAddIOpCreate(
+        mlir_ctx,
+        loc,
+        after_sum,
+        mlir.oraOperationGetResult(one_op, 0),
+    );
+    mlir.oraBlockAppendOwnedOperation(after_block, next_sum);
+    mlir.oraBlockAppendOwnedOperation(after_block, false_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{
+            after_f1,
+            after_f2,
+            after_f3,
+            after_f4,
+            false_val,
+            mlir.oraOperationGetResult(next_sum, 0),
+        },
+        6,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 5));
+    const expected = try encoder.encodeIntegerConstant(5, 256);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "direct non-throwing ora.try_stmt result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
