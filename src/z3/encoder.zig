@@ -354,6 +354,32 @@ pub const Encoder = struct {
         }
     }
 
+    fn stateSnapshotsEquivalent(self: *Encoder, lhs: *const StateSnapshot, rhs: *const StateSnapshot) bool {
+        if (lhs.global_map.count() != rhs.global_map.count()) return false;
+        if (lhs.memref_map.count() != rhs.memref_map.count()) return false;
+        if (lhs.written_global_slots.count() != rhs.written_global_slots.count()) return false;
+
+        var lhs_g = lhs.global_map.iterator();
+        while (lhs_g.next()) |entry| {
+            const rhs_value = rhs.global_map.get(entry.key_ptr.*) orelse return false;
+            if (!self.astEquivalent(entry.value_ptr.*, rhs_value)) return false;
+        }
+
+        var lhs_m = lhs.memref_map.iterator();
+        while (lhs_m.next()) |entry| {
+            const rhs_value = rhs.memref_map.get(entry.key_ptr.*) orelse return false;
+            if (!self.astEquivalent(entry.value_ptr.*.value, rhs_value.value)) return false;
+            if (!self.astEquivalent(entry.value_ptr.*.initialized, rhs_value.initialized)) return false;
+        }
+
+        var lhs_w = lhs.written_global_slots.iterator();
+        while (lhs_w.next()) |entry| {
+            if (!rhs.written_global_slots.contains(entry.key_ptr.*)) return false;
+        }
+
+        return true;
+    }
+
     fn appendUniqueStateName(
         self: *Encoder,
         names: *std.ArrayList([]const u8),
@@ -1886,12 +1912,16 @@ pub const Encoder = struct {
                 try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
         }
 
-        if (std.mem.eql(u8, op_name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(mlir_op)) {
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
             const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
-            return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+            if (!self.tryStmtMayEnterCatch(mlir_op)) {
+                return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
+                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+            }
+            return (try self.tryExtractEquivalentTryStmtResult(mlir_op, result_index, mode)) orelse
+                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
         }
 
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
@@ -2699,15 +2729,15 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const op_id = @intFromPtr(mlir_op.ptr);
             if (!self.tryStmtMayEnterCatch(mlir_op)) {
-                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
-                const op_id = @intFromPtr(mlir_op.ptr);
                 return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
             }
-            // Conservative summary for throwing try/catch-style control flow.
-            return try self.encodeStructuredControlResult(mlir_op, op_name, operands, 0);
+            return (try self.tryExtractEquivalentTryStmtResult(mlir_op, 0, mode)) orelse
+                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
         }
 
         if (std.mem.eql(u8, op_name, "memref.alloca")) {
@@ -3964,6 +3994,21 @@ pub const Encoder = struct {
         return false;
     }
 
+    fn tryExtractEquivalentTryStmtResult(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(try_stmt));
+        if (num_regions < 2) return null;
+
+        const try_expr = (try self.extractRegionYield(try_stmt, 0, result_index, mode)) orelse return null;
+        const catch_expr = (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse return null;
+        if (!self.astEquivalent(try_expr, catch_expr)) return null;
+        return try_expr;
+    }
+
     fn extractScfIfReturnedExpr(
         self: *Encoder,
         if_op: mlir.MlirOperation,
@@ -4350,6 +4395,51 @@ pub const Encoder = struct {
                     }
                     return;
                 }
+
+                var base_state = self.captureStateSnapshot() catch {
+                    self.recordDegradation("failed to capture base state for ora.try_stmt summary");
+                    return;
+                };
+                defer base_state.deinit(self.allocator);
+
+                var try_state = StateSnapshot.init(self.allocator);
+                defer try_state.deinit(self.allocator);
+                var catch_state = StateSnapshot.init(self.allocator);
+                defer catch_state.deinit(self.allocator);
+
+                self.restoreStateSnapshot(&base_state) catch {
+                    self.recordDegradation("failed to restore base state for ora.try_stmt try-summary");
+                    return;
+                };
+                const try_region = mlir.oraOperationGetRegion(op, 0);
+                if (!mlir.oraRegionIsNull(try_region)) {
+                    self.encodeStateEffectsInRegion(try_region);
+                }
+                try_state = self.captureStateSnapshot() catch {
+                    self.recordDegradation("failed to capture ora.try_stmt try-state summary");
+                    return;
+                };
+
+                self.restoreStateSnapshot(&base_state) catch {
+                    self.recordDegradation("failed to restore base state for ora.try_stmt catch-summary");
+                    return;
+                };
+                const catch_region = mlir.oraOperationGetRegion(op, 1);
+                if (!mlir.oraRegionIsNull(catch_region)) {
+                    self.encodeStateEffectsInRegion(catch_region);
+                }
+                catch_state = self.captureStateSnapshot() catch {
+                    self.recordDegradation("failed to capture ora.try_stmt catch-state summary");
+                    return;
+                };
+
+                if (self.stateSnapshotsEquivalent(&try_state, &catch_state)) {
+                    self.restoreStateSnapshot(&try_state) catch {
+                        self.recordDegradation("failed to restore equivalent ora.try_stmt state summary");
+                    };
+                    return;
+                }
+
                 self.recordDegradation("try state summary is not encoded exactly");
                 return;
             }
