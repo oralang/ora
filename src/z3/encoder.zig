@@ -6386,6 +6386,9 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, name, "scf.for")) {
+            if (try self.tryExtractFiniteScfForCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
             if (try self.tryExtractSingleIterationScfForCatchPredicate(start_op, mode, continuation)) |pred| {
                 return pred;
             }
@@ -6393,6 +6396,9 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, name, "scf.while")) {
+            if (try self.tryExtractFiniteScfWhileCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
             if (try self.tryExtractSingleIterationScfWhileCatchPredicate(start_op, mode, continuation)) |pred| {
                 return pred;
             }
@@ -6404,6 +6410,103 @@ pub const Encoder = struct {
         }
 
         return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
+    }
+
+    fn tryExtractFiniteScfForCatchPredicate(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const loop_ctx = self.getFiniteScfForContext(for_op) orelse return null;
+        const carried = try self.getScfForInitCarriedValues(for_op, mode);
+        defer self.allocator.free(carried);
+        return try self.extractFiniteScfForCatchPredicate(loop_ctx, 0, carried, mode, continuation);
+    }
+
+    fn extractFiniteScfForCatchPredicate(
+        self: *Encoder,
+        loop_ctx: FiniteScfForContext,
+        iter_index: usize,
+        carried: []const z3.Z3_ast,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        if (iter_index >= loop_ctx.trip_count) return continuation;
+
+        const iv_value = loop_ctx.lower_bound + iter_index * loop_ctx.step;
+        try self.bindFiniteScfForLoopArgs(loop_ctx, iv_value, carried);
+        self.invalidateBlockValueCaches(loop_ctx.body);
+        const yielded = (try self.extractScfForYieldValues(loop_ctx, mode)) orelse {
+            self.unbindFiniteScfForLoopArgs(loop_ctx);
+            return null;
+        };
+        self.unbindFiniteScfForLoopArgs(loop_ctx);
+        defer self.allocator.free(yielded);
+
+        const rest = (try self.extractFiniteScfForCatchPredicate(loop_ctx, iter_index + 1, yielded, mode, continuation)) orelse return null;
+
+        try self.bindFiniteScfForLoopArgs(loop_ctx, iv_value, carried);
+        defer self.unbindFiniteScfForLoopArgs(loop_ctx);
+        self.invalidateBlockValueCaches(loop_ctx.body);
+        return try self.tryExtractCatchPredicateFromBlock(loop_ctx.body, mode, rest);
+    }
+
+    fn tryExtractFiniteScfWhileCatchPredicate(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const carried = try self.getScfWhileInitValues(while_op, mode);
+        defer self.allocator.free(carried);
+        return try self.extractFiniteScfWhileCatchPredicate(while_op, carried, mode, continuation, 0);
+    }
+
+    fn extractFiniteScfWhileCatchPredicate(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        carried: []const z3.Z3_ast,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+        depth: usize,
+    ) EncodeError!?z3.Z3_ast {
+        if (depth >= finite_scf_while_unroll_limit) return null;
+
+        const condition_op = self.findScfConditionOp(while_op) orelse return null;
+
+        const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, carried);
+        self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
+        self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
+        const condition_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+        const condition_const = self.astSimplifiesToBool(condition_ast) orelse {
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        };
+        if (!condition_const) {
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return continuation;
+        }
+
+        const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+        const yielded = (try self.extractScfWhileYieldValues(while_op, mode)) orelse {
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            return null;
+        };
+        self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+        self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+        defer self.allocator.free(yielded);
+
+        const rest = (try self.extractFiniteScfWhileCatchPredicate(while_op, yielded, mode, continuation, depth + 1)) orelse return null;
+
+        const replay_before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, carried);
+        defer self.unbindScfWhileBeforeArgs(while_op, replay_before_bind_count);
+        self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
+        self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
+        const replay_after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+        defer self.unbindScfWhileAfterArgs(while_op, replay_after_bind_count);
+        return try self.tryExtractCatchPredicateFromBlock(mlir.oraScfWhileOpGetAfterBlock(while_op), mode, rest);
     }
 
     fn tryExtractSingleIterationScfForCatchPredicate(
