@@ -4660,7 +4660,8 @@ pub const Encoder = struct {
         const step_value = mlir.oraOperationGetOperand(for_op, 2);
         const lb_const = self.tryGetConstIntValue(lb_value);
         const step_const = self.tryGetConstIntValue(step_value);
-        if (lb_const == null or lb_const.? != 0 or step_const == null or step_const.? != 1) return null;
+        if (lb_const == null or lb_const.? != 0 or step_const == null or step_const.? == 0) return null;
+        const step_u64 = std.math.cast(u64, step_const.?) orelse return null;
 
         const body = mlir.oraScfForOpGetBodyBlock(for_op);
         if (mlir.oraBlockIsNull(body)) return null;
@@ -4700,7 +4701,8 @@ pub const Encoder = struct {
 
                 const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 3), mode);
                 const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
-                return try self.encodeArithmeticOp(.Add, init_ast, ub_ast);
+                const trip_count_ast = try self.encodeCanonicalPositiveStepTripCount(ub_ast, step_u64);
+                return try self.encodeArithmeticOp(.Add, init_ast, trip_count_ast);
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
@@ -4723,7 +4725,8 @@ pub const Encoder = struct {
         const step_value = mlir.oraOperationGetOperand(for_op, 2);
         const lb_const = self.tryGetConstIntValue(lb_value);
         const step_const = self.tryGetConstIntValue(step_value);
-        if (lb_const == null or lb_const.? != 0 or step_const == null or step_const.? != 1) return null;
+        if (lb_const == null or lb_const.? != 0 or step_const == null or step_const.? == 0) return null;
+        const step_u64 = std.math.cast(u64, step_const.?) orelse return null;
 
         const body = mlir.oraScfForOpGetBodyBlock(for_op);
         if (mlir.oraBlockIsNull(body)) return null;
@@ -4755,12 +4758,33 @@ pub const Encoder = struct {
 
                 const init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 3), mode);
                 const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
-                return try self.encodeArithmeticOp(.Sub, init_ast, ub_ast);
+                const trip_count_ast = try self.encodeCanonicalPositiveStepTripCount(ub_ast, step_u64);
+                return try self.encodeArithmeticOp(.Sub, init_ast, trip_count_ast);
             }
             current = mlir.oraOperationGetNextInBlock(current);
         }
 
         return null;
+    }
+
+    fn encodeCanonicalPositiveStepTripCount(
+        self: *Encoder,
+        ub_ast: z3.Z3_ast,
+        step: u64,
+    ) EncodeError!z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, ub_ast);
+        if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return error.UnsupportedOperation;
+
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        if (step == 1) return ub_ast;
+
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+        const step_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, step, sort);
+        const ub_is_zero = z3.Z3_mk_eq(self.context.ctx, ub_ast, zero);
+        const ub_minus_one = z3.Z3_mk_bv_sub(self.context.ctx, ub_ast, one);
+        const quotient = z3.Z3_mk_bv_udiv(self.context.ctx, ub_minus_one, step_ast);
+        const rounded = z3.Z3_mk_bv_add(self.context.ctx, quotient, one);
+        return z3.Z3_mk_ite(self.context.ctx, ub_is_zero, zero, rounded);
     }
 
     fn tryExtractIdentityScfForResult(
