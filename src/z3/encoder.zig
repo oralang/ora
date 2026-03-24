@@ -208,6 +208,16 @@ pub const Encoder = struct {
         return try self.allocPersistentMessage(loc_text);
     }
 
+    fn formatDegradationAtOp(self: *Encoder, op: mlir.MlirOperation, reason: []const u8) []const u8 {
+        const loc_text = self.getOperationLocationText(op) catch null;
+        if (loc_text) |loc| {
+            const owned = std.fmt.allocPrint(self.allocator, "{s} at {s}", .{ reason, loc }) catch return reason;
+            defer self.allocator.free(owned);
+            return self.allocPersistentMessage(owned) catch reason;
+        }
+        return reason;
+    }
+
     fn recordCalleeResultDegradation(self: *Encoder, call_op: mlir.MlirOperation, callee: []const u8, reason: []const u8) void {
         const loc_text = self.getOperationLocationText(call_op) catch null;
         const full_reason = if (loc_text) |loc|
@@ -893,6 +903,69 @@ pub const Encoder = struct {
 
     fn unbindValue(self: *Encoder, value: mlir.MlirValue) void {
         _ = self.value_bindings.remove(@intFromPtr(value.ptr));
+    }
+
+    fn scalarMemrefStoreValue(
+        self: *Encoder,
+        store_op: mlir.MlirOperation,
+        memref_value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        if (!self.operationNameEq(store_op, "memref.store")) return null;
+        const num_operands = mlir.oraOperationGetNumOperands(store_op);
+        if (num_operands != 2) return null;
+        const store_memref = mlir.oraOperationGetOperand(store_op, 1);
+        if (!mlir.mlirValueEqual(store_memref, memref_value)) return null;
+        return try self.encodeValueWithMode(mlir.oraOperationGetOperand(store_op, 0), mode);
+    }
+
+    fn tryRecoverDominatingScalarMemrefStoreInBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        before_op: mlir.MlirOperation,
+        memref_value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?TrackedMemrefState {
+        if (mlir.oraBlockIsNull(block)) return null;
+        var current = mlir.oraBlockGetFirstOperation(block);
+        var recovered: ?TrackedMemrefState = null;
+        while (!mlir.oraOperationIsNull(current) and !mlir.mlirOperationEqual(current, before_op)) {
+            if (try self.scalarMemrefStoreValue(current, memref_value, mode)) |stored_value| {
+                recovered = .{
+                    .value = stored_value,
+                    .initialized = self.boolTrue(),
+                };
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return recovered;
+    }
+
+    fn tryRecoverDominatingScalarMemrefState(
+        self: *Encoder,
+        load_op: mlir.MlirOperation,
+        memref_value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?TrackedMemrefState {
+        const owner_block = mlir.mlirOperationGetBlock(load_op);
+        if (mlir.oraBlockIsNull(owner_block)) return null;
+
+        if (try self.tryRecoverDominatingScalarMemrefStoreInBlock(owner_block, load_op, memref_value, mode)) |state| {
+            return state;
+        }
+
+        const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+        if (mlir.oraOperationIsNull(parent_op)) return null;
+        if (!self.operationNameEq(parent_op, "scf.while")) return null;
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(parent_op);
+        if (!mlir.oraBlockIsNull(before_block) and before_block.ptr == owner_block.ptr) {
+            const parent_block = mlir.mlirOperationGetBlock(parent_op);
+            if (mlir.oraBlockIsNull(parent_block)) return null;
+            return try self.tryRecoverDominatingScalarMemrefStoreInBlock(parent_block, parent_op, memref_value, mode);
+        }
+
+        return null;
     }
 
     pub fn encodeValueOld(self: *Encoder, mlir_value: mlir.MlirValue) EncodeError!z3.Z3_ast {
@@ -3220,8 +3293,19 @@ pub const Encoder = struct {
                         if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathImplies(stored.initialized)) {
                             return stored.value;
                         }
+                        if (self.isBoolConst(stored.initialized, false)) {
+                            if (try self.tryRecoverDominatingScalarMemrefState(mlir_op, memref_value, mode)) |recovered| {
+                                try map.put(memref_id, recovered);
+                                return recovered.value;
+                            }
+                        }
                         const op_id_unknown_conditional = @intFromPtr(mlir_op.ptr);
-                        const fresh_conditional = try self.degradeToUndef(result_sort, "memref_load", op_id_unknown_conditional, "memref.load read from conditionally initialized tracked local state");
+                        const fresh_conditional = try self.degradeToUndef(
+                            result_sort,
+                            "memref_load",
+                            op_id_unknown_conditional,
+                            self.formatDegradationAtOp(mlir_op, "memref.load read from conditionally initialized tracked local state"),
+                        );
                         try map.put(memref_id, .{
                             .value = fresh_conditional,
                             .initialized = stored.initialized,
@@ -3229,8 +3313,18 @@ pub const Encoder = struct {
                         return fresh_conditional;
                     }
 
+                    if (try self.tryRecoverDominatingScalarMemrefState(mlir_op, memref_value, mode)) |recovered| {
+                        try map.put(memref_id, recovered);
+                        return recovered.value;
+                    }
+
                     const op_id_unknown = @intFromPtr(mlir_op.ptr);
-                    const fresh = try self.degradeToUndef(result_sort, "memref_load", op_id_unknown, "memref.load read from uninitialized tracked local state");
+                    const fresh = try self.degradeToUndef(
+                        result_sort,
+                        "memref_load",
+                        op_id_unknown,
+                        self.formatDegradationAtOp(mlir_op, "memref.load read from uninitialized tracked local state"),
+                    );
                     try map.put(memref_id, .{
                         .value = fresh,
                         .initialized = self.boolFalse(),
@@ -3238,8 +3332,23 @@ pub const Encoder = struct {
                     return fresh;
                 }
 
+                if (num_operands > 1) {
+                    return try self.encodeTensorExtractOp(operands, mlir_op);
+                }
+
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.degradeToUndef(result_sort, "memref_load", op_id, "memref.load with unsupported operand shape");
+                const shape_reason = try std.fmt.allocPrint(
+                    self.allocator,
+                    "memref.load with unsupported operand shape (operands={d})",
+                    .{num_operands},
+                );
+                defer self.allocator.free(shape_reason);
+                return try self.degradeToUndef(
+                    result_sort,
+                    "memref_load",
+                    op_id,
+                    self.formatDegradationAtOp(mlir_op, shape_reason),
+                );
             }
         }
 

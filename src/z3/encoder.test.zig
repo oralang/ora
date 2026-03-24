@@ -261,6 +261,74 @@ test "uninitialized memref load degrades encoding" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
 }
 
+test "scalar memref load recovers dominating store before scf.while" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const null_attr = mlir.MlirAttribute{ .ptr = null };
+    const memref_ty = mlir.oraMemRefTypeCreate(mlir_ctx, i1_ty, 0, null, null_attr, null_attr);
+
+    const empty_attrs = [_]mlir.MlirNamedAttribute{};
+    const func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &empty_attrs, empty_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(func);
+
+    const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_ty);
+    const slot = mlir.oraOperationGetResult(alloca, 0);
+    mlir.oraBlockAppendOwnedOperation(body, alloca);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const false_val = mlir.oraOperationGetResult(false_op, 0);
+    mlir.oraBlockAppendOwnedOperation(body, false_op);
+
+    const init_store = mlir.oraMemrefStoreOpCreate(mlir_ctx, loc, false_val, slot, null, 0);
+    mlir.oraBlockAppendOwnedOperation(body, init_store);
+
+    const init_vals = [_]mlir.MlirValue{};
+    const result_types = [_]mlir.MlirType{};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const load_op = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, slot, null, 0, i1_ty);
+    const loaded = mlir.oraOperationGetResult(load_op, 0);
+    mlir.oraBlockAppendOwnedOperation(before_block, load_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        loaded,
+        &[_]mlir.MlirValue{},
+        0,
+    ));
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+
+    _ = try encoder.encodeOperation(alloca);
+    _ = try encoder.encodeOperation(false_op);
+    _ = try encoder.encodeOperation(init_store);
+
+    encoder.memref_map.clearRetainingCapacity();
+    const recovered = try encoder.encodeOperation(load_op);
+
+    try testing.expect(!encoder.isDegraded());
+    const expected_false = try encoder.encodeValue(false_val);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, recovered, expected_false)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "tload encodes exact transient slot value" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
