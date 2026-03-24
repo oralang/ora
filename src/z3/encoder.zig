@@ -5139,6 +5139,53 @@ pub const Encoder = struct {
             });
         }
 
+        if (std.mem.eql(u8, name, "ora.conditional_return")) {
+            if (mlir.oraOperationGetNumOperands(start_op) < 1) return null;
+            const condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(start_op, 0), mode);
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
+            const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraConditionalReturnOpGetThenBlock(start_op), mode, rest)) orelse return null;
+            const else_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraConditionalReturnOpGetElseBlock(start_op), mode, rest)) orelse return null;
+            return self.encodeOr(&.{
+                self.encodeAnd(&.{ condition, then_pred }),
+                self.encodeAnd(&.{ self.encodeNot(condition), else_pred }),
+            });
+        }
+
+        if (std.mem.eql(u8, name, "ora.switch")) {
+            if (mlir.oraOperationGetNumOperands(start_op) < 1) return null;
+            const scrutinee = try self.encodeValueWithMode(mlir.oraOperationGetOperand(start_op, 0), mode);
+            const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
+            const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(start_op));
+            if (num_regions == 0) return rest;
+
+            var metadata = try self.getSwitchCaseMetadata(start_op, num_regions);
+            defer metadata.deinit(self.allocator);
+
+            var remaining = self.encodeBoolConstant(true);
+            var combined = self.encodeBoolConstant(false);
+            for (0..num_regions) |region_index| {
+                const raw_predicate = try self.buildOraSwitchCasePredicate(
+                    scrutinee,
+                    metadata.case_kinds,
+                    metadata.case_values,
+                    metadata.range_starts,
+                    metadata.range_ends,
+                    region_index,
+                );
+                const branch_condition = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
+                    remaining
+                else
+                    self.encodeAnd(&.{ remaining, raw_predicate });
+                const region = mlir.oraOperationGetRegion(start_op, @intCast(region_index));
+                const branch_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraRegionGetFirstBlock(region), mode, rest)) orelse return null;
+                combined = self.encodeOr(&.{ combined, self.encodeAnd(&.{ branch_condition, branch_pred }) });
+                if (metadata.default_case_index == null or metadata.default_case_index.? != @as(i64, @intCast(region_index))) {
+                    remaining = self.encodeAnd(&.{ remaining, self.encodeNot(raw_predicate) });
+                }
+            }
+            return combined;
+        }
+
         if (std.mem.eql(u8, name, "scf.execute_region")) {
             const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
             const region = mlir.oraOperationGetRegion(start_op, 0);
@@ -5157,8 +5204,6 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, name, "scf.for") or
             std.mem.eql(u8, name, "scf.while") or
-            std.mem.eql(u8, name, "ora.switch") or
-            std.mem.eql(u8, name, "ora.conditional_return") or
             std.mem.eql(u8, name, "ora.try_stmt"))
         {
             return null;

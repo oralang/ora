@@ -1131,6 +1131,103 @@ test "func.call summary with branch-conditioned ora.try_stmt state effects encod
     try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
 }
 
+test "func.call summary with conditional-return ora.try_stmt state effects encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("conditionalReturnTryWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i1_ty, eu_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const helper_flag = mlir.oraBlockGetArgument(body, 0);
+    const helper_maybe = mlir.oraBlockGetArgument(body, 1);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{}, 0);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const conditional_ret = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, helper_flag);
+    const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional_ret);
+    const else_block = mlir.oraConditionalReturnOpGetElseBlock(conditional_ret);
+
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, helper_maybe, i256_ty);
+    mlir.oraBlockAppendOwnedOperation(then_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const try_store_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const try_store_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, try_store_attr);
+    mlir.oraBlockAppendOwnedOperation(try_block, conditional_ret);
+    mlir.oraBlockAppendOwnedOperation(try_block, try_store_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(try_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const catch_store_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33);
+    const catch_store_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_store_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_store_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(catch_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const outer_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
+    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const helper_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("conditionalReturnTryWriter"),
+        &[_]mlir.MlirValue{
+            mlir.oraOperationGetResult(outer_flag, 0),
+            mlir.oraOperationGetResult(outer_maybe, 0),
+        },
+        2,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(helper_call);
+
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+    const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, counter));
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "condValue") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
+}
+
 test "func.call summary with equivalent ora.try_stmt branches preserves state exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
