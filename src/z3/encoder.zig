@@ -4149,11 +4149,14 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "scf.execute_region")) {
-                const region = mlir.oraOperationGetRegion(current, 0);
-                if (!mlir.oraRegionIsNull(region)) {
-                    const block = mlir.oraRegionGetFirstBlock(region);
-                    const nested_expr = try self.extractReturnedExprFromBlock(block, result_index, mode);
-                    if (nested_expr != null) return nested_expr;
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                if (mlir.oraOperationIsNull(next_op)) {
+                    const region = mlir.oraOperationGetRegion(current, 0);
+                    if (!mlir.oraRegionIsNull(region)) {
+                        const block = mlir.oraRegionGetFirstBlock(region);
+                        const nested_expr = try self.extractReturnedExprFromBlock(block, result_index, mode);
+                        if (nested_expr != null) return nested_expr;
+                    }
                 }
             }
 
@@ -4170,9 +4173,12 @@ pub const Encoder = struct {
             }
 
             if (std.mem.eql(u8, name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(current)) {
-                const try_block = mlir.oraTryStmtOpGetTryBlock(current);
-                const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
-                if (nested_expr != null) return nested_expr;
+                const next_op = mlir.oraOperationGetNextInBlock(current);
+                if (mlir.oraOperationIsNull(next_op)) {
+                    const try_block = mlir.oraTryStmtOpGetTryBlock(current);
+                    const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
+                    if (nested_expr != null) return nested_expr;
+                }
             }
 
             current = mlir.oraOperationGetNextInBlock(current);

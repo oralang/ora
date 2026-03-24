@@ -4425,6 +4425,71 @@ test "direct scf.execute_region result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee scf.execute_region does not preempt later explicit return" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("executeRegionThenReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const exec_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const exec_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, exec_attr);
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    mlir.oraBlockAppendOwnedOperation(exec_block, exec_value_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(exec_value_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, exec);
+
+    const ret_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 42);
+    const ret_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, ret_attr);
+    mlir.oraBlockAppendOwnedOperation(body, ret_value_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(ret_value_op, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("executeRegionThenReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+    const encoded = try encoder.encodeOperation(call);
+    const expected = try encoder.encodeOperation(ret_value_op);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "known pure callee single-iteration scf.for return encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -7788,6 +7853,85 @@ test "known pure callee non-throwing ora.try_stmt local memref result encodes ex
     try testing.expect(!encoder.isDegraded());
 
     const expected = z3.Z3_mk_numeral(z3_ctx.ctx, "7", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "known pure callee non-throwing ora.try_stmt does not preempt later explicit return" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("tryThenReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const try_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const try_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, try_attr);
+    mlir.oraBlockAppendOwnedOperation(try_block, try_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_op, 0)},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+
+    const ret_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 42);
+    const ret_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, ret_attr);
+    mlir.oraBlockAppendOwnedOperation(body, ret_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(ret_op, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("tryThenReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+
+    const encoded = try encoder.encodeOperation(call);
+    const expected = try encoder.encodeOperation(ret_op);
+    try testing.expect(!encoder.isDegraded());
+
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
