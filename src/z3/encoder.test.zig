@@ -4170,6 +4170,90 @@ test "known pure callee always-catching ora.try_stmt result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee execute_region symbolic ora.try_stmt result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const maybe_value = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("executeRegionTryHelper"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_value, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(exec_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, exec);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(exec, 0)},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 19);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_stmt, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("executeRegionTryHelper"),
+        &[_]mlir.MlirValue{},
+        0,
+        &result_types,
+        result_types.len,
+    );
+
+    const encoded = try encoder.encodeOperation(call);
+    try testing.expect(!encoder.isDegraded());
+    const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
+}
+
 test "direct symbolic error-union ora.try_stmt result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -4361,6 +4445,63 @@ test "direct branch-conditioned ora.try_stmt result encodes exactly" {
     const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
     try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
     try testing.expect(std.mem.indexOf(u8, encoded_text, "condValue") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
+}
+
+test "direct execute_region symbolic ora.try_stmt result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const maybe_value = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const exec = mlir.oraScfExecuteRegionOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1, false);
+    const exec_block = mlir.oraScfExecuteRegionOpGetBodyBlock(exec);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_value, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(exec_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(exec_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, exec);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(exec, 0)},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 17);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(try_stmt, 0));
+    try testing.expect(!encoder.isDegraded());
+    const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
+    try testing.expect(std.mem.indexOf(u8, encoded_text, "ite") != null);
     try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
 }
 

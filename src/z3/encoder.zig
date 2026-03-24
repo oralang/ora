@@ -6023,6 +6023,12 @@ pub const Encoder = struct {
             return .{ .is_err = catch_pred, .ok_expr = ok_expr };
         }
 
+        if (self.operationNameEq(owner, "scf.execute_region")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const yielded_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return null;
+            return (try self.trySummarizeTryValue(yielded_value, mode)) orelse null;
+        }
+
         return .{
             .is_err = self.encodeBoolConstant(false),
             .ok_expr = try self.encodeValueWithMode(value, mode),
