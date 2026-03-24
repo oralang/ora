@@ -3988,6 +3988,41 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn invalidateOperationResultCaches(self: *Encoder, op: mlir.MlirOperation) void {
+        var result_index: u32 = 0;
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(op));
+        while (result_index < num_results) : (result_index += 1) {
+            const result = mlir.oraOperationGetResult(op, @intCast(result_index));
+            const result_id = @intFromPtr(result.ptr);
+            _ = self.value_map.remove(result_id);
+            _ = self.value_map_old.remove(result_id);
+        }
+
+        var region_index: u32 = 0;
+        const num_regions: u32 = @intCast(mlir.oraOperationGetNumRegions(op));
+        while (region_index < num_regions) : (region_index += 1) {
+            self.invalidateRegionValueCaches(mlir.oraOperationGetRegion(op, @intCast(region_index)));
+        }
+    }
+
+    fn invalidateRegionValueCaches(self: *Encoder, region: mlir.MlirRegion) void {
+        if (mlir.oraRegionIsNull(region)) return;
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) {
+            self.invalidateBlockValueCaches(block);
+            block = mlir.oraBlockGetNextInRegion(block);
+        }
+    }
+
+    fn invalidateBlockValueCaches(self: *Encoder, block: mlir.MlirBlock) void {
+        if (mlir.oraBlockIsNull(block)) return;
+        var current = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(current)) {
+            self.invalidateOperationResultCaches(current);
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+    }
+
     fn tryExtractFiniteScfForResult(
         self: *Encoder,
         for_op: mlir.MlirOperation,
@@ -4005,6 +4040,7 @@ pub const Encoder = struct {
 
         for (0..loop_ctx.trip_count) |iter_index| {
             try self.bindFiniteScfForLoopArgs(loop_ctx, loop_ctx.lower_bound + iter_index * loop_ctx.step, carried);
+            self.invalidateBlockValueCaches(loop_ctx.body);
             if (try self.extractReturnedExprFromBlock(loop_ctx.body, result_index, mode)) |returned_expr| {
                 self.unbindFiniteScfForLoopArgs(loop_ctx);
                 return returned_expr;
@@ -4029,6 +4065,7 @@ pub const Encoder = struct {
 
         for (0..loop_ctx.trip_count) |iter_index| {
             self.bindFiniteScfForLoopArgs(loop_ctx, loop_ctx.lower_bound + iter_index * loop_ctx.step, carried) catch return false;
+            self.invalidateBlockValueCaches(loop_ctx.body);
 
             var current = mlir.oraBlockGetFirstOperation(loop_ctx.body);
             while (!mlir.oraOperationIsNull(current)) {
@@ -4271,6 +4308,8 @@ pub const Encoder = struct {
         var iteration_count: usize = 0;
         while (iteration_count < 4) : (iteration_count += 1) {
             const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, carried);
+            self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
+            self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
             const condition_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
             if (self.astEquivalent(condition_ast, self.encodeBoolConstant(false))) {
                 const num_operands = mlir.oraOperationGetNumOperands(condition_op);
@@ -4315,6 +4354,8 @@ pub const Encoder = struct {
         var iteration_count: usize = 0;
         while (iteration_count < 4) : (iteration_count += 1) {
             const before_bind_count = self.bindScfWhileBeforeArgsFromValues(while_op, carried) catch return false;
+            self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetBeforeBlock(while_op));
+            self.invalidateBlockValueCaches(mlir.oraScfWhileOpGetAfterBlock(while_op));
             const condition_ast = self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), .Current) catch {
                 self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
                 return false;
