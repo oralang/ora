@@ -5277,16 +5277,30 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-
         var control_index_opt: ?usize = null;
+        var bound_value: ?mlir.MlirValue = null;
+        var control_predicate: ?u64 = null;
         for (0..num_operands) |idx| {
             const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(idx));
             if (mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) {
                 control_index_opt = idx;
+                bound_value = cmp_rhs;
+                control_predicate = predicate;
+                break;
+            }
+            if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
+                control_index_opt = idx;
+                bound_value = cmp_lhs;
+                control_predicate = switch (predicate) {
+                    6 => 8, // bound < control => control > bound
+                    8 => 6, // bound > control => control < bound
+                    else => null,
+                };
                 break;
             }
         }
         const control_index = control_index_opt orelse return null;
+        const normalized_predicate = control_predicate orelse return null;
 
         for (0..num_operands) |idx| {
             const false_value = mlir.oraOperationGetOperand(condition_op, @intCast(idx + 1));
@@ -5302,13 +5316,13 @@ pub const Encoder = struct {
         const control_update = self.classifyCanonicalWhileCarriedUpdate(control_yield, control_after_arg) orelse return null;
 
         const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(control_index)), mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
+        const bound_ast = try self.encodeValueWithMode(bound_value.?, mode);
         const step_count = switch (control_update) {
-            .add_const => |delta| if (predicate == 6) try self.encodeUnsignedPositiveStepCount(
+            .add_const => |delta| if (normalized_predicate == 6) try self.encodeUnsignedPositiveStepCount(
                 try self.encodeUnsignedPositiveDistance(init_control_ast, bound_ast),
                 delta,
             ) else return null,
-            .sub_const => |delta| if (predicate == 8) try self.encodeUnsignedPositiveStepCount(
+            .sub_const => |delta| if (normalized_predicate == 8) try self.encodeUnsignedPositiveStepCount(
                 try self.encodeUnsignedPositiveDistance(bound_ast, init_control_ast),
                 delta,
             ) else return null,
@@ -5364,16 +5378,30 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-
         var control_index_opt: ?usize = null;
+        var bound_value: ?mlir.MlirValue = null;
+        var control_predicate: ?u64 = null;
         for (0..num_operands) |idx| {
             const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(idx));
             if (mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) {
                 control_index_opt = idx;
+                bound_value = cmp_rhs;
+                control_predicate = predicate;
+                break;
+            }
+            if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
+                control_index_opt = idx;
+                bound_value = cmp_lhs;
+                control_predicate = switch (predicate) {
+                    2 => 4,
+                    4 => 2,
+                    else => null,
+                };
                 break;
             }
         }
         const control_index = control_index_opt orelse return null;
+        const normalized_predicate = control_predicate orelse return null;
 
         for (0..num_operands) |idx| {
             const false_value = mlir.oraOperationGetOperand(condition_op, @intCast(idx + 1));
@@ -5397,13 +5425,13 @@ pub const Encoder = struct {
         }
 
         const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(control_index)), mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
+        const bound_ast = try self.encodeValueWithMode(bound_value.?, mode);
         const step_count = switch (control_update) {
-            .add_const => |delta| if (predicate == 2) try self.encodeUnsignedPositiveStepCount(
+            .add_const => |delta| if (normalized_predicate == 2) try self.encodeUnsignedPositiveStepCount(
                 try self.encodeSignedPositiveDistance(init_control_ast, bound_ast),
                 delta,
             ) else return null,
-            .sub_const => |delta| if (predicate == 4) try self.encodeUnsignedPositiveStepCount(
+            .sub_const => |delta| if (normalized_predicate == 4) try self.encodeUnsignedPositiveStepCount(
                 try self.encodeSignedPositiveDistance(bound_ast, init_control_ast),
                 delta,
             ) else return null,
@@ -5460,8 +5488,19 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-        if (!mlir.mlirValueEqual(cmp_lhs, before_arg)) return null;
-        if (mlir.mlirValueEqual(cmp_rhs, before_arg)) return null;
+        const bound_value, const normalized_predicate = blk: {
+            if (mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) {
+                break :blk .{ cmp_rhs, predicate };
+            }
+            if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
+                break :blk .{ cmp_lhs, switch (predicate) {
+                    2 => @as(u64, 4),
+                    6 => @as(u64, 8),
+                    else => return null,
+                } };
+            }
+            return null;
+        };
 
         const false_value = mlir.oraOperationGetOperand(condition_op, 1);
         if (!mlir.mlirValueEqual(false_value, before_arg)) return null;
@@ -5492,9 +5531,9 @@ pub const Encoder = struct {
 
         const init_value = mlir.oraOperationGetOperand(while_op, 0);
         const init_ast = try self.encodeValueWithMode(init_value, mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
+        const bound_ast = try self.encodeValueWithMode(bound_value, mode);
 
-        if (predicate == 6) {
+        if (normalized_predicate == 6) {
             return try self.encodeUnsignedCanonicalWhileIncrementResult(init_ast, bound_ast, delta_u64);
         }
 
@@ -5538,8 +5577,19 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-        if (!mlir.mlirValueEqual(cmp_lhs, before_arg)) return null;
-        if (mlir.mlirValueEqual(cmp_rhs, before_arg)) return null;
+        const bound_value, const normalized_predicate = blk: {
+            if (mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) {
+                break :blk .{ cmp_rhs, predicate };
+            }
+            if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
+                break :blk .{ cmp_lhs, switch (predicate) {
+                    4 => @as(u64, 2),
+                    8 => @as(u64, 6),
+                    else => return null,
+                } };
+            }
+            return null;
+        };
 
         const false_value = mlir.oraOperationGetOperand(condition_op, 1);
         if (!mlir.mlirValueEqual(false_value, before_arg)) return null;
@@ -5562,9 +5612,9 @@ pub const Encoder = struct {
 
         const init_value = mlir.oraOperationGetOperand(while_op, 0);
         const init_ast = try self.encodeValueWithMode(init_value, mode);
-        const bound_ast = try self.encodeValueWithMode(cmp_rhs, mode);
+        const bound_ast = try self.encodeValueWithMode(bound_value, mode);
 
-        if (predicate == 8) {
+        if (normalized_predicate == 8) {
             return try self.encodeUnsignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
         }
 
@@ -5700,8 +5750,8 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-        if (!mlir.mlirValueEqual(cmp_lhs, before_arg)) return false;
-        if (mlir.mlirValueEqual(cmp_rhs, before_arg)) return false;
+        if (!((mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) or
+            (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)))) return false;
         if (!mlir.mlirValueEqual(mlir.oraOperationGetOperand(condition_op, 1), before_arg)) return false;
 
         const after_arg = mlir.oraBlockGetArgument(after_block, 0);
@@ -5747,8 +5797,8 @@ pub const Encoder = struct {
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
         const cmp_rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-        if (!mlir.mlirValueEqual(cmp_lhs, before_arg)) return false;
-        if (mlir.mlirValueEqual(cmp_rhs, before_arg)) return false;
+        if (!((mlir.mlirValueEqual(cmp_lhs, before_arg) and !mlir.mlirValueEqual(cmp_rhs, before_arg)) or
+            (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)))) return false;
         if (!mlir.mlirValueEqual(mlir.oraOperationGetOperand(condition_op, 1), before_arg)) return false;
 
         const after_arg = mlir.oraBlockGetArgument(after_block, 0);
