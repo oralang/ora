@@ -5658,6 +5658,87 @@ pub const Encoder = struct {
         sub_const: u64,
     };
 
+    fn tryEncodeCanonicalWhileAffineCarriedResult(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        after_block: mlir.MlirBlock,
+        yield_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+        step_count: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const target_after_arg = mlir.oraBlockGetArgument(after_block, result_index);
+        const target_yield = mlir.oraOperationGetOperand(yield_op, result_index);
+        if (!mlir.oraValueIsAOpResult(target_yield)) return null;
+
+        const owner = mlir.oraOpResultGetOwner(target_yield);
+        const op_name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+        if (!std.mem.eql(u8, op_name, "arith.addi") and !std.mem.eql(u8, op_name, "arith.subi")) return null;
+        if (mlir.oraOperationGetNumOperands(owner) != 2) return null;
+
+        const lhs = mlir.oraOperationGetOperand(owner, 0);
+        const rhs = mlir.oraOperationGetOperand(owner, 1);
+        var other_index_opt: ?u32 = null;
+        var is_add = false;
+        var is_sub = false;
+
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(while_op));
+        if (std.mem.eql(u8, op_name, "arith.addi")) {
+            if (mlir.mlirValueEqual(lhs, target_after_arg)) {
+                var idx: u32 = 0;
+                while (idx < num_results) : (idx += 1) {
+                    if (idx == result_index) continue;
+                    if (mlir.mlirValueEqual(rhs, mlir.oraBlockGetArgument(after_block, idx))) {
+                        other_index_opt = idx;
+                        is_add = true;
+                        break;
+                    }
+                }
+            } else if (mlir.mlirValueEqual(rhs, target_after_arg)) {
+                var idx: u32 = 0;
+                while (idx < num_results) : (idx += 1) {
+                    if (idx == result_index) continue;
+                    if (mlir.mlirValueEqual(lhs, mlir.oraBlockGetArgument(after_block, idx))) {
+                        other_index_opt = idx;
+                        is_add = true;
+                        break;
+                    }
+                }
+            }
+        } else if (std.mem.eql(u8, op_name, "arith.subi")) {
+            if (mlir.mlirValueEqual(lhs, target_after_arg)) {
+                var idx: u32 = 0;
+                while (idx < num_results) : (idx += 1) {
+                    if (idx == result_index) continue;
+                    if (mlir.mlirValueEqual(rhs, mlir.oraBlockGetArgument(after_block, idx))) {
+                        other_index_opt = idx;
+                        is_sub = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const other_index = other_index_opt orelse return null;
+        const other_yield = mlir.oraOperationGetOperand(yield_op, other_index);
+        const other_after_arg = mlir.oraBlockGetArgument(after_block, other_index);
+        const other_update = self.classifyCanonicalWhileCarriedUpdate(other_yield, other_after_arg) orelse return null;
+        if (other_update != .identity) return null;
+
+        const target_init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, result_index), mode);
+        const other_init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, other_index), mode);
+        const total_delta = try self.encodeArithmeticOp(.Mul, step_count, other_init_ast);
+
+        if (is_add) return try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
+        if (is_sub) return try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
+        return null;
+    }
+
     fn classifyCanonicalWhileCarriedUpdate(
         self: *Encoder,
         yielded_value: mlir.MlirValue,
@@ -5779,23 +5860,32 @@ pub const Encoder = struct {
         const target_init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, result_index), mode);
         const target_after_arg = mlir.oraBlockGetArgument(after_block, result_index);
         const target_yield = mlir.oraOperationGetOperand(yield_op, result_index);
-        const target_update = self.classifyCanonicalWhileCarriedUpdate(target_yield, target_after_arg) orelse return null;
+        if (self.classifyCanonicalWhileCarriedUpdate(target_yield, target_after_arg)) |target_update| {
+            return switch (target_update) {
+                .identity => target_init_ast,
+                .add_const => |delta| blk: {
+                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+                    break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
+                },
+                .sub_const => |delta| blk: {
+                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+                    break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
+                },
+            };
+        }
 
-        return switch (target_update) {
-            .identity => target_init_ast,
-            .add_const => |delta| blk: {
-                const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
-                const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
-                break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
-            },
-            .sub_const => |delta| blk: {
-                const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
-                const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
-                break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
-            },
-        };
+        return try self.tryEncodeCanonicalWhileAffineCarriedResult(
+            while_op,
+            after_block,
+            yield_op,
+            result_index,
+            mode,
+            step_count,
+        );
     }
 
     fn tryExtractCanonicalSignedScfWhileResult(
@@ -5888,23 +5978,32 @@ pub const Encoder = struct {
         const target_init_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, result_index), mode);
         const target_after_arg = mlir.oraBlockGetArgument(after_block, result_index);
         const target_yield = mlir.oraOperationGetOperand(yield_op, result_index);
-        const target_update = self.classifyCanonicalWhileCarriedUpdate(target_yield, target_after_arg) orelse return null;
+        if (self.classifyCanonicalWhileCarriedUpdate(target_yield, target_after_arg)) |target_update| {
+            return switch (target_update) {
+                .identity => target_init_ast,
+                .add_const => |delta| blk: {
+                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+                    break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
+                },
+                .sub_const => |delta| blk: {
+                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
+                    break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
+                },
+            };
+        }
 
-        return switch (target_update) {
-            .identity => target_init_ast,
-            .add_const => |delta| blk: {
-                const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
-                const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
-                break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
-            },
-            .sub_const => |delta| blk: {
-                const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
-                const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
-                break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
-            },
-        };
+        return try self.tryEncodeCanonicalWhileAffineCarriedResult(
+            while_op,
+            after_block,
+            yield_op,
+            result_index,
+            mode,
+            step_count,
+        );
     }
 
     fn tryExtractCanonicalIncrementScfWhileResult(
