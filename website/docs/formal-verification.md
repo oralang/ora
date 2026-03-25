@@ -9,11 +9,12 @@ No guarantee of end-to-end proofs for all programs.
 
 Verification is expressed with specification clauses that live alongside code:
 
-- `requires` for preconditions
-- `ensures` for postconditions
-- `invariant` for contract and loop invariants
-- `assume` for verification-only constraints
-- `assert` for runtime-visible checks (also modeled in verification)
+- `requires` — preconditions the caller must satisfy (verified statically at call sites)
+- `guard` — runtime-enforced preconditions the function checks itself (reverts if false, informs the verifier)
+- `ensures` — postconditions the function must satisfy on all return paths
+- `invariant` — contract-level or loop-level properties that must hold across all state transitions
+- `assume` — verification-only constraints (no runtime check)
+- `assert` — runtime-visible checks also modeled as verification obligations
 
 These clauses are parsed and type-checked in the front end, then lowered into
 verification-relevant IR for constraint extraction and SMT proof.
@@ -22,8 +23,9 @@ verification-relevant IR for constraint extraction and SMT proof.
 
 ```ora
 pub fn transfer(to: address, amount: u256) -> bool
-    requires amount > 0
     requires balances[std.msg.sender()] >= amount
+    guard amount > 0
+    guard to != std.constants.ZERO_ADDRESS
     ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount
     ensures balances[to] == old(balances[to]) + amount
 {
@@ -64,7 +66,6 @@ flowchart TB
 
 - Which constraints should refine types vs remain SMT-only?
 - How should refinement propagation behave across control-flow joins?
-- What is the precise boundary between runtime checks and proof obligations?
 - How should error unions and region effects integrate with proof obligations?
 
 ## Status

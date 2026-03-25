@@ -195,12 +195,12 @@ contract Vault {
     storage var balances: map<address, u256>;
     ghost storage spec_sum: u256 = 0;
 
-    invariant deposits_nonnegative(totalDeposits >= 0);
+    invariant deposits_nonnegative: totalDeposits >= 0;
 
     pub fn deposit(amount: MinValue<u256, 1>)
-        requires(totalDeposits <= std.constants.U256_MAX - amount)
-        ensures(totalDeposits == old(totalDeposits) + amount)
-        ensures(spec_sum == old(spec_sum) + amount)
+        requires totalDeposits <= std.constants.U256_MAX - amount
+        ensures totalDeposits == old(totalDeposits) + amount
+        ensures spec_sum == old(spec_sum) + amount
     {
         let sender: NonZeroAddress = std.msg.sender();
         balances[sender] += amount;
@@ -342,14 +342,16 @@ pub fn transfer(
     to: NonZeroAddress,                              // can't be zero address
     amount: InRange<u256, 1, 1000000>                // bounded amount
 ) -> !bool | InsufficientBalance | ExternalCallFailed  // exactly these failure modes
-    requires(balances[std.msg.sender()] >= amount)     // precondition
-    ensures(balances[to] == old(balances[to]) + amount) // postcondition — SMT-proven
+    requires balances[std.msg.sender()] >= amount       // caller must prove this
+    guard amount > 0                                     // function checks this at runtime
+    ensures balances[to] == old(balances[to]) + amount   // postcondition — SMT-proven
 ```
 
 An auditor reads this and knows:
-- **Input constraints** — from refinement types (`NonZeroAddress`, `InRange`), base types (`u256`, `address`), and region constraints (parameters come from calldata — read-only, cannot alias storage)
+- **Input constraints** — from refinement types (`NonZeroAddress`, `InRange`), base types, and region constraints (parameters come from calldata — read-only, cannot alias storage)
 - **Failure modes** — from the error union: exactly `InsufficientBalance` or `ExternalCallFailed`, nothing else
-- **Preconditions** — from `requires`: what must hold before the function runs
+- **Caller obligations** — from `requires`: what the caller must prove statically
+- **Runtime checks** — from `guard`: what the function enforces at runtime (reverts if false)
 - **Postconditions** — from `ensures`: what the SMT solver proved about every execution path
 - **Effect surface** — the compiler inferred which slots are read/written, which the auditor can inspect
 
@@ -374,7 +376,7 @@ For the full syntax of each feature, see the corresponding book chapter.
 | Memory regions | `memory`/`storage` on ref types | `storage var`, `memory var`, `tstore var` | [Ch. 7](./07-memory-regions.md) |
 | Refinement types | `require(x > 0)` | `MinValue<u256, 1>`, `InRange<u256, 0, 100>` | [Ch. 8](./08-refinement-types.md) |
 | Events | `event E(); emit E();` | `log E(); log E();` | [Ch. 9](./09-logs-and-events.md) |
-| Specifications | NatSpec comments (not checked) | `requires`, `ensures`, `invariant` | [Ch. 10](./10-specification-clauses.md) |
+| Specifications | NatSpec comments (not checked) | `requires`, `guard`, `ensures`, `invariant` | [Ch. 10](./10-specification-clauses.md) |
 | Ghost state | Nothing | `ghost storage`, `old()` | [Ch. 11](./11-ghost-state.md) |
 | Reentrancy | OpenZeppelin `nonReentrant` | `@lock`/`@unlock` | [Ch. 12](./12-locks.md) |
 | Interfaces | `interface I { }` | `trait T { }`, `impl T for S { }` | [Ch. 14](./14-traits.md) |

@@ -106,7 +106,9 @@ contract ERC20BitfieldComptimeGenerics {
         return true;
     }
 
-    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+    pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        guard balances[to] <= std.constants.U256_MAX - amount
+    {
         let sender: NonZeroAddress = std.msg.sender();
         let sender_before: u256 = balances[sender];
 
@@ -132,7 +134,9 @@ contract ERC20BitfieldComptimeGenerics {
         return true;
     }
 
-    pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+    pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        guard balances[to] <= std.constants.U256_MAX - amount
+    {
         let spender: NonZeroAddress = std.msg.sender();
         let current_allowance: u256 = allowances[from][spender];
 
@@ -155,7 +159,10 @@ contract ERC20BitfieldComptimeGenerics {
         return true;
     }
 
-    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool {
+    pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        guard total_supply <= std.constants.U256_MAX - amount
+        guard balances[to] <= std.constants.U256_MAX - amount
+    {
         let f: TokenFlags = token_flags;
         if (f.mint_enabled == false) {
             return false;

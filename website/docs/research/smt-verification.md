@@ -15,43 +15,39 @@ obligations and eliminates runtime checks when proofs succeed.
 - Counterexamples are surfaced when constraints fail.
 - SMT-only assumptions are preserved when refinements cannot be inferred.
 
-## Syntax (Defny-style)
+## Syntax
 
-Ora’s specification syntax follows a Defny-style layout: clauses attach to
-functions or loops, and verification-only statements live in blocks.
+Specification clauses attach to functions or loops:
 
 ```ora
 pub fn transfer(to: address, amount: u256) -> bool
-    requires amount > 0
     requires balances[std.msg.sender()] >= amount
+    guard amount > 0
+    guard to != std.constants.ZERO_ADDRESS
     ensures balances[to] == old(balances[to]) + amount
 {
     // ...
 }
 ```
 
-When SMT proves these clauses, the compiler removes the corresponding runtime
-guards. If SMT cannot prove them, the checks remain in bytecode.
+- `requires` — caller obligation, verified statically at call sites by the SMT solver
+- `guard` — runtime-enforced check: the function reverts if the condition is false, and the SMT solver assumes the condition holds after the check
+- `ensures` — postcondition checked by the SMT solver across all return paths
 
-Example: if `requires amount > 0` is not implied by refinements or control
-flow, the compiler emits a runtime guard such as:
-
-```ora
-if (amount < 1) {
-    // runtime error / abort
-}
-```
+When SMT proves a refinement guard or `requires` clause is always satisfied,
+the compiler can elide the corresponding runtime check. If it cannot prove it,
+the check remains in bytecode.
 
 ### Where to put the code
 
-- **Function clauses**: `requires`, `ensures`
+- **Function clauses**: `requires`, `guard`, `ensures`
 - **Loop clauses**: `invariant` (placed on the loop header)
 - **Block statements**: `assert`, `assume`, `havoc`
 - **Quantifiers**: `forall`, `exists` inside clauses or ghost code
 
 ```ora
 while (i < n)
-    invariant(i <= n)
+    invariant i <= n
 {
     // ...
 }

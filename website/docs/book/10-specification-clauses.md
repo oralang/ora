@@ -14,8 +14,8 @@ Ora has built-in support for formal verification. You write `requires` and `ensu
 
 ```ora
 pub fn withdraw(amount: u256)
-    requires(amount > 0)
-    requires(balances[std.msg.sender()] >= amount)
+    requires amount > 0
+    requires balances[std.msg.sender()] >= amount
 {
     // The compiler guarantees both conditions hold here
 }
@@ -29,8 +29,8 @@ Multiple `requires` clauses are conjunctive — all must hold. If a caller viola
 
 ```ora
 pub fn deposit(amount: u256)
-    requires(amount > 0)
-    ensures(totalDeposits == old(totalDeposits) + amount)
+    requires amount > 0
+    ensures totalDeposits == old(totalDeposits) + amount
 {
     totalDeposits += amount;
 }
@@ -44,8 +44,8 @@ The compiler checks that every code path satisfies the `ensures` clause. If it c
 
 ```ora
 pub fn deposit(amount: u256)
-    ensures(totalDeposits == old(totalDeposits) + amount)
-    ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
+    ensures totalDeposits == old(totalDeposits) + amount
+    ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount
 {
     let sender: address = std.msg.sender();
     balances[sender] += amount;
@@ -54,6 +54,59 @@ pub fn deposit(amount: u256)
 ```
 
 `old(totalDeposits)` is the value of `totalDeposits` before `deposit` executed. This lets you express relational postconditions — "the new value equals the old value plus the deposit."
+
+## Guards: runtime checks with verification
+
+`guard` is a specification clause that generates a runtime check. It's the `requires` in spirit — but instead of trusting the caller to satisfy the condition, the function checks it at runtime and reverts if it fails.
+
+```ora
+pub fn transfer(to: address, amount: u256) -> bool
+    guard amount > 0
+    guard to != std.constants.ZERO_ADDRESS
+{
+    // Both conditions are checked at runtime (revert if false)
+    // AND visible to the SMT solver (so downstream code can rely on them)
+}
+```
+
+Without `guard`, you'd write the same logic manually:
+
+```ora
+pub fn transfer(to: address, amount: u256) -> bool {
+    if (amount == 0) { return false; }
+    if (to == std.constants.ZERO_ADDRESS) { return false; }
+    // ...
+}
+```
+
+`guard` writes both the check and the specification in one place. The compiler:
+1. Emits a runtime check (reverts if the condition is false)
+2. Tells the SMT solver the condition holds after the check — so the verifier can use it to prove downstream obligations like overflow safety or postconditions
+
+### guard vs requires
+
+| Clause | Who is responsible | Runtime behavior | SMT role |
+|---|---|---|---|
+| `requires(x > 0)` | **Caller** — must prove the condition before calling | No runtime check (proven statically, or caller gets verification error) | Assumption — the verifier assumes it holds |
+| `guard(x > 0)` | **Function** — checks the condition itself | Runtime revert if false | Assumption after the check — the verifier knows it holds for everything after |
+
+Use `requires` when the caller should guarantee the condition. Use `guard` when the function should enforce it.
+
+### guard with requires and ensures
+
+Guards compose with other spec clauses:
+
+```ora
+pub fn withdraw(amount: u256)
+    requires amount <= balance              // caller guarantees no underflow
+    guard amount > 0                       // function checks at runtime
+    ensures balance == old(balance) - amount    // postcondition
+{
+    balance -= amount;
+}
+```
+
+The verifier checks the `ensures` clause under the combined context of both the `requires` assumption and the `guard` assumption.
 
 ## Assert and assume
 
@@ -80,12 +133,12 @@ Inside a contract:
 
 ```ora
 pub fn sum(n: u256) -> u256
-    ensures(result == n * (n + 1) / 2)
+    ensures result == n * (n + 1) / 2
 {
     var total: u256 = 0;
     var i: u256 = 0;
     while (i <= n)
-        invariant(total == i * (i + 1) / 2)
+        invariant total == i * (i + 1) / 2
     {
         total += i;
         i += 1;
@@ -109,11 +162,11 @@ contract Vault {
     log Withdrawal(account: address, amount: u256);
 
     pub fn deposit(amount: MinValue<u256, 1>)
-        requires(amount > 0)
-        requires(totalDeposits <= std.constants.U256_MAX - amount)
-        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
-        ensures(totalDeposits == old(totalDeposits) + amount)
-        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
+        requires amount > 0
+        requires totalDeposits <= std.constants.U256_MAX - amount
+        requires balances[std.msg.sender()] <= std.constants.U256_MAX - amount
+        ensures totalDeposits == old(totalDeposits) + amount
+        ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount
     {
         let sender: NonZeroAddress = std.msg.sender();
         balances[sender] += amount;
@@ -122,10 +175,10 @@ contract Vault {
     }
 
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
-        requires(amount > 0)
-        requires(balances[std.msg.sender()] >= amount)
-        ensures(totalDeposits == old(totalDeposits) - amount)
-        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        requires amount > 0
+        requires balances[std.msg.sender()] >= amount
+        ensures totalDeposits == old(totalDeposits) - amount
+        ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount
     {
         let sender: NonZeroAddress = std.msg.sender();
         let current: u256 = balances[sender];
