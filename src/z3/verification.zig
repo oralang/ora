@@ -1222,6 +1222,7 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
+                const guard_id = try self.getStringAttr(op, "ora.guard_id");
                 var tagged_assert = false;
                 const requires_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.requires", 12));
                 if (!mlir.oraAttributeIsNull(requires_attr)) {
@@ -1243,7 +1244,7 @@ pub const VerificationPass = struct {
                         break :blk .ContractInvariant;
                     } else .ContractInvariant;
                     // In full mode, treat untagged assert ops as proof obligations.
-                    _ = try self.recordEncodedAnnotation(op, obligation_kind, condition_value, null);
+                    _ = try self.recordEncodedAnnotation(op, obligation_kind, condition_value, guard_id);
                 }
             }
         }
@@ -1975,6 +1976,13 @@ pub const VerificationPass = struct {
                         ann.line,
                         ann.column,
                     );
+                }
+                if (obligation_status == z3.Z3_L_FALSE and ann.kind == .Guard and ann.guard_id != null) {
+                    const guard_id = ann.guard_id.?;
+                    if (!result.proven_guard_ids.contains(guard_id)) {
+                        const key = try self.allocator.dupe(u8, guard_id);
+                        try result.proven_guard_ids.put(key, {});
+                    }
                 }
 
                 try self.solver.popChecked();
@@ -2751,6 +2759,12 @@ pub const VerificationPass = struct {
                             query.line,
                             query.column,
                         );
+                    } else if (entry.status == z3.Z3_L_FALSE and query.obligation_kind == .Guard and query.guard_id != null) {
+                        const guard_id = query.guard_id.?;
+                        if (!combined.proven_guard_ids.contains(guard_id)) {
+                            const key = try self.allocator.dupe(u8, guard_id);
+                            try combined.proven_guard_ids.put(key, {});
+                        }
                     }
                 },
                 .LoopInvariantStep => {
@@ -3656,6 +3670,7 @@ pub const VerificationPass = struct {
                 try queries.append(.{
                     .kind = .Obligation,
                     .function_name = fn_name,
+                    .guard_id = ann.guard_id,
                     .obligation_kind = ann.kind,
                     .file = ann.file,
                     .line = ann.line,
@@ -5356,8 +5371,10 @@ fn buildGuardOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("guard failed: cond"));
     mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_type"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard")));
     mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_clause")));
+    mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.guard_id"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard:test:clause")));
     const assume_op = mlir.oraAssumeOpCreate(mlir_ctx, loc, cond);
     mlir.oraOperationSetAttributeByName(assume_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_clause")));
+    mlir.oraOperationSetAttributeByName(assume_op, testStringRef("ora.guard_id"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard:test:clause")));
     const empty_return_vals = [_]mlir.MlirValue{};
     const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
 
@@ -6272,6 +6289,26 @@ test "full verify mode classifies guard-tagged ora.assert as guard obligation" {
         }
     }
     try testing.expect(saw_guard_obligation);
+}
+
+test "verified guard obligations populate proven guard ids" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGuardOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:clause"));
 }
 
 test "full verify mode simplifies checked multiply assert obligations before SMT-LIB emission" {

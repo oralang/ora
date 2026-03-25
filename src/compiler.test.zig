@@ -3075,6 +3075,40 @@ test "compiler lowers guard clauses to runtime revert through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
 }
 
+test "compiler removes proven guard clauses after verification" {
+    const source_text =
+        \\pub fn safe_add(amount: u256) -> bool
+        \\    requires amount < 10;
+        \\    guard amount < 10;
+        \\{
+        \\    return true;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.parallel = false;
+
+    var vr = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer vr.deinit();
+
+    try testing.expect(vr.success);
+    try testing.expect(vr.proven_guard_ids.count() > 0);
+
+    const mutable_hir_result = @constCast(hir_result);
+    mutable_hir_result.cleanupRefinementGuards(&vr.proven_guard_ids);
+    const hir_text = try mutable_hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "cf.assert"));
+}
+
 test "compiler HIR output runs through Z3 verification" {
     const source_text =
         \\pub fn keep(next: u256) -> u256

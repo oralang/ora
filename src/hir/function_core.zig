@@ -193,7 +193,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const condition = try self.lowerExpr(clause.expr, locals);
             const loc = self.parent.location(clause.range);
             const message = try @This().guardMessage(self, clause.expr);
+            const line_col = self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = clause.range });
+            const guard_id = try std.fmt.allocPrint(self.parent.allocator, "guard:{s}:{d}:{d}:{d}:guard_clause", .{
+                self.parent.sources.file(self.parent.file.file_id).path,
+                line_col.line,
+                line_col.column,
+                clause.range.len(),
+            });
             defer self.parent.allocator.free(message);
+            defer self.parent.allocator.free(guard_id);
 
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
@@ -201,11 +209,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "guard").attribute);
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "guard_clause").attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.guard_id"), namedStringAttr(self.parent.context, "ora.guard_id", guard_id).attribute);
             appendOp(self.block, assert_op);
 
             const assume_op = mlir.oraAssumeOpCreate(self.parent.context, loc, condition);
             if (mlir.oraOperationIsNull(assume_op)) return error.MlirOperationCreationFailed;
             mlir.oraOperationSetAttributeByName(assume_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "guard_clause").attribute);
+            mlir.oraOperationSetAttributeByName(assume_op, strRef("ora.guard_id"), namedStringAttr(self.parent.context, "ora.guard_id", guard_id).attribute);
             appendOp(self.block, assume_op);
         }
 
