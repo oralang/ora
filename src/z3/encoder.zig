@@ -513,7 +513,13 @@ pub const Encoder = struct {
                 self.encodeIte(condition, then_val, else_val);
             try self.memref_map.put(key, .{
                 .value = merged,
-                .initialized = self.mergeInitPredicate(condition, then_state_entry.initialized, else_state_entry.initialized),
+                .initialized = blk: {
+                    const merged_init = self.mergeInitPredicate(condition, then_state_entry.initialized, else_state_entry.initialized);
+                    if (self.astSimplifiesToBool(merged_init)) |const_init| {
+                        break :blk if (const_init) self.boolTrue() else self.boolFalse();
+                    }
+                    break :blk merged_init;
+                },
             });
         }
 
@@ -615,7 +621,12 @@ pub const Encoder = struct {
 
             try self.memref_map.put(key, .{
                 .value = fallback_value,
-                .initialized = fallback_init,
+                .initialized = blk: {
+                    if (self.astSimplifiesToBool(fallback_init)) |const_init| {
+                        break :blk if (const_init) self.boolTrue() else self.boolFalse();
+                    }
+                    break :blk fallback_init;
+                },
             });
         }
 
@@ -785,15 +796,26 @@ pub const Encoder = struct {
             }
         }
 
-        const key = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(key);
-        const value = try self.allocator.dupe(u8, csv_builder.items);
-        errdefer self.allocator.free(value);
-        try self.struct_field_names_csv.put(key, value);
+        try self.registerStructDeclAlias(name, csv_builder.items, struct_op);
 
-        const decl_key = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(decl_key);
-        try self.struct_decl_ops.put(decl_key, struct_op);
+        const canonical_type_key = try std.fmt.allocPrint(self.allocator, "!ora.struct<\"{s}\">", .{name});
+        defer self.allocator.free(canonical_type_key);
+        try self.registerStructDeclAlias(canonical_type_key, csv_builder.items, struct_op);
+    }
+
+    fn registerStructDeclAlias(self: *Encoder, alias: []const u8, field_names_csv: []const u8, struct_op: mlir.MlirOperation) !void {
+        if (!self.struct_field_names_csv.contains(alias)) {
+            const key = try self.allocator.dupe(u8, alias);
+            errdefer self.allocator.free(key);
+            const value = try self.allocator.dupe(u8, field_names_csv);
+            errdefer self.allocator.free(value);
+            try self.struct_field_names_csv.put(key, value);
+        }
+        if (!self.struct_decl_ops.contains(alias)) {
+            const decl_key = try self.allocator.dupe(u8, alias);
+            errdefer self.allocator.free(decl_key);
+            try self.struct_decl_ops.put(decl_key, struct_op);
+        }
     }
 
     fn copyFunctionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
@@ -4603,6 +4625,8 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            const catch_region = mlir.oraOperationGetRegion(op, 1);
+            if (!self.regionMayEnterCatch(catch_region)) return false;
             return try self.tryStmtAlwaysEntersCatch(op, mode);
         }
 
@@ -4647,6 +4671,8 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            const catch_region = mlir.oraOperationGetRegion(op, 1);
+            if (!self.regionMayEnterCatch(catch_region)) return false;
             return self.tryStmtMayEnterCatch(op);
         }
 
@@ -7732,9 +7758,15 @@ pub const Encoder = struct {
             self.recordDegradation("failed to restore base state for ora.conditional_return then-branch");
             return;
         };
-        const then_region = mlir.oraOperationGetRegion(op, 0);
-        if (!mlir.oraRegionIsNull(then_region)) {
-            self.encodeStateEffectsInRegion(then_region);
+        const then_block = mlir.oraConditionalReturnOpGetThenBlock(op);
+        if (!mlir.oraBlockIsNull(then_block)) {
+            self.encodeStateEffectsInBlockFrom(then_block, mlir.oraBlockGetFirstOperation(then_block));
+            if (self.blockFallsThrough(then_block) and !mlir.oraOperationIsNull(next_op)) {
+                const parent_block = mlir.mlirOperationGetBlock(op);
+                if (!mlir.oraBlockIsNull(parent_block)) {
+                    self.encodeStateEffectsInBlockFrom(parent_block, next_op);
+                }
+            }
         }
         then_state = self.captureStateSnapshot() catch {
             self.recordDegradation("failed to capture ora.conditional_return then-branch state summary");
@@ -7745,13 +7777,15 @@ pub const Encoder = struct {
             self.recordDegradation("failed to restore base state for ora.conditional_return else-branch");
             return;
         };
-        const else_region = mlir.oraOperationGetRegion(op, 1);
-        if (!mlir.oraRegionIsNull(else_region)) {
-            self.encodeStateEffectsInRegion(else_region);
-        }
-        const parent_block = mlir.mlirOperationGetBlock(op);
-        if (!mlir.oraBlockIsNull(parent_block) and !mlir.oraOperationIsNull(next_op)) {
-            self.encodeStateEffectsInBlockFrom(parent_block, next_op);
+        const else_block = mlir.oraConditionalReturnOpGetElseBlock(op);
+        if (!mlir.oraBlockIsNull(else_block)) {
+            self.encodeStateEffectsInBlockFrom(else_block, mlir.oraBlockGetFirstOperation(else_block));
+            if (self.blockFallsThrough(else_block) and !mlir.oraOperationIsNull(next_op)) {
+                const parent_block = mlir.mlirOperationGetBlock(op);
+                if (!mlir.oraBlockIsNull(parent_block)) {
+                    self.encodeStateEffectsInBlockFrom(parent_block, next_op);
+                }
+            }
         }
         else_state = self.captureStateSnapshot() catch {
             self.recordDegradation("failed to capture ora.conditional_return else-branch state summary");
@@ -8300,23 +8334,87 @@ pub const Encoder = struct {
         if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
             return null;
         }
-        const inner = std.mem.trim(u8, trimmed[prefix.len .. trimmed.len - 1], " \t\n\r\"");
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        if (std.mem.indexOfScalar(u8, body, '"')) |first_quote| {
+            const rest = body[first_quote + 1 ..];
+            if (std.mem.indexOfScalar(u8, rest, '"')) |second_quote| {
+                const quoted = rest[0..second_quote];
+                if (quoted.len > 0) return quoted;
+            }
+        }
+        const inner = std.mem.trim(u8, body, " \t\n\r\"");
         if (inner.len == 0) return null;
         return inner;
+    }
+
+    fn resolveRegisteredStructName(self: *Encoder, query: []const u8) ?[]const u8 {
+        if (self.struct_decl_ops.contains(query) or self.struct_field_names_csv.contains(query)) {
+            return query;
+        }
+
+        if (std.mem.lastIndexOfAny(u8, query, ".:")) |sep| {
+            const suffix = query[sep + 1 ..];
+            if (suffix.len > 0 and (self.struct_decl_ops.contains(suffix) or self.struct_field_names_csv.contains(suffix))) {
+                return suffix;
+            }
+        }
+
+        var it = self.struct_decl_ops.iterator();
+        while (it.next()) |entry| {
+            const registered = entry.key_ptr.*;
+            if (std.mem.endsWith(u8, query, registered) or std.mem.endsWith(u8, registered, query)) {
+                return registered;
+            }
+        }
+
+        var field_it = self.struct_field_names_csv.iterator();
+        while (field_it.next()) |entry| {
+            const registered = entry.key_ptr.*;
+            if (std.mem.endsWith(u8, query, registered) or std.mem.endsWith(u8, registered, query)) {
+                return registered;
+            }
+        }
+
+        return null;
     }
 
     fn lookupStructFieldNames(self: *Encoder, ty: mlir.MlirType) !?[]const u8 {
         const type_text = try self.printMlirTypeOwned(ty);
         defer self.allocator.free(type_text);
-        const struct_name = parseStructTypeName(type_text) orelse return null;
+        if (self.struct_field_names_csv.get(type_text)) |direct| return direct;
+        const parsed_name = parseStructTypeName(type_text) orelse return null;
+        const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
         return self.struct_field_names_csv.get(struct_name);
+    }
+
+    fn blockFallsThrough(self: *Encoder, block: mlir.MlirBlock) bool {
+        _ = self;
+        if (mlir.oraBlockIsNull(block)) return true;
+        var current = mlir.oraBlockGetFirstOperation(block);
+        var last: mlir.MlirOperation = .{ .ptr = null };
+        while (!mlir.oraOperationIsNull(current)) {
+            last = current;
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        if (mlir.oraOperationIsNull(last)) return true;
+        const name_ref = mlir.oraOperationGetName(last);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+        return !(std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return"));
     }
 
     fn lookupStructFieldType(self: *Encoder, ty: mlir.MlirType, index: usize) !mlir.MlirType {
         const type_text = try self.printMlirTypeOwned(ty);
         defer self.allocator.free(type_text);
-        const struct_name = parseStructTypeName(type_text) orelse return .{ .ptr = null };
-        const struct_decl = self.struct_decl_ops.get(struct_name) orelse return .{ .ptr = null };
+        const struct_decl = blk: {
+            if (self.struct_decl_ops.get(type_text)) |direct| break :blk direct;
+            const parsed_name = parseStructTypeName(type_text) orelse return .{ .ptr = null };
+            const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+            break :blk self.struct_decl_ops.get(struct_name) orelse return .{ .ptr = null };
+        };
         const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
         if (mlir.oraAttributeIsNull(field_types_attr)) return .{ .ptr = null };
         const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(field_types_attr));

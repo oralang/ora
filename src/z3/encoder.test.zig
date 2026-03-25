@@ -206,7 +206,7 @@ test "struct_field_update preserves untouched fields exactly" {
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
-    const struct_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.struct<\"Pair__u256\">"));
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
     const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256"));
     const field_name_attrs = [_]mlir.MlirAttribute{
@@ -251,15 +251,23 @@ test "struct_field_update preserves untouched fields exactly" {
     const left_ast = try encoder.encodeOperation(extract_left);
     const right_ast = try encoder.encodeOperation(extract_right);
 
+    if (encoder.isDegraded()) {
+        std.debug.print("struct update degradation: {s}\n", .{encoder.degradationReason().?});
+    }
     try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
 
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, left_ast, try encoder.encodeValue(seven))));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 
     solver.reset();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -278,7 +286,7 @@ test "known pure callee returning updated struct preserves untouched fields exac
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
-    const struct_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.struct<\"Pair__u256\">"));
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
     const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256"));
     const field_name_attrs = [_]mlir.MlirAttribute{
@@ -334,10 +342,17 @@ test "known pure callee returning updated struct preserves untouched fields exac
     const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, call_result, stringRef("right"), i256_ty);
     const right_ast = try encoder.encodeOperation(extract_right);
 
+    if (encoder.isDegraded()) {
+        std.debug.print("pure callee struct update degradation: {s}\n", .{encoder.degradationReason().?});
+    }
     try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -408,7 +423,7 @@ test "uninitialized memref load degrades encoding" {
     _ = try encoder.encodeOperation(load);
 
     try testing.expect(encoder.isDegraded());
-    try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
+    try testing.expect(std.mem.startsWith(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
 }
 
 test "scalar memref load recovers dominating store before scf.while" {
@@ -10251,6 +10266,16 @@ test "known pure callee conditional return state effects encode exactly" {
 
     const alloca = mlir.oraMemrefAllocaOpCreate(mlir_ctx, loc, memref_i256_ty);
     const alloca_val = mlir.oraOperationGetResult(alloca, 0);
+    const five_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const five_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, five_attr);
+    const init_store = mlir.oraMemrefStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(five_op, 0),
+        alloca_val,
+        &[_]mlir.MlirValue{},
+        0,
+    );
 
     const conditional = mlir.oraConditionalReturnOpCreate(mlir_ctx, loc, helper_flag);
     const then_block = mlir.oraConditionalReturnOpGetThenBlock(conditional);
@@ -10259,32 +10284,19 @@ test "known pure callee conditional return state effects encode exactly" {
     const nine_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
     const nine_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, nine_attr);
     mlir.oraBlockAppendOwnedOperation(then_block, nine_op);
-    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraMemrefStoreOpCreate(
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraReturnOpCreate(
         mlir_ctx,
         loc,
-        mlir.oraOperationGetResult(nine_op, 0),
-        alloca_val,
-        &[_]mlir.MlirValue{},
-        0,
-    ));
-    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
-
-    const five_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
-    const five_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, five_attr);
-    mlir.oraBlockAppendOwnedOperation(else_block, five_op);
-    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraMemrefStoreOpCreate(
-        mlir_ctx,
-        loc,
-        mlir.oraOperationGetResult(five_op, 0),
-        alloca_val,
-        &[_]mlir.MlirValue{},
-        0,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(nine_op, 0)},
+        1,
     ));
     mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
 
     const load = mlir.oraMemrefLoadOpCreate(mlir_ctx, loc, alloca_val, &[_]mlir.MlirValue{}, 0, i256_ty);
     const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(load, 0)}, 1);
     mlir.oraBlockAppendOwnedOperation(helper_body, alloca);
+    mlir.oraBlockAppendOwnedOperation(helper_body, five_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, init_store);
     mlir.oraBlockAppendOwnedOperation(helper_body, conditional);
     mlir.oraBlockAppendOwnedOperation(helper_body, load);
     mlir.oraBlockAppendOwnedOperation(helper_body, ret);

@@ -1779,11 +1779,27 @@ pub const VerificationPass = struct {
             try entry.value_ptr.append(ann);
         }
 
+        if (global_contract_invariants.items.len > 0) {
+            var fn_it = self.encoder.function_ops.iterator();
+            while (fn_it.next()) |entry| {
+                const fn_name = entry.key_ptr.*;
+                const func_op = entry.value_ptr.*;
+                if (!self.shouldVerifyFunctionOp(func_op)) continue;
+                if (self.filter_function_name) |target_fn| {
+                    if (!std.mem.eql(u8, fn_name, target_fn)) continue;
+                }
+                const fn_entry = try by_function.getOrPut(fn_name);
+                if (!fn_entry.found_existing) {
+                    fn_entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+                }
+            }
+        }
+
         var it = by_function.iterator();
         while (it.next()) |entry| {
             const fn_name = entry.key_ptr.*;
             const annotations = entry.value_ptr.items;
-            if (annotations.len == 0) continue;
+            if (annotations.len == 0 and global_contract_invariants.items.len == 0) continue;
             var timer = try std.time.Timer.start();
 
             var assumption_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
@@ -3437,11 +3453,27 @@ pub const VerificationPass = struct {
             try entry.value_ptr.append(ann);
         }
 
+        if (global_contract_invariants.items.len > 0) {
+            var fn_it = self.encoder.function_ops.iterator();
+            while (fn_it.next()) |entry| {
+                const fn_name = entry.key_ptr.*;
+                const func_op = entry.value_ptr.*;
+                if (!self.shouldVerifyFunctionOp(func_op)) continue;
+                if (self.filter_function_name) |target_fn| {
+                    if (!std.mem.eql(u8, fn_name, target_fn)) continue;
+                }
+                const fn_entry = try by_function.getOrPut(fn_name);
+                if (!fn_entry.found_existing) {
+                    fn_entry.value_ptr.* = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+                }
+            }
+        }
+
         var it = by_function.iterator();
         while (it.next()) |entry| {
             const fn_name = entry.key_ptr.*;
             const annotations = entry.value_ptr.items;
-            if (annotations.len == 0) continue;
+            if (annotations.len == 0 and global_contract_invariants.items.len == 0) continue;
 
             var assumption_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
             defer assumption_annotations.deinit();
