@@ -13505,6 +13505,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/refinements/guards_showcase.ora",
         "ora-example/smt/soundness/conditional_return_split.ora",
         "ora-example/smt/soundness/fail_loop_invariant_post.ora",
+        "ora-example/smt/soundness/open_stream_add_unknown.ora",
         "ora-example/smt/soundness/overflow_mul_constant.ora",
         "ora-example/smt/soundness/switch_arm_path_predicates.ora",
         "ora-example/smt/verification/state_invariants.ora",
@@ -13535,6 +13536,7 @@ test "complex SMT app probes do not degrade verification encoding" {
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
         .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
         .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
+        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
         .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
         .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
     };
@@ -13555,6 +13557,7 @@ test "complex SMT app probes match between sequential and parallel verification"
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
         .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
         .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
+        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
         .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
         .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
     };
@@ -13570,4 +13573,17 @@ test "complex SMT app probes match between sequential and parallel verification"
         try testing.expect(!par_result.degraded);
         try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
+}
+
+test "open_stream_add_unknown verifies without degradation" {
+    var result = try verifyExampleWithoutDegradation(
+        "ora-example/smt/soundness/open_stream_add_unknown.ora",
+        "openLike",
+        false,
+    );
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.degraded);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
 }

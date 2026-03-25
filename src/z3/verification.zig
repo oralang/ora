@@ -903,12 +903,33 @@ pub const VerificationPass = struct {
         // enclosing function, so carrying an ite-merged state/path forward is
         // unsound for later obligations.
         try self.restoreEncoderBranchState(&else_state);
-        const fallthrough_constraints = try self.cloneConstraintSlice(leaked_constraints);
-        try self.active_path_assumptions.append(.{
-            .condition = self.encoder.encodeNot(condition),
-            .extra_constraints = fallthrough_constraints,
-            .owned_extra_constraints = true,
-        });
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
+        const fallthrough_raw_condition = try self.encoder.encodeValue(condition_value);
+        const fallthrough_condition = self.encoder.coerceBoolean(fallthrough_raw_condition);
+        const fallthrough_leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        defer if (fallthrough_leaked_constraints.len > 0) self.allocator.free(fallthrough_leaked_constraints);
+        const fallthrough_leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        defer if (fallthrough_leaked_obligations.len > 0) self.allocator.free(fallthrough_leaked_obligations);
+
+        const not_fallthrough = self.encoder.encodeNot(fallthrough_condition);
+        if (astSimplifiesToBool(self.context.ctx, not_fallthrough)) |always_true| {
+            if (!always_true) {
+                const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+                try self.active_path_assumptions.append(.{
+                    .condition = not_fallthrough,
+                    .extra_constraints = fallthrough_constraints,
+                    .owned_extra_constraints = true,
+                });
+            }
+        } else {
+            const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+            try self.active_path_assumptions.append(.{
+                .condition = not_fallthrough,
+                .extra_constraints = fallthrough_constraints,
+                .owned_extra_constraints = true,
+            });
+        }
     }
 
     fn walkOraSwitchRegions(self: *VerificationPass, switch_op: mlir.MlirOperation) anyerror!void {
@@ -1525,11 +1546,78 @@ pub const VerificationPass = struct {
         defer constraints.deinit();
 
         for (self.active_path_assumptions.items) |assume| {
-            try addConstraintSlice(&constraints, assume.extra_constraints);
-            try constraints.append(assume.condition);
+            for (assume.extra_constraints) |extra| {
+                try self.appendNormalizedPathConstraint(&constraints, extra);
+            }
+            try self.appendNormalizedPathConstraint(&constraints, assume.condition);
         }
 
         return try constraints.toOwnedSlice();
+    }
+
+    fn appendNormalizedPathConstraint(
+        self: *VerificationPass,
+        constraints: *ManagedArrayList(z3.Z3_ast),
+        condition: z3.Z3_ast,
+    ) !void {
+        const simplified = z3.Z3_simplify(self.context.ctx, condition);
+        if (astSimplifiesToBool(self.context.ctx, simplified)) |value| {
+            if (!value and !constraintSliceContains(self, constraints.items, simplified)) {
+                try constraints.append(simplified);
+            }
+            return;
+        }
+
+        if (z3.Z3_get_ast_kind(self.context.ctx, simplified) != z3.Z3_APP_AST) {
+            if (!constraintSliceContains(self, constraints.items, simplified)) {
+                try constraints.append(simplified);
+            }
+            return;
+        }
+
+        const app = z3.Z3_to_app(self.context.ctx, simplified);
+        const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+        const kind = z3.Z3_get_decl_kind(self.context.ctx, decl);
+
+        if (kind == z3.Z3_OP_AND) {
+            const num_args = z3.Z3_get_app_num_args(self.context.ctx, app);
+            for (0..@intCast(num_args)) |arg_idx| {
+                try self.appendNormalizedPathConstraint(constraints, z3.Z3_get_app_arg(self.context.ctx, app, @intCast(arg_idx)));
+            }
+            return;
+        }
+
+        if (kind == z3.Z3_OP_NOT and z3.Z3_get_app_num_args(self.context.ctx, app) == 1) {
+            const inner = z3.Z3_get_app_arg(self.context.ctx, app, 0);
+            if (z3.Z3_get_ast_kind(self.context.ctx, inner) == z3.Z3_APP_AST) {
+                const inner_app = z3.Z3_to_app(self.context.ctx, inner);
+                const inner_decl = z3.Z3_get_app_decl(self.context.ctx, inner_app);
+                if (z3.Z3_get_decl_kind(self.context.ctx, inner_decl) == z3.Z3_OP_ITE and
+                    z3.Z3_get_app_num_args(self.context.ctx, inner_app) == 3)
+                {
+                    const ite_cond = z3.Z3_get_app_arg(self.context.ctx, inner_app, 0);
+                    const ite_then = z3.Z3_get_app_arg(self.context.ctx, inner_app, 1);
+                    const ite_else = z3.Z3_get_app_arg(self.context.ctx, inner_app, 2);
+
+                    if (astSimplifiesToBool(self.context.ctx, ite_then)) |then_value| {
+                        if (then_value) {
+                            // not(ite c true e)  ==  !c && !e
+                            try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_cond));
+                            try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_else));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (shouldSkipHeavyPathConstraint(self.context.ctx, simplified)) {
+            return;
+        }
+
+        if (!constraintSliceContains(self, constraints.items, simplified)) {
+            try constraints.append(simplified);
+        }
     }
 
     fn cloneConstraintSlice(self: *VerificationPass, constraints: []const z3.Z3_ast) ![]const z3.Z3_ast {
@@ -3989,6 +4077,79 @@ fn parseModelString(allocator: std.mem.Allocator, model_str: []const u8) ?errors
         return null;
     }
     return ce;
+}
+
+fn astSimplifiesToBool(ctx: z3.Z3_context, ast: z3.Z3_ast) ?bool {
+    const simplified = z3.Z3_simplify(ctx, ast);
+    if (z3.Z3_get_ast_kind(ctx, simplified) != z3.Z3_APP_AST) return null;
+    const app = z3.Z3_to_app(ctx, simplified);
+    const decl = z3.Z3_get_app_decl(ctx, app);
+    return switch (z3.Z3_get_decl_kind(ctx, decl)) {
+        z3.Z3_OP_TRUE => true,
+        z3.Z3_OP_FALSE => false,
+        else => null,
+    };
+}
+
+fn shouldSkipHeavyPathConstraint(ctx: z3.Z3_context, ast: z3.Z3_ast) bool {
+    if (z3.Z3_get_ast_kind(ctx, ast) != z3.Z3_APP_AST) return false;
+    const app = z3.Z3_to_app(ctx, ast);
+    const decl = z3.Z3_get_app_decl(ctx, app);
+    return switch (z3.Z3_get_decl_kind(ctx, decl)) {
+        z3.c.Z3_OP_EQ,
+        z3.c.Z3_OP_NOT,
+        z3.c.Z3_OP_AND,
+        z3.c.Z3_OP_OR,
+        z3.c.Z3_OP_ITE,
+        => containsHeavyPathArithmetic(ctx, ast),
+        else => false,
+    };
+}
+
+fn containsHeavyPathArithmetic(ctx: z3.Z3_context, ast: z3.Z3_ast) bool {
+    if (z3.Z3_get_ast_kind(ctx, ast) != z3.Z3_APP_AST) return false;
+    const app = z3.Z3_to_app(ctx, ast);
+    const decl = z3.Z3_get_app_decl(ctx, app);
+    const kind = z3.Z3_get_decl_kind(ctx, decl);
+
+    switch (kind) {
+        z3.c.Z3_OP_BUDIV,
+        z3.c.Z3_OP_BUDIV_I,
+        => return true,
+        z3.c.Z3_OP_BMUL => {
+            if (!isAllOnesNegationMul(ctx, app)) return true;
+        },
+        else => {},
+    }
+
+    const num_args = z3.Z3_get_app_num_args(ctx, app);
+    for (0..@intCast(num_args)) |arg_idx| {
+        if (containsHeavyPathArithmetic(ctx, z3.Z3_get_app_arg(ctx, app, @intCast(arg_idx)))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn isAllOnesNegationMul(ctx: z3.Z3_context, app: z3.Z3_app) bool {
+    if (z3.Z3_get_app_num_args(ctx, app) != 2) return false;
+    const lhs = z3.Z3_get_app_arg(ctx, app, 0);
+    const rhs = z3.Z3_get_app_arg(ctx, app, 1);
+    return isAllOnesBitvectorConstant(ctx, lhs) or isAllOnesBitvectorConstant(ctx, rhs);
+}
+
+fn isAllOnesBitvectorConstant(ctx: z3.Z3_context, ast: z3.Z3_ast) bool {
+    if (z3.Z3_get_ast_kind(ctx, ast) != z3.Z3_APP_AST) return false;
+    const sort = z3.Z3_get_sort(ctx, ast);
+    if (z3.Z3_get_sort_kind(ctx, sort) != z3.Z3_BV_SORT) return false;
+    const text_ptr = z3.Z3_ast_to_string(ctx, ast);
+    if (text_ptr == null) return false;
+    const text = std.mem.span(text_ptr);
+    if (text.len < 3 or text[0] != '#' or text[1] != 'x') return false;
+    for (text[2..]) |ch| {
+        if (ch != 'f' and ch != 'F') return false;
+    }
+    return true;
 }
 
 const ActivePathAssume = struct {
