@@ -13390,6 +13390,7 @@ test "complex SMT app probes do not degrade verification encoding" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+        .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
     };
 
     for (probes) |probe| {
@@ -13403,6 +13404,7 @@ test "complex SMT app probes match between sequential and parallel verification"
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+        .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
     };
 
     for (probes) |probe| {

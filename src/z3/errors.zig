@@ -70,11 +70,17 @@ pub const Counterexample = struct {
     }
 
     pub fn addVariable(self: *Counterexample, name: []const u8, value: []const u8) !void {
-        const name_copy = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(name_copy);
-
         const value_copy = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(value_copy);
+
+        if (self.variables.getPtr(name)) |existing| {
+            self.allocator.free(existing.*);
+            existing.* = value_copy;
+            return;
+        }
+
+        const name_copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_copy);
 
         try self.variables.put(name_copy, value_copy);
     }
