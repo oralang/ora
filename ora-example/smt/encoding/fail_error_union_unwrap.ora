@@ -1,0 +1,27 @@
+// SMT Encoding Test: Error Union Unwrap Constraint
+// Exercises the NOT(is_error) constraint added on try/unwrap.
+// After unwrapping, the value is guaranteed to be the ok payload.
+
+comptime const std = @import("std");
+error InsufficientBalance(required: u256, available: u256);
+
+contract ErrorUnionUnwrap {
+    storage var balance: u256 = 0;
+
+    fn checkedWithdraw(amount: u256) -> !u256 | InsufficientBalance {
+        if (balance < amount) {
+            return InsufficientBalance(amount, balance);
+        }
+        balance = balance - amount;
+        return balance;
+    }
+
+    // After try, the value is the ok payload — not an error
+    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance
+        requires balance >= amount
+        ensures balance == old(balance) - amount
+    {
+        let new_balance: u256 = try checkedWithdraw(amount);
+        return new_balance;
+    }
+}

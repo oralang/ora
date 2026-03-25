@@ -1,0 +1,25 @@
+// SMT Soundness Test: Conditional Return Path Split
+// When a function has an early return inside an if-block, the fallthrough path
+// must have the negated condition as context. Obligations after the if must
+// only be checked under the fallthrough path.
+
+comptime const std = @import("std");
+error TooSmall();
+
+contract ConditionalReturnSplit {
+    storage var balance: u256 = 0;
+
+    // The subtraction at the end is only reachable when amount <= balance.
+    // The verifier must see the negation of the early-return condition.
+    pub fn withdraw(amount: u256) -> !u256 | TooSmall
+        requires balance >= amount
+        ensures balance == old(balance) - amount
+    {
+        if (amount == 0) {
+            return TooSmall();
+        }
+        // Fallthrough: amount != 0 AND balance >= amount (from requires)
+        balance = balance - amount;
+        return balance;
+    }
+}

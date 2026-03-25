@@ -8,14 +8,14 @@ comptime const std = @import("std");
 contract LoopInvariants {
     // Simple loop invariant
     pub fn sumToN(n: u256) -> u256
-        requires(n <= 100)
+        requires n <= 100
     {
         var sum: u256 = 0;
         var i: u256 = 1;
         
         while (i <= n)
-            invariant(sum >= 0)
-            invariant(i <= n + 1)
+            invariant sum >= 0
+            invariant i <= n + 1
         {
             sum = sum + i;
             i = i + 1;
@@ -31,8 +31,8 @@ contract LoopInvariants {
         var i: u256 = 0;
         
         while (i < 5)
-            invariant(sum >= 0)
-            invariant(i <= 5)
+            invariant sum >= 0
+            invariant i <= 5
         {
             sum = sum + arr[i];
             i = i + 1;
@@ -45,18 +45,18 @@ contract LoopInvariants {
     storage var total: u256 = 0;
 
     pub fn accumulateToStorage(n: u256)
-        requires(n <= 100)
-        requires(total <= std.constants.U256_MAX - 5050)
-        ensures(total >= old(total))
+        requires n <= 100
+        requires total <= std.constants.U256_MAX - 5050
+        ensures total >= old(total)
     {
         let start_total: u256 = total;
         var i: u256 = 1;
         
         while (i <= n)
-            invariant(i >= 1)
-            invariant(total >= start_total)
-            invariant(total == start_total + (i - 1) * i / 2)
-            invariant(i <= n + 1)
+            invariant i >= 1
+            invariant total >= start_total
+            invariant total == start_total + (i - 1) * i / 2
+            invariant i <= n + 1
         {
             total = total + i;
             i = i + 1;
@@ -65,16 +65,16 @@ contract LoopInvariants {
 
     // Loop invariant with refinement type
     pub fn sumRefined(n: MinValue<u256, 1>) -> MinValue<u256, 0>
-        requires(n >= 1)
-        requires(n <= 100)
+        requires n >= 1
+        requires n <= 100
     {
         var sum: u256 = 0;
         var i: u256 = 1;
         let base_n: u256 = n;
         
         while (i <= base_n)
-            invariant(sum >= 0)
-            invariant(i <= base_n + 1)
+            invariant sum >= 0
+            invariant i <= base_n + 1
         {
             sum = sum + i;
             i = i + 1;
@@ -85,23 +85,23 @@ contract LoopInvariants {
 
     // Nested loops with invariants
     pub fn nestedSum(rows: u256, cols: u256) -> u256
-        requires(rows <= 10)
-        requires(cols <= 10)
+        requires rows <= 10
+        requires cols <= 10
     {
         var acc_total: u256 = 0;
         var i: u256 = 0;
         
         while (i < rows)
-            invariant(acc_total >= 0)
-            invariant(acc_total <= 100)
-            invariant(i <= rows)
+            invariant acc_total >= 0
+            invariant acc_total <= 100
+            invariant i <= rows
         {
             var j: u256 = 0;
             
             while (j < cols)
-                invariant(acc_total >= 0)
-                invariant(acc_total <= 100)
-                invariant(j <= cols)
+                invariant acc_total >= 0
+                invariant acc_total <= 100
+                invariant j <= cols
             {
                 acc_total = acc_total + 1;
                 j = j + 1;

@@ -1,0 +1,37 @@
+// SMT Summary Test: Private Helper Inlining
+// A private helper with its own requires/ensures should be inlined into
+// the caller's verification context. The caller should benefit from the
+// callee's ensures without re-proving it.
+
+comptime const std = @import("std");
+contract PrivateHelperInline {
+    storage var balance: u256 = 0;
+
+    fn safeAdd(a: u256, b: u256) -> u256
+        requires a <= std.constants.U256_MAX - b
+    {
+        return a + b;
+    }
+
+    fn safeSub(a: u256, b: u256) -> u256
+        requires a >= b
+    {
+        return a - b;
+    }
+
+    pub fn deposit(amount: u256)
+        requires amount > 0
+        requires balance <= std.constants.U256_MAX - amount
+        ensures balance == old(balance) + amount
+    {
+        balance = safeAdd(balance, amount);
+    }
+
+    pub fn withdraw(amount: u256)
+        requires amount > 0
+        requires balance >= amount
+        ensures balance == old(balance) - amount
+    {
+        balance = safeSub(balance, amount);
+    }
+}

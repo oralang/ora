@@ -1,0 +1,29 @@
+// SMT Soundness Test: Multiplication Overflow with Constants
+// When one operand of multiplication is a known constant, the overflow check
+// should be solvable (not UNKNOWN/timeout). Currently all 4 UNKNOWN queries
+// in the corpus are multiplication overflow checks that timeout at 60s.
+
+comptime const std = @import("std");
+contract OverflowMulConstant {
+    // Multiply by small constant — should be provable, not timeout
+    pub fn doubleValue(x: u256) -> u256
+        requires x <= std.constants.U256_MAX / 2
+    {
+        return x * 2;
+    }
+
+    // Multiply by 100 — bounded input prevents overflow
+    pub fn percentOf(x: u256, rate: u256) -> u256
+        requires rate <= 100
+        requires x <= std.constants.U256_MAX / 100
+    {
+        return x * rate;
+    }
+
+    // Multiply by 10^18 for scaling — needs tight bound
+    pub fn toWei(x: u256) -> u256
+        requires x <= std.constants.U256_MAX / 1000000000000000000
+    {
+        return x * 1000000000000000000;
+    }
+}

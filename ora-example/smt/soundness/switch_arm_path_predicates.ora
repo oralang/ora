@@ -1,0 +1,27 @@
+// SMT Soundness Test: Switch Arm Path Predicates
+// Each switch arm should be verified under its own path predicate.
+// An obligation in arm 0 should not see the context of arm 1.
+
+comptime const std = @import("std");
+contract SwitchArmPathPredicates {
+    storage var result: u256 = 0;
+
+    pub fn categorize(tier: u256)
+        requires tier <= 3
+    {
+        switch (tier) {
+            0 => {
+                result = 100;
+            }
+            1 => {
+                result = 200;
+            }
+            2 => {
+                result = 300;
+            }
+            else => {
+                result = 0;
+            }
+        }
+    }
+}

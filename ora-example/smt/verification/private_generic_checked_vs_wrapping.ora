@@ -18,13 +18,13 @@ contract PrivateGenericCheckedVsWrapping {
     }
 
     pub fn safeAdd(a: u256, b: u256) -> u256
-        requires(a <= std.constants.U256_MAX - b)
+        requires a <= std.constants.U256_MAX - b
     {
         return add(u256, a, b);
     }
 
     pub fn safeSub(a: u256, b: u256) -> u256
-        requires(a >= b)
+        requires a >= b
     {
         return sub(u256, a, b);
     }

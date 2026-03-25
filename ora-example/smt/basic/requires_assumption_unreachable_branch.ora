@@ -2,8 +2,8 @@ comptime const std = @import("std");
 
 contract RequiresAssumptionUnreachableBranch {
     pub fn g(a: NonZeroAddress) -> bool
-        requires(a == std.msg.sender())
-        ensures(a == std.msg.sender())
+        requires a == std.msg.sender()
+        ensures a == std.msg.sender()
     {
         let s: NonZeroAddress = std.msg.sender();
 

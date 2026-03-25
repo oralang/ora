@@ -1,0 +1,34 @@
+// SMT Encoding Test: Map Frame Conditions
+// Verifies that writing to one map key preserves all other keys.
+// Exercises the quantified frame constraint: forall k. k != idx => post[k] == pre[k]
+
+comptime const std = @import("std");
+contract MapFrameConditions {
+    storage var balances: map<address, u256>;
+    storage var total: u256 = 0;
+
+    // Writing to balances[sender] must not change balances[other]
+    pub fn deposit(amount: u256)
+        requires amount > 0
+        requires amount <= std.constants.U256_MAX - total
+        requires balances[std.msg.sender()] <= std.constants.U256_MAX - amount
+        ensures balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount
+        ensures total == old(total) + amount
+    {
+        let sender: address = std.msg.sender();
+        balances[sender] = balances[sender] + amount;
+        total = total + amount;
+    }
+
+    // Transfer: writing two keys, both frame conditions must hold
+    pub fn transfer(from: NonZeroAddress, to: NonZeroAddress, amount: u256)
+        requires amount > 0
+        requires balances[from] >= amount
+        requires balances[to] <= std.constants.U256_MAX - amount
+        ensures balances[from] == old(balances[from]) - amount
+        ensures balances[to] == old(balances[to]) + amount
+    {
+        balances[from] = balances[from] - amount;
+        balances[to] = balances[to] + amount;
+    }
+}

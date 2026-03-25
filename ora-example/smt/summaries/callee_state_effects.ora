@@ -1,0 +1,25 @@
+// SMT Summary Test: Callee State Effects
+// When a callee writes to storage, the caller's post-state must reflect
+// the callee's writes. Frame conditions must hold for non-written slots.
+
+comptime const std = @import("std");
+contract CalleeStateEffects {
+    storage var counter: u256 = 0;
+    storage var owner: address;
+
+    fn incrementCounter()
+        requires counter < std.constants.U256_MAX
+        ensures counter == old(counter) + 1
+    {
+        counter = counter + 1;
+    }
+
+    // After calling incrementCounter, the caller should see counter incremented.
+    // owner should be unchanged (frame condition for non-written slot).
+    pub fn doIncrement()
+        requires counter < std.constants.U256_MAX
+        ensures counter == old(counter) + 1
+    {
+        incrementCounter();
+    }
+}

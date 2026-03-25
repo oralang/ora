@@ -22,10 +22,10 @@ contract GhostFunctions {
 
     // Ghost function used in ensures clause
     pub fn deposit(amount: u256)
-        requires(amount > 0)
-        requires(balance <= max_balance)
-        requires(amount <= max_balance - balance)
-        ensures(balance == old(balance) + amount)
+        requires amount > 0
+        requires balance <= max_balance
+        requires amount <= max_balance - balance
+        ensures balance == old(balance) + amount
     {
         balance = balance + amount;
     }
@@ -37,12 +37,12 @@ contract GhostFunctions {
 
     // Ghost function used in ensures
     pub fn transferWithFee(amount: u256, rate: u256)
-        requires(amount > 0)
-        requires(rate <= 100)
-        requires(amount <= std.constants.U256_MAX / 100)
-        requires(amount <= balance)
-        requires(amount + (amount * rate / 100) <= balance)
-        ensures(balance <= old(balance))
+        requires amount > 0
+        requires rate <= 100
+        requires amount <= std.constants.U256_MAX / 100
+        requires amount <= balance
+        requires amount + (amount * rate / 100) <= balance
+        ensures balance <= old(balance)
     {
         let fee: u256 = amount * rate / 100;
         balance = balance - amount - fee;
@@ -55,8 +55,8 @@ contract GhostFunctions {
 
     // Ghost function used with refinement
     pub fn setBalance(value: MinValue<u256, 0>)
-        requires(value >= 0)
-        ensures(balance == value)
+        requires value >= 0
+        ensures balance == value
     {
         let base_value: u256 = value;
         balance = base_value;
@@ -69,21 +69,21 @@ contract GhostFunctions {
 
     // Ghost function used in complex ensures
     pub fn updateMultipleBalances(a: u256, b: u256, c: u256)
-        requires(a >= 0)
-        requires(b >= 0)
-        requires(c >= 0)
-        ensures(a == old(a))
-        ensures(b == old(b))
-        ensures(c == old(c))
+        requires a >= 0
+        requires b >= 0
+        requires c >= 0
+        ensures a == old(a)
+        ensures b == old(b)
+        ensures c == old(c)
     {
         // Balances unchanged
     }
 
     // Ghost function with InRange
     ghost fn getPercentage(value: u256, total: u256) -> InRange<u256, 0, 100>
-        requires(total > 0)
-        requires(value <= total)
-        requires(value <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff / 100)
+        requires total > 0
+        requires value <= total
+        requires value <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff / 100
     {
         if (total == 0) {
             return 0;
@@ -94,11 +94,11 @@ contract GhostFunctions {
 
     // Ghost function used with InRange
     pub fn calculatePercentage(value: u256, total: u256)
-        requires(value <= total)
-        requires(total > 0)
-        requires(value <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff / 100)
-        ensures(value <= total)
-        ensures(total > 0)
+        requires value <= total
+        requires total > 0
+        requires value <= 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff / 100
+        ensures value <= total
+        ensures total > 0
     {
         // Percentage calculation
     }
@@ -110,8 +110,8 @@ contract GhostFunctions {
 
     // Ghost function used in ensures with old()
     pub fn updateBalance(new_balance: u256)
-        requires(new_balance >= 0)
-        ensures(balance == new_balance)
+        requires new_balance >= 0
+        ensures balance == new_balance
     {
         balance = new_balance;
     }
@@ -127,7 +127,7 @@ contract GhostFunctions {
 
     // Ghost function used in ensures
     pub fn ensureMaxBalance()
-        ensures(balance <= max_balance)
+        ensures balance <= max_balance
     {
         if (balance > max_balance) {
             balance = max_balance;
@@ -146,8 +146,8 @@ contract GhostFunctionsComplex {
 
     // Sum specification validated against ghost formula
     pub fn sumToN(n: u256) -> u256
-        requires(n <= 100)
-        ensures(sumToN(n) == expectedSum(n))
+        requires n <= 100
+        ensures sumToN(n) == expectedSum(n)
     {
         return expectedSum(n);
     }
@@ -165,7 +165,7 @@ contract GhostFunctionsComplex {
 
     // Ghost function used with array
     pub fn verifyArraySum(arr: [u256; 5])
-        ensures(arr[0] >= 0)
+        ensures arr[0] >= 0
     {
         let _: u256 = arr[0];
     }

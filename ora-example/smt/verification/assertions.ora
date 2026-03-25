@@ -10,16 +10,16 @@ contract Assertions {
 
     // Runtime assertion
     pub fn checkBalance()
-        requires(balance >= 0)
+        requires balance >= 0
     {
         assert(balance >= 0, "Balance must be non-negative");
     }
 
     // Runtime assertion with expression
     pub fn checkSum(a: u256, b: u256)
-        requires(a >= 0)
-        requires(b >= 0)
-        requires(a <= std.constants.U256_MAX - b)
+        requires a >= 0
+        requires b >= 0
+        requires a <= std.constants.U256_MAX - b
     {
         let sum: u256 = a + b;
         assert(sum >= a, "Sum must be >= a");
@@ -29,7 +29,7 @@ contract Assertions {
     // Ghost assertion (for verification only, not in bytecode)
     // Note: Ghost assertions may need different syntax - using regular assert for now
     pub fn verifyInvariant()
-        requires(balance >= 0)
+        requires balance >= 0
     {
         // Ghost assertion would be: ghost assert(balance >= 0, "Balance invariant");
         // For now, using regular assert
@@ -38,7 +38,7 @@ contract Assertions {
 
     // Assertion with refinement type
     pub fn checkRefinement(value: MinValue<u256, 100>)
-        requires(value >= 100)
+        requires value >= 100
     {
         let base_value: u256 = value;
         assert(base_value >= 100, "Value must be >= 100");
@@ -46,7 +46,7 @@ contract Assertions {
 
     // Assertion in conditional
     pub fn conditionalCheck(condition: bool, value: u256)
-        requires(value >= 0)
+        requires value >= 0
     {
         if (condition) {
             assert(value >= 0, "Value must be non-negative");
@@ -55,7 +55,7 @@ contract Assertions {
 
     // Assertion in loop
     pub fn loopAssertion(n: u256)
-        requires(n <= 100)
+        requires n <= 100
     {
         var i: u256 = 0;
         while (i < n) {
@@ -66,12 +66,12 @@ contract Assertions {
 
     // Multiple assertions
     pub fn multipleChecks(a: u256, b: u256, c: u256)
-        requires(a > 0)
-        requires(b > 0)
-        requires(c > 0)
-        requires(a <= 1000)
-        requires(b <= 1000)
-        requires(c <= 1000)
+        requires a > 0
+        requires b > 0
+        requires c > 0
+        requires a <= 1000
+        requires b <= 1000
+        requires c <= 1000
     {
         assert(a > 0, "a must be positive");
         assert(b > 0, "b must be positive");

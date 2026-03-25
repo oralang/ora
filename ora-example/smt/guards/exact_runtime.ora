@@ -22,7 +22,7 @@ contract ExactRuntime {
 
     // SMT cannot prove Exact division - requires clause insufficient
     pub fn runtimeExactDivisionInsufficient(dividend: Exact<u256>, divisor: u256)
-        requires(dividend > 0)
+        requires dividend > 0
     {
         // Guard should remain - dividend > 0 does not prove divisibility
         let _: u256 = divisor;
@@ -38,14 +38,14 @@ contract ExactRuntime {
 
     // SMT cannot prove Exact division from function call
     pub fn getDividend(x: Exact<u256>) -> Exact<u256>
-        requires(x > 0)
+        requires x > 0
     {
         return x;
     }
 
     pub fn testCall(dividend: Exact<u256>)
-        requires(dividend > 0)
-        requires(dividend % 10 == 0)
+        requires dividend > 0
+        requires dividend % 10 == 0
     {
         let from_call: Exact<u256> = getDividend(dividend);
         let _: Exact<u256> = from_call;
@@ -56,7 +56,7 @@ contract ExactRuntime {
 
     // SMT cannot prove Exact division from arithmetic result
     pub fn runtimeExactDivisionArithmetic(x: u256, y: u256)
-        requires(x <= std.constants.U256_MAX - y)
+        requires x <= std.constants.U256_MAX - y
     {
         let sum: u256 = x + y;
         // Guard should remain - sum may not be divisible by y

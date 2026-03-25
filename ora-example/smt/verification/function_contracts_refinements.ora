@@ -11,10 +11,10 @@ contract FunctionContractsRefinements {
 
     // Requires with refinement type parameter
     pub fn depositRefined(amount: MinValue<u256, 1>)
-        requires(amount >= 1)
-        requires(balance <= max_balance)
-        requires(amount <= max_balance - balance)
-        ensures(balance >= old(balance))
+        requires amount >= 1
+        requires balance <= max_balance
+        requires amount <= max_balance - balance
+        ensures balance >= old(balance)
     {
         let base_amount: u256 = amount;
         balance = balance + base_amount;
@@ -22,17 +22,17 @@ contract FunctionContractsRefinements {
 
     // Ensures returning refinement type
     pub fn getRefinedBalance() -> MinValue<u256, 0>
-        ensures(balance >= 0)
+        ensures balance >= 0
     {
         return balance;
     }
 
     // Requires and ensures with InRange
     pub fn setPercentage(rate: InRange<u256, 0, 100>)
-        requires(rate >= 0)
-        requires(rate <= 100)
-        ensures(rate >= 0)
-        ensures(rate <= 100)
+        requires rate >= 0
+        requires rate <= 100
+        ensures rate >= 0
+        ensures rate <= 100
     {
         // Rate is already constrained by type
         let _: u256 = rate;
@@ -40,17 +40,17 @@ contract FunctionContractsRefinements {
 
     // Requires with NonZeroAddress
     pub fn setOwner(owner: NonZeroAddress)
-        requires(owner != std.constants.ZERO_ADDRESS)
-        ensures(owner != std.constants.ZERO_ADDRESS)
+        requires owner != std.constants.ZERO_ADDRESS
+        ensures owner != std.constants.ZERO_ADDRESS
     {
         let _: address = owner;
     }
 
     // Requires proving refinement constraint
     pub fn transferRefined(amount: MinValue<u256, 100>)
-        requires(amount >= 100)
-        requires(amount <= balance)
-        ensures(balance == old(balance) - amount)
+        requires amount >= 100
+        requires amount <= balance
+        ensures balance == old(balance) - amount
     {
         let base_amount: u256 = amount;
         balance = balance - base_amount;
@@ -58,10 +58,10 @@ contract FunctionContractsRefinements {
 
     // Ensures with refinement in return
     pub fn calculateFee(amount: MinValue<u256, 100>, rate: InRange<u256, 0, 100>) -> MinValue<u256, 0>
-        requires(amount >= 100)
-        requires(amount <= std.constants.U256_MAX / 100)
-        requires(rate >= 0)
-        requires(rate <= 100)
+        requires amount >= 100
+        requires amount <= std.constants.U256_MAX / 100
+        requires rate >= 0
+        requires rate <= 100
     {
         let base_amount: u256 = amount;
         let base_rate: u256 = rate;

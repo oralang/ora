@@ -36,14 +36,14 @@ comptime const std = @import("std");
 
     // Regular function updating ghost variables and using ghost function
     pub fn deposit(amount: u256)
-        requires(amount > 0)
-        requires(balance <= max_balance)
-        requires(amount <= max_balance - balance)
-        requires(sumOfBalances <= std.constants.U256_MAX - amount)
-        requires(transactionCount < std.constants.U256_MAX)
-        ensures(balance == old(balance) + amount)
-        ensures(sumOfBalances == old(sumOfBalances) + amount)
-        ensures(transactionCount == old(transactionCount) + 1)
+        requires amount > 0
+        requires balance <= max_balance
+        requires amount <= max_balance - balance
+        requires sumOfBalances <= std.constants.U256_MAX - amount
+        requires transactionCount < std.constants.U256_MAX
+        ensures balance == old(balance) + amount
+        ensures sumOfBalances == old(sumOfBalances) + amount
+        ensures transactionCount == old(transactionCount) + 1
     {
         balance = balance + amount;
         sumOfBalances = sumOfBalances + amount;
@@ -62,10 +62,10 @@ comptime const std = @import("std");
 
     // Function using ghost function with old()
     pub fn transfer(amount: u256)
-        requires(amount > 0)
-        requires(amount <= balance)
-        requires(balance <= std.constants.U256_MAX - sumOfBalances)
-        ensures(balance == old(balance) - amount)
+        requires amount > 0
+        requires amount <= balance
+        requires balance <= std.constants.U256_MAX - sumOfBalances
+        ensures balance == old(balance) - amount
     {
         balance = balance - amount;
     }
@@ -101,9 +101,9 @@ comptime const std = @import("std");
 
     // Function using ghost function with refinement
     pub fn updateVerifiedSum(value: MinValue<u256, 0>)
-        requires(value >= 0)
-        ensures(verifiedSum == value)
-        ensures(verifiedSum >= 0)
+        requires value >= 0
+        ensures verifiedSum == value
+        ensures verifiedSum >= 0
     {
         verifiedSum = value;
     }
@@ -115,13 +115,13 @@ comptime const std = @import("std");
 
     // Function with ghost function in loop
     pub fn countToN(n: u256)
-        requires(n <= 100)
+        requires n <= 100
     {
         counter = 0;
         var i: u256 = 0;
 
         while (i < n)
-            invariant(counter == i)
+            invariant counter == i
         {
             counter = counter + 1;
             i = i + 1;

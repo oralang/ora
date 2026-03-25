@@ -14,7 +14,7 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue - no requires clause
     pub fn runtimeMinValue10(value: MinValue<u256, 10>)
-        requires(value >= 10)
+        requires value >= 10
     {
         // Guard should remain - no requires clause to prove constraint
         let v: MinValue<u256, 10> = value;
@@ -22,7 +22,7 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue - requires clause insufficient
     pub fn runtimeMinValueInsufficient(value: MinValue<u256, 100>)
-        requires(value >= 100)
+        requires value >= 100
     {
         // Guard should remain - value >= 50 does not imply value >= 100
         let v: MinValue<u256, 100> = value;
@@ -30,7 +30,7 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue from storage
     pub fn runtimeMinValueFromStorage()
-        requires(stored_value >= 100)
+        requires stored_value >= 100
     {
         // Guard should remain - storage value unknown at compile time
         let v: MinValue<u256, 100> = stored_value;
@@ -42,7 +42,7 @@ contract MinValueRuntime {
     }
 
     pub fn testCall(x: u256)
-        requires(x >= 100)
+        requires x >= 100
     {
         let call_result: u256 = runtimeMinValueFromCall(x);
         let _: u256 = call_result;
@@ -51,8 +51,8 @@ contract MinValueRuntime {
 
     // SMT cannot prove MinValue from arithmetic result
     pub fn runtimeMinValueArithmetic(x: u256, y: u256)
-        requires(x <= std.constants.U256_MAX - y)
-        requires(x + y >= 100)
+        requires x <= std.constants.U256_MAX - y
+        requires x + y >= 100
     {
         let sum: u256 = x + y;
         // Guard should remain - sum may be < 100

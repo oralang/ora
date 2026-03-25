@@ -13,13 +13,13 @@ contract MultipleConstraints {
         rate: InRange<u256, 0, 100>,
         addr: NonZeroAddress
     )
-        requires(amount >= 100)
-        requires(limit <= 1000)
-        requires(rate >= 0)
-        requires(rate <= 100)
-        requires(addr != std.constants.ZERO_ADDRESS)
-        requires(amount <= limit)
-        ensures(amount <= limit)
+        requires amount >= 100
+        requires limit <= 1000
+        requires rate >= 0
+        requires rate <= 100
+        requires addr != std.constants.ZERO_ADDRESS
+        requires amount <= limit
+        ensures amount <= limit
     {
         // Keep this function focused on cross-parameter refinement consistency.
     }
@@ -29,11 +29,11 @@ contract MultipleConstraints {
     storage var max_balance: MaxValue<u256, 10000> = 10000;
 
     pub fn transferWithConstraints(amount: MinValue<u256, 100>)
-        requires(amount >= 100)
-        requires(amount <= balance)
-        requires(balance <= max_balance)
-        ensures(balance >= 0)
-        ensures(balance <= max_balance)
+        requires amount >= 100
+        requires amount <= balance
+        requires balance <= max_balance
+        ensures balance >= 0
+        ensures balance <= max_balance
     {
         let base_amount: u256 = amount;
         balance = balance - base_amount;
@@ -45,11 +45,11 @@ contract MultipleConstraints {
         multiplier: InRange<u256, 1, 10>,
         divisor: MinValue<u256, 1>
     ) -> MinValue<u256, 0>
-        requires(base >= 100)
-        requires(multiplier >= 1)
-        requires(multiplier <= 10)
-        requires(divisor >= 1)
-        requires(base <= std.constants.U256_MAX - multiplier)
+        requires base >= 100
+        requires multiplier >= 1
+        requires multiplier <= 10
+        requires divisor >= 1
+        requires base <= std.constants.U256_MAX - multiplier
     {
         let base_val: u256 = base;
         let mult_val: u256 = multiplier;
@@ -61,8 +61,8 @@ contract MultipleConstraints {
     pub fn returnWithConstraint(
         value: InRange<u256, 0, 100>
     ) -> u256
-        requires(value >= 0)
-        requires(value <= 100)
+        requires value >= 0
+        requires value <= 100
     {
         let base_value: u256 = value;
         return base_value;
@@ -73,12 +73,12 @@ contract MultipleConstraints {
         outer: InRange<u256, 0, 1000>,
         inner: InRange<u256, 0, 100>
     )
-        requires(outer >= 0)
-        requires(outer <= 1000)
-        requires(inner >= 0)
-        requires(inner <= 100)
-        requires(inner <= outer)
-        ensures(outer >= inner)
+        requires outer >= 0
+        requires outer <= 1000
+        requires inner >= 0
+        requires inner <= 100
+        requires inner <= outer
+        ensures outer >= inner
     {
         // SMT should prove nested constraints
     }

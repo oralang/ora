@@ -26,31 +26,31 @@ contract RefinementContractDedupSoundCore {
     }
 
     pub fn requiresCovered(amount: MinValue<u256, 1>)
-        requires(amount > 0)
+        requires amount > 0
     {
         let _: u256 = amount;
     }
 
     pub fn requiresUncovered(amount: MinValue<u256, 1>)
-        requires(amount > 10)
+        requires amount > 10
     {
         let _: u256 = amount;
     }
 
     pub fn requiresCallNotDedup(amount: MinValue<u256, 1>)
-        requires(identityU256(amount) > 0)
+        requires identityU256(amount) > 0
     {
         let _: u256 = amount;
     }
 
     pub fn ensuresIdentitySelfCall(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
-        ensures(ensuresIdentitySelfCall(amount) > 0)
+        ensures ensuresIdentitySelfCall(amount) > 0
     {
         return amount;
     }
 
     pub fn ensuresOtherCallNotDedup(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
-        ensures(plusOne(amount) > 0)
+        ensures plusOne(amount) > 0
     {
         return amount;
     }

@@ -7,7 +7,7 @@
 contract AssumeHavoc {
     // Assume for verification
     pub fn assumeExample(x: u256) -> u256
-        requires(x > 0)
+        requires x > 0
     {
         assume(x < 100);
         return x * 2;
@@ -15,7 +15,7 @@ contract AssumeHavoc {
 
     // Assume with refinement
     pub fn assumeRefinement(value: u256)
-        requires(value >= 0)
+        requires value >= 0
     {
         assume(value >= 100);
         let refined: MinValue<u256, 100> = value;
@@ -24,7 +24,7 @@ contract AssumeHavoc {
 
     // Assume in conditional
     pub fn assumeConditional(x: u256)
-        requires(x >= 0)
+        requires x >= 0
     {
         if (x > 50) {
             assume(x <= 100);
@@ -44,7 +44,7 @@ contract AssumeHavoc {
     storage var state: u256 = 0;
 
     pub fn havocStorage()
-        ensures(state >= 0)
+        ensures state >= 0
     {
         havoc state;
         // After havoc, state can be any value
@@ -74,7 +74,7 @@ contract AssumeHavoc {
 
     // Havoc in loop (modeling non-deterministic loop)
     pub fn havocLoop(n: u256) -> u256
-        requires(n <= 10)
+        requires n <= 10
     {
         var sum: u256 = 0;
         var i: u256 = 0;

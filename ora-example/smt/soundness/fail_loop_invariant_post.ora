@@ -1,0 +1,39 @@
+// SMT Soundness Test: Loop Invariant Postcondition
+// Exercises the loop-invariant-post query path (invariant + exit condition => ensures)
+// This path had 0 queries across the entire corpus — either dead code or untested.
+
+comptime const std = @import("std");
+contract LoopInvariantPost {
+    // Simple counter loop with storage postcondition depending on loop
+    storage var counter: u256 = 0;
+
+    pub fn countTo(n: u256)
+        requires n <= 1000
+        requires counter == 0
+        ensures counter == n
+    {
+        while (counter < n)
+            invariant counter <= n
+        {
+            counter = counter + 1;
+        }
+    }
+
+    // Accumulator loop: ensures depends on the accumulated value
+    storage var total: u256 = 0;
+
+    pub fn accumulateN(n: u256)
+        requires n <= 100
+        requires total <= std.constants.U256_MAX - n
+        ensures total == old(total) + n
+    {
+        var added: u256 = 0;
+        while (added < n)
+            invariant added <= n
+            invariant total == old(total) + added
+        {
+            total = total + 1;
+            added = added + 1;
+        }
+    }
+}

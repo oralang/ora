@@ -1,0 +1,41 @@
+// SMT Summary Test: Generic Call Path Conditions
+// Regression test for: generic function call summaries don't inherit caller path conditions.
+// The generic add(u256, a, b) inside a guarded path should see that recipient_before + amount
+// cannot overflow because the guard already checked it.
+//
+// KNOWN BUG: This test currently FAILS because the inlined generic body doesn't
+// carry the caller's path condition (the if-guard). Direct arithmetic passes;
+// generic wrapper does not.
+
+comptime const std = @import("std");
+contract GenericCallPathConditions {
+    storage var balances: map<address, u256>;
+
+    fn add(comptime T: type, a: T, b: T) -> T {
+        return a + b;
+    }
+
+    fn sub(comptime T: type, a: T, b: T) -> T {
+        return a - b;
+    }
+
+    // This version uses direct arithmetic — should pass
+    pub fn transferDirect(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        requires balances[from] >= amount
+        requires balances[to] <= std.constants.U256_MAX - amount
+    {
+        balances[from] = balances[from] - amount;
+        balances[to] = balances[to] + amount;
+        return true;
+    }
+
+    // This version uses generic helpers — exercises call summary path propagation
+    pub fn transferGeneric(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        requires balances[from] >= amount
+        requires balances[to] <= std.constants.U256_MAX - amount
+    {
+        balances[from] = sub(u256, balances[from], amount);
+        balances[to] = add(u256, balances[to], amount);
+        return true;
+    }
+}

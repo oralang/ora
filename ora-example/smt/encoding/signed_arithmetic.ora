@@ -1,0 +1,41 @@
+// SMT Encoding Test: Signed Arithmetic
+// Exercises the signed bitvector paths (i256) that have zero test coverage.
+// Tests signed add, sub, comparison, and overflow detection.
+
+comptime const std = @import("std");
+contract SignedArithmetic {
+    storage var value: i256 = 0;
+
+    // Signed addition with overflow guard
+    pub fn addSigned(a: i256, b: i256) -> i256
+        requires a >= 0
+        requires b >= 0
+        requires a <= 1000
+        requires b <= 1000
+    {
+        return a + b;
+    }
+
+    // Signed subtraction — result can be negative
+    pub fn subSigned(a: i256, b: i256) -> i256
+        requires a >= -1000
+        requires a <= 1000
+        requires b >= -1000
+        requires b <= 1000
+    {
+        return a - b;
+    }
+
+    // Signed comparison
+    pub fn maxSigned(a: i256, b: i256) -> i256
+        requires a >= -1000
+        requires a <= 1000
+        requires b >= -1000
+        requires b <= 1000
+    {
+        if (a >= b) {
+            return a;
+        }
+        return b;
+    }
+}

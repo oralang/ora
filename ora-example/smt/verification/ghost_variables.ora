@@ -21,14 +21,14 @@ contract GhostVariables {
 
     // Regular function using ghost variable in ensures
     pub fn deposit(amount: u256)
-        requires(amount > 0)
-        requires(balance <= max_balance)
-        requires(amount <= max_balance - balance)
-        requires(sumOfBalances <= std.constants.U256_MAX - amount)
-        requires(totalDeposits <= std.constants.U256_MAX - amount)
-        ensures(balance == old(balance) + amount)
-        ensures(sumOfBalances == old(sumOfBalances) + amount)
-        ensures(totalDeposits == old(totalDeposits) + amount)
+        requires amount > 0
+        requires balance <= max_balance
+        requires amount <= max_balance - balance
+        requires sumOfBalances <= std.constants.U256_MAX - amount
+        requires totalDeposits <= std.constants.U256_MAX - amount
+        ensures balance == old(balance) + amount
+        ensures sumOfBalances == old(sumOfBalances) + amount
+        ensures totalDeposits == old(totalDeposits) + amount
     {
         balance = balance + amount;
         sumOfBalances = sumOfBalances + amount;
@@ -37,11 +37,11 @@ contract GhostVariables {
 
     // Regular function updating ghost variable
     pub fn withdraw(amount: u256)
-        requires(amount > 0)
-        requires(amount <= balance)
-        requires(totalWithdrawals <= std.constants.U256_MAX - amount)
-        ensures(balance == old(balance) - amount)
-        ensures(totalWithdrawals == old(totalWithdrawals) + amount)
+        requires amount > 0
+        requires amount <= balance
+        requires totalWithdrawals <= std.constants.U256_MAX - amount
+        ensures balance == old(balance) - amount
+        ensures totalWithdrawals == old(totalWithdrawals) + amount
     {
         balance = balance - amount;
         totalWithdrawals = totalWithdrawals + amount;
@@ -49,10 +49,10 @@ contract GhostVariables {
 
     // Ghost variable used in invariant
     pub fn transfer(amount: u256)
-        requires(amount > 0)
-        requires(amount <= balance)
-        ensures(balance == old(balance) - amount)
-        ensures(sumOfBalances == old(sumOfBalances))
+        requires amount > 0
+        requires amount <= balance
+        ensures balance == old(balance) - amount
+        ensures sumOfBalances == old(sumOfBalances)
     {
         balance = balance - amount;
         // sumOfBalances unchanged (internal transfer)
@@ -60,21 +60,21 @@ contract GhostVariables {
 
     // Ghost variable with refinement type
     pub fn setVerifiedBalance(value: MinValue<u256, 0>)
-        requires(value >= 0)
-        ensures(verifiedBalance == value)
-        ensures(verifiedBalance >= 0)
+        requires value >= 0
+        ensures verifiedBalance == value
+        ensures verifiedBalance >= 0
     {
         verifiedBalance = value;
     }
 
     // Multiple ghost variables
     pub fn updateMultipleGhosts(deposit: u256, withdrawal: u256)
-        requires(deposit >= 0)
-        requires(withdrawal >= 0)
-        requires(deposit <= std.constants.U256_MAX - totalDeposits)
-        requires(withdrawal <= std.constants.U256_MAX - totalWithdrawals)
-        ensures(totalDeposits == old(totalDeposits) + deposit)
-        ensures(totalWithdrawals == old(totalWithdrawals) + withdrawal)
+        requires deposit >= 0
+        requires withdrawal >= 0
+        requires deposit <= std.constants.U256_MAX - totalDeposits
+        requires withdrawal <= std.constants.U256_MAX - totalWithdrawals
+        ensures totalDeposits == old(totalDeposits) + deposit
+        ensures totalWithdrawals == old(totalWithdrawals) + withdrawal
     {
         totalDeposits = totalDeposits + deposit;
         totalWithdrawals = totalWithdrawals + withdrawal;
@@ -82,8 +82,8 @@ contract GhostVariables {
 
     // Ghost variable in arithmetic
     pub fn calculateNetFlow() -> u256
-        requires(totalWithdrawals <= totalDeposits)
-        ensures(calculateNetFlow() == totalDeposits - totalWithdrawals)
+        requires totalWithdrawals <= totalDeposits
+        ensures calculateNetFlow() == totalDeposits - totalWithdrawals
     {
         return totalDeposits - totalWithdrawals;
     }
@@ -93,7 +93,7 @@ contract GhostVariablesMemory {
     // Ghost memory variable (if supported)
     // Note: Ghost memory variables may not be supported - testing ghost storage only
     pub fn testGhostMemory(value: u256)
-        requires(value > 0)
+        requires value > 0
     {
         // Ghost memory variables may need to be declared at contract level
         // For now, using regular memory variable

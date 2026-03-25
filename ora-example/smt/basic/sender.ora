@@ -2,7 +2,7 @@ comptime const std = @import("std");
 
 contract C {
     pub fn f() -> bool
-        ensures(std.msg.sender() == std.msg.sender())
+        ensures std.msg.sender() == std.msg.sender()
     {
         let s1: NonZeroAddress = std.msg.sender();
         let s2: NonZeroAddress = std.msg.sender();
@@ -15,8 +15,8 @@ contract C {
     }
 
     pub fn g(a: NonZeroAddress) -> bool
-        requires(a == std.msg.sender())
-        ensures(a == std.msg.sender())
+        requires a == std.msg.sender()
+        ensures a == std.msg.sender()
     {
         let s: NonZeroAddress = std.msg.sender();
 

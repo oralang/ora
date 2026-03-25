@@ -12,7 +12,7 @@ comptime const std = @import("std");
 contract NonZeroAddressProven {
     // SMT can prove NonZeroAddress from requires clause
     pub fn provenNonZeroAddress(addr: NonZeroAddress)
-        requires(addr != std.constants.ZERO_ADDRESS)
+        requires addr != std.constants.ZERO_ADDRESS
     {
         // Guard should be removed - requires clause proves non-zero
         let owner: NonZeroAddress = addr;
@@ -32,7 +32,7 @@ contract NonZeroAddressProven {
 
     // SMT can prove NonZeroAddress from function parameter refinement
     pub fn provenNonZeroFromRefinement(addr: NonZeroAddress)
-        requires(addr != std.constants.ZERO_ADDRESS)
+        requires addr != std.constants.ZERO_ADDRESS
     {
         // Guard should be removed - parameter already has NonZeroAddress
         // and requires proves it
@@ -41,7 +41,7 @@ contract NonZeroAddressProven {
 
     // SMT can prove NonZeroAddress in return
     pub fn provenNonZeroReturn(addr: NonZeroAddress) -> NonZeroAddress
-        requires(addr != std.constants.ZERO_ADDRESS)
+        requires addr != std.constants.ZERO_ADDRESS
     {
         // Guard should be removed for return
         return addr;

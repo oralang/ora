@@ -21,20 +21,20 @@
 comptime const std = @import("std");
 contract NonZeroRequiresDedup {
     pub fn initRedundant(token: NonZeroAddress, adapter: NonZeroAddress)
-        requires(token != std.constants.ZERO_ADDRESS)
-        requires(adapter != std.constants.ZERO_ADDRESS)
+        requires token != std.constants.ZERO_ADDRESS
+        requires adapter != std.constants.ZERO_ADDRESS
     {
     }
 
     pub fn initNonZeroOnly(token: NonZeroAddress, adapter: NonZeroAddress)
-        requires(token != std.constants.ZERO_ADDRESS)
-        requires(adapter != std.constants.ZERO_ADDRESS)
+        requires token != std.constants.ZERO_ADDRESS
+        requires adapter != std.constants.ZERO_ADDRESS
     {
     }
 
     pub fn initAddressRequires(token: address, adapter: address)
-        requires(token != std.constants.ZERO_ADDRESS)
-        requires(adapter != std.constants.ZERO_ADDRESS)
+        requires token != std.constants.ZERO_ADDRESS
+        requires adapter != std.constants.ZERO_ADDRESS
     {
     }
 }

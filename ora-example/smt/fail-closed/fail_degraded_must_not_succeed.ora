@@ -1,0 +1,22 @@
+// SMT Fail-Closed Test: Degraded Encoding Must Not Report Success
+// This contract uses transient storage (tload/tstore). The encoder currently
+// degrades tload to an unconstrained symbol and tstore to a no-op.
+//
+// The ensures clause references transient state. Because the encoding is
+// degraded, the SMT solver reasons about unconstrained symbols and could
+// vacuously prove the postcondition.
+//
+// EXPECTED: Verification should report DEGRADED or FAIL — never SUCCESS.
+// If this test reports verification success, the fail-closed gate is broken.
+
+comptime const std = @import("std");
+contract DegradedMustNotSucceed {
+    tstore var lock_count: u256 = 0;
+
+    pub fn incrementLock()
+        requires lock_count < std.constants.U256_MAX
+        ensures lock_count == old(lock_count) + 1
+    {
+        lock_count = lock_count + 1;
+    }
+}

@@ -1,0 +1,28 @@
+// SMT Encoding Test: Struct Field Update Frame Conditions
+// Updating one field of a struct must preserve all other fields.
+// Exercises the fragile struct frame condition code in encoder.zig.
+
+comptime const std = @import("std");
+contract StructFieldUpdateFrame {
+    struct Position {
+        x: u256,
+        y: u256,
+        z: u256,
+    }
+
+    storage var pos: Position = Position { x: 0, y: 0, z: 0 };
+
+    // Update x only — y and z must be preserved
+    pub fn setX(new_x: u256)
+        ensures pos.x == new_x
+    {
+        pos.x = new_x;
+    }
+
+    // Update y only — x and z must be preserved
+    pub fn setY(new_y: u256)
+        ensures pos.y == new_y
+    {
+        pos.y = new_y;
+    }
+}
