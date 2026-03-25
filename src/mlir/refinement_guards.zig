@@ -142,10 +142,10 @@ fn handleVerificationOp(
             const assert_op = c.oraCfAssertOpCreate(ctx, loc, condition, h.strRef(message));
             if (assert_op.ptr != null) {
                 if (context) |ctx_str| {
-                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.namedStringAttr(ctx, "ora.verification_context", ctx_str).attribute);
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.stringAttr(ctx, ctx_str));
                 }
                 if (verification_type) |type_str| {
-                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.namedStringAttr(ctx, "ora.verification_type", type_str).attribute);
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.stringAttr(ctx, type_str));
                 }
                 h.insertOpBefore(block, assert_op, op);
             }

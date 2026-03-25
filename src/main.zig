@@ -1336,6 +1336,22 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.Verificati
 
     for (errors, 0..) |err, idx| {
         try stdout.print("\n  {d}. {s}\n", .{ idx + 1, err.message });
+
+        // Show source location and snippet if available
+        if (err.file.len > 0 and err.line > 0) {
+            try stdout.print("     --> {s}:{d}:{d}\n", .{ shortPath(err.file), err.line, err.column });
+            if (readSourceLineFromFile(err.file, err.line)) |source_line| {
+                const line_no_str_len = std.fmt.count("{d}", .{err.line});
+                try stdout.print("      ", .{});
+                for (0..line_no_str_len) |_| try stdout.print(" ", .{});
+                try stdout.print("|\n", .{});
+                try stdout.print("   {d} | {s}\n", .{ err.line, source_line });
+                try stdout.print("      ", .{});
+                for (0..line_no_str_len) |_| try stdout.print(" ", .{});
+                try stdout.print("|\n", .{});
+            }
+        }
+
         if (err.counterexample) |ce| {
             var it = ce.variables.iterator();
             var has_vars = false;
@@ -1344,11 +1360,54 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.Verificati
                     try stdout.print("     counterexample:\n", .{});
                     has_vars = true;
                 }
-                try stdout.print("       {s} = {s}\n", .{ entry.key_ptr.*, formatHexValue(entry.value_ptr.*) });
+                try stdout.print("       {s} = {s}\n", .{ prettifyVariableName(entry.key_ptr.*), formatHexValue(entry.value_ptr.*) });
             }
         }
     }
     try stdout.print("\n", .{});
+}
+
+/// Read a single line from a source file by line number (1-based).
+/// Returns null if the file can't be read or the line doesn't exist.
+fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
+    const file = std.fs.cwd().openFile(file_path, .{}) catch return null;
+    defer file.close();
+    const content = file.readToEndAlloc(std.heap.page_allocator, 1024 * 1024) catch return null;
+    // Note: we leak this allocation — it's diagnostic output, called once.
+    var current_line: u32 = 1;
+    var line_start: usize = 0;
+    for (content, 0..) |ch, i| {
+        if (ch == '\n') {
+            if (current_line == line_number) {
+                const line = content[line_start..i];
+                // Trim trailing whitespace
+                return std.mem.trimRight(u8, line, " \t\r");
+            }
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+    // Last line (no trailing newline)
+    if (current_line == line_number and line_start < content.len) {
+        return std.mem.trimRight(u8, content[line_start..], " \t\r\n");
+    }
+    return null;
+}
+
+/// Make counterexample variable names more readable.
+/// - "g_balance" stays as "balance" (strip g_ prefix for globals)
+/// - "v_12345678" stays as-is (we don't have source names for these yet)
+/// - "env_evm_caller" becomes "msg.sender"
+/// - "struct_instantiate_123" becomes "struct"
+fn prettifyVariableName(name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, name, "env_evm_caller")) return "msg.sender";
+    if (std.mem.startsWith(u8, name, "env_evm_origin")) return "tx.origin";
+    if (std.mem.startsWith(u8, name, "env_evm_callvalue")) return "msg.value";
+    if (std.mem.startsWith(u8, name, "env_evm_timestamp")) return "block.timestamp";
+    if (std.mem.startsWith(u8, name, "g_")) return name[2..];
+    if (std.mem.startsWith(u8, name, "struct_instantiate_")) return "struct";
+    if (std.mem.startsWith(u8, name, "struct_field_update_")) return "struct_update";
+    return name;
 }
 
 fn verifyMlirModule(stdout: anytype, module: @import("mlir_c_api").c.MlirModule, stage: []const u8) !void {

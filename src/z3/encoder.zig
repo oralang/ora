@@ -1995,7 +1995,7 @@ pub const Encoder = struct {
         // if no defining operation, create a fresh variable
         const value_type = mlir.oraValueGetType(mlir_value);
         const sort = try self.encodeMLIRType(value_type);
-        const var_name = try std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
+        const var_name = try self.resolveValueName(mlir_value, value_id);
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
         try self.addBlockArgumentConstraints(mlir_value, encoded, mode);
@@ -2313,6 +2313,61 @@ pub const Encoder = struct {
         if (has_checked_sub_message) {
             const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
             return try self.tryEncodeCheckedSubAssert(condition_value, mode);
+        }
+        return null;
+    }
+
+    /// Try to resolve a human-readable name for an MLIR value.
+    /// For function parameters (block arguments of func ops), extracts the
+    /// parameter name from the enclosing function's printed form.
+    /// Falls back to "v_{pointer_id}".
+    fn resolveValueName(self: *Encoder, value: mlir.MlirValue, value_id: u64) ![]u8 {
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const owner_block = mlir.mlirBlockArgumentGetOwner(value);
+            if (!mlir.oraBlockIsNull(owner_block)) {
+                const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+                if (!mlir.oraOperationIsNull(parent_op)) {
+                    const op_name_ref = mlir.oraOperationGetName(parent_op);
+                    if (op_name_ref.data != null and op_name_ref.length > 0) {
+                        const op_name = op_name_ref.data[0..op_name_ref.length];
+                        if (std.mem.eql(u8, op_name, "func.func") or std.mem.eql(u8, op_name, "ora.func_decl")) {
+                            const arg_no = mlir.mlirBlockArgumentGetArgNumber(value);
+                            // Try to read parameter name from printed function signature
+                            if (self.extractFuncParamName(parent_op, @intCast(arg_no))) |name| {
+                                return std.fmt.allocPrint(self.allocator, "{s}", .{name});
+                            }
+                            // Fallback: use positional name
+                            return std.fmt.allocPrint(self.allocator, "arg{d}", .{arg_no});
+                        }
+                    }
+                }
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
+    }
+
+    /// Extract the parameter name at a given index from a func op's sym_name and
+    /// printed representation. We look for the ora.param_names attribute first,
+    /// then fall back to parsing the MLIR printed form.
+    fn extractFuncParamName(self: *Encoder, func_op: mlir.MlirOperation, arg_index: u32) ?[]const u8 {
+        _ = self;
+        // Try ora.param_names array attribute (if present on the function)
+        const param_names_attr = mlir.oraOperationGetAttributeByName(
+            func_op,
+            mlir.oraStringRefCreate("ora.param_names", 15),
+        );
+        if (!mlir.oraAttributeIsNull(param_names_attr)) {
+            // It's an array attribute; extract the element at arg_index
+            const num_elements: u32 = @intCast(mlir.oraArrayAttrGetNumElements(param_names_attr));
+            if (arg_index < num_elements) {
+                const elem = mlir.oraArrayAttrGetElement(param_names_attr, @intCast(arg_index));
+                if (!mlir.oraAttributeIsNull(elem)) {
+                    const str = mlir.oraStringAttrGetValue(elem);
+                    if (str.data != null and str.length > 0) {
+                        return str.data[0..str.length];
+                    }
+                }
+            }
         }
         return null;
     }

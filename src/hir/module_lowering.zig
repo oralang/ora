@@ -403,6 +403,24 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
 
+            // Attach ora.param_names so the SMT encoder can use readable variable names.
+            if (parameters.len > 0) {
+                const param_name_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
+                defer self.allocator.free(param_name_attrs);
+                for (parameters, 0..) |parameter, index| {
+                    const param_name = switch (self.file.pattern(parameter.pattern).*) {
+                        .Name => |name| name.name,
+                        else => "",
+                    };
+                    param_name_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
+                }
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.param_names"),
+                    mlir.oraArrayAttrCreate(self.context, @intCast(param_name_attrs.len), param_name_attrs.ptr),
+                );
+            }
+
             if (return_type != null and self.errorUnionRequiresWideCarrier(self.typecheck.body_types[function.body.index()])) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
             }
