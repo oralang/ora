@@ -1323,7 +1323,11 @@ pub const Encoder = struct {
     }
 
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
-        self.pending_obligations.append(self.allocator, obligation) catch {
+        const guarded_obligation = if (self.return_path_assumptions.items.len == 0)
+            obligation
+        else
+            self.encodeImplies(self.encodeAnd(self.return_path_assumptions.items), obligation);
+        self.pending_obligations.append(self.allocator, guarded_obligation) catch {
             self.recordDegradation("failed to record SMT obligation");
         };
     }
@@ -7687,6 +7691,12 @@ pub const Encoder = struct {
                 };
                 const then_region = mlir.oraOperationGetRegion(op, 0);
                 if (!mlir.oraRegionIsNull(then_region)) {
+                    const saved_len = self.return_path_assumptions.items.len;
+                    defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+                    self.return_path_assumptions.append(self.allocator, self.coerceToBool(condition)) catch {
+                        self.recordDegradation("failed to record scf.if then-branch path assumption");
+                        return;
+                    };
                     self.encodeStateEffectsInRegion(then_region);
                 }
                 then_state = self.captureStateSnapshot() catch {
@@ -7700,6 +7710,12 @@ pub const Encoder = struct {
                 };
                 const else_region = mlir.oraOperationGetRegion(op, 1);
                 if (!mlir.oraRegionIsNull(else_region)) {
+                    const saved_len = self.return_path_assumptions.items.len;
+                    defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+                    self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition))) catch {
+                        self.recordDegradation("failed to record scf.if else-branch path assumption");
+                        return;
+                    };
                     self.encodeStateEffectsInRegion(else_region);
                 }
                 else_state = self.captureStateSnapshot() catch {
@@ -8001,6 +8017,12 @@ pub const Encoder = struct {
         };
         const then_block = mlir.oraConditionalReturnOpGetThenBlock(op);
         if (!mlir.oraBlockIsNull(then_block)) {
+            const saved_len = self.return_path_assumptions.items.len;
+            defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+            self.return_path_assumptions.append(self.allocator, self.coerceToBool(condition)) catch {
+                self.recordDegradation("failed to record ora.conditional_return then-branch path assumption");
+                return;
+            };
             self.encodeStateEffectsInBlockFrom(then_block, mlir.oraBlockGetFirstOperation(then_block));
             if (self.blockFallsThrough(then_block) and !mlir.oraOperationIsNull(next_op)) {
                 const parent_block = mlir.mlirOperationGetBlock(op);
@@ -8020,6 +8042,12 @@ pub const Encoder = struct {
         };
         const else_block = mlir.oraConditionalReturnOpGetElseBlock(op);
         if (!mlir.oraBlockIsNull(else_block)) {
+            const saved_len = self.return_path_assumptions.items.len;
+            defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+            self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition))) catch {
+                self.recordDegradation("failed to record ora.conditional_return else-branch path assumption");
+                return;
+            };
             self.encodeStateEffectsInBlockFrom(else_block, mlir.oraBlockGetFirstOperation(else_block));
             if (self.blockFallsThrough(else_block) and !mlir.oraOperationIsNull(next_op)) {
                 const parent_block = mlir.mlirOperationGetBlock(op);
