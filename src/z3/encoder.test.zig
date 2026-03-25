@@ -1743,6 +1743,113 @@ test "func.call summary with direct symbolic ora.try_stmt state effects encodes 
     try testing.expect(std.mem.indexOf(u8, encoded_text, "maybeValue") != null);
 }
 
+test "func.call summary with direct symbolic ora.try_stmt result and state stay aligned" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicTryResultWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper_param_types = [_]mlir.MlirType{eu_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const maybe_arg = mlir.oraBlockGetArgument(body, 0);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, maybe_arg, i256_ty);
+    const unwrapped = mlir.oraOperationGetResult(unwrap_op, 0);
+    mlir.oraBlockAppendOwnedOperation(try_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraSStoreOpCreate(mlir_ctx, loc, unwrapped, stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{unwrapped},
+        1,
+    ));
+
+    const catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33);
+    const catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_attr);
+    const catch_value = mlir.oraOperationGetResult(catch_op, 0);
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraSStoreOpCreate(mlir_ctx, loc, catch_value, stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{catch_value},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_stmt, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
+    const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicTryResultWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{i256_ty}, 1);
+    const encoded_result = try encoder.encodeOperation(call_helper);
+    const catch_ast = try encoder.encodeValue(catch_value);
+
+    try testing.expect(!encoder.isDegraded());
+    const counter = encoder.global_map.get("counter").?;
+
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, outer_maybe_result);
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const outer_unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, outer_maybe_result, i256_ty);
+    const ok_value = try encoder.encodeOperation(outer_unwrap_op);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_result, counter)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, encoder.coerceBoolean(is_error)));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_result, ok_value)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, encoder.coerceBoolean(is_error)));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, ok_value)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(encoder.coerceBoolean(is_error));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_result, catch_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(encoder.coerceBoolean(is_error));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, catch_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "func.call summary with direct symbolic no-result ora.try_stmt state effects encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
