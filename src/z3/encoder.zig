@@ -3203,6 +3203,13 @@ pub const Encoder = struct {
                 const struct_val = try self.mkVariable(struct_var_name, result_sort);
 
                 var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
+                var field_names_owned: ?[]u8 = null;
+                defer if (field_names_owned) |owned| self.allocator.free(owned);
+                if (field_names_str == null) {
+                    const names_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.field_names", 15));
+                    field_names_owned = try self.buildFieldNamesCsvFromAttr(names_attr);
+                    field_names_str = field_names_owned;
+                }
                 if (field_names_str == null) {
                     if (self.getStringAttr(mlir_op, "struct_name")) |struct_name| {
                         field_names_str = self.struct_field_names_csv.get(struct_name);
@@ -3235,7 +3242,14 @@ pub const Encoder = struct {
                 defer self.allocator.free(struct_var_name);
                 const struct_val = try self.mkVariable(struct_var_name, result_sort);
                 // Use field names from attribute if available, otherwise fall back to field_N
-                const field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
+                var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
+                var field_names_owned: ?[]u8 = null;
+                defer if (field_names_owned) |owned| self.allocator.free(owned);
+                if (field_names_str == null) {
+                    const names_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.field_names", 15));
+                    field_names_owned = try self.buildFieldNamesCsvFromAttr(names_attr);
+                    field_names_str = field_names_owned;
+                }
                 for (operands, 0..) |operand, i| {
                     const field_attr_name = try self.resolveFieldNameForIndex(field_names_str, i);
                     defer self.allocator.free(field_attr_name);
@@ -3293,6 +3307,7 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
             if (operands.len >= 2 and mlir.oraOperationGetNumResults(mlir_op) >= 1) {
+                const source_value = mlir.oraOperationGetOperand(mlir_op, 0);
                 const field_name = self.getStringAttr(mlir_op, "field_name") orelse {
                     self.recordDegradation("struct_field_update missing field_name");
                     return error.UnsupportedOperation;
@@ -3310,10 +3325,19 @@ pub const Encoder = struct {
                 const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operands[1]);
                 self.addConstraint(eq);
 
-                const field_names_csv = self.lookupStructFieldNames(result_type) catch blk: {
+                var field_names_csv = self.lookupStructFieldNames(result_type) catch blk: {
                     self.recordDegradation("failed to resolve struct field names for struct update");
                     break :blk null;
                 };
+                var field_names_csv_owned = false;
+                defer if (field_names_csv_owned and field_names_csv != null) self.allocator.free(field_names_csv.?);
+                if (field_names_csv == null) {
+                    field_names_csv = self.tryLookupStructFieldNamesFromValue(source_value) catch blk: {
+                        self.recordDegradation("failed to recover struct field names from source value");
+                        break :blk null;
+                    };
+                    field_names_csv_owned = field_names_csv != null;
+                }
                 if (field_names_csv) |csv| {
                     var struct_update_failed = false;
                     var it = std.mem.splitScalar(u8, csv, ',');
@@ -3321,11 +3345,16 @@ pub const Encoder = struct {
                     while (it.next()) |part| : (field_index += 1) {
                         const trimmed = std.mem.trim(u8, part, " \t\n\r");
                         if (trimmed.len == 0 or std.mem.eql(u8, trimmed, field_name)) continue;
-                        const unchanged_type = self.lookupStructFieldType(result_type, field_index) catch {
+                        var unchanged_type = self.lookupStructFieldType(result_type, field_index) catch blk: {
                             self.recordDegradation("failed to resolve struct field type for struct update");
-                            struct_update_failed = true;
-                            continue;
+                            break :blk mlir.MlirType{ .ptr = null };
                         };
+                        if (mlir.oraTypeIsNull(unchanged_type)) {
+                            unchanged_type = self.tryLookupStructFieldTypeFromValue(source_value, field_index) catch blk: {
+                                self.recordDegradation("failed to recover struct field type from source value");
+                                break :blk mlir.MlirType{ .ptr = null };
+                            };
+                        }
                         if (mlir.oraTypeIsNull(unchanged_type)) {
                             self.recordDegradation("missing struct field type metadata for struct update");
                             struct_update_failed = true;
@@ -8519,6 +8548,109 @@ pub const Encoder = struct {
             type_slice = type_slice[type_prefix.len .. type_slice.len - 1];
         }
         return mlir.mlirTypeParseGet(mlir.mlirTypeGetContext(ty), mlir.oraStringRefCreate(type_slice.ptr, type_slice.len));
+    }
+
+    fn buildFieldNamesCsvFromAttr(self: *Encoder, attr: mlir.MlirAttribute) !?[]u8 {
+        if (mlir.oraAttributeIsNull(attr)) return null;
+
+        const direct = mlir.oraStringAttrGetValue(attr);
+        if (direct.data != null and direct.length > 0) {
+            const copy = try self.allocator.dupe(u8, direct.data[0..direct.length]);
+            return copy;
+        }
+
+        var csv_builder = std.ArrayList(u8){};
+        defer csv_builder.deinit(self.allocator);
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        if (count == 0) return null;
+        for (0..count) |i| {
+            const field_attr = mlir.oraArrayAttrGetElement(attr, i);
+            if (mlir.oraAttributeIsNull(field_attr)) continue;
+            const field_ref = mlir.oraStringAttrGetValue(field_attr);
+            if (field_ref.data == null or field_ref.length == 0) continue;
+            if (csv_builder.items.len > 0) try csv_builder.append(self.allocator, ',');
+            try csv_builder.appendSlice(self.allocator, field_ref.data[0..field_ref.length]);
+        }
+        if (csv_builder.items.len == 0) return null;
+        const csv = try csv_builder.toOwnedSlice(self.allocator);
+        return csv;
+    }
+
+    fn tryLookupStructFieldNamesFromValue(self: *Encoder, value: mlir.MlirValue) !?[]u8 {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.struct_init")) {
+            const names_attr = mlir.oraOperationGetAttributeByName(owner, mlir.oraStringRefCreate("ora.field_names", 15));
+            return try self.buildFieldNamesCsvFromAttr(names_attr);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.struct_instantiate")) {
+            if (self.getStringAttr(owner, "struct_name")) |struct_name| {
+                if (self.struct_field_names_csv.get(struct_name)) |csv| {
+                    const copy = try self.allocator.dupe(u8, csv);
+                    return copy;
+                }
+            }
+            const names_attr = mlir.oraOperationGetAttributeByName(owner, mlir.oraStringRefCreate("ora.field_names", 15));
+            return try self.buildFieldNamesCsvFromAttr(names_attr);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
+            return try self.tryLookupStructFieldNamesFromValue(mlir.oraOperationGetOperand(owner, 0));
+        }
+
+        return null;
+    }
+
+    fn tryLookupStructFieldTypeFromValue(self: *Encoder, value: mlir.MlirValue, index: usize) !mlir.MlirType {
+        if (!mlir.oraValueIsAOpResult(value)) return .{ .ptr = null };
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return .{ .ptr = null };
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.struct_init") or std.mem.eql(u8, op_name, "ora.struct_instantiate")) {
+            const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(owner));
+            if (index >= num_operands) return .{ .ptr = null };
+            return mlir.oraValueGetType(mlir.oraOperationGetOperand(owner, @intCast(index)));
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
+            const field_names_csv = try self.tryLookupStructFieldNamesFromValue(value);
+            defer if (field_names_csv) |csv| self.allocator.free(csv);
+
+            const updated_field_name = self.getStringAttr(owner, "field_name") orelse return .{ .ptr = null };
+            if (field_names_csv) |csv| {
+                var it = std.mem.splitScalar(u8, csv, ',');
+                var field_idx: usize = 0;
+                while (it.next()) |part| : (field_idx += 1) {
+                    const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                    if (!std.mem.eql(u8, trimmed, updated_field_name)) continue;
+                    if (field_idx == index) {
+                        return mlir.oraValueGetType(mlir.oraOperationGetOperand(owner, 1));
+                    }
+                    break;
+                }
+            }
+            return try self.tryLookupStructFieldTypeFromValue(mlir.oraOperationGetOperand(owner, 0), index);
+        }
+
+        return .{ .ptr = null };
     }
 
     fn resolveFieldNameForIndex(self: *Encoder, field_names_csv: ?[]const u8, index: usize) ![]u8 {
