@@ -312,6 +312,41 @@ pub const Encoder = struct {
         try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
     }
 
+    fn putOwnedStringAst(
+        self: *Encoder,
+        map: *std.StringHashMap(z3.Z3_ast),
+        name: []const u8,
+        value: z3.Z3_ast,
+    ) EncodeError!void {
+        if (map.getPtr(name)) |existing| {
+            existing.* = value;
+            return;
+        }
+        const key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key);
+        try map.put(key, value);
+    }
+
+    fn putOwnedStringVoid(
+        self: *Encoder,
+        map: *std.StringHashMap(void),
+        name: []const u8,
+    ) EncodeError!void {
+        if (map.contains(name)) return;
+        const key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key);
+        try map.put(key, {});
+    }
+
+    fn putTupleValue(self: *Encoder, result_id: u64, elements: []z3.Z3_ast) EncodeError!void {
+        if (self.tuple_values.getPtr(result_id)) |existing| {
+            self.allocator.free(existing.elements);
+            existing.* = .{ .elements = elements };
+            return;
+        }
+        try self.tuple_values.put(result_id, .{ .elements = elements });
+    }
+
     fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
         return self.written_global_slots.contains(name);
     }
@@ -466,7 +501,7 @@ pub const Encoder = struct {
                 then_val
             else
                 self.encodeIte(condition, then_val, else_val);
-            try self.global_map.put(try self.allocator.dupe(u8, name), merged);
+            try self.putOwnedStringAst(&self.global_map, name, merged);
         }
 
         var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
@@ -530,7 +565,7 @@ pub const Encoder = struct {
         var else_w_it = else_state.written_global_slots.iterator();
         while (else_w_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
         for (written_names.items) |name| {
-            try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
+            try self.putOwnedStringVoid(&self.written_global_slots, name);
         }
     }
 
@@ -574,7 +609,7 @@ pub const Encoder = struct {
                     self.encodeIte(conditions[idx], branch_val, fallback);
             }
 
-            try self.global_map.put(try self.allocator.dupe(u8, name), fallback);
+            try self.putOwnedStringAst(&self.global_map, name, fallback);
         }
 
         var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
@@ -637,7 +672,7 @@ pub const Encoder = struct {
             while (written_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
         }
         for (written_names.items) |name| {
-            try self.written_global_slots.put(try self.allocator.dupe(u8, name), {});
+            try self.putOwnedStringVoid(&self.written_global_slots, name);
         }
     }
 
@@ -3045,7 +3080,7 @@ pub const Encoder = struct {
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_id = @intFromPtr(result_value.ptr);
             const elements = try self.allocator.dupe(z3.Z3_ast, operands);
-            try self.tuple_values.put(result_id, .{ .elements = elements });
+            try self.putTupleValue(result_id, elements);
             return if (operands.len > 0) operands[0] else self.encodeBoolConstant(true);
         }
 

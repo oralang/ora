@@ -3,6 +3,7 @@ const testing = std.testing;
 const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
+const z3_verification = @import("ora_z3_verification");
 
 fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
@@ -77,6 +78,68 @@ fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+const VerificationProbeSummary = struct {
+    success: bool,
+    errors_len: usize,
+    diagnostics_len: usize,
+    degraded: bool,
+    error_kinds: []u8,
+
+    fn deinit(self: *VerificationProbeSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.error_kinds);
+    }
+};
+
+fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, rhs: *const VerificationProbeSummary) !void {
+    try testing.expectEqual(lhs.success, rhs.success);
+    try testing.expectEqual(lhs.errors_len, rhs.errors_len);
+    try testing.expectEqual(lhs.diagnostics_len, rhs.diagnostics_len);
+    try testing.expectEqualStrings(lhs.error_kinds, rhs.error_kinds);
+    try testing.expectEqual(lhs.degraded, rhs.degraded);
+}
+
+fn verifyExampleWithoutDegradation(path: []const u8, function_name: ?[]const u8, parallel: bool) !VerificationProbeSummary {
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.parallel = parallel;
+    verifier.filter_function_name = function_name;
+
+    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    var kinds = std.ArrayList([]const u8){};
+    defer kinds.deinit(testing.allocator);
+    for (result.errors.items) |err| {
+        try kinds.append(testing.allocator, @tagName(err.error_type));
+    }
+    std.mem.sort([]const u8, kinds.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.lessThan);
+
+    var builder = std.ArrayList(u8){};
+    defer builder.deinit(testing.allocator);
+    for (kinds.items, 0..) |kind, i| {
+        if (i != 0) try builder.append(testing.allocator, ',');
+        try builder.appendSlice(testing.allocator, kind);
+    }
+
+    verifier.deinit();
+    defer result.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = try builder.toOwnedSlice(testing.allocator),
+    };
 }
 
 fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
@@ -1613,7 +1676,6 @@ test "compiler verifies impls with trait ghost blocks end to end" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 
-    const z3_verification = @import("ora_z3_verification");
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
     verifier.parallel = false;
@@ -1658,7 +1720,6 @@ test "compiler verifies trait ghost method calls with self end to end" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 
-    const z3_verification = @import("ora_z3_verification");
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
     verifier.parallel = false;
@@ -3026,7 +3087,6 @@ test "compiler HIR output runs through Z3 verification" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
 
-    const z3_verification = @import("ora_z3_verification");
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
     verifier.parallel = false;
@@ -13323,5 +13383,37 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         const rendered = module_text_ref.data[0..module_text_ref.length];
 
         try expectNoResidualOraRuntimeOps(rendered);
+    }
+}
+
+test "complex SMT app probes do not degrade verification encoding" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8 }{
+        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+    };
+
+    for (probes) |probe| {
+        var result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false);
+        defer result.deinit(testing.allocator);
+        try testing.expect(!result.degraded);
+    }
+}
+
+test "complex SMT app probes match between sequential and parallel verification" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8 }{
+        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expect(!seq_result.degraded);
+        try testing.expect(!par_result.degraded);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
 }
