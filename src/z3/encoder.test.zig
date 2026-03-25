@@ -9779,6 +9779,111 @@ test "func.call summary preserves switch-guarded storage writes" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "func.call summary preserves branch-guarded result and storage together" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_name_attr = mlir.oraStringAttrCreate(mlir_ctx, stringRef("branchResultAndStore"));
+    const effect_attr = mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"));
+    const slot_attr = mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter"));
+    const slot_array = [_]mlir.MlirAttribute{slot_attr};
+    const write_slots_attr = mlir.oraArrayAttrCreate(mlir_ctx, slot_array.len, &slot_array);
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", helper_name_attr),
+        namedAttr(mlir_ctx, "ora.effect", effect_attr),
+        namedAttr(mlir_ctx, "ora.write_slots", write_slots_attr),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i1_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper_func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper_func);
+    const helper_flag = mlir.oraBlockGetArgument(helper_body, 0);
+    const helper_value = mlir.oraBlockGetArgument(helper_body, 1);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+
+    const if_results = [_]mlir.MlirType{i256_ty};
+    const if_op = mlir.oraScfIfOpCreate(mlir_ctx, loc, helper_flag, &if_results, if_results.len, true);
+    const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+    const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraSStoreOpCreate(mlir_ctx, loc, helper_value, stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{helper_value},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraSStoreOpCreate(mlir_ctx, loc, zero, stringRef("counter")));
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{zero},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(helper_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, if_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(if_op, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper_func);
+
+    const call_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("branchResultStoreFlag"), i1_ty);
+    const call_value = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("branchResultStoreValue"), i256_ty);
+    const call_operands = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(call_flag, 0),
+        mlir.oraOperationGetResult(call_value, 0),
+    };
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("branchResultAndStore"),
+        &call_operands,
+        call_operands.len,
+        &[_]mlir.MlirType{i256_ty},
+        1,
+    );
+
+    const encoded_result = try encoder.encodeOperation(call);
+    const loaded = try encoder.encodeOperation(mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("counter"), i256_ty));
+
+    try testing.expect(!encoder.isDegraded());
+
+    const cond_ast = try encoder.encodeValue(mlir.oraOperationGetResult(call_flag, 0));
+    const value_ast = try encoder.encodeValue(mlir.oraOperationGetResult(call_value, 0));
+    const zero_ast = try encoder.encodeValue(zero);
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, encoder.coerceBoolean(cond_ast), value_ast, zero_ast);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded_result, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    try solver.resetChecked();
+    try solver.assertChecked(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try solver.checkChecked());
+}
+
 test "func.call summary encodes switch-selected pure returns exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
