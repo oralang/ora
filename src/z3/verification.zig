@@ -2330,6 +2330,100 @@ pub const VerificationPass = struct {
         return result;
     }
 
+    pub fn runVerificationPassPreparedSequential(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) {
+            return try self.degradedVerificationResult();
+        }
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) {
+            return try self.degradedVerificationResult();
+        }
+
+        if (queries.items.len == 0) {
+            return errors.VerificationResult.init(self.allocator);
+        }
+
+        const results = try self.allocator.alloc(PreparedQueryResult, queries.items.len);
+        defer self.allocator.free(results);
+        for (results) |*entry| entry.* = .{};
+        defer {
+            for (results) |entry| {
+                if (entry.model_str) |model| self.allocator.free(model);
+            }
+        }
+
+        for (queries.items, 0..) |query, idx| {
+            if (self.trace_smt) {
+                self.tracePreparedQuery(idx, query);
+                self.traceSmt("Q{d} load-smt begin", .{idx + 1});
+                if (self.trace_smtlib) {
+                    std.debug.print("smt-trace: Q{d} smtlib-begin\n{s}\n", .{ idx + 1, query.smtlib_z });
+                    std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
+                }
+            }
+
+            try self.solver.resetChecked();
+            try self.solver.loadFromSmtlib(query.smtlib_z);
+
+            std.debug.print("{s} start\n", .{query.log_prefix});
+            var timer = try std.time.Timer.start();
+            const status = try self.solver.checkChecked();
+            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+
+            std.debug.print("{s} -> {s} ({d}ms)\n", .{
+                query.log_prefix,
+                queryStatusLabel(status),
+                elapsed_ms,
+            });
+            if (status == z3.Z3_L_UNDEF) {
+                std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+            }
+
+            results[idx].status = status;
+            results[idx].elapsed_ms = elapsed_ms;
+
+            if (status == z3.Z3_L_TRUE and (query.kind == .GuardViolate or query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost)) {
+                if (try self.solver.getModelChecked()) |model| {
+                    const raw = z3.Z3_model_to_string(self.context.ctx, model);
+                    if (raw != null) {
+                        results[idx].model_str = try self.allocator.dupe(u8, std.mem.span(raw));
+                    }
+                }
+            }
+        }
+
+        if (self.verify_stats) {
+            var total_queries_stats: u64 = 0;
+            var sat: u64 = 0;
+            var unsat: u64 = 0;
+            var unknown: u64 = 0;
+            var total_ms: u64 = 0;
+            for (results) |entry| {
+                total_queries_stats += 1;
+                total_ms += entry.elapsed_ms;
+                switch (entry.status) {
+                    z3.Z3_L_TRUE => sat += 1,
+                    z3.Z3_L_FALSE => unsat += 1,
+                    else => unknown += 1,
+                }
+            }
+            std.debug.print(
+                "verification stats: queries={d} sat={d} unsat={d} unknown={d} total_ms={d}\n",
+                .{ total_queries_stats, sat, unsat, unknown, total_ms },
+            );
+        }
+
+        return try self.collectPreparedQueryResults(queries.items, results);
+    }
+
     fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         self.encoder.clearDegradation();
         try self.extractAnnotationsFromMLIR(mlir_module);
@@ -2394,7 +2488,7 @@ pub const VerificationPass = struct {
             .next_index = std.atomic.Value(usize).init(0),
             .results = results,
             .allocator = worker_allocator,
-            .timeout_ms = self.timeout_ms,
+            .timeout_ms = scaledParallelTimeoutMs(self.timeout_ms, worker_count),
             .trace_smt = self.trace_smt,
             .trace_smtlib = self.trace_smtlib,
         };
@@ -4353,6 +4447,17 @@ const PreparedQueryResult = struct {
     err: ?anyerror = null,
     model_str: ?[]const u8 = null,
 };
+
+fn scaledParallelTimeoutMs(timeout_ms: ?u32, worker_count: usize) ?u32 {
+    const base = timeout_ms orelse return null;
+    if (worker_count <= 1) return base;
+
+    const widened: u64 = @as(u64, base) * @as(u64, @intCast(worker_count));
+    return if (widened > std.math.maxInt(u32))
+        std.math.maxInt(u32)
+    else
+        @as(u32, @intCast(widened));
+}
 
 fn inferReportVerificationSuccess(
     summary: ReportSummary,
@@ -6856,6 +6961,13 @@ test "parallel verification matches sequential verification on conditional retur
     defer par_result.deinit();
 
     try expectVerificationResultsEquivalent(&seq_result, &par_result);
+}
+
+test "scaledParallelTimeoutMs widens timeout by worker count" {
+    try testing.expectEqual(@as(?u32, null), scaledParallelTimeoutMs(null, 4));
+    try testing.expectEqual(@as(?u32, 1000), scaledParallelTimeoutMs(1000, 1));
+    try testing.expectEqual(@as(?u32, 4000), scaledParallelTimeoutMs(1000, 4));
+    try testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scaledParallelTimeoutMs(std.math.maxInt(u32), 2));
 }
 
 test "contract invariants from loop body obligations use loop constraints" {

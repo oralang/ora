@@ -110,7 +110,10 @@ fn verifyExampleWithoutDegradation(path: []const u8, function_name: ?[]const u8,
     verifier.parallel = parallel;
     verifier.filter_function_name = function_name;
 
-    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    var result = if (parallel)
+        try verifier.runVerificationPass(hir_result.module.raw_module)
+    else
+        try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
     errdefer result.deinit();
     const degraded = verifier.encoder.isDegraded();
     var kinds = std.ArrayList([]const u8){};
@@ -13389,8 +13392,14 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
 test "complex SMT app probes do not degrade verification encoding" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
+        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "claimableNow" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity" },
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
+        .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
+        .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
+        .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
+        .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
     };
 
     for (probes) |probe| {
@@ -13403,8 +13412,14 @@ test "complex SMT app probes do not degrade verification encoding" {
 test "complex SMT app probes match between sequential and parallel verification" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
+        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "claimableNow" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity" },
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
+        .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
+        .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
+        .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
+        .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
     };
 
     for (probes) |probe| {
