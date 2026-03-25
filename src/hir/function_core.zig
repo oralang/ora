@@ -568,7 +568,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
-        pub fn appendDeferredReturnCheck(self: *FunctionLowerer, range: source.TextRange) anyerror!void {
+        pub fn appendDeferredReturnCheck(self: *FunctionLowerer, range: source.TextRange, locals: *LocalEnv) anyerror!void {
             const flag = self.deferred_return_flag orelse return;
             const loc = self.parent.location(range);
             const flag_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, flag, null, 0, boolType(self.parent.context));
@@ -585,19 +585,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return error.MlirOperationCreationFailed;
             }
 
-            if (self.deferred_return_value_slot) |slot| {
-                const return_type = self.return_type orelse return error.MlirOperationCreationFailed;
-                const value_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, slot, null, 0, return_type);
-                if (mlir.oraOperationIsNull(value_load)) return error.MlirOperationCreationFailed;
-                const value = appendValueOp(then_block, value_load);
-                const ret = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
-                if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
-                appendOp(then_block, ret);
-            } else {
-                const ret = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
-                if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
-                appendOp(then_block, ret);
-            }
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            try then_lowerer.appendDeferredReturnTerminator(range, locals);
 
             try appendEmptyYield(self.parent.context, else_block, loc);
         }
@@ -2348,8 +2338,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(for_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(for_stmt.range, locals);
             }
             return false;
         }

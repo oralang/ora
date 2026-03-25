@@ -145,6 +145,47 @@ fn verifyExampleWithoutDegradation(path: []const u8, function_name: ?[]const u8,
     };
 }
 
+fn verifyTextWithoutDegradation(source_text: []const u8, function_name: ?[]const u8) !VerificationProbeSummary {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.filter_function_name = function_name;
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    var kinds = std.ArrayList([]const u8){};
+    defer kinds.deinit(testing.allocator);
+    for (result.errors.items) |err| {
+        try kinds.append(testing.allocator, @tagName(err.error_type));
+    }
+    std.mem.sort([]const u8, kinds.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.lessThan);
+
+    var builder = std.ArrayList(u8){};
+    defer builder.deinit(testing.allocator);
+    for (kinds.items, 0..) |kind, i| {
+        if (i != 0) try builder.append(testing.allocator, ',');
+        try builder.appendSlice(testing.allocator, kind);
+    }
+
+    verifier.deinit();
+    defer result.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = try builder.toOwnedSlice(testing.allocator),
+    };
+}
+
 fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
     var it = node.children();
     while (it.next()) |child| {
@@ -11349,6 +11390,68 @@ test "compiler lowers if statements with carried locals and early return without
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.conditional_return"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
+test "compiler preserves later early returns after deferred return slots are introduced" {
+    const source_text =
+        \\pub fn choose(a: u256, b: u256, c: u256) -> u256 {
+        \\    if (a == 0) {
+        \\        return 0;
+        \\    }
+        \\    let value = 1;
+        \\    if (b > 0) {
+        \\        value = 2;
+        \\    } else {
+        \\        return 5;
+        \\    }
+        \\    if (c > 0) {
+        \\        return 7;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 3, "ora.conditional_return"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref.store %true"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
+test "private call summary handles deferred return fallthrough exactly" {
+    const source_text =
+        \\contract Test {
+        \\    fn choose(a: u256, b: u256, c: u256) -> u256 {
+        \\        if (a == 0) {
+        \\            return 0;
+        \\        }
+        \\        let value = 1;
+        \\        if (b > 0) {
+        \\            value = 2;
+        \\        } else {
+        \\            return 5;
+        \\        }
+        \\        if (c > 0) {
+        \\            return 7;
+        \\        }
+        \\        return value;
+        \\    }
+        \\    pub fn invoke(a: u256, b: u256, c: u256) -> u256 {
+        \\        let out = choose(a, b, c);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "invoke");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.degraded);
 }
 
 test "compiler skips unknown carried locals in if lowering" {

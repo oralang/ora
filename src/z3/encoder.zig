@@ -287,7 +287,17 @@ pub const Encoder = struct {
         for (self.return_path_assumptions.items) |assume| {
             if (self.astContainsConjunct(assume, needle)) return true;
         }
-        return false;
+        if (self.return_path_assumptions.items.len == 0) return false;
+
+        const solver = z3.Z3_mk_solver(self.context.ctx) orelse return false;
+        z3.Z3_solver_inc_ref(self.context.ctx, solver);
+        defer z3.Z3_solver_dec_ref(self.context.ctx, solver);
+
+        for (self.return_path_assumptions.items) |assume| {
+            z3.Z3_solver_assert(self.context.ctx, solver, self.coerceToBool(assume));
+        }
+        z3.Z3_solver_assert(self.context.ctx, solver, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(needle)));
+        return z3.Z3_solver_check(self.context.ctx, solver) == z3.Z3_L_FALSE;
     }
 
     pub fn mergeInitPredicate(self: *Encoder, condition: z3.Z3_ast, then_init: z3.Z3_ast, else_init: z3.Z3_ast) z3.Z3_ast {
@@ -4526,7 +4536,20 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, name, "ora.conditional_return")) {
                 const next_op = mlir.oraOperationGetNextInBlock(current);
-                const fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                var fallthrough_expr: ?z3.Z3_ast = null;
+                if (!mlir.oraOperationIsNull(next_op) and mlir.oraOperationGetNumOperands(current) >= 1) {
+                    const condition_value = mlir.oraOperationGetOperand(current, 0);
+                    const condition = try self.encodeValueWithMode(condition_value, mode);
+                    const saved_len = self.return_path_assumptions.items.len;
+                    defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+                    try self.return_path_assumptions.append(
+                        self.allocator,
+                        z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition)),
+                    );
+                    fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                } else {
+                    fallthrough_expr = try self.extractReturnedExprFromSequence(next_op, result_index, mode);
+                }
                 const branch_expr = try self.extractConditionalReturnExpr(current, result_index, mode, fallthrough_expr);
                 if (branch_expr != null) return branch_expr;
             }

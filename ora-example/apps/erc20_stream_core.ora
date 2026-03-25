@@ -119,7 +119,8 @@ contract ERC20StreamCore {
         return cutoff;
     }
 
-    fn accruedAt(stream_id: u256, now_ts: u256) -> u256 {
+    fn accruedAt(stream_id: u256, now_ts: u256) -> u256
+    {
         let start_ts: u256 = stream_start[stream_id];
         if (now_ts <= start_ts) {
             return 0;
@@ -146,6 +147,10 @@ contract ERC20StreamCore {
 
     pub fn openStream(sender: address, recipient: address, starts_at: u256, ends_at: u256, rate_per_second: u256, total_amount: u256)
         -> !u256 | Unauthorized | InvalidAddress | InvalidSchedule | InvalidRate | InvalidAmount | EscrowOverflow | StreamIdExhausted | SpecOverflow
+        guard next_stream_id < std.constants.U256_MAX
+        guard total_amount > 0
+        guard total_escrowed <= std.constants.U256_MAX - total_amount
+        guard spec_total_opened <= std.constants.U256_MAX - total_amount
     {
         if (!onlyAdapter()) {
             return Unauthorized;

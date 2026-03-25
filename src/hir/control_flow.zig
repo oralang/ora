@@ -145,8 +145,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(if_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(if_stmt.range, locals);
                 if (then_terminated and else_terminated and !blockEndsWithTerminator(self.block)) {
                     try self.appendDeferredReturnTerminator(if_stmt.range, locals);
                 }
@@ -239,8 +239,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
             }
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(try_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(try_stmt.range, locals);
                 if (try_terminated and catch_terminated and !blockEndsWithTerminator(self.block)) {
                     try self.appendDeferredReturnTerminator(try_stmt.range, locals);
                 }
@@ -377,8 +377,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
             }
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(block_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(block_stmt.range, locals);
                 if (terminated and !blockEndsWithTerminator(self.block)) {
                     try self.appendDeferredReturnTerminator(block_stmt.range, locals);
                 }
@@ -553,8 +553,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(while_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(while_stmt.range, locals);
             }
             return false;
         }
@@ -634,8 +634,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
             }
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(switch_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(switch_stmt.range, locals);
                 if (all_cases_terminate and !blockEndsWithTerminator(self.block)) {
                     try self.appendDeferredReturnTerminator(switch_stmt.range, locals);
                 }
@@ -825,8 +825,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
             }
-            if (created_deferred_return) {
-                try self.appendDeferredReturnCheck(switch_stmt.range);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(switch_stmt.range, locals);
             }
             return false;
         }
