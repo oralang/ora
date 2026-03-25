@@ -18,6 +18,7 @@ const semantic_tokens_api = ora_root.lsp.semantic_tokens;
 const signature_help_api = ora_root.lsp.signature_help;
 const code_lens_api = ora_root.lsp.code_lens;
 const inlay_hints_api = ora_root.lsp.inlay_hints;
+const folding_api = ora_root.lsp.folding;
 const formatting_api = @import("formatting.zig");
 const Allocator = std.mem.Allocator;
 
@@ -106,6 +107,7 @@ pub const Handler = struct {
                 .TextDocumentSyncOptions = .{
                     .openClose = true,
                     .change = .Incremental,
+                    .save = .{ .SaveOptions = .{ .includeText = false } },
                 },
             },
             .hoverProvider = .{ .bool = true },
@@ -117,6 +119,8 @@ pub const Handler = struct {
                 .resolveProvider = false,
             },
             .renameProvider = .{ .RenameOptions = .{ .prepareProvider = true } },
+            .documentHighlightProvider = .{ .bool = true },
+            .foldingRangeProvider = .{ .bool = true },
             .documentFormattingProvider = .{ .bool = true },
             .inlayHintProvider = .{ .InlayHintOptions = .{ .resolveProvider = false } },
             .codeLensProvider = .{ .resolveProvider = false },
@@ -225,6 +229,17 @@ pub const Handler = struct {
 
         if (removed_path) |path| {
             try self.publishDependentsDiagnostics(arena, path, null);
+        }
+    }
+
+    pub fn @"textDocument/didSave"(self: *Handler, arena: Allocator, notification: types.DidSaveTextDocumentParams) !void {
+        const uri = notification.textDocument.uri;
+        const source = self.docs.docs.get(uri) orelse return;
+        try self.updateDocumentDependencies(uri, source);
+        try self.publishDiagnostics(arena, uri, source);
+
+        if (self.dependencies.getPathForUri(uri)) |changed_path| {
+            try self.publishDependentsDiagnostics(arena, changed_path, uri);
         }
     }
 
@@ -541,6 +556,51 @@ pub const Handler = struct {
             .newText = try arena.dupe(u8, formatted),
         };
         return edits;
+    }
+
+    pub fn @"textDocument/documentHighlight"(self: *Handler, arena: Allocator, params: types.DocumentHighlightParams) !lsp.ResultType("textDocument/documentHighlight") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+        const position: frontend.Position = .{
+            .line = params.position.line,
+            .character = params.position.character,
+        };
+
+        const refs = try references_api.referencesAt(self.allocator, source, position, true);
+        defer self.allocator.free(refs);
+        if (refs.len == 0) return null;
+
+        const result = try arena.alloc(types.DocumentHighlight, refs.len);
+        for (refs, 0..) |ref, i| {
+            result[i] = .{
+                .range = toLspRange(ref),
+                .kind = .Text,
+            };
+        }
+
+        return result;
+    }
+
+    pub fn @"textDocument/foldingRange"(self: *Handler, arena: Allocator, params: types.FoldingRangeParams) !lsp.ResultType("textDocument/foldingRange") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+
+        const ranges = try folding_api.foldingRanges(self.allocator, source);
+        defer folding_api.deinitRanges(self.allocator, ranges);
+        if (ranges.len == 0) return null;
+
+        const result = try arena.alloc(types.FoldingRange, ranges.len);
+        for (ranges, 0..) |range, i| {
+            result[i] = .{
+                .startLine = range.start_line,
+                .endLine = range.end_line,
+                .kind = switch (range.kind) {
+                    .region => .region,
+                    .comment => .comment,
+                    .imports => .imports,
+                },
+            };
+        }
+
+        return result;
     }
 
     fn identifierAtPosition(self: *Handler, source: []const u8, position: frontend.Position) !?[]const u8 {

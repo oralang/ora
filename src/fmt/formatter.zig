@@ -309,6 +309,7 @@ fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) boo
             .If, .Else, .While, .For, .Switch, .Catch => true,
             else => false,
         },
+        .Dot => !canEndExpression(prev),
         else => isAlwaysSpacedOperator(current) and !isPrefixOperator(current, previous),
     };
 }

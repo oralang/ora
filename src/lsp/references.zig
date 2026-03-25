@@ -11,18 +11,21 @@ pub fn referencesAt(
     position: frontend.Position,
     include_declaration: bool,
 ) ![]frontend.Range {
-    const maybe_target = try definition.definitionAt(allocator, source, position);
-    if (maybe_target == null) {
+    var analysis = (try definition.Analysis.init(allocator, source)) orelse
         return try allocator.alloc(frontend.Range, 0);
-    }
-    const target_range = maybe_target.?.range;
+    defer analysis.deinit();
+
+    const target_range = blk: {
+        const def = definition.definitionAtCached(&analysis, source, position) orelse
+            return try allocator.alloc(frontend.Range, 0);
+        break :blk def.range;
+    };
 
     var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
     defer lex.deinit();
 
-    const tokens = lex.scanTokens() catch {
+    const tokens = lex.scanTokens() catch
         return try allocator.alloc(frontend.Range, 0);
-    };
     defer allocator.free(tokens);
 
     var ranges = std.ArrayList(frontend.Range){};
@@ -32,11 +35,10 @@ pub fn referencesAt(
         if (token.type != .Identifier) continue;
 
         const token_range = tokenSelectionRange(token);
-        const token_pos = token_range.start;
-        const maybe_definition = try definition.definitionAt(allocator, source, token_pos);
-        if (maybe_definition == null) continue;
+        const maybe_def = definition.definitionAtCached(&analysis, source, token_range.start);
+        if (maybe_def == null) continue;
 
-        if (!rangesEqual(maybe_definition.?.range, target_range)) continue;
+        if (!rangesEqual(maybe_def.?.range, target_range)) continue;
         if (!include_declaration and rangesEqual(token_range, target_range)) continue;
 
         try appendUniqueRange(allocator, &ranges, token_range);

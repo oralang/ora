@@ -24,7 +24,7 @@ const file_origin: frontend.Range = .{
     .end = .{ .line = 0, .character = 0 },
 };
 
-const Analysis = struct {
+pub const Analysis = struct {
     sources: compiler.source.SourceStore,
     file_id: compiler.FileId,
     module_id: compiler.ModuleId,
@@ -34,7 +34,7 @@ const Analysis = struct {
     resolution: compiler.sema.NameResolutionResult,
     source_text: []const u8,
 
-    fn init(allocator: Allocator, source_text: []const u8) !?Analysis {
+    pub fn init(allocator: Allocator, source_text: []const u8) !?Analysis {
         var sources = compiler.source.SourceStore.init(allocator);
         errdefer sources.deinit();
         const file_id = try sources.addFile("<lsp>", source_text);
@@ -64,7 +64,7 @@ const Analysis = struct {
         };
     }
 
-    fn deinit(self: *Analysis) void {
+    pub fn deinit(self: *Analysis) void {
         self.resolution.deinit();
         self.item_index.deinit();
         self.lower_result.deinit();
@@ -586,6 +586,17 @@ pub fn definitionAt(allocator: Allocator, source: []const u8, position: frontend
 
 pub fn definitionAtCrossFile(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: CrossFileContext) !?Definition {
     return definitionAtImpl(allocator, source, position, cross_file);
+}
+
+/// Resolve definition using a pre-built analysis (avoids re-parsing).
+pub fn definitionAtCached(analysis: *Analysis, source: []const u8, position: frontend.Position) ?Definition {
+    var resolver = Resolver{
+        .analysis = analysis,
+        .query_position = position,
+        .cross_file = null,
+    };
+    _ = source;
+    return resolver.run() catch null;
 }
 
 fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
