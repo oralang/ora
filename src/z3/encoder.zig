@@ -4518,6 +4518,191 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn tryLookupStructFieldNamesFromFunctionReturn(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        result_index: u32,
+    ) EncodeError!?[]u8 {
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return null;
+        return try self.tryLookupStructFieldNamesFromReturnBlock(
+            mlir.oraRegionGetFirstBlock(body_region),
+            result_index,
+        );
+    }
+
+    fn tryLookupStructFieldNamesFromReturnBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        result_index: u32,
+    ) EncodeError!?[]u8 {
+        if (mlir.oraBlockIsNull(block)) return null;
+        return try self.tryLookupStructFieldNamesFromReturnSequence(
+            mlir.oraBlockGetFirstOperation(block),
+            result_index,
+        );
+    }
+
+    fn tryLookupStructFieldNamesFromReturnSequence(
+        self: *Encoder,
+        start_op: mlir.MlirOperation,
+        result_index: u32,
+    ) EncodeError!?[]u8 {
+        var current = start_op;
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            const next = mlir.oraOperationGetNextInBlock(current);
+
+            if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return null;
+                return try self.tryLookupStructFieldNamesFromValue(mlir.oraOperationGetOperand(current, result_index));
+            }
+
+            if (std.mem.eql(u8, name, "scf.if")) {
+                const fallthrough = try self.tryLookupStructFieldNamesFromReturnSequence(next, result_index);
+                var then_csv = try self.tryLookupStructFieldNamesFromReturnBlock(mlir.oraScfIfOpGetThenBlock(current), result_index);
+                var else_csv = try self.tryLookupStructFieldNamesFromReturnBlock(mlir.oraScfIfOpGetElseBlock(current), result_index);
+                if (then_csv == null) then_csv = fallthrough;
+                if (else_csv == null) else_csv = fallthrough;
+                return try self.mergeRecoveredFieldNames(then_csv, else_csv);
+            }
+
+            if (std.mem.eql(u8, name, "ora.conditional_return")) {
+                const fallthrough = try self.tryLookupStructFieldNamesFromReturnSequence(next, result_index);
+                var then_csv = try self.tryLookupStructFieldNamesFromReturnBlock(mlir.oraConditionalReturnOpGetThenBlock(current), result_index);
+                var else_csv = try self.tryLookupStructFieldNamesFromReturnBlock(mlir.oraConditionalReturnOpGetElseBlock(current), result_index);
+                if (then_csv == null) then_csv = fallthrough;
+                if (else_csv == null) else_csv = fallthrough;
+                return try self.mergeRecoveredFieldNames(then_csv, else_csv);
+            }
+
+            if (std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr")) {
+                const fallthrough = try self.tryLookupStructFieldNamesFromReturnSequence(next, result_index);
+                const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(current));
+                var recovered = fallthrough;
+                for (0..num_regions) |region_index| {
+                    const region = mlir.oraOperationGetRegion(current, @intCast(region_index));
+                    const branch_block = mlir.oraRegionGetFirstBlock(region);
+                    const branch_csv = try self.tryLookupStructFieldNamesFromReturnBlock(branch_block, result_index);
+                    recovered = try self.mergeRecoveredFieldNames(recovered, if (branch_csv != null) branch_csv else fallthrough);
+                }
+                return recovered;
+            }
+
+            if (std.mem.eql(u8, name, "scf.execute_region")) {
+                const region = mlir.oraOperationGetRegion(current, 0);
+                if (!mlir.oraRegionIsNull(region)) {
+                    const nested = try self.tryLookupStructFieldNamesFromReturnBlock(mlir.oraRegionGetFirstBlock(region), result_index);
+                    if (nested != null) return nested;
+                }
+            }
+
+            current = next;
+        }
+        return null;
+    }
+
+    fn tryLookupStructFieldTypeFromFunctionReturn(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        result_index: u32,
+        index: usize,
+    ) EncodeError!mlir.MlirType {
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return .{ .ptr = null };
+        return try self.tryLookupStructFieldTypeFromReturnBlock(
+            mlir.oraRegionGetFirstBlock(body_region),
+            result_index,
+            index,
+        );
+    }
+
+    fn tryLookupStructFieldTypeFromReturnBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        result_index: u32,
+        index: usize,
+    ) EncodeError!mlir.MlirType {
+        if (mlir.oraBlockIsNull(block)) return .{ .ptr = null };
+        return try self.tryLookupStructFieldTypeFromReturnSequence(
+            mlir.oraBlockGetFirstOperation(block),
+            result_index,
+            index,
+        );
+    }
+
+    fn tryLookupStructFieldTypeFromReturnSequence(
+        self: *Encoder,
+        start_op: mlir.MlirOperation,
+        result_index: u32,
+        index: usize,
+    ) EncodeError!mlir.MlirType {
+        var current = start_op;
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            const next = mlir.oraOperationGetNextInBlock(current);
+
+            if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return .{ .ptr = null };
+                return try self.tryLookupStructFieldTypeFromValue(mlir.oraOperationGetOperand(current, result_index), index);
+            }
+
+            if (std.mem.eql(u8, name, "scf.if")) {
+                const fallthrough = try self.tryLookupStructFieldTypeFromReturnSequence(next, result_index, index);
+                var then_ty = try self.tryLookupStructFieldTypeFromReturnBlock(mlir.oraScfIfOpGetThenBlock(current), result_index, index);
+                var else_ty = try self.tryLookupStructFieldTypeFromReturnBlock(mlir.oraScfIfOpGetElseBlock(current), result_index, index);
+                if (mlir.oraTypeIsNull(then_ty)) then_ty = fallthrough;
+                if (mlir.oraTypeIsNull(else_ty)) else_ty = fallthrough;
+                return self.mergeRecoveredFieldTypes(then_ty, else_ty);
+            }
+
+            if (std.mem.eql(u8, name, "ora.conditional_return")) {
+                const fallthrough = try self.tryLookupStructFieldTypeFromReturnSequence(next, result_index, index);
+                var then_ty = try self.tryLookupStructFieldTypeFromReturnBlock(mlir.oraConditionalReturnOpGetThenBlock(current), result_index, index);
+                var else_ty = try self.tryLookupStructFieldTypeFromReturnBlock(mlir.oraConditionalReturnOpGetElseBlock(current), result_index, index);
+                if (mlir.oraTypeIsNull(then_ty)) then_ty = fallthrough;
+                if (mlir.oraTypeIsNull(else_ty)) else_ty = fallthrough;
+                return self.mergeRecoveredFieldTypes(then_ty, else_ty);
+            }
+
+            if (std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr")) {
+                const fallthrough = try self.tryLookupStructFieldTypeFromReturnSequence(next, result_index, index);
+                const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(current));
+                var recovered = fallthrough;
+                for (0..num_regions) |region_index| {
+                    const region = mlir.oraOperationGetRegion(current, @intCast(region_index));
+                    const branch_block = mlir.oraRegionGetFirstBlock(region);
+                    const branch_ty = try self.tryLookupStructFieldTypeFromReturnBlock(branch_block, result_index, index);
+                    recovered = self.mergeRecoveredFieldTypes(recovered, if (!mlir.oraTypeIsNull(branch_ty)) branch_ty else fallthrough);
+                }
+                return recovered;
+            }
+
+            if (std.mem.eql(u8, name, "scf.execute_region")) {
+                const region = mlir.oraOperationGetRegion(current, 0);
+                if (!mlir.oraRegionIsNull(region)) {
+                    const nested = try self.tryLookupStructFieldTypeFromReturnBlock(mlir.oraRegionGetFirstBlock(region), result_index, index);
+                    if (!mlir.oraTypeIsNull(nested)) return nested;
+                }
+            }
+
+            current = next;
+        }
+        return .{ .ptr = null };
+    }
+
     fn extractReturnedExprFromBlock(
         self: *Encoder,
         block: mlir.MlirBlock,
@@ -8847,8 +9032,10 @@ pub const Encoder = struct {
             const func_op = if (callee) |name| self.function_ops.get(name) else null;
             if (func_op) |known_func| {
                 const result_index = self.getResultIndex(owner, value) orelse return null;
-                const returned_value = (try self.extractFunctionReturnValue(known_func, result_index)) orelse return null;
-                return try self.tryLookupStructFieldNamesFromValue(returned_value);
+                if (try self.extractFunctionReturnValue(known_func, result_index)) |returned_value| {
+                    return try self.tryLookupStructFieldNamesFromValue(returned_value);
+                }
+                return try self.tryLookupStructFieldNamesFromFunctionReturn(known_func, result_index);
             }
         }
 
@@ -8927,8 +9114,10 @@ pub const Encoder = struct {
             const func_op = if (callee) |name| self.function_ops.get(name) else null;
             if (func_op) |known_func| {
                 const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
-                const returned_value = (try self.extractFunctionReturnValue(known_func, result_index)) orelse return .{ .ptr = null };
-                return try self.tryLookupStructFieldTypeFromValue(returned_value, index);
+                if (try self.extractFunctionReturnValue(known_func, result_index)) |returned_value| {
+                    return try self.tryLookupStructFieldTypeFromValue(returned_value, index);
+                }
+                return try self.tryLookupStructFieldTypeFromFunctionReturn(known_func, result_index, index);
             }
         }
 
