@@ -305,6 +305,29 @@ extern "C"
         MlirContext ctx,
         MlirStringRef structName);
 
+    /// Look up the number of fields for an Ora struct type using the nearest
+    /// in-scope ora.struct.decl visible from `anchorOp`.
+    /// Returns 0 if the type is not an Ora struct or no declaration is found.
+    MLIR_CAPI_EXPORTED size_t oraStructTypeGetFieldCountInScope(
+        MlirOperation anchorOp,
+        MlirType structType);
+
+    /// Look up the field name at `index` for an Ora struct type using the
+    /// nearest in-scope ora.struct.decl visible from `anchorOp`.
+    /// Returns a null/empty string ref on failure.
+    MLIR_CAPI_EXPORTED MlirStringRef oraStructTypeGetFieldNameInScope(
+        MlirOperation anchorOp,
+        MlirType structType,
+        size_t index);
+
+    /// Look up the field type at `index` for an Ora struct type using the
+    /// nearest in-scope ora.struct.decl visible from `anchorOp`.
+    /// Returns a null type on failure.
+    MLIR_CAPI_EXPORTED MlirType oraStructTypeGetFieldTypeInScope(
+        MlirOperation anchorOp,
+        MlirType structType,
+        size_t index);
+
     /// Create an Ora error union type !ora.error_union<successType>
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
         MlirContext ctx,

@@ -52,6 +52,37 @@
 #include <cstdlib>
 #include <cstring>
 
+namespace
+{
+    static mlir::Operation *findStructDeclInScope(mlir::Operation *anchor, llvm::StringRef structName)
+    {
+        if (!anchor)
+            return nullptr;
+
+        auto module = llvm::dyn_cast<mlir::ModuleOp>(anchor);
+        if (!module)
+            module = anchor->getParentOfType<mlir::ModuleOp>();
+        if (!module)
+            return nullptr;
+
+        mlir::Operation *structDecl = nullptr;
+        module.walk([&](mlir::Operation *declOp)
+                    {
+                        if (declOp->getName().getStringRef() != "ora.struct.decl")
+                            return mlir::WalkResult::advance();
+                        auto nameAttr = declOp->getAttrOfType<mlir::StringAttr>("sym_name");
+                        if (!nameAttr)
+                            nameAttr = declOp->getAttrOfType<mlir::StringAttr>("name");
+                        if (nameAttr && nameAttr.getValue() == structName)
+                        {
+                            structDecl = declOp;
+                            return mlir::WalkResult::interrupt();
+                        }
+                        return mlir::WalkResult::advance(); });
+        return structDecl;
+    }
+}
+
 extern "C"
 {
     MlirStringRef oraStringRefCreate(const char *data, size_t length)
@@ -1652,6 +1683,103 @@ MlirType oraStructTypeGet(MlirContext ctx, MlirStringRef structName)
 
         auto structType = ora::StructType::get(context, nameRef);
         return wrap(structType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+size_t oraStructTypeGetFieldCountInScope(MlirOperation anchorOp, MlirType structType)
+{
+    try
+    {
+        mlir::Operation *anchor = unwrap(anchorOp);
+        if (!anchor)
+            return 0;
+
+        mlir::Type type = unwrap(structType);
+        auto oraStructType = llvm::dyn_cast<ora::StructType>(type);
+        if (!oraStructType)
+            return 0;
+
+        auto structDecl = findStructDeclInScope(anchor, oraStructType.getName());
+        if (!structDecl)
+            return 0;
+
+        auto fieldNamesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+            return 0;
+
+        return fieldNamesAttr.size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirStringRef oraStructTypeGetFieldNameInScope(MlirOperation anchorOp, MlirType structType, size_t index)
+{
+    try
+    {
+        mlir::Operation *anchor = unwrap(anchorOp);
+        if (!anchor)
+            return oraStringRefCreate(nullptr, 0);
+
+        mlir::Type type = unwrap(structType);
+        auto oraStructType = llvm::dyn_cast<ora::StructType>(type);
+        if (!oraStructType)
+            return oraStringRefCreate(nullptr, 0);
+
+        auto structDecl = findStructDeclInScope(anchor, oraStructType.getName());
+        if (!structDecl)
+            return oraStringRefCreate(nullptr, 0);
+
+        auto fieldNamesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size() || index >= fieldNamesAttr.size())
+            return oraStringRefCreate(nullptr, 0);
+
+        auto nameAttr = llvm::dyn_cast<mlir::StringAttr>(fieldNamesAttr[index]);
+        if (!nameAttr)
+            return oraStringRefCreate(nullptr, 0);
+        auto value = nameAttr.getValue();
+        return oraStringRefCreate(value.data(), value.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirType oraStructTypeGetFieldTypeInScope(MlirOperation anchorOp, MlirType structType, size_t index)
+{
+    try
+    {
+        mlir::Operation *anchor = unwrap(anchorOp);
+        if (!anchor)
+            return {nullptr};
+
+        mlir::Type type = unwrap(structType);
+        auto oraStructType = llvm::dyn_cast<ora::StructType>(type);
+        if (!oraStructType)
+            return {nullptr};
+
+        auto structDecl = findStructDeclInScope(anchor, oraStructType.getName());
+        if (!structDecl)
+            return {nullptr};
+
+        auto fieldNamesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<mlir::ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size() || index >= fieldTypesAttr.size())
+            return {nullptr};
+
+        auto typeAttr = llvm::dyn_cast<mlir::TypeAttr>(fieldTypesAttr[index]);
+        if (!typeAttr)
+            return {nullptr};
+        return wrap(typeAttr.getValue());
     }
     catch (...)
     {
