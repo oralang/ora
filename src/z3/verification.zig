@@ -1579,6 +1579,58 @@ pub const VerificationPass = struct {
         const decl = z3.Z3_get_app_decl(self.context.ctx, app);
         const kind = z3.Z3_get_decl_kind(self.context.ctx, decl);
 
+        if (kind == z3.Z3_OP_ITE and z3.Z3_get_app_num_args(self.context.ctx, app) == 3) {
+            const ite_cond = z3.Z3_get_app_arg(self.context.ctx, app, 0);
+            const ite_then = z3.Z3_get_app_arg(self.context.ctx, app, 1);
+            const ite_else = z3.Z3_get_app_arg(self.context.ctx, app, 2);
+
+            const then_bool = astSimplifiesToBool(self.context.ctx, ite_then);
+            const else_bool = astSimplifiesToBool(self.context.ctx, ite_else);
+
+            if (then_bool) |then_value| {
+                if (else_bool) |else_value| {
+                    if (then_value and !else_value) {
+                        try self.appendNormalizedPathConstraint(constraints, ite_cond);
+                        return;
+                    }
+                    if (!then_value and else_value) {
+                        try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_cond));
+                        return;
+                    }
+                } else if (!then_value) {
+                    // ite c false e == !c && e
+                    try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_cond));
+                    try self.appendNormalizedPathConstraint(constraints, ite_else);
+                    return;
+                } else {
+                    // ite c true e == c || e
+                    try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_or(
+                        self.context.ctx,
+                        2,
+                        &[_]z3.Z3_ast{ ite_cond, ite_else },
+                    ));
+                    return;
+                }
+            }
+
+            if (else_bool) |else_value| {
+                if (!else_value) {
+                    // ite c t false == c && t
+                    try self.appendNormalizedPathConstraint(constraints, ite_cond);
+                    try self.appendNormalizedPathConstraint(constraints, ite_then);
+                    return;
+                } else {
+                    // ite c t true == !c || t
+                    try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_or(
+                        self.context.ctx,
+                        2,
+                        &[_]z3.Z3_ast{ z3.Z3_mk_not(self.context.ctx, ite_cond), ite_then },
+                    ));
+                    return;
+                }
+            }
+        }
+
         if (kind == z3.Z3_OP_AND) {
             const num_args = z3.Z3_get_app_num_args(self.context.ctx, app);
             for (0..@intCast(num_args)) |arg_idx| {
@@ -1604,6 +1656,14 @@ pub const VerificationPass = struct {
                             // not(ite c true e)  ==  !c && !e
                             try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_cond));
                             try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_else));
+                            return;
+                        }
+                    }
+                    if (astSimplifiesToBool(self.context.ctx, ite_else)) |else_value| {
+                        if (else_value) {
+                            // not(ite c t true) == c && !t
+                            try self.appendNormalizedPathConstraint(constraints, ite_cond);
+                            try self.appendNormalizedPathConstraint(constraints, z3.Z3_mk_not(self.context.ctx, ite_then));
                             return;
                         }
                     }
@@ -1990,6 +2050,7 @@ pub const VerificationPass = struct {
             // Obligation proving: assumptions ∧ ¬obligation must be UNSAT.
             for (obligation_annotations.items) |ann| {
                 try self.solver.pushChecked();
+                defer self.solver.pop();
                 try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
@@ -2016,6 +2077,10 @@ pub const VerificationPass = struct {
                 }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try self.solver.assertChecked(negated);
+                if (self.encoder.isDegraded()) {
+                    try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
+                    return result;
+                }
 
                 const obligation_label = obligationKindLabel(ann.kind);
                 self.traceSmt("{s} [{s}] check-start", .{ fn_name, obligation_label });
@@ -2053,7 +2118,6 @@ pub const VerificationPass = struct {
                         .counterexample = ce,
                         .allocator = self.allocator,
                     });
-                    try self.solver.popChecked();
                     continue;
                 }
                 if (obligation_status == z3.Z3_L_UNDEF) {
@@ -2074,11 +2138,10 @@ pub const VerificationPass = struct {
                     }
                 }
 
-                try self.solver.popChecked();
-
                 if (ann.kind == .LoopInvariant) {
                     if (ann.old_condition) |old_inv| {
                         try self.solver.pushChecked();
+                        defer self.solver.pop();
                         for (ann.path_constraints) |cst| {
                             try self.solver.assertChecked(cst);
                         }
@@ -2111,6 +2174,10 @@ pub const VerificationPass = struct {
                             try self.solver.assertChecked(step_cond);
                         }
                         try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
+                        if (self.encoder.isDegraded()) {
+                            try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
+                            return result;
+                        }
 
                         self.traceSmt("{s} [invariant-step] check-start", .{fn_name});
                         self.traceCurrentSolverState("query");
@@ -2146,7 +2213,6 @@ pub const VerificationPass = struct {
                                 .counterexample = ce,
                                 .allocator = self.allocator,
                             });
-                            try self.solver.popChecked();
                             continue;
                         }
                         if (step_status == z3.Z3_L_UNDEF) {
@@ -2159,8 +2225,6 @@ pub const VerificationPass = struct {
                                 ann.column,
                             );
                         }
-
-                        try self.solver.popChecked();
                     }
                 }
             }
@@ -2170,6 +2234,7 @@ pub const VerificationPass = struct {
                 const exit_condition = inv_ann.loop_exit_condition orelse continue;
                 for (ensure_annotations.items) |ensure_ann| {
                     try self.solver.pushChecked();
+                    defer self.solver.pop();
                     for (ensure_ann.path_constraints) |cst| {
                         try self.solver.assertChecked(cst);
                     }
@@ -2197,6 +2262,10 @@ pub const VerificationPass = struct {
 
                     try self.solver.assertChecked(exit_condition);
                     try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
+                    if (self.encoder.isDegraded()) {
+                        try self.addDegradedDuringProvingError(&result, ensure_ann.file, ensure_ann.line, ensure_ann.column);
+                        return result;
+                    }
 
                     self.traceSmt("{s} [invariant-post] check-start", .{fn_name});
                     self.traceCurrentSolverState("query");
@@ -2236,7 +2305,6 @@ pub const VerificationPass = struct {
                             .counterexample = ce,
                             .allocator = self.allocator,
                         });
-                        try self.solver.popChecked();
                         continue;
                     }
                     if (post_status == z3.Z3_L_UNDEF) {
@@ -2252,8 +2320,6 @@ pub const VerificationPass = struct {
                             ensure_ann.column,
                         );
                     }
-
-                    try self.solver.popChecked();
                 }
             }
 
@@ -2268,6 +2334,7 @@ pub const VerificationPass = struct {
                 // First check: can the guard EVER be satisfied given previous guards?
                 // If (assumptions AND previous_guards AND this_guard) is UNSAT, error!
                 try self.solver.pushChecked();
+                defer self.solver.pop();
                 try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
@@ -2286,6 +2353,10 @@ pub const VerificationPass = struct {
                     try self.solver.assertChecked(cst);
                 }
                 try self.solver.assertChecked(ann.condition);
+                if (self.encoder.isDegraded()) {
+                    try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
+                    return result;
+                }
                 self.traceSmt("{s} guard {s} [satisfy] check-start", .{ fn_name, ann.guard_id.? });
                 self.traceCurrentSolverState("query");
                 std.debug.print("verification: {s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
@@ -2304,7 +2375,6 @@ pub const VerificationPass = struct {
                     self.logAst("guard", ann.condition);
                     self.logSolverState("satisfiability");
                 }
-                try self.solver.popChecked();
 
                 if (satisfy_status == z3.Z3_L_FALSE) {
                     // Guard can NEVER be satisfied given previous constraints - error!
@@ -2336,6 +2406,7 @@ pub const VerificationPass = struct {
 
                 // Second check: can the guard be violated? (to determine if it should be kept)
                 try self.solver.pushChecked();
+                defer self.solver.pop();
                 try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
@@ -2355,6 +2426,10 @@ pub const VerificationPass = struct {
                 }
                 const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try self.solver.assertChecked(not_guard);
+                if (self.encoder.isDegraded()) {
+                    try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
+                    return result;
+                }
                 if (self.debug_z3) {
                     std.debug.print("[Z3] guard {s}\n", .{ann.guard_id.?});
                     self.logAst("guard", ann.condition);
@@ -2413,7 +2488,6 @@ pub const VerificationPass = struct {
                         ann.column,
                     );
                 }
-                try self.solver.popChecked();
 
                 try previous_guards.append(ann);
             }
@@ -3997,6 +4071,27 @@ pub const VerificationPass = struct {
             0,
         );
         return result;
+    }
+
+    fn addDegradedDuringProvingError(
+        self: *VerificationPass,
+        result: *errors.VerificationResult,
+        file: []const u8,
+        line: u32,
+        column: u32,
+    ) !void {
+        const reason = self.encoder.degradationReason() orelse "unknown SMT encoding degradation";
+        try self.addUnknownVerificationError(
+            result,
+            try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted: SMT encoding degraded during proving ({s})",
+                .{reason},
+            ),
+            file,
+            line,
+            column,
+        );
     }
 
     fn addUnknownVerificationError(
@@ -7188,6 +7283,35 @@ test "sequential guard verification uses linear path assumptions to prove guards
     try testing.expect(result.proven_guard_ids.contains("guard:test:linear"));
 }
 
+test "path constraint normalization flattens boolean ite ladders" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const bool_sort = z3.Z3_mk_bool_sort(pass.context.ctx);
+    const cond = try pass.encoder.mkVariable("ite_ladder_cond", bool_sort);
+    const prev = try pass.encoder.mkVariable("ite_ladder_prev", bool_sort);
+
+    const ite = z3.Z3_mk_ite(pass.context.ctx, cond, prev, z3.Z3_mk_true(pass.context.ctx));
+    const nested = z3.Z3_mk_not(pass.context.ctx, ite);
+
+    try pass.active_path_assumptions.append(.{
+        .condition = nested,
+        .extra_constraints = &[_]z3.Z3_ast{},
+        .owned_extra_constraints = false,
+    });
+
+    const constraints = try pass.captureActivePathConstraints();
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+
+    try testing.expect(constraints.len > 0);
+
+    var solver = try Solver.init(pass.encoder.context, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |constraint| solver.assert(constraint);
+    solver.assert(z3.Z3_mk_not(pass.context.ctx, nested));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 fn verificationErrorTypeCounts(result: *const errors.VerificationResult) [@typeInfo(errors.VerificationErrorType).@"enum".fields.len]usize {
     var counts = [_]usize{0} ** @typeInfo(errors.VerificationErrorType).@"enum".fields.len;
     for (result.errors.items) |err| {
@@ -7603,6 +7727,28 @@ test "degraded SMT encoding fails closed" {
     try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "SMT encoding degraded"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "test degradation"));
+}
+
+test "mid-proof SMT degradation fails closed" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+
+    pass.encoder.encoding_degraded = true;
+    pass.encoder.encoding_degraded_reason = "mid-proof degradation";
+
+    try pass.addDegradedDuringProvingError(&result, "/tmp/test.ora", 9, 4);
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expectEqualStrings("/tmp/test.ora", result.errors.items[0].file);
+    try testing.expectEqual(@as(u32, 9), result.errors.items[0].line);
+    try testing.expectEqual(@as(u32, 4), result.errors.items[0].column);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "degraded during proving"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "mid-proof degradation"));
 }
 
 test "unknown verification errors fail closed" {
