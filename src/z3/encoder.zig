@@ -9353,8 +9353,62 @@ pub const Encoder = struct {
         return .{ .ptr = null };
     }
 
+    fn tryResolveBlockArgInitOperand(self: *Encoder, value: mlir.MlirValue) ?mlir.MlirValue {
+        _ = self;
+        if (!mlir.mlirValueIsABlockArgument(value)) return null;
+
+        const owner_block = mlir.mlirBlockArgumentGetOwner(value);
+        if (mlir.oraBlockIsNull(owner_block)) return null;
+
+        const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+        if (mlir.oraOperationIsNull(parent_op)) return null;
+
+        const arg_no: usize = @intCast(mlir.mlirBlockArgumentGetArgNumber(value));
+        const name_ref = mlir.oraOperationGetName(parent_op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(parent_op));
+            if (arg_no < num_operands) {
+                return mlir.oraOperationGetOperand(parent_op, @intCast(arg_no));
+            }
+            return null;
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            if (arg_no == 0) return null;
+            const init_operand_index = arg_no + 2;
+            const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(parent_op));
+            if (init_operand_index < num_operands) {
+                return mlir.oraOperationGetOperand(parent_op, @intCast(init_operand_index));
+            }
+            return null;
+        }
+
+        return null;
+    }
+
+    fn tryLookupStructFieldNamesFromBlockArg(self: *Encoder, value: mlir.MlirValue) EncodeError!?[]u8 {
+        const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return null;
+        return try self.tryLookupStructFieldNamesFromValue(init_operand);
+    }
+
+    fn tryLookupStructFieldTypeFromBlockArg(self: *Encoder, value: mlir.MlirValue, index: usize) EncodeError!mlir.MlirType {
+        const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return .{ .ptr = null };
+        return try self.tryLookupStructFieldTypeFromValue(init_operand, index);
+    }
+
     fn tryLookupStructFieldNamesFromValue(self: *Encoder, value: mlir.MlirValue) !?[]u8 {
-        if (!mlir.oraValueIsAOpResult(value)) return null;
+        if (!mlir.oraValueIsAOpResult(value)) {
+            if (mlir.mlirValueIsABlockArgument(value)) {
+                return try self.tryLookupStructFieldNamesFromBlockArg(value);
+            }
+            return null;
+        }
         const owner = mlir.oraOpResultGetOwner(value);
         if (mlir.oraOperationIsNull(owner)) return null;
 
@@ -9441,7 +9495,12 @@ pub const Encoder = struct {
     }
 
     fn tryLookupStructFieldTypeFromValue(self: *Encoder, value: mlir.MlirValue, index: usize) !mlir.MlirType {
-        if (!mlir.oraValueIsAOpResult(value)) return .{ .ptr = null };
+        if (!mlir.oraValueIsAOpResult(value)) {
+            if (mlir.mlirValueIsABlockArgument(value)) {
+                return try self.tryLookupStructFieldTypeFromBlockArg(value, index);
+            }
+            return .{ .ptr = null };
+        }
         const owner = mlir.oraOpResultGetOwner(value);
         if (mlir.oraOperationIsNull(owner)) return .{ .ptr = null };
 
