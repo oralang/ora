@@ -14495,6 +14495,118 @@ test "scf.while canonical signed positive-delta decrement result encodes exactly
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "scf.while unsigned swapped-compare decrement degrades exact SMT modeling" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, delta_attr);
+    const init = mlir.oraOperationGetResult(init_op, 0);
+    const bound_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("unsignedSwappedDecBound"), i256_ty);
+    const bound = mlir.oraOperationGetResult(bound_op, 0);
+
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{init}, 1, &[_]mlir.MlirType{i256_ty}, 1);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, bound, before_arg); // ugt swapped
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const next_op = mlir.oraArithSubIOpCreate(mlir_ctx, loc, after_arg, mlir.oraOperationGetResult(delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeOperation(init_op);
+    _ = try encoder.encodeOperation(delta_op);
+    _ = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(encoder.isDegraded());
+}
+
+test "scf.while signed swapped-compare decrement degrades exact SMT modeling" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, delta_attr);
+    const init = mlir.oraOperationGetResult(init_op, 0);
+    const bound_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("signedSwappedDecBound"), i256_ty);
+    const bound = mlir.oraOperationGetResult(bound_op, 0);
+
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{init}, 1, &[_]mlir.MlirType{i256_ty}, 1);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 4, bound, before_arg); // sgt swapped
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const next_op = mlir.oraArithSubIOpCreate(mlir_ctx, loc, after_arg, mlir.oraOperationGetResult(delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeOperation(init_op);
+    _ = try encoder.encodeOperation(delta_op);
+    _ = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(encoder.isDegraded());
+}
+
 test "known pure callee canonical signed positive-delta decrement scf.while return encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

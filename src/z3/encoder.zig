@@ -6444,6 +6444,12 @@ pub const Encoder = struct {
             return try self.encodeUnsignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
         }
 
+        // Swapped-compare forms normalize to slt/ult. Those are not valid
+        // decrement closed forms because the control variable moves away from
+        // the bound, so we must fail closed instead of routing them through the
+        // signed decrement path.
+        if (normalized_predicate != 4) return null;
+
         if (delta_u64 != 1) {
             return try self.encodeSignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
         }
