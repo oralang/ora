@@ -4333,7 +4333,7 @@ test "func.call summary with unresolved ora.try_stmt preserves unchanged slots" 
     try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") != null);
 }
 
-test "func.call summary with symbolic loop ora.try_stmt degrades differing slots only" {
+test "func.call summary with symbolic loop ora.try_stmt encodes differing slots exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -4453,8 +4453,7 @@ test "func.call summary with symbolic loop ora.try_stmt degrades differing slots
     );
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("try state summary is not encoded exactly", encoder.degradationReason().?);
+    try testing.expect(!encoder.isDegraded());
 
     const stable = encoder.global_map.get("stable").?;
     var solver = try Solver.init(&z3_ctx, testing.allocator);
@@ -4465,7 +4464,7 @@ test "func.call summary with symbolic loop ora.try_stmt degrades differing slots
     const counter = encoder.global_map.get("counter").?;
     const counter_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, counter));
     _ = counter_pre;
-    try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") != null);
+    try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") == null);
 }
 
 test "func.call summary with dead zero-iteration scf.for in ora.try_stmt preserves state exactly" {

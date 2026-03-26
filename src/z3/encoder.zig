@@ -7415,6 +7415,9 @@ pub const Encoder = struct {
             if (try self.tryExtractSingleIterationScfForCatchPredicate(start_op, mode, continuation)) |pred| {
                 return pred;
             }
+            if (try self.tryExtractLoopInvariantScfForCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
             return null;
         }
 
@@ -7492,6 +7495,50 @@ pub const Encoder = struct {
         defer self.unbindFiniteScfForLoopArgs(loop_ctx);
         self.invalidateBlockValueCaches(loop_ctx.body);
         return try self.tryExtractCatchPredicateFromBlock(loop_ctx.body, mode, rest);
+    }
+
+    fn tryExtractLoopInvariantScfForCatchPredicate(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands != 3) return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+
+        const body_arg_count: usize = @intCast(mlir.oraBlockGetNumArguments(body));
+        if (body_arg_count != 1) return null;
+
+        const iv = mlir.oraBlockGetArgument(body, 0);
+        const lb_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 0), mode);
+        const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
+        const iv_sort = z3.Z3_get_sort(self.context.ctx, lb_ast);
+
+        const iv_name = try std.fmt.allocPrint(self.allocator, "scf_for_catch_iv_{d}", .{@intFromPtr(for_op.ptr)});
+        defer self.allocator.free(iv_name);
+        const iv_symbol = z3.Z3_mk_string_symbol(self.context.ctx, iv_name.ptr);
+        const iv_ast = z3.Z3_mk_const(self.context.ctx, iv_symbol, iv_sort);
+
+        try self.bindValue(iv, iv_ast);
+        defer self.unbindValue(iv);
+        self.invalidateBlockValueCaches(body);
+
+        const body_pred = (try self.tryExtractCatchPredicateFromBlock(body, mode, self.encodeBoolConstant(false))) orelse return null;
+        const body_pred_text = std.mem.span(z3.Z3_ast_to_string(self.context.ctx, body_pred));
+        if (std.mem.indexOf(u8, body_pred_text, iv_name) != null) return null;
+
+        const enters_loop = if (mlir_helpers.getScfForUnsignedCmp(for_op))
+            z3.Z3_mk_bvult(self.context.ctx, lb_ast, ub_ast)
+        else
+            z3.Z3_mk_bvslt(self.context.ctx, lb_ast, ub_ast);
+        const catches_in_loop = self.encodeAnd(&.{ enters_loop, body_pred });
+        return self.encodeOr(&.{
+            catches_in_loop,
+            self.encodeAnd(&.{ self.encodeNot(catches_in_loop), continuation }),
+        });
     }
 
     fn tryExtractFiniteScfWhileCatchPredicate(
