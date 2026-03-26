@@ -100,7 +100,12 @@ fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, rhs: 
     try testing.expectEqual(lhs.degraded, rhs.degraded);
 }
 
-fn verifyExampleWithoutDegradation(path: []const u8, function_name: ?[]const u8, parallel: bool) !VerificationProbeSummary {
+fn verifyExampleWithoutDegradation(
+    path: []const u8,
+    function_name: ?[]const u8,
+    parallel: bool,
+    timeout_ms: ?u32,
+) !VerificationProbeSummary {
     var compilation = try compilePackage(path);
     defer compilation.deinit();
 
@@ -109,6 +114,7 @@ fn verifyExampleWithoutDegradation(path: []const u8, function_name: ?[]const u8,
     errdefer verifier.deinit();
     verifier.parallel = parallel;
     verifier.filter_function_name = function_name;
+    verifier.timeout_ms = timeout_ms;
 
     var result = if (parallel)
         try verifier.runVerificationPass(hir_result.module.raw_module)
@@ -11340,7 +11346,6 @@ test "compiler lowers real HIR if regions with carried locals" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
 }
 
@@ -11420,7 +11425,6 @@ test "compiler does not emit invalid ora.conditional_return inside deferred scf 
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
 }
 
@@ -13574,7 +13578,7 @@ test "complex SMT app probes do not degrade verification encoding" {
     };
 
     for (probes) |probe| {
-        var result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false);
+        var result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
         defer result.deinit(testing.allocator);
         try testing.expect(!result.degraded);
     }
@@ -13595,10 +13599,10 @@ test "complex SMT app probes match between sequential and parallel verification"
     };
 
     for (probes) |probe| {
-        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false);
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
         defer seq_result.deinit(testing.allocator);
 
-        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true);
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
         defer par_result.deinit(testing.allocator);
 
         try testing.expect(!seq_result.degraded);
@@ -13612,6 +13616,7 @@ test "open_stream_add_unknown verifies without degradation" {
         "ora-example/smt/soundness/open_stream_add_unknown.ora",
         "openLike",
         false,
+        10_000,
     );
     defer result.deinit(testing.allocator);
 

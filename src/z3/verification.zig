@@ -2049,13 +2049,17 @@ pub const VerificationPass = struct {
 
             // Obligation proving: assumptions ∧ ¬obligation must be UNSAT.
             for (obligation_annotations.items) |ann| {
+                var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
+                defer relevant_symbols.deinit();
                 try self.solver.pushChecked();
                 defer self.solver.pop();
-                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann, &relevant_symbols);
                 for (ann.path_constraints) |cst| {
+                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 for (ann.extra_constraints) |cst| {
+                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 if (ann.kind == .LoopInvariant) {
@@ -2067,9 +2071,11 @@ pub const VerificationPass = struct {
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         for (peer_inv_ann.path_constraints) |cst| {
+                            if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                             try self.solver.assertChecked(cst);
                         }
                         for (peer_inv_ann.extra_constraints) |cst| {
+                            if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                             try self.solver.assertChecked(cst);
                         }
                         try self.solver.assertChecked(peer_inv_ann.condition);
@@ -2330,26 +2336,33 @@ pub const VerificationPass = struct {
             defer previous_guards.deinit();
             for (guard_annotations.items) |ann| {
                 if (ann.guard_id == null) continue;
+                var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
+                defer relevant_symbols.deinit();
 
                 // First check: can the guard EVER be satisfied given previous guards?
                 // If (assumptions AND previous_guards AND this_guard) is UNSAT, error!
                 try self.solver.pushChecked();
                 defer self.solver.pop();
-                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann, &relevant_symbols);
                 for (ann.path_constraints) |cst| {
+                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 for (previous_guards.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     for (prev.path_constraints) |cst| {
+                        if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                         try self.solver.assertChecked(cst);
                     }
                     for (prev.extra_constraints) |cst| {
+                        if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                         try self.solver.assertChecked(cst);
                     }
+                    if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try self.solver.assertChecked(prev.condition);
                 }
                 for (ann.extra_constraints) |cst| {
+                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 try self.solver.assertChecked(ann.condition);
@@ -2407,18 +2420,22 @@ pub const VerificationPass = struct {
                 // Second check: can the guard be violated? (to determine if it should be kept)
                 try self.solver.pushChecked();
                 defer self.solver.pop();
-                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann, &relevant_symbols);
                 for (ann.path_constraints) |cst| {
+                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 for (previous_guards.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     for (prev.path_constraints) |cst| {
+                        if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                         try self.solver.assertChecked(cst);
                     }
                     for (prev.extra_constraints) |cst| {
+                        if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                         try self.solver.assertChecked(cst);
                     }
+                    if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try self.solver.assertChecked(prev.condition);
                 }
                 for (ann.extra_constraints) |cst| {
@@ -2545,6 +2562,9 @@ pub const VerificationPass = struct {
 
             try self.solver.resetChecked();
             try self.solver.loadFromSmtlib(query.smtlib_z);
+            if (self.timeout_ms) |ms| {
+                try self.solver.setTimeoutMs(ms);
+            }
 
             std.debug.print("{s} start\n", .{query.log_prefix});
             var timer = try std.time.Timer.start();
@@ -2680,13 +2700,6 @@ pub const VerificationPass = struct {
                 };
                 defer solver.deinit();
 
-                if (ctx.timeout_ms) |ms| {
-                    solver.setTimeoutMs(ms) catch |err| {
-                        ctx.recordSetupError(err);
-                        return;
-                    };
-                }
-
                 while (true) {
                     const idx = ctx.next_index.fetchAdd(1, .seq_cst);
                     if (idx >= ctx.queries.len) break;
@@ -2720,6 +2733,12 @@ pub const VerificationPass = struct {
                         ctx.results[idx].err = err;
                         continue;
                     };
+                    if (ctx.timeout_ms) |ms| {
+                        solver.setTimeoutMs(ms) catch |err| {
+                            ctx.results[idx].err = err;
+                            continue;
+                        };
+                    }
                     if (ctx.trace_smt) {
                         std.debug.print("smt-trace: Q{d} load-smt done\n", .{idx + 1});
                         std.debug.print("smt-trace: Q{d} check start\n", .{idx + 1});
@@ -3807,20 +3826,22 @@ pub const VerificationPass = struct {
             });
 
             for (obligation_annotations.items) |ann| {
+                var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
+                defer relevant_symbols.deinit();
                 var obligation_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer obligation_constraints.deinit();
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
-                try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann);
-                try addConstraintSlice(&obligation_constraints, ann.path_constraints);
-                try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann, &relevant_symbols);
+                try addRelevantConstraintSlice(self, &obligation_constraints, ann.path_constraints, &relevant_symbols);
+                try addRelevantConstraintSlice(self, &obligation_constraints, ann.extra_constraints, &relevant_symbols);
                 if (ann.kind == .LoopInvariant) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
-                        try addConstraintSlice(&obligation_constraints, peer_inv_ann.path_constraints);
-                        try addConstraintSlice(&obligation_constraints, peer_inv_ann.extra_constraints);
+                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
+                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
                         try obligation_constraints.append(peer_inv_ann.condition);
                     }
                 }
@@ -3943,17 +3964,20 @@ pub const VerificationPass = struct {
 
             for (guard_annotations.items) |ann| {
                 if (ann.guard_id == null) continue;
+                var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
+                defer relevant_symbols.deinit();
 
                 var guard_base = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer guard_base.deinit();
                 try addConstraintSlice(&guard_base, assumption_constraints.items);
-                try addApplicablePathAssumptionsToConstraintList(self, &guard_base, path_assumption_annotations.items, ann);
-                try addConstraintSlice(&guard_base, ann.path_constraints);
+                try addApplicablePathAssumptionsToConstraintList(self, &guard_base, path_assumption_annotations.items, ann, &relevant_symbols);
+                try addRelevantConstraintSlice(self, &guard_base, ann.path_constraints, &relevant_symbols);
 
                 for (previous_guards.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
-                    try addConstraintSlice(&guard_base, prev.path_constraints);
-                    try addConstraintSlice(&guard_base, prev.extra_constraints);
+                    try addRelevantConstraintSlice(self, &guard_base, prev.path_constraints, &relevant_symbols);
+                    try addRelevantConstraintSlice(self, &guard_base, prev.extra_constraints, &relevant_symbols);
+                    if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try guard_base.append(prev.condition);
                 }
 
@@ -3961,7 +3985,7 @@ pub const VerificationPass = struct {
                 var satisfy_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer satisfy_constraints.deinit();
                 try addConstraintSlice(&satisfy_constraints, guard_base.items);
-                try addConstraintSlice(&satisfy_constraints, ann.extra_constraints);
+                try addRelevantConstraintSlice(self, &satisfy_constraints, ann.extra_constraints, &relevant_symbols);
                 try satisfy_constraints.append(ann.condition);
 
                 const satisfy_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items);
@@ -3988,7 +4012,7 @@ pub const VerificationPass = struct {
                 var violate_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer violate_constraints.deinit();
                 try addConstraintSlice(&violate_constraints, guard_base.items);
-                try addConstraintSlice(&violate_constraints, ann.extra_constraints);
+                try addRelevantConstraintSlice(self, &violate_constraints, ann.extra_constraints, &relevant_symbols);
                 const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try violate_constraints.append(not_guard);
 
@@ -4200,6 +4224,7 @@ fn shouldSkipHeavyPathConstraint(ctx: z3.Z3_context, ast: z3.Z3_ast) bool {
         z3.c.Z3_OP_NOT,
         z3.c.Z3_OP_AND,
         z3.c.Z3_OP_OR,
+        z3.c.Z3_OP_XOR,
         z3.c.Z3_OP_ITE,
         => containsHeavyPathArithmetic(ctx, ast),
         else => false,
@@ -4349,14 +4374,24 @@ fn addApplicablePathAssumptionsToSolver(
     self: *VerificationPass,
     path_assumption_annotations: []const EncodedAnnotation,
     ann: EncodedAnnotation,
+    relevant_symbols: ?*const ManagedArrayList([]const u8),
 ) !void {
     for (path_assumption_annotations) |path_assume| {
         if (!pathAssumeAppliesToAnnotation(self, path_assume, ann)) continue;
         for (path_assume.path_constraints) |cst| {
+            if (relevant_symbols) |symbols| {
+                if (!astUsesOnlyRelevantSymbols(self, cst, symbols)) continue;
+            }
             try self.solver.assertChecked(cst);
         }
         for (path_assume.extra_constraints) |cst| {
+            if (relevant_symbols) |symbols| {
+                if (!astUsesOnlyRelevantSymbols(self, cst, symbols)) continue;
+            }
             try self.solver.assertChecked(cst);
+        }
+        if (relevant_symbols) |symbols| {
+            if (!astUsesOnlyRelevantSymbols(self, path_assume.condition, symbols)) continue;
         }
         try self.solver.assertChecked(path_assume.condition);
     }
@@ -4367,11 +4402,15 @@ fn addApplicablePathAssumptionsToConstraintList(
     constraints: *ManagedArrayList(z3.Z3_ast),
     path_assumption_annotations: []const EncodedAnnotation,
     ann: EncodedAnnotation,
+    relevant_symbols: ?*const ManagedArrayList([]const u8),
 ) !void {
     for (path_assumption_annotations) |path_assume| {
         if (!pathAssumeAppliesToAnnotation(self, path_assume, ann)) continue;
-        try addConstraintSlice(constraints, path_assume.path_constraints);
-        try addConstraintSlice(constraints, path_assume.extra_constraints);
+        try addRelevantConstraintSlice(self, constraints, path_assume.path_constraints, relevant_symbols);
+        try addRelevantConstraintSlice(self, constraints, path_assume.extra_constraints, relevant_symbols);
+        if (relevant_symbols) |symbols| {
+            if (!astUsesOnlyRelevantSymbols(self, path_assume.condition, symbols)) continue;
+        }
         try constraints.append(path_assume.condition);
     }
 }
@@ -4391,6 +4430,153 @@ fn constraintSlicesEquivalent(self: *VerificationPass, lhs: []const z3.Z3_ast, r
         if (!astEquivalent(self, l_ast, r_ast)) return false;
     }
     return true;
+}
+
+fn collectAstSymbols(
+    self: *VerificationPass,
+    ast: z3.Z3_ast,
+    symbols: *ManagedArrayList([]const u8),
+) !void {
+    if (z3.Z3_get_ast_kind(self.context.ctx, ast) != z3.Z3_APP_AST) return;
+
+    const app = z3.Z3_to_app(self.context.ctx, ast);
+    const num_args = z3.Z3_get_app_num_args(self.context.ctx, app);
+    if (num_args == 0) {
+        const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+        if (z3.Z3_get_decl_kind(self.context.ctx, decl) == z3.c.Z3_OP_UNINTERPRETED) {
+            const symbol = z3.Z3_get_decl_name(self.context.ctx, decl);
+            const symbol_text = z3.Z3_get_symbol_string(self.context.ctx, symbol);
+            if (symbol_text != null) {
+                const name = std.mem.span(symbol_text);
+                if (!symbolListContains(symbols.items, name)) {
+                    try symbols.append(name);
+                }
+            }
+        }
+        return;
+    }
+
+    for (0..@intCast(num_args)) |arg_idx| {
+        try collectAstSymbols(self, z3.Z3_get_app_arg(self.context.ctx, app, @intCast(arg_idx)), symbols);
+    }
+}
+
+fn astUsesOnlyRelevantSymbols(
+    self: *VerificationPass,
+    ast: z3.Z3_ast,
+    relevant_symbols: *const ManagedArrayList([]const u8),
+) bool {
+    if (z3.Z3_get_ast_kind(self.context.ctx, ast) != z3.Z3_APP_AST) return true;
+
+    const app = z3.Z3_to_app(self.context.ctx, ast);
+    const num_args = z3.Z3_get_app_num_args(self.context.ctx, app);
+    if (num_args == 0) {
+        const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+        if (z3.Z3_get_decl_kind(self.context.ctx, decl) == z3.c.Z3_OP_UNINTERPRETED) {
+            const symbol = z3.Z3_get_decl_name(self.context.ctx, decl);
+            const symbol_text = z3.Z3_get_symbol_string(self.context.ctx, symbol);
+            if (symbol_text == null) return true;
+            return symbolListContains(relevant_symbols.items, std.mem.span(symbol_text));
+        }
+        return true;
+    }
+
+    for (0..@intCast(num_args)) |arg_idx| {
+        if (!astUsesOnlyRelevantSymbols(self, z3.Z3_get_app_arg(self.context.ctx, app, @intCast(arg_idx)), relevant_symbols)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn extractZeroArgUninterpretedSymbol(self: *VerificationPass, ast: z3.Z3_ast) ?[]const u8 {
+    if (z3.Z3_get_ast_kind(self.context.ctx, ast) != z3.Z3_APP_AST) return null;
+    const app = z3.Z3_to_app(self.context.ctx, ast);
+    if (z3.Z3_get_app_num_args(self.context.ctx, app) != 0) return null;
+    const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+    if (z3.Z3_get_decl_kind(self.context.ctx, decl) != z3.c.Z3_OP_UNINTERPRETED) return null;
+    const symbol = z3.Z3_get_decl_name(self.context.ctx, decl);
+    const symbol_text = z3.Z3_get_symbol_string(self.context.ctx, symbol);
+    if (symbol_text == null) return null;
+    return std.mem.span(symbol_text);
+}
+
+fn expandRelevantSymbolsFromSimpleEqualities(
+    self: *VerificationPass,
+    symbols: *ManagedArrayList([]const u8),
+    constraints: []const z3.Z3_ast,
+) !void {
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (constraints) |constraint| {
+            if (z3.Z3_get_ast_kind(self.context.ctx, constraint) != z3.Z3_APP_AST) continue;
+            const app = z3.Z3_to_app(self.context.ctx, constraint);
+            if (z3.Z3_get_app_num_args(self.context.ctx, app) != 2) continue;
+            const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+            if (z3.Z3_get_decl_kind(self.context.ctx, decl) != z3.c.Z3_OP_EQ) continue;
+
+            const lhs_symbol = extractZeroArgUninterpretedSymbol(self, z3.Z3_get_app_arg(self.context.ctx, app, 0));
+            const rhs_symbol = extractZeroArgUninterpretedSymbol(self, z3.Z3_get_app_arg(self.context.ctx, app, 1));
+
+            if (lhs_symbol) |lhs| {
+                if (rhs_symbol) |rhs| {
+                    const lhs_known = symbolListContains(symbols.items, lhs);
+                    const rhs_known = symbolListContains(symbols.items, rhs);
+                    if (lhs_known and !rhs_known) {
+                        try symbols.append(rhs);
+                        changed = true;
+                    } else if (rhs_known and !lhs_known) {
+                        try symbols.append(lhs);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn buildRelevantSymbolSetForAnnotation(
+    self: *VerificationPass,
+    ann: EncodedAnnotation,
+) !ManagedArrayList([]const u8) {
+    var symbols = ManagedArrayList([]const u8).init(self.allocator);
+    errdefer symbols.deinit();
+
+    try collectAstSymbols(self, ann.condition, &symbols);
+    if (ann.old_condition) |old_cond| {
+        try collectAstSymbols(self, old_cond, &symbols);
+    }
+    if (ann.loop_step_condition) |step_cond| {
+        try collectAstSymbols(self, step_cond, &symbols);
+    }
+    if (ann.loop_exit_condition) |exit_cond| {
+        try collectAstSymbols(self, exit_cond, &symbols);
+    }
+    try expandRelevantSymbolsFromSimpleEqualities(self, &symbols, ann.extra_constraints);
+
+    return symbols;
+}
+
+fn addRelevantConstraintSlice(
+    self: *VerificationPass,
+    list: *ManagedArrayList(z3.Z3_ast),
+    constraints: []const z3.Z3_ast,
+    relevant_symbols: ?*const ManagedArrayList([]const u8),
+) !void {
+    for (constraints) |constraint| {
+        if (relevant_symbols) |symbols| {
+            if (!astUsesOnlyRelevantSymbols(self, constraint, symbols)) continue;
+        }
+        try list.append(constraint);
+    }
+}
+
+fn symbolListContains(symbols: []const []const u8, needle: []const u8) bool {
+    for (symbols) |symbol| {
+        if (std.mem.eql(u8, symbol, needle)) return true;
+    }
+    return false;
 }
 
 fn sameLoopInvariantGroup(self: *VerificationPass, reference: EncodedAnnotation, candidate: EncodedAnnotation) bool {

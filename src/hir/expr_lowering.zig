@@ -1999,7 +1999,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn computeUnsignedMulOverflow(
             self: *FunctionLowerer,
-            result: mlir.MlirValue,
+            _: mlir.MlirValue,
             a: mlir.MlirValue,
             b: mlir.MlirValue,
             value_ty: mlir.MlirType,
@@ -2007,12 +2007,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
             const b_non_zero = appendValueOp(self.block, self.createCompareOp(loc, "ne", b, zero));
-            const quot_op = mlir.oraArithDivUIOpCreate(self.parent.context, loc, result, b);
+
+            const width = mlir.oraIntegerTypeGetWidth(value_ty);
+            const max_value: u256 = if (width >= 256)
+                std.math.maxInt(u256)
+            else
+                (@as(u256, 1) << @intCast(width)) - 1;
+            const max_const = try @This().createWideIntegerConstant(self, value_ty, max_value, false, source.TextRange.empty(0));
+            const quot_op = mlir.oraArithDivUIOpCreate(self.parent.context, loc, max_const, b);
             if (mlir.oraOperationIsNull(quot_op)) return error.MlirOperationCreationFailed;
             mlir.oraOperationSetAttributeByName(quot_op, strRef("ora.guard_internal"), mlir.oraStringAttrCreate(self.parent.context, strRef("true")));
-            const quotient = appendValueOp(self.block, quot_op);
-            const mismatch = appendValueOp(self.block, self.createCompareOp(loc, "ne", quotient, a));
-            const overflow_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, mismatch, b_non_zero);
+            const max_div_b = appendValueOp(self.block, quot_op);
+            const above_limit = appendValueOp(self.block, self.createCompareOp(loc, "ugt", a, max_div_b));
+            const overflow_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, b_non_zero, above_limit);
             if (mlir.oraOperationIsNull(overflow_op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, overflow_op);
         }
