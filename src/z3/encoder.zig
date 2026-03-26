@@ -7428,6 +7428,9 @@ pub const Encoder = struct {
             if (try self.tryExtractSingleIterationScfWhileCatchPredicate(start_op, mode, continuation)) |pred| {
                 return pred;
             }
+            if (try self.tryExtractSymbolicSingleEntryScfWhileCatchPredicate(start_op, mode, continuation)) |pred| {
+                return pred;
+            }
             return null;
         }
 
@@ -7694,6 +7697,54 @@ pub const Encoder = struct {
         if (!self.isBoolConst(next_condition, false)) return null;
 
         return body_pred;
+    }
+
+    fn tryExtractSymbolicSingleEntryScfWhileCatchPredicate(
+        self: *Encoder,
+        while_op: mlir.MlirOperation,
+        mode: EncodeMode,
+        continuation: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const before_bind_count = try self.bindScfWhileBeforeArgs(while_op, mode);
+        defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+        if (mlir.oraBlockIsNull(before_block) or mlir.oraBlockIsNull(after_block)) return null;
+
+        self.invalidateBlockValueCaches(before_block);
+        self.invalidateBlockValueCaches(after_block);
+
+        const condition_op = self.findScfConditionOp(while_op) orelse return null;
+        if (mlir.oraOperationGetNumOperands(condition_op) < 1) return null;
+        const initial_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+
+        const after_bind_count = try self.bindScfWhileAfterArgsFromCondition(while_op, condition_op, mode);
+        const body_pred = (try self.tryExtractCatchPredicateFromBlock(after_block, mode, self.encodeBoolConstant(false))) orelse {
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            return null;
+        };
+        const yielded = (try self.extractScfWhileYieldValues(while_op, mode)) orelse {
+            self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+            return null;
+        };
+        defer self.allocator.free(yielded);
+
+        self.unbindScfWhileAfterArgs(while_op, after_bind_count);
+
+        const second_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, yielded);
+        defer self.unbindScfWhileBeforeArgs(while_op, second_bind_count);
+
+        self.invalidateBlockValueCaches(before_block);
+        self.invalidateBlockValueCaches(after_block);
+
+        const next_condition = try self.encodeValueWithMode(mlir.oraOperationGetOperand(condition_op, 0), mode);
+        if (!self.isBoolConst(next_condition, false)) return null;
+
+        return self.encodeOr(&.{
+            self.encodeAnd(&.{ initial_condition, body_pred }),
+            self.encodeAnd(&.{ self.encodeNot(initial_condition), continuation }),
+        });
     }
 
     fn tryExtractTryRegionCatchPredicate(

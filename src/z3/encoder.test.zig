@@ -4467,6 +4467,143 @@ test "func.call summary with symbolic loop ora.try_stmt encodes differing slots 
     try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") == null);
 }
 
+test "func.call summary with symbolic single-entry scf.while in ora.try_stmt preserves differing slots exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicSingleEntryTryWhileWriter"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, 1, &[_]mlir.MlirAttribute{
+            mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        })),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i1_ty, eu_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const enter_arg = mlir.oraBlockGetArgument(body, 0);
+    const maybe_arg = mlir.oraBlockGetArgument(body, 1);
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{}, 0);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+
+    const false_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i1_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0),
+    );
+    mlir.oraBlockAppendOwnedOperation(try_block, false_op);
+
+    const init_vals = [_]mlir.MlirValue{enter_arg};
+    const result_types = [_]mlir.MlirType{i1_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        before_arg,
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, maybe_arg, i256_ty);
+    mlir.oraBlockAppendOwnedOperation(after_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(false_op, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, while_op);
+
+    const try_store_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    );
+    mlir.oraBlockAppendOwnedOperation(try_block, try_store_op);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(try_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const catch_store_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33),
+    );
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_store_op);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraSStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(catch_store_op, 0),
+        stringRef("counter"),
+    ));
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(body, try_stmt);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const counter_pre = try encoder.getOrCreateCurrentGlobal("counter", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
+    const stable_pre = try encoder.getOrCreateCurrentGlobal("stable", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
+
+    const enter = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("shouldEnter"), i1_ty);
+    const maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("whileMaybe"), eu_ty);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("symbolicSingleEntryTryWhileWriter"),
+        &[_]mlir.MlirValue{
+            mlir.oraOperationGetResult(enter, 0),
+            mlir.oraOperationGetResult(maybe, 0),
+        },
+        2,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+
+    const stable = encoder.global_map.get("stable").?;
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, stable, stable_pre)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    const counter = encoder.global_map.get("counter").?;
+    const counter_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, counter));
+    _ = counter_pre;
+    try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") == null);
+}
+
 test "func.call summary with dead zero-iteration scf.for in ora.try_stmt preserves state exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
