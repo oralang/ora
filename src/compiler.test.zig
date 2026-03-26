@@ -11392,6 +11392,38 @@ test "compiler lowers if statements with carried locals and early return without
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
 }
 
+test "compiler does not emit invalid ora.conditional_return inside deferred scf regions" {
+    const source_text =
+        \\pub fn choose(level: u256) -> u256 {
+        \\    if (level > 10) {
+        \\        return 0;
+        \\    } else {
+        \\        if (level > 5) {
+        \\            return 1;
+        \\        } else {
+        \\            if (level > 2) {
+        \\                return 2;
+        \\            } else {
+        \\                return 3;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.if_placeholder"));
+}
+
 test "compiler preserves later early returns after deferred return slots are introduced" {
     const source_text =
         \\pub fn choose(a: u256, b: u256, c: u256) -> u256 {

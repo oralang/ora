@@ -255,6 +255,10 @@ fn stmtMayReturn(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
     };
 }
 
+pub fn statementMayReturn(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
+    return stmtMayReturn(file, statement_id);
+}
+
 fn stmtContainsSwitchBreak(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
     return stmtContainsSwitchBreakInContext(file, statement_id, false);
 }

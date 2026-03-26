@@ -33,6 +33,7 @@ const SwitchContext = support.SwitchContext;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
+const statementMayReturn = analysis.statementMayReturn;
 
 fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
@@ -570,6 +571,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn appendDeferredReturnCheck(self: *FunctionLowerer, range: source.TextRange, locals: *LocalEnv) anyerror!void {
             const flag = self.deferred_return_flag orelse return;
+            if (self.deferred_return_kind != .none) return;
             const loc = self.parent.location(range);
             const flag_load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, flag, null, 0, boolType(self.parent.context));
             if (mlir.oraOperationIsNull(flag_load)) return error.MlirOperationCreationFailed;
@@ -595,10 +597,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn lowerBody(self: *FunctionLowerer, body_id: ast.BodyId, locals: *LocalEnv) anyerror!bool {
             const body = self.parent.file.body(body_id).*;
             var seen_loop_control = false;
+            var seen_potential_return = false;
             for (body.statements) |statement_id| {
                 if (self.loop_context) |loop_context| {
                     if (loop_context.continue_flag.ptr != null and self.current_scf_carried_locals == null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
                         if (try @This().lowerStmtGuardedOnLoopContinue(self, statement_id, locals, loop_context)) return true;
+                    } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
+                        if (try @This().lowerStmtGuardedOnDeferredReturn(self, statement_id, locals)) return true;
                     } else {
                         if (try self.lowerStmt(statement_id, locals)) return true;
                     }
@@ -606,10 +611,76 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         seen_loop_control = true;
                     }
                 } else {
-                    if (try self.lowerStmt(statement_id, locals)) return true;
+                    if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
+                        if (try @This().lowerStmtGuardedOnDeferredReturn(self, statement_id, locals)) return true;
+                    } else {
+                        if (try self.lowerStmt(statement_id, locals)) return true;
+                    }
+                }
+                if (statementMayReturn(self.parent.file, statement_id)) {
+                    seen_potential_return = true;
                 }
             }
             return false;
+        }
+
+        fn lowerStmtGuardedOnDeferredReturn(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            locals: *LocalEnv,
+        ) anyerror!bool {
+            const return_flag = self.deferred_return_flag orelse return self.lowerStmt(statement_id, locals);
+            const range = support.stmtRange(self.parent.file, statement_id);
+            const loc = self.parent.location(range);
+
+            const return_value = appendValueOp(self.block, blk: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, return_flag, null, 0, boolType(self.parent.context));
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :blk load;
+            });
+            const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const should_run = self.createCompareOp(loc, "eq", return_value, false_value);
+            if (mlir.oraOperationIsNull(should_run)) return error.MlirOperationCreationFailed;
+
+            const carried_locals = self.deferred_return_carried_locals;
+            const result_types = if (carried_locals.len == 0)
+                null
+            else
+                (try self.buildCarriedResultTypes(locals, carried_locals)) orelse return error.MlirOperationCreationFailed;
+
+            const if_op = mlir.oraScfIfOpCreate(
+                self.parent.context,
+                loc,
+                appendValueOp(self.block, should_run),
+                if (result_types) |types| types.items.ptr else null,
+                if (result_types) |types| types.items.len else 0,
+                true,
+            );
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            then_lowerer.current_scf_carried_locals = carried_locals;
+            var then_locals = try self.cloneLocals(locals);
+            const terminated = try then_lowerer.lowerStmt(statement_id, &then_locals);
+            if (!support.blockEndsWithTerminator(then_block)) {
+                try then_lowerer.appendScfYieldFromLocals(then_block, range, &then_locals, carried_locals);
+            }
+
+            var else_locals = try self.cloneLocals(locals);
+            if (!support.blockEndsWithTerminator(else_block)) {
+                try self.appendScfYieldFromLocals(else_block, range, &else_locals, carried_locals);
+            }
+
+            try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals, if_op);
+            return terminated;
         }
 
         fn lowerStmtGuardedOnLoopContinue(
