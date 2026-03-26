@@ -205,7 +205,6 @@ test "struct_field_update preserves untouched fields exactly" {
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -432,6 +431,7 @@ test "known pure callee returning source-metadata struct update preserves untouc
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -506,6 +506,7 @@ test "caller struct_field_update recovers untouched fields from known callee sou
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -1338,7 +1339,6 @@ test "struct_field_update recovers untouched fields through ora.try_stmt source 
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -13068,6 +13068,95 @@ test "known callee with unknown write set degrades encoder" {
 
     try testing.expect(encoder.isDegraded());
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to recover known callee write set exactly"));
+}
+
+test "known callee nested map write set stays exact" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, inner_map_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writeAllowance"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{i256_ty, i256_ty, i256_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const owner = mlir.oraBlockGetArgument(helper_body, 0);
+    const spender = mlir.oraBlockGetArgument(helper_body, 1);
+    const value = mlir.oraBlockGetArgument(helper_body, 2);
+
+    const outer_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const outer_before_value = mlir.oraOperationGetResult(outer_before, 0);
+    const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
+    const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
+    const inner_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, inner_before_value, spender, value);
+    const outer_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, mlir.oraOperationGetResult(inner_after, 0));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+
+    mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, inner_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, inner_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, outer_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const owner_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const spender_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+    const owner_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, owner_attr);
+    const spender_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, spender_attr);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const owner_val = mlir.oraOperationGetResult(owner_op, 0);
+    const spender_val = mlir.oraOperationGetResult(spender_op, 0);
+    const value_val = mlir.oraOperationGetResult(value_op, 0);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writeAllowance"),
+        &[_]mlir.MlirValue{ owner_val, spender_val, value_val },
+        3,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+
+    const outer_after_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const inner_after_load = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(outer_after_load, 0), owner_val, inner_map_ty);
+    const final_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(inner_after_load, 0), spender_val, i256_ty);
+    const loaded = try encoder.encodeOperation(final_get);
+    const expected = try encoder.encodeValue(value_val);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "summary precondition encoding failure degrades encoder" {

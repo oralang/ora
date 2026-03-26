@@ -4777,6 +4777,13 @@ pub const Encoder = struct {
                     if (try self.tryExtractGuaranteedFirstIterationScfWhileReturnedExpr(current, result_index, mode)) |loop_returned_expr| {
                         return loop_returned_expr;
                     }
+                    const nested_expr = (try self.tryExtractZeroIterationScfWhileResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalUnsignedScfWhileResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalSignedScfWhileResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalIncrementScfWhileResult(current, result_index, mode)) orelse
+                        (try self.tryExtractCanonicalDecrementScfWhileResult(current, result_index, mode)) orelse
+                        (try self.tryExtractFiniteScfWhileResult(current, result_index, mode));
+                    if (nested_expr != null) return nested_expr;
                 }
             }
 
@@ -4854,12 +4861,21 @@ pub const Encoder = struct {
                 }
             }
 
-            if (std.mem.eql(u8, name, "ora.try_stmt") and !self.tryStmtMayEnterCatch(current)) {
+            if (std.mem.eql(u8, name, "ora.try_stmt")) {
                 const next_op = mlir.oraOperationGetNextInBlock(current);
                 if (mlir.oraOperationIsNull(next_op)) {
-                    const try_block = mlir.oraTryStmtOpGetTryBlock(current);
-                    const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
-                    if (nested_expr != null) return nested_expr;
+                    if ((self.tryStmtAlwaysEntersCatch(current, mode) catch false)) {
+                        const catch_region = mlir.oraOperationGetRegion(current, 1);
+                        if (!mlir.oraRegionIsNull(catch_region)) {
+                            const catch_block = mlir.oraRegionGetFirstBlock(catch_region);
+                            const nested_expr = try self.extractReturnedExprFromBlock(catch_block, result_index, mode);
+                            if (nested_expr != null) return nested_expr;
+                        }
+                    } else if (!self.tryStmtMayEnterCatch(current)) {
+                        const try_block = mlir.oraTryStmtOpGetTryBlock(current);
+                        const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
+                        if (nested_expr != null) return nested_expr;
+                    }
                 }
             }
 
@@ -8536,6 +8552,15 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.sload")) {
             return self.getStringAttr(owner, "global");
+        }
+
+        // Nested map access: ora.map_get(parent_map, key) — the write
+        // targets the root global that the parent map was loaded from.
+        if (std.mem.eql(u8, op_name, "ora.map_get")) {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return null;
+            const parent_map = mlir.oraOperationGetOperand(owner, 0);
+            return self.resolveGlobalNameFromMapOperand(parent_map);
         }
 
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base") or
