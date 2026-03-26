@@ -205,6 +205,7 @@ test "struct_field_update preserves untouched fields exactly" {
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -673,7 +674,6 @@ test "caller struct_field_update recovers untouched fields from known callee str
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -781,7 +781,6 @@ test "caller struct_field_update recovers untouched fields from known callee bra
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -1309,6 +1308,94 @@ test "struct_field_update recovers untouched fields through scf.execute_region s
     ));
 
     const pair = mlir.oraOperationGetResult(exec, 0);
+    const update_op = mlir.oraStructFieldUpdateOpCreate(mlir_ctx, loc, pair, stringRef("left"), seven);
+    const updated_pair = mlir.oraOperationGetResult(update_op, 0);
+    const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("right"), i256_ty);
+    const right_ast = try encoder.encodeOperation(extract_right);
+
+    try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "struct_field_update recovers untouched fields through ora.try_stmt source metadata" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
+
+    const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+    ), 0);
+    const three = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3),
+    ), 0);
+    const two = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
+    ), 0);
+    const seven = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    ), 0);
+
+    const try_stmt = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{struct_ty}, 1);
+    const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
+    const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("left")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("right")),
+    };
+
+    const try_init = mlir.oraStructInitOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{ one, two }, 2, struct_ty);
+    mlir.oraOperationSetAttributeByName(try_init, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraBlockAppendOwnedOperation(try_block, try_init);
+    mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_init, 0)},
+        1,
+    ));
+
+    const catch_init = mlir.oraStructInitOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{ three, two }, 2, struct_ty);
+    mlir.oraOperationSetAttributeByName(catch_init, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraBlockAppendOwnedOperation(catch_block, catch_init);
+    mlir.oraBlockAppendOwnedOperation(catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_init, 0)},
+        1,
+    ));
+
+    const pair = mlir.oraOperationGetResult(try_stmt, 0);
     const update_op = mlir.oraStructFieldUpdateOpCreate(mlir_ctx, loc, pair, stringRef("left"), seven);
     const updated_pair = mlir.oraOperationGetResult(update_op, 0);
     const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("right"), i256_ty);

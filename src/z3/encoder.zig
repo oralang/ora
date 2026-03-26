@@ -3449,6 +3449,18 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
                 const op_id = @intFromPtr(mlir_op.ptr);
+                if (try self.tryExtractCanonicalScfForDerivedResult(mlir_op, 0, mode)) |derived_result| {
+                    return derived_result;
+                }
+                if (try self.tryExtractCanonicalIncrementScfForResult(mlir_op, 0, mode)) |increment_result| {
+                    return increment_result;
+                }
+                if (try self.tryExtractCanonicalDecrementScfForResult(mlir_op, 0, mode)) |decrement_result| {
+                    return decrement_result;
+                }
+                if (try self.tryExtractIdentityScfForResult(mlir_op, 0, mode)) |identity_result| {
+                    return identity_result;
+                }
                 return (try self.tryExtractFiniteScfForResult(mlir_op, 0, mode)) orelse
                     try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
             }
@@ -9125,6 +9137,15 @@ pub const Encoder = struct {
             return recovered;
         }
 
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const try_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return null;
+            const catch_value = (try self.extractRegionYieldValue(owner, 1, result_index)) orelse return null;
+            const try_csv = try self.tryLookupStructFieldNamesFromValue(try_value);
+            const catch_csv = try self.tryLookupStructFieldNamesFromValue(catch_value);
+            return try self.mergeRecoveredFieldNames(try_csv, catch_csv);
+        }
+
         return null;
     }
 
@@ -9208,6 +9229,16 @@ pub const Encoder = struct {
                 if (mlir.oraTypeIsNull(recovered)) return .{ .ptr = null };
             }
             return recovered;
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+            const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
+            const try_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return .{ .ptr = null };
+            const catch_value = (try self.extractRegionYieldValue(owner, 1, result_index)) orelse return .{ .ptr = null };
+            return self.mergeRecoveredFieldTypes(
+                try self.tryLookupStructFieldTypeFromValue(try_value, index),
+                try self.tryLookupStructFieldTypeFromValue(catch_value, index),
+            );
         }
 
         return .{ .ptr = null };
