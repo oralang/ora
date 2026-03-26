@@ -2268,6 +2268,7 @@ pub const VerificationPass = struct {
                 // First check: can the guard EVER be satisfied given previous guards?
                 // If (assumptions AND previous_guards AND this_guard) is UNSAT, error!
                 try self.solver.pushChecked();
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -2335,6 +2336,7 @@ pub const VerificationPass = struct {
 
                 // Second check: can the guard be violated? (to determine if it should be kept)
                 try self.solver.pushChecked();
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -3871,6 +3873,7 @@ pub const VerificationPass = struct {
                 var guard_base = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer guard_base.deinit();
                 try addConstraintSlice(&guard_base, assumption_constraints.items);
+                try addApplicablePathAssumptionsToConstraintList(self, &guard_base, path_assumption_annotations.items, ann);
                 try addConstraintSlice(&guard_base, ann.path_constraints);
 
                 for (previous_guards.items) |prev| {
@@ -6196,6 +6199,49 @@ fn buildBranchPathGuardsModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildLinearPathAssumeGuardModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("linear_path_guard_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const param_types = [_]mlir.MlirType{i1_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const flag = mlir.oraBlockGetArgument(func_body, 0);
+
+    const assume_op = mlir.oraAssumeOpCreate(mlir_ctx, loc, flag);
+    mlir.oraOperationSetAttributeByName(
+        assume_op,
+        testStringRef("ora.assume_origin"),
+        mlir.oraStringAttrCreate(mlir_ctx, testStringRef("path")),
+    );
+
+    const guard_op = mlir.oraRefinementGuardOpCreate(mlir_ctx, loc, flag, testStringRef("linear path guard"));
+    mlir.oraOperationSetAttributeByName(
+        guard_op,
+        testStringRef("ora.guard_id"),
+        mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard:test:linear")),
+    );
+    mlir.oraOperationSetAttributeByName(
+        guard_op,
+        testStringRef("ora.refinement_kind"),
+        mlir.oraStringAttrCreate(mlir_ctx, testStringRef("min_value")),
+    );
+
+    const empty_vals = [_]mlir.MlirValue{};
+    mlir.oraBlockAppendOwnedOperation(func_body, assume_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, guard_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len));
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 test "scf.for loop invariants capture loop exit conditions" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -7035,6 +7081,39 @@ test "obligation query includes scoped path assumptions" {
     try testing.expect(found_obligation);
 }
 
+test "guard violate query includes scoped path assumptions" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var found_violate = false;
+    for (queries.items) |q| {
+        if (q.kind != .GuardViolate) continue;
+        found_violate = true;
+        pass.solver.reset();
+        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        const status = pass.solver.check();
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
+    }
+    try testing.expect(found_violate);
+}
+
 test "guard satisfy queries ignore incompatible sibling branch paths" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -7087,6 +7166,26 @@ test "sequential guard verification ignores sibling branch guards" {
 
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+}
+
+test "sequential guard verification uses linear path assumptions to prove guards" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.parallel = false;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:linear"));
 }
 
 fn verificationErrorTypeCounts(result: *const errors.VerificationResult) [@typeInfo(errors.VerificationErrorType).@"enum".fields.len]usize {
