@@ -13749,6 +13749,91 @@ test "known pure callee first-iteration scf.while return encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known pure callee finite two-iteration scf.while return encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("twoIterWhileReturn"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0));
+    mlir.oraBlockAppendOwnedOperation(body, true_op);
+    mlir.oraBlockAppendOwnedOperation(body, false_op);
+
+    const init_vals = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(true_op, 0),
+        mlir.oraOperationGetResult(true_op, 0),
+    };
+    const result_types = [_]mlir.MlirType{ i1_ty, i1_ty };
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(before_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i1_ty, loc);
+    const before_flag = mlir.oraBlockGetArgument(before_block, 0);
+    const before_next = mlir.oraBlockGetArgument(before_block, 1);
+    const after_next = mlir.oraBlockGetArgument(after_block, 1);
+
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        before_flag,
+        &[_]mlir.MlirValue{ before_flag, before_next },
+        2,
+    ));
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{ after_next, mlir.oraOperationGetResult(false_op, 0) },
+        2,
+    ));
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(while_op, 0)},
+        1,
+    ));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("twoIterWhileReturn"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{i1_ty},
+        1,
+    );
+    const encoded = try encoder.encodeOperation(call);
+    const expected = encoder.encodeBoolConstant(false);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
