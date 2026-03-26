@@ -14666,6 +14666,121 @@ test "known callee nested map write set stays exact" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "known callee loop-carried nested map write set currently degrades" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, inner_map_ty);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writeAllowanceViaLoop"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const owner = mlir.oraBlockGetArgument(helper_body, 0);
+    const spender = mlir.oraBlockGetArgument(helper_body, 1);
+    const value = mlir.oraBlockGetArgument(helper_body, 2);
+
+    const zero_idx = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        index_ty,
+        mlir.oraIntegerAttrCreateI64FromType(index_ty, 0),
+    ), 0);
+    const one_idx = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        index_ty,
+        mlir.oraIntegerAttrCreateI64FromType(index_ty, 1),
+    ), 0);
+    const outer_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const outer_before_value = mlir.oraOperationGetResult(outer_before, 0);
+    const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
+    const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
+    const loop = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        zero_idx,
+        one_idx,
+        one_idx,
+        &[_]mlir.MlirValue{inner_before_value},
+        1,
+        false,
+    );
+    const loop_body = mlir.oraScfForOpGetBodyBlock(loop);
+    const carried_inner = mlir.oraBlockGetArgument(loop_body, 1);
+    const inner_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, carried_inner, spender, value);
+    mlir.oraBlockAppendOwnedOperation(loop_body, inner_after);
+    mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(inner_after, 0)},
+        1,
+    ));
+    mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, inner_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, loop);
+    mlir.oraBlockAppendOwnedOperation(helper_body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const owner_val = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11),
+    ), 0);
+    const spender_val = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22),
+    ), 0);
+    const value_val = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99),
+    ), 0);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writeAllowanceViaLoop"),
+        &[_]mlir.MlirValue{ owner_val, spender_val, value_val },
+        3,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+}
+
 test "summary precondition encoding failure degrades encoder" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
