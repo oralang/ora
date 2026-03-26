@@ -686,6 +686,101 @@ pub const Encoder = struct {
         }
     }
 
+    fn opaqueTryStateSlotId(name: []const u8, op_id: u64) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(name);
+        return hasher.final() ^ op_id;
+    }
+
+    fn restoreEquivalentTryStateSnapshot(
+        self: *Encoder,
+        base: *const StateSnapshot,
+        try_state: *const StateSnapshot,
+        catch_state: *const StateSnapshot,
+        op_id: u64,
+    ) !void {
+        self.clearCurrentStateMaps();
+
+        var global_names = std.ArrayList([]const u8){};
+        defer global_names.deinit(self.allocator);
+
+        var base_g_it = base.global_map.iterator();
+        while (base_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        var try_g_it = try_state.global_map.iterator();
+        while (try_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        var catch_g_it = catch_state.global_map.iterator();
+        while (catch_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+
+        for (global_names.items) |name| {
+            const base_opt = base.global_map.get(name);
+            const try_opt = try_state.global_map.get(name);
+            const catch_opt = catch_state.global_map.get(name);
+            const fallback = base_opt orelse try_opt orelse catch_opt orelse continue;
+            const try_val = try_opt orelse fallback;
+            const catch_val = catch_opt orelse fallback;
+
+            const preserved = if (self.astEquivalent(try_val, catch_val))
+                try_val
+            else
+                try self.mkUndefValue(
+                    z3.Z3_get_sort(self.context.ctx, fallback),
+                    "try_state_global",
+                    opaqueTryStateSlotId(name, op_id),
+                );
+            try self.putOwnedStringAst(&self.global_map, name, preserved);
+
+            const wrote_slot = try_state.written_global_slots.contains(name) or catch_state.written_global_slots.contains(name);
+            if (!wrote_slot) continue;
+
+            const base_same = if (base_opt) |base_val|
+                self.astEquivalent(preserved, base_val)
+            else
+                false;
+            if (!base_same) {
+                try self.putOwnedStringVoid(&self.written_global_slots, name);
+            }
+        }
+
+        var mem_keys = std.AutoHashMap(u64, void).init(self.allocator);
+        defer mem_keys.deinit();
+
+        var base_m_it = base.memref_map.iterator();
+        while (base_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        var try_m_it = try_state.memref_map.iterator();
+        while (try_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        var catch_m_it = catch_state.memref_map.iterator();
+        while (catch_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+
+        var mem_key_it = mem_keys.iterator();
+        while (mem_key_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const base_opt = base.memref_map.get(key);
+            const try_opt = try_state.memref_map.get(key);
+            const catch_opt = catch_state.memref_map.get(key);
+
+            if (base_opt) |base_state| {
+                const try_state_entry = try_opt orelse base_state;
+                const catch_state_entry = catch_opt orelse base_state;
+                if (self.astEquivalent(try_state_entry.value, catch_state_entry.value) and
+                    self.astEquivalent(try_state_entry.initialized, catch_state_entry.initialized))
+                {
+                    try self.memref_map.put(key, try_state_entry);
+                }
+                continue;
+            }
+
+            if (try_opt) |try_state_entry| {
+                if (catch_opt) |catch_state_entry| {
+                    if (self.astEquivalent(try_state_entry.value, catch_state_entry.value) and
+                        self.astEquivalent(try_state_entry.initialized, catch_state_entry.initialized))
+                    {
+                        try self.memref_map.put(key, try_state_entry);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn resetFunctionState(self: *Encoder) void {
         var g_it = self.global_map.iterator();
         while (g_it.next()) |entry| {
@@ -4877,6 +4972,25 @@ pub const Encoder = struct {
                         const try_block = mlir.oraTryStmtOpGetTryBlock(current);
                         const nested_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
                         if (nested_expr != null) return nested_expr;
+                    } else {
+                        // May enter catch: try to extract from both regions and combine.
+                        const try_block = mlir.oraTryStmtOpGetTryBlock(current);
+                        const try_expr = try self.extractReturnedExprFromBlock(try_block, result_index, mode);
+                        const catch_region = mlir.oraOperationGetRegion(current, 1);
+                        const catch_expr = if (!mlir.oraRegionIsNull(catch_region))
+                            try self.extractReturnedExprFromBlock(mlir.oraRegionGetFirstBlock(catch_region), result_index, mode)
+                        else
+                            null;
+
+                        if (try_expr != null and catch_expr != null) {
+                            // Both branches have extractable returns.
+                            if (self.astEquivalent(try_expr.?, catch_expr.?)) {
+                                return try_expr;
+                            }
+                            if (try self.tryExtractTryRegionCatchPredicate(current, mode)) |catch_pred| {
+                                return try self.encodeControlFlow("scf.if", catch_pred, catch_expr.?, try_expr.?);
+                            }
+                        }
                     }
                 }
             }
@@ -7950,6 +8064,10 @@ pub const Encoder = struct {
                     slot.post = post;
                 } else if (!summary_encoder.isDegraded()) {
                     slot.post = slot.pre;
+                } else if (self.astEquivalent(post, slot.pre)) {
+                    // Degradation occurred but this slot was not modified by any
+                    // materialized path. Safe to preserve as unchanged.
+                    slot.post = slot.pre;
                 }
             } else if (slot.is_write and !summary_encoder.isDegraded() and !summary_encoder.hasWrittenGlobalSlot(slot.name)) {
                 slot.post = slot.pre;
@@ -8276,6 +8394,10 @@ pub const Encoder = struct {
                     return;
                 }
 
+                self.restoreEquivalentTryStateSnapshot(&base_state, &try_state, &catch_state, @intFromPtr(op.ptr)) catch {
+                    self.recordDegradation("failed to preserve equivalent ora.try_stmt state summary slots");
+                    return;
+                };
                 self.recordDegradation("try state summary is not encoded exactly");
                 return;
             }
