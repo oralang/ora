@@ -4468,6 +4468,56 @@ pub const Encoder = struct {
         return try self.extractReturnedExprFromBlock(entry_block, result_index, mode);
     }
 
+    fn extractFunctionReturnValue(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        result_index: u32,
+    ) EncodeError!?mlir.MlirValue {
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return null;
+        const entry_block = mlir.oraRegionGetFirstBlock(body_region);
+        if (mlir.oraBlockIsNull(entry_block)) return null;
+        return try self.extractReturnedValueFromBlock(entry_block, result_index);
+    }
+
+    fn extractReturnedValueFromBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        result_index: u32,
+    ) EncodeError!?mlir.MlirValue {
+        if (mlir.oraBlockIsNull(block)) return null;
+        return try self.extractReturnedValueFromSequence(
+            mlir.oraBlockGetFirstOperation(block),
+            result_index,
+        );
+    }
+
+    fn extractReturnedValueFromSequence(
+        self: *Encoder,
+        start_op: mlir.MlirOperation,
+        result_index: u32,
+    ) EncodeError!?mlir.MlirValue {
+        _ = self;
+        var current = start_op;
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return") or std.mem.eql(u8, name, "func.return")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return null;
+                return mlir.oraOperationGetOperand(current, result_index);
+            }
+
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
+    }
+
     fn extractReturnedExprFromBlock(
         self: *Encoder,
         block: mlir.MlirBlock,
@@ -8791,6 +8841,17 @@ pub const Encoder = struct {
             return try self.tryLookupStructFieldNamesFromValue(mlir.oraOperationGetOperand(owner, 0));
         }
 
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const callee = self.resolveCalleeName(owner) catch return null;
+            defer if (callee) |name| self.allocator.free(name);
+            const func_op = if (callee) |name| self.function_ops.get(name) else null;
+            if (func_op) |known_func| {
+                const result_index = self.getResultIndex(owner, value) orelse return null;
+                const returned_value = (try self.extractFunctionReturnValue(known_func, result_index)) orelse return null;
+                return try self.tryLookupStructFieldNamesFromValue(returned_value);
+            }
+        }
+
         if (std.mem.eql(u8, op_name, "scf.if")) {
             const result_index = self.getResultIndex(owner, value) orelse return null;
             const then_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return null;
@@ -8858,6 +8919,17 @@ pub const Encoder = struct {
                 }
             }
             return try self.tryLookupStructFieldTypeFromValue(mlir.oraOperationGetOperand(owner, 0), index);
+        }
+
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const callee = self.resolveCalleeName(owner) catch return .{ .ptr = null };
+            defer if (callee) |name| self.allocator.free(name);
+            const func_op = if (callee) |name| self.function_ops.get(name) else null;
+            if (func_op) |known_func| {
+                const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
+                const returned_value = (try self.extractFunctionReturnValue(known_func, result_index)) orelse return .{ .ptr = null };
+                return try self.tryLookupStructFieldTypeFromValue(returned_value, index);
+            }
         }
 
         if (std.mem.eql(u8, op_name, "scf.if")) {
