@@ -8008,9 +8008,7 @@ pub const Encoder = struct {
                     return;
                 };
                 if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
-                if (!loop_writes_state) {
-                    if (self.allScfWhileResultsEncodeExactly(op, .Current)) return;
-                }
+                if (!loop_writes_state) return;
                 if (self.tryEncodeFiniteScfWhileStateEffects(op)) return;
                 self.recordDegradation("loop state summary is not encoded exactly");
                 return;
