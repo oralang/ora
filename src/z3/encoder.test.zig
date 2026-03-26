@@ -13290,13 +13290,11 @@ test "known callee nested map write set stays exact" {
     const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
     const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
     const inner_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, inner_before_value, spender, value);
-    const outer_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_before_value);
     const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
 
     mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
     mlir.oraBlockAppendOwnedOperation(helper_body, inner_before);
     mlir.oraBlockAppendOwnedOperation(helper_body, inner_after);
-    mlir.oraBlockAppendOwnedOperation(helper_body, outer_after);
     mlir.oraBlockAppendOwnedOperation(helper_body, ret);
 
     try encoder.registerFunctionOperation(helper);
