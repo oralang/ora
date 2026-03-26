@@ -159,6 +159,10 @@ pub const Z3_BV_SORT = c.Z3_BV_SORT;
 pub const Z3_ARRAY_SORT = c.Z3_ARRAY_SORT;
 pub const Z3_APP_AST = c.Z3_APP_AST;
 pub const Z3_OP_AND = c.Z3_OP_AND;
+pub const Z3_OP_NOT = c.Z3_OP_NOT;
+pub const Z3_OP_ITE = c.Z3_OP_ITE;
+pub const Z3_OP_TRUE = c.Z3_OP_TRUE;
+pub const Z3_OP_FALSE = c.Z3_OP_FALSE;
 
 // Model evaluation and iteration
 pub const Z3_model_inc_ref = c.Z3_model_inc_ref;
