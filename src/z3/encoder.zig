@@ -9058,7 +9058,8 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.struct_init")) {
             const names_attr = mlir.oraOperationGetAttributeByName(owner, mlir.oraStringRefCreate("ora.field_names", 15));
-            return try self.buildFieldNamesCsvFromAttr(names_attr);
+            if (try self.buildFieldNamesCsvFromAttr(names_attr)) |csv| return csv;
+            return try self.lookupStructFieldNamesInScope(owner, mlir.oraValueGetType(value));
         }
 
         if (std.mem.eql(u8, op_name, "ora.struct_instantiate")) {
@@ -9069,7 +9070,8 @@ pub const Encoder = struct {
                 }
             }
             const names_attr = mlir.oraOperationGetAttributeByName(owner, mlir.oraStringRefCreate("ora.field_names", 15));
-            return try self.buildFieldNamesCsvFromAttr(names_attr);
+            if (try self.buildFieldNamesCsvFromAttr(names_attr)) |csv| return csv;
+            return try self.lookupStructFieldNamesInScope(owner, mlir.oraValueGetType(value));
         }
 
         if (std.mem.eql(u8, op_name, "ora.struct_field_update")) {
