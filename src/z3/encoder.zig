@@ -3121,7 +3121,9 @@ pub const Encoder = struct {
                     const map_operand_id = @intFromPtr(map_operand.ptr);
                     try self.value_bindings.put(map_operand_id, stored);
                     try self.value_map.put(map_operand_id, stored);
-                    if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
+                    if (self.mapOperandUsesNestedGet(map_operand)) {
+                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode, op_id);
+                    } else if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
                         if (self.global_map.getPtr(global_name)) |existing| {
                             existing.* = stored;
                             try self.markGlobalSlotWritten(global_name);
@@ -6108,7 +6110,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
         const predicate = try self.getCmpPredicate(cmp_op);
-        if (predicate != 6 and predicate != 8) return null; // ult / ugt only
+        if (predicate != 6 and predicate != 7 and predicate != 8 and predicate != 9) return null; // ult / ule / ugt / uge
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6129,7 +6131,9 @@ pub const Encoder = struct {
                 bound_value = cmp_lhs;
                 control_predicate = switch (predicate) {
                     6 => 8, // bound < control => control > bound
+                    7 => 9, // bound <= control => control >= bound
                     8 => 6, // bound > control => control < bound
+                    9 => 7, // bound >= control => control <= bound
                     else => null,
                 };
                 break;
@@ -6153,15 +6157,47 @@ pub const Encoder = struct {
 
         const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(control_index)), mode);
         const bound_ast = try self.encodeValueWithMode(bound_value.?, mode);
+
+        // For inclusive predicates (ule/uge), convert to exclusive bound.
+        // while (i <= bound) is equivalent to while (i < bound + 1).
+        // When bound == MAX_UINT, bound + 1 wraps to 0 and distance becomes 0,
+        // which encodes as zero iterations. This is sound: the real loop would be
+        // non-terminating, so post-loop obligations are unreachable dead code.
+        const bound_sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bound_sort);
         const step_count = switch (control_update) {
-            .add_const => |delta| if (normalized_predicate == 6) try self.encodeUnsignedPositiveStepCount(
-                try self.encodeUnsignedPositiveDistance(init_control_ast, bound_ast),
-                delta,
-            ) else return null,
-            .sub_const => |delta| if (normalized_predicate == 8) try self.encodeUnsignedPositiveStepCount(
-                try self.encodeUnsignedPositiveDistance(bound_ast, init_control_ast),
-                delta,
-            ) else return null,
+            .add_const => |delta| blk: {
+                if (normalized_predicate == 6) {
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeUnsignedPositiveDistance(init_control_ast, bound_ast),
+                        delta,
+                    );
+                }
+                if (normalized_predicate == 7) {
+                    const exclusive_bound = z3.Z3_mk_bv_add(self.context.ctx, bound_ast, one);
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeUnsignedPositiveDistance(init_control_ast, exclusive_bound),
+                        delta,
+                    );
+                }
+                return null;
+            },
+            .sub_const => |delta| blk: {
+                if (normalized_predicate == 8) {
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeUnsignedPositiveDistance(bound_ast, init_control_ast),
+                        delta,
+                    );
+                }
+                if (normalized_predicate == 9) {
+                    const exclusive_bound = z3.Z3_mk_bv_sub(self.context.ctx, bound_ast, one);
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeUnsignedPositiveDistance(exclusive_bound, init_control_ast),
+                        delta,
+                    );
+                }
+                return null;
+            },
             .identity => return null,
         };
 
@@ -6172,14 +6208,14 @@ pub const Encoder = struct {
             return switch (target_update) {
                 .identity => target_init_ast,
                 .add_const => |delta| blk: {
-                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const target_sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, target_sort);
                     const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
                     break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
                 },
                 .sub_const => |delta| blk: {
-                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const target_sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, target_sort);
                     const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
                     break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
                 },
@@ -6218,7 +6254,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
         const predicate = try self.getCmpPredicate(cmp_op);
-        if (predicate != 2 and predicate != 4) return null; // slt / sgt only
+        if (predicate != 2 and predicate != 3 and predicate != 4 and predicate != 5) return null; // slt / sle / sgt / sge
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6238,8 +6274,10 @@ pub const Encoder = struct {
                 control_index_opt = idx;
                 bound_value = cmp_lhs;
                 control_predicate = switch (predicate) {
-                    2 => 4,
-                    4 => 2,
+                    2 => 4, // bound < control => control > bound
+                    3 => 5, // bound <= control => control >= bound
+                    4 => 2, // bound > control => control < bound
+                    5 => 3, // bound >= control => control <= bound
                     else => null,
                 };
                 break;
@@ -6263,23 +6301,54 @@ pub const Encoder = struct {
 
         if (num_operands == 1 and result_index == 0) {
             switch (control_update) {
-                .add_const => |delta| if (predicate == 2 and delta == 1) return null,
-                .sub_const => |delta| if (predicate == 4 and delta == 1) return null,
+                .add_const => |delta| if ((predicate == 2 or predicate == 3) and delta == 1) return null,
+                .sub_const => |delta| if ((predicate == 4 or predicate == 5) and delta == 1) return null,
                 .identity => return null,
             }
         }
 
         const init_control_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(while_op, @intCast(control_index)), mode);
         const bound_ast = try self.encodeValueWithMode(bound_value.?, mode);
+
+        // For inclusive predicates (sle/sge), convert to exclusive bound.
+        // Same soundness argument as unsigned: when bound == SMAX/SMIN,
+        // bound+1/bound-1 wraps and distance becomes 0 (zero iterations),
+        // which is sound because the real loop would be non-terminating.
+        const sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
         const step_count = switch (control_update) {
-            .add_const => |delta| if (normalized_predicate == 2) try self.encodeUnsignedPositiveStepCount(
-                try self.encodeSignedPositiveDistance(init_control_ast, bound_ast),
-                delta,
-            ) else return null,
-            .sub_const => |delta| if (normalized_predicate == 4) try self.encodeUnsignedPositiveStepCount(
-                try self.encodeSignedPositiveDistance(bound_ast, init_control_ast),
-                delta,
-            ) else return null,
+            .add_const => |delta| blk: {
+                if (normalized_predicate == 2) {
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeSignedPositiveDistance(init_control_ast, bound_ast),
+                        delta,
+                    );
+                }
+                if (normalized_predicate == 3) {
+                    const exclusive_bound = z3.Z3_mk_bv_add(self.context.ctx, bound_ast, one);
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeSignedPositiveDistance(init_control_ast, exclusive_bound),
+                        delta,
+                    );
+                }
+                return null;
+            },
+            .sub_const => |delta| blk: {
+                if (normalized_predicate == 4) {
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeSignedPositiveDistance(bound_ast, init_control_ast),
+                        delta,
+                    );
+                }
+                if (normalized_predicate == 5) {
+                    const exclusive_bound = z3.Z3_mk_bv_sub(self.context.ctx, bound_ast, one);
+                    break :blk try self.encodeUnsignedPositiveStepCount(
+                        try self.encodeSignedPositiveDistance(exclusive_bound, init_control_ast),
+                        delta,
+                    );
+                }
+                return null;
+            },
             .identity => return null,
         };
 
@@ -6290,14 +6359,14 @@ pub const Encoder = struct {
             return switch (target_update) {
                 .identity => target_init_ast,
                 .add_const => |delta| blk: {
-                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const target_sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, target_sort);
                     const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
                     break :blk try self.encodeArithmeticOp(.Add, target_init_ast, total_delta);
                 },
                 .sub_const => |delta| blk: {
-                    const sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
-                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, sort);
+                    const target_sort = z3.Z3_get_sort(self.context.ctx, target_init_ast);
+                    const delta_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, delta, target_sort);
                     const total_delta = try self.encodeArithmeticOp(.Mul, step_count, delta_ast);
                     break :blk try self.encodeArithmeticOp(.Sub, target_init_ast, total_delta);
                 },
@@ -6337,7 +6406,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
         const predicate = try self.getCmpPredicate(cmp_op);
-        if (predicate != 2 and predicate != 6) return null; // slt / ult
+        if (predicate != 2 and predicate != 3 and predicate != 6 and predicate != 7) return null; // slt / sle / ult / ule
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6349,7 +6418,9 @@ pub const Encoder = struct {
             if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
                 break :blk .{ cmp_lhs, switch (predicate) {
                     2 => @as(u64, 4),
+                    3 => @as(u64, 5),
                     6 => @as(u64, 8),
+                    7 => @as(u64, 9),
                     else => return null,
                 } };
             }
@@ -6387,8 +6458,30 @@ pub const Encoder = struct {
         const init_ast = try self.encodeValueWithMode(init_value, mode);
         const bound_ast = try self.encodeValueWithMode(bound_value, mode);
 
+        // For inclusive predicates, convert to exclusive bound for the closed-form encoders.
+        if (normalized_predicate == 7) {
+            const bv_sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+            const bv_one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv_sort);
+            const exclusive_bound = z3.Z3_mk_bv_add(self.context.ctx, bound_ast, bv_one);
+            return try self.encodeUnsignedCanonicalWhileIncrementResult(init_ast, exclusive_bound, delta_u64);
+        }
         if (normalized_predicate == 6) {
             return try self.encodeUnsignedCanonicalWhileIncrementResult(init_ast, bound_ast, delta_u64);
+        }
+
+        if (normalized_predicate == 3) {
+            const bv_sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+            const bv_one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv_sort);
+            const exclusive_bound = z3.Z3_mk_bv_add(self.context.ctx, bound_ast, bv_one);
+            if (delta_u64 != 1) {
+                return try self.encodeSignedCanonicalWhileIncrementResult(init_ast, exclusive_bound, delta_u64);
+            }
+            const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, &[_]z3.Z3_ast{init_ast});
+            defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            self.invalidateBlockValueCaches(before_block);
+            self.invalidateBlockValueCaches(after_block);
+            const initial_condition = try self.encodeValueWithMode(condition_value, mode);
+            return try self.encodeControlFlow("scf.if", initial_condition, exclusive_bound, init_ast);
         }
 
         if (delta_u64 != 1) {
@@ -6426,7 +6519,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return null;
         const predicate = try self.getCmpPredicate(cmp_op);
-        if (predicate != 4 and predicate != 8) return null; // sgt / ugt
+        if (predicate != 4 and predicate != 5 and predicate != 8 and predicate != 9) return null; // sgt / sge / ugt / uge
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return null;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6438,7 +6531,9 @@ pub const Encoder = struct {
             if (mlir.mlirValueEqual(cmp_rhs, before_arg) and !mlir.mlirValueEqual(cmp_lhs, before_arg)) {
                 break :blk .{ cmp_lhs, switch (predicate) {
                     4 => @as(u64, 2),
+                    5 => @as(u64, 3),
                     8 => @as(u64, 6),
+                    9 => @as(u64, 7),
                     else => return null,
                 } };
             }
@@ -6468,15 +6563,37 @@ pub const Encoder = struct {
         const init_ast = try self.encodeValueWithMode(init_value, mode);
         const bound_ast = try self.encodeValueWithMode(bound_value, mode);
 
+        // For inclusive predicates, convert to exclusive bound.
+        if (normalized_predicate == 9) {
+            const bv_sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+            const bv_one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv_sort);
+            const exclusive_bound = z3.Z3_mk_bv_sub(self.context.ctx, bound_ast, bv_one);
+            return try self.encodeUnsignedCanonicalWhileDecrementResult(init_ast, exclusive_bound, delta_u64);
+        }
         if (normalized_predicate == 8) {
             return try self.encodeUnsignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
         }
 
-        // Swapped-compare forms normalize to slt/ult. Those are not valid
+        // Swapped-compare forms normalize to slt/sle/ult/ule. Those are not valid
         // decrement closed forms because the control variable moves away from
         // the bound, so we must fail closed instead of routing them through the
         // signed decrement path.
-        if (normalized_predicate != 4) return null;
+        if (normalized_predicate != 4 and normalized_predicate != 5) return null;
+
+        if (normalized_predicate == 5) {
+            const bv_sort = z3.Z3_get_sort(self.context.ctx, bound_ast);
+            const bv_one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bv_sort);
+            const exclusive_bound = z3.Z3_mk_bv_sub(self.context.ctx, bound_ast, bv_one);
+            if (delta_u64 != 1) {
+                return try self.encodeSignedCanonicalWhileDecrementResult(init_ast, exclusive_bound, delta_u64);
+            }
+            const before_bind_count = try self.bindScfWhileBeforeArgsFromValues(while_op, &[_]z3.Z3_ast{init_ast});
+            defer self.unbindScfWhileBeforeArgs(while_op, before_bind_count);
+            self.invalidateBlockValueCaches(before_block);
+            self.invalidateBlockValueCaches(after_block);
+            const initial_condition = try self.encodeValueWithMode(condition_value, mode);
+            return try self.encodeControlFlow("scf.if", initial_condition, exclusive_bound, init_ast);
+        }
 
         if (delta_u64 != 1) {
             return try self.encodeSignedCanonicalWhileDecrementResult(init_ast, bound_ast, delta_u64);
@@ -6605,7 +6722,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return false;
         const predicate = self.getCmpPredicate(cmp_op) catch return false;
-        if (predicate != 2 and predicate != 6) return false; // slt / ult
+        if (predicate != 2 and predicate != 3 and predicate != 6 and predicate != 7) return false; // slt / sle / ult / ule
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return false;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6627,10 +6744,6 @@ pub const Encoder = struct {
         const add_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const lhs_const = self.tryGetConstIntValue(add_lhs);
         const rhs_const = self.tryGetConstIntValue(add_rhs);
-        if (predicate == 6) {
-            return (lhs_const != null and lhs_const.? != 0 and mlir.mlirValueEqual(add_rhs, after_arg)) or
-                (rhs_const != null and rhs_const.? != 0 and mlir.mlirValueEqual(add_lhs, after_arg));
-        }
         return (lhs_const != null and lhs_const.? != 0 and mlir.mlirValueEqual(add_rhs, after_arg)) or
             (rhs_const != null and rhs_const.? != 0 and mlir.mlirValueEqual(add_lhs, after_arg));
     }
@@ -6652,7 +6765,7 @@ pub const Encoder = struct {
         const cmp_op = mlir.oraOpResultGetOwner(condition_value);
         if (!self.operationNameEq(cmp_op, "arith.cmpi")) return false;
         const predicate = self.getCmpPredicate(cmp_op) catch return false;
-        if (predicate != 4 and predicate != 8) return false; // sgt / ugt
+        if (predicate != 4 and predicate != 5 and predicate != 8 and predicate != 9) return false; // sgt / sge / ugt / uge
         if (mlir.oraOperationGetNumOperands(cmp_op) != 2) return false;
 
         const cmp_lhs = mlir.oraOperationGetOperand(cmp_op, 0);
@@ -6673,9 +6786,6 @@ pub const Encoder = struct {
         const sub_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
         const sub_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
         const rhs_const = self.tryGetConstIntValue(sub_rhs);
-        if (predicate == 8) {
-            return mlir.mlirValueEqual(sub_lhs, after_arg) and rhs_const != null and rhs_const.? != 0;
-        }
         return mlir.mlirValueEqual(sub_lhs, after_arg) and rhs_const != null and rhs_const.? != 0;
     }
 
@@ -8582,6 +8692,40 @@ pub const Encoder = struct {
         }
 
         return null;
+    }
+
+    fn mapOperandUsesNestedGet(self: *Encoder, value: mlir.MlirValue) bool {
+        if (!mlir.oraValueIsAOpResult(value)) return false;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return false;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.map_get")) return true;
+
+        if (std.mem.eql(u8, op_name, "ora.refinement_to_base") or
+            std.mem.eql(u8, op_name, "ora.base_to_refinement") or
+            std.mem.eql(u8, op_name, "arith.bitcast") or
+            std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi") or
+            std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast") or
+            std.mem.eql(u8, op_name, "tensor.cast"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return false;
+            return self.mapOperandUsesNestedGet(mlir.oraOperationGetOperand(owner, 0));
+        }
+
+        return false;
     }
 
     const MapGetAncestor = struct {

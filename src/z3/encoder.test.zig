@@ -431,7 +431,6 @@ test "known pure callee returning source-metadata struct update preserves untouc
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -506,7 +505,6 @@ test "caller struct_field_update recovers untouched fields from known callee sou
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
-    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -675,6 +673,7 @@ test "caller struct_field_update recovers untouched fields from known callee str
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -782,6 +781,7 @@ test "caller struct_field_update recovers untouched fields from known callee bra
     _ = mlir.oraDialectRegister(mlir_ctx);
 
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
@@ -2483,6 +2483,96 @@ test "func.call summary with canonical symbolic no-write scf.while preserves sta
         mlir_ctx,
         loc,
         stringRef("symbolicNoWriteWhile"),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(symbolic_ub, 0)},
+        1,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    const post_counter = encoder.global_map.get("counter").?;
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, post_counter, pre_counter)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "func.call summary with canonical inclusive symbolic no-write scf.while preserves state exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("symbolicNoWriteWhileInclusive"))),
+    };
+    const helper_param_types = [_]mlir.MlirType{index_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &helper_param_types, &helper_param_locs, helper_param_types.len);
+    const body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    mlir.oraBlockAppendOwnedOperation(body, c0_op);
+    mlir.oraBlockAppendOwnedOperation(body, c1_op);
+
+    const ub = mlir.oraBlockGetArgument(body, 0);
+    const init_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(c0_op, 0)};
+    const result_types = [_]mlir.MlirType{index_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, index_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, index_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 7, before_arg, ub); // ule
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const next_op = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_arg, mlir.oraOperationGetResult(c1_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(body, while_op);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    try encoder.registerFunctionOperation(helper);
+
+    const counter_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const pre_counter = z3.Z3_mk_const(z3_ctx.ctx, z3.Z3_mk_string_symbol(z3_ctx.ctx, "pre_counter_symbolic_inclusive_while"), counter_sort);
+    try encoder.global_map.put(try testing.allocator.dupe(u8, "counter"), pre_counter);
+
+    const symbolic_ub = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("ubWhileInclusiveValue"), index_ty);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("symbolicNoWriteWhileInclusive"),
         &[_]mlir.MlirValue{mlir.oraOperationGetResult(symbolic_ub, 0)},
         1,
         &[_]mlir.MlirType{},
@@ -5308,6 +5398,93 @@ test "direct canonical unsigned positive-delta scf.while result encodes exactly"
         ub_le_init,
         zero,
         z3.Z3_mk_bv_sub(z3_ctx.ctx, ub_ast, init_ast),
+    );
+    const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
+    const step_count = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        distance_is_zero,
+        zero,
+        z3.Z3_mk_bv_add(
+            z3_ctx.ctx,
+            z3.Z3_mk_bv_udiv(z3_ctx.ctx, z3.Z3_mk_bv_sub(z3_ctx.ctx, distance, one), delta_ast),
+            one,
+        ),
+    );
+    const total_delta = try encoder.encodeArithmeticOp(.Mul, step_count, delta_ast);
+    const expected = try encoder.encodeArithmeticOp(.Add, init_ast, total_delta);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "direct canonical unsigned inclusive positive-delta scf.while result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, delta_attr);
+    const ub_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("whileIncUbInclusive"), i256_ty);
+
+    const init_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)};
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 7, before_arg, mlir.oraOperationGetResult(ub_op, 0)); // ule
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+    const next_op = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_arg, mlir.oraOperationGetResult(delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    const init_ast = try encoder.encodeOperation(init_op);
+    const ub_ast = try encoder.encodeOperation(ub_op);
+    const delta_ast = try encoder.encodeOperation(delta_op);
+    const sort = z3.Z3_get_sort(z3_ctx.ctx, ub_ast);
+    const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, sort);
+    const one = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 1, sort);
+    const exclusive_bound = z3.Z3_mk_bv_add(z3_ctx.ctx, ub_ast, one);
+    const ub_le_init = z3.Z3_mk_bvule(z3_ctx.ctx, exclusive_bound, init_ast);
+    const distance = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        ub_le_init,
+        zero,
+        z3.Z3_mk_bv_sub(z3_ctx.ctx, exclusive_bound, init_ast),
     );
     const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
     const step_count = z3.Z3_mk_ite(
@@ -13113,7 +13290,7 @@ test "known callee nested map write set stays exact" {
     const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
     const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
     const inner_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, inner_before_value, spender, value);
-    const outer_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, mlir.oraOperationGetResult(inner_after, 0));
+    const outer_after = mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_before_value);
     const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
 
     mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
@@ -14650,6 +14827,98 @@ test "scf.while canonical signed positive-delta decrement result encodes exactly
         init_le_bound,
         zero,
         z3.Z3_mk_bv_sub(z3_ctx.ctx, init_ast, bound_ast),
+    );
+    const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
+    const step_count = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        distance_is_zero,
+        zero,
+        z3.Z3_mk_bv_add(
+            z3_ctx.ctx,
+            z3.Z3_mk_bv_udiv(z3_ctx.ctx, z3.Z3_mk_bv_sub(z3_ctx.ctx, distance, one), delta_ast),
+            one,
+        ),
+    );
+    const total_delta = try encoder.encodeArithmeticOp(.Mul, step_count, delta_ast);
+    const expected = try encoder.encodeArithmeticOp(.Sub, init_ast, total_delta);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "scf.while canonical signed inclusive positive-delta decrement result encodes exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const delta_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, init_attr);
+    const delta_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, delta_attr);
+    const init = mlir.oraOperationGetResult(init_op, 0);
+    const bound_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("signedDeltaDecInclusiveBoundValue"), i256_ty);
+    const bound = mlir.oraOperationGetResult(bound_op, 0);
+
+    const init_vals = [_]mlir.MlirValue{init};
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &init_vals, init_vals.len, &result_types, result_types.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+    _ = mlir.mlirBlockAddArgument(before_block, i256_ty, loc);
+    _ = mlir.mlirBlockAddArgument(after_block, i256_ty, loc);
+    const before_arg = mlir.oraBlockGetArgument(before_block, 0);
+    const after_arg = mlir.oraBlockGetArgument(after_block, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 5, before_arg, bound); // sge
+    mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{before_arg},
+        1,
+    ));
+
+    const next_op = mlir.oraArithSubIOpCreate(mlir_ctx, loc, after_arg, mlir.oraOperationGetResult(delta_op, 0));
+    mlir.oraBlockAppendOwnedOperation(after_block, next_op);
+    mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(next_op, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeOperation(init_op);
+    _ = try encoder.encodeOperation(delta_op);
+
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    const init_ast = try encoder.encodeValue(init);
+    const bound_ast = try encoder.encodeValue(bound);
+    const delta_ast = try encoder.encodeValue(mlir.oraOperationGetResult(delta_op, 0));
+    const sort = z3.Z3_get_sort(z3_ctx.ctx, bound_ast);
+    const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, sort);
+    const one = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 1, sort);
+    const exclusive_bound = z3.Z3_mk_bv_sub(z3_ctx.ctx, bound_ast, one);
+    const init_le_bound = z3.Z3_mk_bvsle(z3_ctx.ctx, init_ast, exclusive_bound);
+    const distance = z3.Z3_mk_ite(
+        z3_ctx.ctx,
+        init_le_bound,
+        zero,
+        z3.Z3_mk_bv_sub(z3_ctx.ctx, init_ast, exclusive_bound),
     );
     const distance_is_zero = z3.Z3_mk_eq(z3_ctx.ctx, distance, zero);
     const step_count = z3.Z3_mk_ite(
