@@ -2700,7 +2700,7 @@ test "func.call summary with canonical unsigned multi-result nonzero-control no-
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "func.call summary with zero-result symbolic no-write scf.while degrades exact state modeling" {
+test "func.call summary with zero-result symbolic no-write scf.while preserves exact state modeling" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -2758,7 +2758,7 @@ test "func.call summary with zero-result symbolic no-write scf.while degrades ex
     );
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
+    try testing.expect(!encoder.isDegraded());
 }
 
 test "func.call summary with non-throwing ora.try_stmt state effects encodes exactly" {

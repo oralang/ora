@@ -6647,7 +6647,9 @@ pub const Encoder = struct {
 
     fn allScfWhileResultsEncodeExactly(self: *Encoder, while_op: mlir.MlirOperation, mode: EncodeMode) bool {
         const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(while_op));
-        if (num_results == 0) return false;
+        // A zero-result while contributes no value summary. For no-write state
+        // summaries, that is already exact on the returning path.
+        if (num_results == 0) return true;
         var result_idx: u32 = 0;
         while (result_idx < num_results) : (result_idx += 1) {
             const exact =
