@@ -25,6 +25,8 @@ const defaultIntegerType = support.defaultIntegerType;
 const exprRange = support.exprRange;
 const memRefType = support.memRefType;
 const namedBoolAttr = support.namedBoolAttr;
+const namedStringAttr = support.namedStringAttr;
+const strRef = support.strRef;
 const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
 const bodyContainsSwitchBreak = analysis.bodyContainsSwitchBreak;
 const bodyMayReturn = analysis.bodyMayReturn;
@@ -41,6 +43,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const has_return =
                 bodyMayReturn(self.parent.file, if_stmt.then_body) or
                 (if_stmt.else_body != null and bodyMayReturn(self.parent.file, if_stmt.else_body.?));
+            const then_is_early_return_only = blk: {
+                if (if_stmt.else_body != null) break :blk false;
+                const then_body = self.parent.file.body(if_stmt.then_body).*;
+                break :blk then_body.statements.len == 1 and self.parent.file.statement(then_body.statements[0]).* == .Return;
+            };
 
             if (if_stmt.else_body == null and self.deferred_return_flag == null) {
                 const then_body = self.parent.file.body(if_stmt.then_body).*;
@@ -66,6 +73,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         return false;
                     }
                     try appendEmptyYield(self.parent.context, else_block, loc);
+                    if (has_return) {
+                        try @This().appendPathAssumeNot(self, condition, if_stmt.range);
+                    }
                     return false;
                 }
             }
@@ -147,11 +157,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(if_stmt.range, locals);
+                if (then_is_early_return_only) {
+                    try @This().appendPathAssumeNot(self, condition, if_stmt.range);
+                }
                 if (then_terminated and else_terminated and !blockEndsWithTerminator(self.block)) {
                     try self.appendDeferredReturnTerminator(if_stmt.range, locals);
                 }
             }
             return then_terminated and else_terminated;
+        }
+
+        fn appendPathAssumeNot(self: *FunctionLowerer, condition: mlir.MlirValue, range: source.TextRange) anyerror!void {
+            const loc = self.parent.location(range);
+            const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+            const not_op = mlir.oraArithXorIOpCreate(self.parent.context, loc, condition, true_val);
+            if (mlir.oraOperationIsNull(not_op)) return error.MlirOperationCreationFailed;
+            const not_condition = appendValueOp(self.block, not_op);
+
+            const assume_op = mlir.oraAssumeOpCreate(self.parent.context, loc, not_condition);
+            if (mlir.oraOperationIsNull(assume_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(assume_op, strRef("ora.assume_origin"), namedStringAttr(self.parent.context, "ora.assume_origin", "path").attribute);
+            mlir.oraOperationSetAttributeByName(assume_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "path_assumption").attribute);
+            appendOp(self.block, assume_op);
         }
 
         pub fn lowerTryStmt(self: *FunctionLowerer, try_stmt: ast.TryStmt, locals: *LocalEnv) anyerror!bool {

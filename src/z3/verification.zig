@@ -1990,6 +1990,7 @@ pub const VerificationPass = struct {
             // Obligation proving: assumptions ∧ ¬obligation must be UNSAT.
             for (obligation_annotations.items) |ann| {
                 try self.solver.pushChecked();
+                try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann);
                 for (ann.path_constraints) |cst| {
                     try self.solver.assertChecked(cst);
                 }
@@ -3733,6 +3734,7 @@ pub const VerificationPass = struct {
                 var obligation_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer obligation_constraints.deinit();
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
+                try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
                 if (ann.kind == .LoopInvariant) {
@@ -4227,6 +4229,53 @@ fn constraintSliceContains(self: *VerificationPass, haystack: []const z3.Z3_ast,
         if (astEquivalent(self, candidate, needle)) return true;
     }
     return false;
+}
+
+fn annotationLocationPrecedes(lhs: EncodedAnnotation, rhs: EncodedAnnotation) bool {
+    if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
+    if (lhs.line < rhs.line) return true;
+    if (lhs.line > rhs.line) return false;
+    return lhs.column <= rhs.column;
+}
+
+fn pathAssumeAppliesToAnnotation(
+    self: *VerificationPass,
+    path_assume: EncodedAnnotation,
+    ann: EncodedAnnotation,
+) bool {
+    if (!annotationLocationPrecedes(path_assume, ann)) return false;
+    return pathConstraintsCompatible(self, path_assume.path_constraints, ann.path_constraints);
+}
+
+fn addApplicablePathAssumptionsToSolver(
+    self: *VerificationPass,
+    path_assumption_annotations: []const EncodedAnnotation,
+    ann: EncodedAnnotation,
+) !void {
+    for (path_assumption_annotations) |path_assume| {
+        if (!pathAssumeAppliesToAnnotation(self, path_assume, ann)) continue;
+        for (path_assume.path_constraints) |cst| {
+            try self.solver.assertChecked(cst);
+        }
+        for (path_assume.extra_constraints) |cst| {
+            try self.solver.assertChecked(cst);
+        }
+        try self.solver.assertChecked(path_assume.condition);
+    }
+}
+
+fn addApplicablePathAssumptionsToConstraintList(
+    self: *VerificationPass,
+    constraints: *ManagedArrayList(z3.Z3_ast),
+    path_assumption_annotations: []const EncodedAnnotation,
+    ann: EncodedAnnotation,
+) !void {
+    for (path_assumption_annotations) |path_assume| {
+        if (!pathAssumeAppliesToAnnotation(self, path_assume, ann)) continue;
+        try addConstraintSlice(constraints, path_assume.path_constraints);
+        try addConstraintSlice(constraints, path_assume.extra_constraints);
+        try constraints.append(path_assume.condition);
+    }
 }
 
 fn pathConstraintsCompatible(self: *VerificationPass, previous_path: []const z3.Z3_ast, current_path: []const z3.Z3_ast) bool {
