@@ -12,7 +12,10 @@ contract Vault {
     log Deposit(account: address, amount: u256);
     log Withdrawal(account: address, amount: u256);
 
-    pub fn deposit(amount: MinValue<u256, 1>) {
+    pub fn deposit(amount: MinValue<u256, 1>)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+    {
         let sender: NonZeroAddress = std.msg.sender();
         @lock(reentrancyGuard);
         balances[sender] += amount;
@@ -21,7 +24,9 @@ contract Vault {
         log Deposit(sender, amount);
     }
 
-    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
+        requires(totalDeposits >= amount)
+    {
         let sender: NonZeroAddress = std.msg.sender();
         @lock(reentrancyGuard);
         let current: u256 = balances[sender];

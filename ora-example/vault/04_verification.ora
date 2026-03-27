@@ -17,6 +17,7 @@ contract Vault {
         requires(amount > 0)
         requires(totalDeposits <= std.constants.U256_MAX - amount)
         requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(spec_sum <= std.constants.U256_MAX - amount)
         ensures(totalDeposits == old(totalDeposits) + amount)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
         ensures(spec_sum == old(spec_sum) + amount)
@@ -31,6 +32,8 @@ contract Vault {
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
         requires(amount > 0)
         requires(balances[std.msg.sender()] >= amount)
+        requires(totalDeposits >= amount)
+        requires(spec_sum >= amount)
         ensures(totalDeposits == old(totalDeposits) - amount)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
         ensures(spec_sum == old(spec_sum) - amount)
