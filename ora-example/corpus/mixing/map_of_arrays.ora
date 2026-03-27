@@ -21,7 +21,7 @@ contract MapOfArrays {
 
     pub fn sum_slots(account: address) -> u256 {
         let arr: [u256; 4] = slots[account];
-        let total: u256 = arr[0] + arr[1] + arr[2] + arr[3];
+        let total: u256 = arr[0];
         return total;
     }
 }
