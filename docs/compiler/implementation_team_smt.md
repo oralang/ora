@@ -197,6 +197,12 @@ Still live in the encoder:
 - `failed to encode known callee state exactly`
 - `known callee state fell back to opaque UF summary`
 
+On the current branch, the main direct anchor that still remains in-tree is the intentional opaque-case boundary:
+
+- known callee with unknown write set delegating to an unresolved writer
+
+The broad helper-summary bucket is no longer the right mental model; most remaining work here is narrowing or reclassifying the few explicit opaque/fail-closed cases that are left.
+
 ### Anchor Repros
 
 - helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig)
@@ -571,7 +577,7 @@ Primary target:
 | --- | --- | --- | --- | --- | --- |
 | Live `UNKNOWN` elimination | Core SMT owners + SMT execution solver/tractability owner | Done | [open_stream_add_unknown.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/open_stream_add_unknown.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [expr_lowering.zig](/Users/logic/Ora/Ora/src/hir/expr_lowering.zig) | No unexplained `UNKNOWN` in the narrow repro; corresponding real-contract obligations resolve to `UNSAT` or real `SAT`. |
 | Non-canonical loop exactness | Core SMT owners + SMT execution loop owner | Active | direct loop regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining loop degradations are either exact or explicitly preserved with named regressions and rationale. |
-| Interprocedural summary exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowed | helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Common helper shapes stay exact; remaining UF fallbacks are rare, deliberate, and tested. |
+| Interprocedural summary exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowly residual | helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Common helper shapes stay exact; remaining UF fallbacks are rare, deliberate, and tested. |
 | Struct/frame residuals | Core SMT owners + SMT execution struct/frame owner | Active | struct regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | No silent partial-frame behavior; metadata-miss cases are exact or explicit fail-closed boundaries. |
 | Residual `ora.try_stmt` exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowed | `try` regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining live-try degradations are narrow, justified, and regression-tested. |
 | Guard/context propagation | Core SMT owners + SMT execution solver/tractability owner | Done | guard regressions in [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | Applicable path facts discharge guards consistently without cross-branch leakage. |
