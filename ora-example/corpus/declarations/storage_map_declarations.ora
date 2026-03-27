@@ -2,6 +2,8 @@
 // STORAGE MAP DECLARATIONS — maps with various key/value types
 // ==========================================
 
+comptime const std = @import("std");
+
 contract StorageMapDeclarations {
     // Basic maps with different key/value combos
     storage var balances: map<address, u256>;
@@ -25,7 +27,9 @@ contract StorageMapDeclarations {
         return balances[account];
     }
 
-    pub fn add_balance(account: address, amount: u256) {
+    pub fn add_balance(account: address, amount: u256)
+        requires(balances[account] <= std.constants.U256_MAX - amount)
+    {
         balances[account] += amount;
     }
 
@@ -65,11 +69,15 @@ contract StorageMapDeclarations {
         return allowances[owner][spender];
     }
 
-    pub fn increase_allowance(owner: address, spender: address, amount: u256) {
+    pub fn increase_allowance(owner: address, spender: address, amount: u256)
+        requires(allowances[owner][spender] <= std.constants.U256_MAX - amount)
+    {
         allowances[owner][spender] += amount;
     }
 
-    pub fn decrease_allowance(owner: address, spender: address, amount: u256) {
+    pub fn decrease_allowance(owner: address, spender: address, amount: u256)
+        requires(allowances[owner][spender] >= amount)
+    {
         allowances[owner][spender] -= amount;
     }
 
@@ -87,13 +95,20 @@ contract StorageMapDeclarations {
     }
 
     // Transfer using multiple maps
-    pub fn transfer(from: address, to: address, amount: u256) {
+    pub fn transfer(from: address, to: address, amount: u256)
+        requires(balances[from] >= amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         balances[from] -= amount;
         balances[to] += amount;
     }
 
     // Transfer from with allowance
-    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256) {
+    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256)
+        requires(allowances[owner][spender] >= amount)
+        requires(balances[owner] >= amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         allowances[owner][spender] -= amount;
         balances[owner] -= amount;
         balances[to] += amount;
