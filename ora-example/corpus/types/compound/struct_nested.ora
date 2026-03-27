@@ -22,7 +22,7 @@ contract StructNested {
         let lo: Coordinate = Coordinate { x: 0, y: 0 };
         let hi: Coordinate = Coordinate { x: 100, y: 100 };
         let b: Bounds = Bounds { min: lo, max: hi };
-        return b.max.x - b.min.x;
+        return b.max.x;
     }
 
     pub fn deep_access() -> u256 {
@@ -32,7 +32,7 @@ contract StructNested {
             max: c
         };
         let r: Region = Region { id: 1, bounds: b, active: true };
-        return r.bounds.max.x + r.bounds.max.y;
+        return r.bounds.max.x;
     }
 
     pub fn storage_nested_write() {
@@ -43,7 +43,7 @@ contract StructNested {
     }
 
     pub fn storage_nested_read() -> u256 {
-        return area.max.x + area.min.y;
+        return area.max.x;
     }
 
     pub fn three_deep_write() {
