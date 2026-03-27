@@ -1,10 +1,14 @@
 // Level 1: Simple counter contract
 // Tests: storage var, basic arithmetic, getter/setter pattern
 
+comptime const std = @import("std");
+
 contract Counter {
     storage var count: u256 = 0;
 
-    pub fn increment() {
+    pub fn increment()
+        requires(count < std.constants.U256_MAX)
+    {
         count += 1;
     }
 
