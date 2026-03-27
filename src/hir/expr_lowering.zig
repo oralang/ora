@@ -68,9 +68,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn tryLowerConstEvalValue(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?mlir.MlirValue {
             const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            if (@This().exprDependsOnRuntimeState(self, expr_id)) return null;
             const expr = self.parent.file.expression(expr_id).*;
             switch (expr) {
-                .Binary, .Unary, .Comptime, .Group, .Name => {},
+                .Binary, .Unary, .Comptime, .Group => {},
+                .Name => {
+                    const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse return null;
+                    switch (binding) {
+                        .pattern => return null,
+                        .item => |item_id| switch (self.parent.file.item(item_id).*) {
+                            .Field => |field| if (field.storage_class != .none) return null,
+                            .Constant => {},
+                            else => return null,
+                        },
+                    }
+                },
                 else => return null,
             }
 
@@ -99,6 +111,49 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     );
                     break :blk appendValueOp(self.block, op);
                 },
+            };
+        }
+
+        pub fn exprDependsOnRuntimeState(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Name => blk: {
+                    const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse break :blk true;
+                    break :blk switch (binding) {
+                        .pattern => false,
+                        .item => |item_id| switch (self.parent.file.item(item_id).*) {
+                            .Field => |field| field.storage_class != .none,
+                            .Constant => false,
+                            else => true,
+                        },
+                    };
+                },
+                .Group => |group| @This().exprDependsOnRuntimeState(self, group.expr),
+                .Binary => |binary| @This().exprDependsOnRuntimeState(self, binary.lhs) or @This().exprDependsOnRuntimeState(self, binary.rhs),
+                .Unary => |unary| @This().exprDependsOnRuntimeState(self, unary.operand),
+                .Comptime => |comptime_expr| blk: {
+                    const body = self.parent.file.body(comptime_expr.body).*;
+                    for (body.statements) |statement_id| {
+                        switch (self.parent.file.statement(statement_id).*) {
+                            .Expr => |expr_stmt| if (@This().exprDependsOnRuntimeState(self, expr_stmt.expr)) break :blk true,
+                            .Return => |ret| if (ret.value) |value| if (@This().exprDependsOnRuntimeState(self, value)) break :blk true,
+                            else => {},
+                        }
+                    }
+                    break :blk false;
+                },
+                .Field => |field| blk: {
+                    const path = @This().fieldExprPath(self, expr_id) catch break :blk true;
+                    defer self.parent.allocator.free(path);
+                    if (std.mem.startsWith(u8, path, "std.msg.") or
+                        std.mem.startsWith(u8, path, "std.transaction.") or
+                        std.mem.startsWith(u8, path, "std.tx.") or
+                        std.mem.startsWith(u8, path, "std.block."))
+                    {
+                        break :blk true;
+                    }
+                    break :blk @This().exprDependsOnRuntimeState(self, field.base);
+                },
+                else => false,
             };
         }
 
@@ -320,65 +375,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .pattern => |pattern_id| {
                         if (locals.getValue(pattern_id)) |value| return value;
                     },
-                    .item => |item_id| {
-                        const item = self.parent.file.item(item_id).*;
-                        switch (item) {
-                            .Field => |field| {
-                                if (field.binding_kind == .immutable) {
-                                    if (field.value) |value| return self.lowerExpr(value, locals);
-                                }
-                                const result_type = if (field.type_expr) |_|
-                                    self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], field.range)
-                                else
-                                    self.parent.lowerExprType(expr_id);
-                                const op = switch (field.storage_class) {
-                                    .storage => mlir.oraSLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(field.range),
-                                        strRef(field.name),
-                                        result_type,
-                                    ),
-                                    .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
-                                    .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
-                                    .none => std.mem.zeroes(mlir.MlirOperation),
-                                };
-                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                            },
-                            .Constant => |constant| return self.lowerExpr(constant.value, locals),
-                            .Function => {
-                                const result_type = self.parent.lowerExprType(expr_id);
-                                const function_name = switch (self.parent.file.item(binding.item).*) {
-                                    .Function => |function| function.name,
-                                    else => "",
-                                };
-                                const op = mlir.oraFunctionRefOpCreate(
-                                    self.parent.context,
-                                    self.parent.location(name.range),
-                                    strRef(function_name),
-                                    result_type,
-                                );
-                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                                const placeholder = try self.createAggregatePlaceholder("ora.function_ref", name.range, &.{}, result_type);
-                                return appendValueOp(self.block, placeholder);
-                            },
-                            .ErrorDecl => |error_decl| {
-                                if (error_decl.parameters.len == 0) {
-                                    const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
-                                    const op = mlir.oraErrorReturnOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(name.range),
-                                        strRef(error_decl.name),
-                                        null,
-                                        0,
-                                        result_type,
-                                    );
-                                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                                    return appendValueOp(self.block, op);
-                                }
-                            },
-                            else => {},
-                        }
-                    },
+                    .item => |item_id| if (try @This().lowerBoundItemExpr(self, expr_id, name, item_id, locals)) |lowered| return lowered,
                 }
             }
 
@@ -390,7 +387,130 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.current_return_value) |value| return value;
             }
 
+            if (try @This().lowerCurrentContractMemberByName(self, expr_id, name, locals)) |lowered| {
+                return lowered;
+            }
+
+            if (self.parent.item_index.lookup(name.name)) |item_id| {
+                if (try @This().lowerBoundItemExpr(self, expr_id, name, item_id, locals)) |lowered| return lowered;
+            }
+
+            for (self.parent.file.items, 0..) |_, idx| {
+                const item_id: ast.ItemId = @enumFromInt(idx);
+                switch (self.parent.file.item(item_id).*) {
+                    .Field => |field| {
+                        if (!std.mem.eql(u8, field.name, name.name)) continue;
+                        if (try @This().lowerBoundItemExpr(self, expr_id, name, item_id, locals)) |lowered| return lowered;
+                    },
+                    .Constant => |constant| {
+                        if (!std.mem.eql(u8, constant.name, name.name)) continue;
+                        if (try @This().lowerBoundItemExpr(self, expr_id, name, item_id, locals)) |lowered| return lowered;
+                    },
+                    .Function => |function_item| {
+                        if (!std.mem.eql(u8, function_item.name, name.name)) continue;
+                        if (try @This().lowerBoundItemExpr(self, expr_id, name, item_id, locals)) |lowered| return lowered;
+                    },
+                    else => {},
+                }
+            }
+
             return self.defaultValue(self.parent.lowerExprType(expr_id), name.range);
+        }
+
+        fn lowerBoundItemExpr(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            name: ast.NameExpr,
+            item_id: ast.ItemId,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            const item = self.parent.file.item(item_id).*;
+            switch (item) {
+                .Field => |field| {
+                    if (field.binding_kind == .immutable and field.storage_class == .none) {
+                        if (field.value) |value| return try self.lowerExpr(value, locals);
+                    }
+                    const result_type = if (field.type_expr) |_|
+                        self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], field.range)
+                    else
+                        self.parent.lowerExprType(expr_id);
+                    const op = switch (field.storage_class) {
+                        .storage => mlir.oraSLoadOpCreate(
+                            self.parent.context,
+                            self.parent.location(field.range),
+                            strRef(field.name),
+                            result_type,
+                        ),
+                        .memory => mlir.oraMLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                        .tstore => mlir.oraTLoadOpCreate(self.parent.context, self.parent.location(field.range), strRef(field.name), result_type),
+                        .none => std.mem.zeroes(mlir.MlirOperation),
+                    };
+                    if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                },
+                .Constant => |constant| return try self.lowerExpr(constant.value, locals),
+                .Function => |function| {
+                    const result_type = self.parent.lowerExprType(expr_id);
+                    const op = mlir.oraFunctionRefOpCreate(
+                        self.parent.context,
+                        self.parent.location(name.range),
+                        strRef(function.name),
+                        result_type,
+                    );
+                    if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                    const placeholder = try self.createAggregatePlaceholder("ora.function_ref", name.range, &.{}, result_type);
+                    return appendValueOp(self.block, placeholder);
+                },
+                .ErrorDecl => |error_decl| {
+                    if (error_decl.parameters.len == 0) {
+                        const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
+                        const op = mlir.oraErrorReturnOpCreate(
+                            self.parent.context,
+                            self.parent.location(name.range),
+                            strRef(error_decl.name),
+                            null,
+                            0,
+                            result_type,
+                        );
+                        if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                        return appendValueOp(self.block, op);
+                    }
+                },
+                else => {},
+            }
+            return null;
+        }
+
+        fn lowerCurrentContractMemberByName(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            name: ast.NameExpr,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            const function = self.function orelse return null;
+            const contract_id = function.parent_contract orelse return null;
+            const contract = switch (self.parent.file.item(contract_id).*) {
+                .Contract => |contract| contract,
+                else => return null,
+            };
+
+            for (contract.members) |member_id| {
+                switch (self.parent.file.item(member_id).*) {
+                    .Field => |field| {
+                        if (!std.mem.eql(u8, field.name, name.name)) continue;
+                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
+                    },
+                    .Constant => |constant| {
+                        if (!std.mem.eql(u8, constant.name, name.name)) continue;
+                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
+                    },
+                    .Function => |function_item| {
+                        if (!std.mem.eql(u8, function_item.name, name.name)) continue;
+                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
+                    },
+                    else => {},
+                }
+            }
+            return null;
         }
 
         pub fn lowerUnary(self: *FunctionLowerer, unary: ast.UnaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
