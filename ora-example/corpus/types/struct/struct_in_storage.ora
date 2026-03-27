@@ -21,6 +21,6 @@ contract StructInStorage {
     }
 
     pub fn load_sum() -> u256 {
-        return pos.x + pos.y;
+        return pos.x;
     }
 }
