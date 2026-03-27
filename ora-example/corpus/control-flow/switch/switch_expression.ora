@@ -41,7 +41,7 @@ contract SwitchExpression {
             2 => 4,
             else => 8
         };
-        return base * factor;
+        return factor;
     }
 
     // Nested switch expressions
