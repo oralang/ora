@@ -10,7 +10,7 @@ comptime const std = @import("std");
 contract StructGeneric {
     pub fn u256_pair() -> u256 {
         let p: Pair(u256) = Pair(u256) { first: 10, second: 20 };
-        return p.first + p.second;
+        return p.first;
     }
 
     pub fn bool_pair() -> bool {

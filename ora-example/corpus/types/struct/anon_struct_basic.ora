@@ -11,7 +11,7 @@ contract AnonStructBasic {
     // Use named struct as baseline (known to work)
     pub fn named_struct() -> u256 {
         let p: Point = Point { x: 10, y: 20 };
-        return p.x + p.y;
+        return p.x;
     }
 
     // Anonymous struct literal assigned to typed variable

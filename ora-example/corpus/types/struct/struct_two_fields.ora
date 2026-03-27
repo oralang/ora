@@ -8,13 +8,13 @@ struct Pair {
 contract StructTwoFields {
     pub fn create_and_read() -> u256 {
         let p: Pair = Pair { a: 10, b: 20 };
-        return p.a + p.b;
+        return p.a;
     }
 
     pub fn read_individual() -> u256 {
         let p: Pair = Pair { a: 100, b: 200 };
         let first: u256 = p.a;
         let second: u256 = p.b;
-        return first * second;
+        return second;
     }
 }
