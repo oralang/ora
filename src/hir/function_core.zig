@@ -804,7 +804,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             switch (self.parent.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {
-                        if (decl.storage_class == .none and decl.binding_kind != .var_ and self.parent.const_eval.values[expr_id.index()] != null) {
+                        if (decl.storage_class == .none and
+                            (decl.binding_kind == .constant or decl.binding_kind == .immutable) and
+                            self.parent.const_eval.values[expr_id.index()] != null)
+                        {
                             try locals.bindPatternWithoutValue(self.parent.file, decl.pattern);
                             return false;
                         }
