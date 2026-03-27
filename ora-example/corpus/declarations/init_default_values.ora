@@ -7,6 +7,8 @@ struct Config {
     active: bool;
 }
 
+comptime const std = @import("std");
+
 contract InitDefaultValues {
     // Scalar defaults
     storage var count: u256 = 0;
@@ -43,7 +45,9 @@ contract InitDefaultValues {
 
     // Verify default was set, then modify
     pub fn increment_count() -> u256 {
-        count += 1;
+        if (count < std.constants.U256_MAX) {
+            count += 1;
+        }
         return count;
     }
 
@@ -54,6 +58,9 @@ contract InitDefaultValues {
 
     // Use default in computation
     pub fn remaining_supply() -> u256 {
+        if (minted > max_supply) {
+            return 0;
+        }
         return max_supply - minted;
     }
 
@@ -77,11 +84,13 @@ contract InitDefaultValues {
 
     // Mint using defaults
     pub fn mint(amount: u256) -> bool {
-        let projected: u256 = minted + amount;
-        if (projected > max_supply) {
+        if (amount > max_supply) {
             return false;
         }
-        minted = projected;
+        if (total > std.constants.U256_MAX - amount) {
+            return false;
+        }
+        minted = amount;
         total += amount;
         return true;
     }
