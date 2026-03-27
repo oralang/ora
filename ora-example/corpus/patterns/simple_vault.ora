@@ -22,6 +22,7 @@ contract SimpleVault {
 
     pub fn withdraw(amount: u256) -> bool
         requires(amount > 0)
+        requires(totalDeposits >= amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
         let current: u256 = deposits[sender];
