@@ -3,12 +3,12 @@ contract U64Ops {
     storage var b: u64;
 
     pub fn arithmetic(x: u64, y: u64) -> u64 {
-        let add: u64 = x + y;
-        let sub: u64 = x - y;
-        let mul: u64 = x * y;
+        let add: u64 = x +% y;
+        let sub: u64 = x -% y;
+        let mul: u64 = x *% y;
         let div: u64 = x / y;
         let mod_: u64 = x % y;
-        let compound: u64 = (x + y) * x;
+        let compound: u64 = (x +% y) *% x;
         return add;
     }
 

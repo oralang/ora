@@ -3,12 +3,12 @@ contract U8Ops {
     storage var b: u8;
 
     pub fn arithmetic(x: u8, y: u8) -> u8 {
-        let add: u8 = x + y;
-        let sub: u8 = x - y;
-        let mul: u8 = x * y;
+        let add: u8 = x +% y;
+        let sub: u8 = x -% y;
+        let mul: u8 = x *% y;
         let div: u8 = x / y;
         let mod_: u8 = x % y;
-        let compound: u8 = (x + y) * x;
+        let compound: u8 = (x +% y) *% x;
         return add;
     }
 

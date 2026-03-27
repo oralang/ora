@@ -3,13 +3,13 @@ contract I256Ops {
     storage var b: i256;
 
     pub fn arithmetic(x: i256, y: i256) -> i256 {
-        let add: i256 = x + y;
-        let sub: i256 = x - y;
-        let mul: i256 = x * y;
+        let add: i256 = x +% y;
+        let sub: i256 = x -% y;
+        let mul: i256 = x *% y;
         let div: i256 = x / y;
         let mod_: i256 = x % y;
         let neg: i256 = -x;
-        let compound: i256 = (x + y) * x;
+        let compound: i256 = (x +% y) *% x;
         return add;
     }
 

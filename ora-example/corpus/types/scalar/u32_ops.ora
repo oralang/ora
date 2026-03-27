@@ -3,12 +3,12 @@ contract U32Ops {
     storage var b: u32;
 
     pub fn arithmetic(x: u32, y: u32) -> u32 {
-        let add: u32 = x + y;
-        let sub: u32 = x - y;
-        let mul: u32 = x * y;
+        let add: u32 = x +% y;
+        let sub: u32 = x -% y;
+        let mul: u32 = x *% y;
         let div: u32 = x / y;
         let mod_: u32 = x % y;
-        let compound: u32 = (x + y) * x;
+        let compound: u32 = (x +% y) *% x;
         return add;
     }
 

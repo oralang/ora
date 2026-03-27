@@ -3,12 +3,12 @@ contract U256Ops {
     storage var b: u256;
 
     pub fn arithmetic(x: u256, y: u256) -> u256 {
-        let add: u256 = x + y;
-        let sub: u256 = x - y;
-        let mul: u256 = x * y;
+        let add: u256 = x +% y;
+        let sub: u256 = x -% y;
+        let mul: u256 = x *% y;
         let div: u256 = x / y;
         let mod_: u256 = x % y;
-        let compound: u256 = (x + y) * x;
+        let compound: u256 = (x +% y) *% x;
         return add;
     }
 

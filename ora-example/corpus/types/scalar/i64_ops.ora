@@ -3,13 +3,13 @@ contract I64Ops {
     storage var b: i64;
 
     pub fn arithmetic(x: i64, y: i64) -> i64 {
-        let add: i64 = x + y;
-        let sub: i64 = x - y;
-        let mul: i64 = x * y;
+        let add: i64 = x +% y;
+        let sub: i64 = x -% y;
+        let mul: i64 = x *% y;
         let div: i64 = x / y;
         let mod_: i64 = x % y;
         let neg: i64 = -x;
-        let compound: i64 = (x + y) * x;
+        let compound: i64 = (x +% y) *% x;
         return add;
     }
 
