@@ -76,7 +76,9 @@ contract BurnableToken {
         return true;
     }
 
-    pub fn burn(amount: u256) -> bool {
+    pub fn burn(amount: u256) -> bool
+        requires(totalSupply >= amount)
+    {
         let sender: address = std.msg.sender();
         let senderBalance: u256 = balances[sender];
 
@@ -91,7 +93,9 @@ contract BurnableToken {
         return true;
     }
 
-    pub fn burnFrom(from: address, amount: u256) -> bool {
+    pub fn burnFrom(from: address, amount: u256) -> bool
+        requires(totalSupply >= amount)
+    {
         let spender: NonZeroAddress = std.msg.sender();
 
         let currentAllowance: u256 = allowances[from][spender];
