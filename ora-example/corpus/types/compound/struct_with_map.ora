@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 struct AccountInfo {
     balance: u256;
     nonce: u256;
@@ -12,7 +14,10 @@ contract StructWithMap {
         accounts[owner] = AccountInfo { balance: 0, nonce: 0, active: true };
     }
 
-    pub fn deposit(owner: address, amount: u256) {
+    pub fn deposit(owner: address, amount: u256)
+        requires(accounts[owner].balance <= std.constants.U256_MAX - amount)
+        requires(accounts[owner].nonce < std.constants.U256_MAX)
+    {
         let acct: AccountInfo = accounts[owner];
         accounts[owner] = AccountInfo {
             balance: acct.balance + amount,
