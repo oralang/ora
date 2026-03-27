@@ -8,7 +8,7 @@ contract ForArray {
         var arr: [u256; 5] = [1, 2, 3, 4, 5];
         var sum: u256 = 0;
         for (arr) |val, _| {
-            sum += val;
+            sum = sum +% val;
         }
         return sum; // 15
     }
@@ -18,7 +18,7 @@ contract ForArray {
         var arr: [u256; 4] = [10, 20, 30, 40];
         var weighted_sum: u256 = 0;
         for (arr) |val, idx| {
-            weighted_sum += val * idx;
+            weighted_sum = weighted_sum +% (val *% idx);
         }
         return weighted_sum; // 0*10 + 1*20 + 2*30 + 3*40 = 0+20+60+120 = 200
     }
@@ -41,7 +41,7 @@ contract ForArray {
         var count: u256 = 0;
         for (arr) |val, _| {
             if (val > 4) {
-                count += 1;
+                count = count +% 1;
             }
         }
         return count; // 3 (5, 8, 7)

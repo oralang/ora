@@ -53,8 +53,8 @@ contract DeclarationsVar {
         var sum: u256 = 0;
         var i: u256 = 0;
         while (i < 10) {
-            sum += i;
-            i += 1;
+            sum = sum +% i;
+            i = i +% 1;
         }
         return sum;
     }
