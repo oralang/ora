@@ -7594,6 +7594,75 @@ pub const Encoder = struct {
         });
     }
 
+    fn tryCollectEqCatchTargetsFromIfChain(
+        self: *Encoder,
+        if_op: mlir.MlirOperation,
+        iv: mlir.MlirValue,
+        mode: EncodeMode,
+        targets: *std.ArrayListUnmanaged(mlir.MlirValue),
+        branch_preds: *std.ArrayListUnmanaged(z3.Z3_ast),
+    ) EncodeError!bool {
+        if (mlir.oraOperationIsNull(if_op)) return false;
+        if (!self.operationNameEq(if_op, "scf.if")) return false;
+        if (mlir.oraOperationGetNumOperands(if_op) < 1) return false;
+
+        const cond_value = mlir.oraOperationGetOperand(if_op, 0);
+        if (!mlir.oraValueIsAOpResult(cond_value)) return false;
+        const cmp_op = mlir.oraOpResultGetOwner(cond_value);
+        if (mlir.oraOperationIsNull(cmp_op) or !self.operationNameEq(cmp_op, "arith.cmpi")) return false;
+        const predicate = try self.getCmpPredicate(cmp_op);
+        if (predicate != 0) return false;
+        if (mlir.oraOperationGetNumOperands(cmp_op) < 2) return false;
+
+        const lhs = mlir.oraOperationGetOperand(cmp_op, 0);
+        const rhs = mlir.oraOperationGetOperand(cmp_op, 1);
+        const target = if (lhs.ptr == iv.ptr)
+            rhs
+        else if (rhs.ptr == iv.ptr)
+            lhs
+        else
+            return false;
+
+        const false_pred = self.encodeBoolConstant(false);
+        const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetThenBlock(if_op), mode, false_pred)) orelse return false;
+        try targets.append(self.allocator, target);
+        try branch_preds.append(self.allocator, then_pred);
+
+        const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+        var current = mlir.oraBlockGetFirstOperation(else_block);
+        var nested_if: ?mlir.MlirOperation = null;
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                current = mlir.oraOperationGetNextInBlock(current);
+                continue;
+            }
+            if (std.mem.eql(u8, name, "arith.cmpi")) {
+                current = mlir.oraOperationGetNextInBlock(current);
+                continue;
+            }
+            if (std.mem.eql(u8, name, "scf.if") and nested_if == null) {
+                nested_if = current;
+                current = mlir.oraOperationGetNextInBlock(current);
+                continue;
+            }
+            return false;
+        }
+
+        if (nested_if) |next_if| {
+            return try self.tryCollectEqCatchTargetsFromIfChain(next_if, iv, mode, targets, branch_preds);
+        }
+
+        const else_pred = (try self.tryExtractCatchPredicateFromBlock(else_block, mode, false_pred)) orelse return false;
+        return self.astEquivalent(else_pred, false_pred);
+    }
+
     fn tryExtractFixedIterationScfForCatchPredicate(
         self: *Encoder,
         for_op: mlir.MlirOperation,
@@ -7614,7 +7683,6 @@ pub const Encoder = struct {
         const iv = mlir.oraBlockGetArgument(body, 0);
 
         var if_op: ?mlir.MlirOperation = null;
-        var target_value: ?mlir.MlirValue = null;
         var current = mlir.oraBlockGetFirstOperation(body);
         while (!mlir.oraOperationIsNull(current)) {
             const name_ref = self.getOperationName(current);
@@ -7626,31 +7694,6 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, name, "scf.if")) {
                 if (if_op != null) return null;
-                if (mlir.oraOperationGetNumOperands(current) < 1) return null;
-                const cond_value = mlir.oraOperationGetOperand(current, 0);
-                if (!mlir.oraValueIsAOpResult(cond_value)) return null;
-                const cmp_op = mlir.oraOpResultGetOwner(cond_value);
-                if (mlir.oraOperationIsNull(cmp_op)) return null;
-                const cmp_name_ref = self.getOperationName(cmp_op);
-                defer @import("mlir_c_api").freeStringRef(cmp_name_ref);
-                const cmp_name = if (cmp_name_ref.data == null or cmp_name_ref.length == 0)
-                    ""
-                else
-                    cmp_name_ref.data[0..cmp_name_ref.length];
-                if (!std.mem.eql(u8, cmp_name, "arith.cmpi")) return null;
-                const predicate = try self.getCmpPredicate(cmp_op);
-                if (predicate != 0) return null;
-                if (mlir.oraOperationGetNumOperands(cmp_op) < 2) return null;
-
-                const lhs = mlir.oraOperationGetOperand(cmp_op, 0);
-                const rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-                if (lhs.ptr == iv.ptr) {
-                    target_value = rhs;
-                } else if (rhs.ptr == iv.ptr) {
-                    target_value = lhs;
-                } else {
-                    return null;
-                }
                 if_op = current;
                 current = mlir.oraOperationGetNextInBlock(current);
                 continue;
@@ -7661,29 +7704,33 @@ pub const Encoder = struct {
         }
 
         const branch_op = if_op orelse return null;
-        const target = target_value orelse return null;
-
-        const false_pred = self.encodeBoolConstant(false);
-        const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetThenBlock(branch_op), mode, false_pred)) orelse return null;
-        const else_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetElseBlock(branch_op), mode, false_pred)) orelse return null;
-
-        const active_pred = if (self.astEquivalent(else_pred, false_pred))
-            then_pred
-        else if (self.astEquivalent(then_pred, false_pred))
-            else_pred
-        else
-            return null;
+        var targets = std.ArrayListUnmanaged(mlir.MlirValue){};
+        defer targets.deinit(self.allocator);
+        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer branch_preds.deinit(self.allocator);
+        if (!(try self.tryCollectEqCatchTargetsFromIfChain(branch_op, iv, mode, &targets, &branch_preds))) return null;
+        if (targets.items.len == 0) return null;
 
         const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
-        const target_ast = try self.encodeValueWithMode(target, mode);
-        const reaches_target = if (mlir_helpers.getScfForUnsignedCmp(for_op))
-            z3.Z3_mk_bvugt(self.context.ctx, ub_ast, target_ast)
-        else
-            z3.Z3_mk_bvsgt(self.context.ctx, ub_ast, target_ast);
+        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer catch_cases.deinit(self.allocator);
+        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer miss_cases.deinit(self.allocator);
+        for (targets.items, branch_preds.items) |target, pred| {
+            const target_ast = try self.encodeValueWithMode(target, mode);
+            const reaches_target = if (mlir_helpers.getScfForUnsignedCmp(for_op))
+                z3.Z3_mk_bvugt(self.context.ctx, ub_ast, target_ast)
+            else
+                z3.Z3_mk_bvsgt(self.context.ctx, ub_ast, target_ast);
+            try catch_cases.append(self.allocator, self.encodeAnd(&.{ reaches_target, pred }));
+            try miss_cases.append(self.allocator, self.encodeNot(reaches_target));
+        }
+        const catches_any = self.encodeOr(catch_cases.items);
+        const misses_all = self.encodeAnd(miss_cases.items);
 
         return self.encodeOr(&.{
-            self.encodeAnd(&.{ reaches_target, active_pred }),
-            self.encodeAnd(&.{ self.encodeNot(reaches_target), continuation }),
+            catches_any,
+            self.encodeAnd(&.{ misses_all, continuation }),
         });
     }
 
@@ -7831,7 +7878,6 @@ pub const Encoder = struct {
         const limit_value = cmp_rhs;
 
         var if_op: ?mlir.MlirOperation = null;
-        var target_value: ?mlir.MlirValue = null;
         var yielded_value: ?mlir.MlirValue = null;
         var current = mlir.oraBlockGetFirstOperation(after_block);
         while (!mlir.oraOperationIsNull(current)) {
@@ -7844,32 +7890,6 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, name, "scf.if")) {
                 if (if_op != null) return null;
-                if (mlir.oraOperationGetNumOperands(current) < 1) return null;
-                const if_cond = mlir.oraOperationGetOperand(current, 0);
-                if (!mlir.oraValueIsAOpResult(if_cond)) return null;
-                const if_cmp = mlir.oraOpResultGetOwner(if_cond);
-                if (mlir.oraOperationIsNull(if_cmp)) return null;
-                const if_cmp_name_ref = self.getOperationName(if_cmp);
-                defer @import("mlir_c_api").freeStringRef(if_cmp_name_ref);
-                const if_cmp_name = if (if_cmp_name_ref.data == null or if_cmp_name_ref.length == 0)
-                    ""
-                else
-                    if_cmp_name_ref.data[0..if_cmp_name_ref.length];
-                if (!std.mem.eql(u8, name, "scf.if") or !std.mem.eql(u8, if_cmp_name, "arith.cmpi")) return null;
-                const if_predicate = try self.getCmpPredicate(if_cmp);
-                if (if_predicate != 0) return null; // eq
-                if (mlir.oraOperationGetNumOperands(if_cmp) < 2) return null;
-
-                const lhs = mlir.oraOperationGetOperand(if_cmp, 0);
-                const rhs = mlir.oraOperationGetOperand(if_cmp, 1);
-                if (lhs.ptr == after_iv.ptr) {
-                    target_value = rhs;
-                } else if (rhs.ptr == after_iv.ptr) {
-                    target_value = lhs;
-                } else {
-                    return null;
-                }
-
                 if_op = current;
                 current = mlir.oraOperationGetNextInBlock(current);
                 continue;
@@ -7885,7 +7905,6 @@ pub const Encoder = struct {
         }
 
         const branch_op = if_op orelse return null;
-        const target = target_value orelse return null;
         const yielded = yielded_value orelse return null;
         if (!mlir.oraValueIsAOpResult(yielded)) return null;
         const yielded_owner = mlir.oraOpResultGetOwner(yielded);
@@ -7906,24 +7925,30 @@ pub const Encoder = struct {
             return null;
         }
 
-        const false_pred = self.encodeBoolConstant(false);
-        const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetThenBlock(branch_op), mode, false_pred)) orelse return null;
-        const else_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetElseBlock(branch_op), mode, false_pred)) orelse return null;
-
-        const active_pred = if (self.astEquivalent(else_pred, false_pred))
-            then_pred
-        else if (self.astEquivalent(then_pred, false_pred))
-            else_pred
-        else
-            return null;
+        var targets = std.ArrayListUnmanaged(mlir.MlirValue){};
+        defer targets.deinit(self.allocator);
+        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer branch_preds.deinit(self.allocator);
+        if (!(try self.tryCollectEqCatchTargetsFromIfChain(branch_op, after_iv, mode, &targets, &branch_preds))) return null;
+        if (targets.items.len == 0) return null;
 
         const limit_ast = try self.encodeValueWithMode(limit_value, mode);
-        const target_ast = try self.encodeValueWithMode(target, mode);
-        const reaches_target = z3.Z3_mk_bvugt(self.context.ctx, limit_ast, target_ast);
+        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer catch_cases.deinit(self.allocator);
+        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        defer miss_cases.deinit(self.allocator);
+        for (targets.items, branch_preds.items) |target, pred| {
+            const target_ast = try self.encodeValueWithMode(target, mode);
+            const reaches_target = z3.Z3_mk_bvugt(self.context.ctx, limit_ast, target_ast);
+            try catch_cases.append(self.allocator, self.encodeAnd(&.{ reaches_target, pred }));
+            try miss_cases.append(self.allocator, self.encodeNot(reaches_target));
+        }
+        const catches_any = self.encodeOr(catch_cases.items);
+        const misses_all = self.encodeAnd(miss_cases.items);
 
         return self.encodeOr(&.{
-            self.encodeAnd(&.{ reaches_target, active_pred }),
-            self.encodeAnd(&.{ self.encodeNot(reaches_target), continuation }),
+            catches_any,
+            self.encodeAnd(&.{ misses_all, continuation }),
         });
     }
 

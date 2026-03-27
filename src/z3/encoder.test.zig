@@ -4715,7 +4715,7 @@ test "func.call summary with fixed-iteration symbolic-target scf.for ora.try_stm
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), counter_solver.check());
 }
 
-test "func.call summary with multi-target symbolic scf.for ora.try_stmt currently degrades differing slots" {
+test "func.call summary with multi-target symbolic scf.for ora.try_stmt encodes differing slots exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -4862,18 +4862,34 @@ test "func.call summary with multi-target symbolic scf.for ora.try_stmt currentl
         0,
     );
     _ = try encoder.encodeOperation(call);
-
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("try state summary is not encoded exactly", encoder.degradationReason().?);
+    try testing.expect(!encoder.isDegraded());
 
     const stable = encoder.global_map.get("stable").?;
     var stable_solver = try Solver.init(&z3_ctx, testing.allocator);
     defer stable_solver.deinit();
     stable_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, stable, stable_pre)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), stable_solver.check());
+
+    const counter = encoder.global_map.get("counter").?;
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit, 0));
+    const target_a_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_a, 0));
+    const target_b_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_b, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_a = z3.Z3_mk_bvsgt(z3_ctx.ctx, limit_ast, target_a_ast);
+    const reaches_b = z3.Z3_mk_bvsgt(z3_ctx.ctx, limit_ast, target_b_ast);
+    const catches = encoder.encodeAnd(&.{ encoder.encodeOr(&.{ reaches_a, reaches_b }), encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
+
+    var counter_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer counter_solver.deinit();
+    counter_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), counter_solver.check());
 }
 
-test "func.call summary with multi-target symbolic scf.while ora.try_stmt currently degrades differing slots" {
+test "func.call summary with multi-target symbolic scf.while ora.try_stmt encodes differing slots exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -5040,15 +5056,31 @@ test "func.call summary with multi-target symbolic scf.while ora.try_stmt curren
         0,
     );
     _ = try encoder.encodeOperation(call);
-
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("try state summary is not encoded exactly", encoder.degradationReason().?);
+    try testing.expect(!encoder.isDegraded());
 
     const stable = encoder.global_map.get("stable").?;
     var stable_solver = try Solver.init(&z3_ctx, testing.allocator);
     defer stable_solver.deinit();
     stable_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, stable, stable_pre)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), stable_solver.check());
+
+    const counter = encoder.global_map.get("counter").?;
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit, 0));
+    const target_a_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_a, 0));
+    const target_b_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_b, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_a = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_a_ast);
+    const reaches_b = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_b_ast);
+    const catches = encoder.encodeAnd(&.{ encoder.encodeOr(&.{ reaches_a, reaches_b }), encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
+
+    var counter_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer counter_solver.deinit();
+    counter_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), counter_solver.check());
 }
 
 test "func.call summary with symbolic loop ora.try_stmt encodes differing slots exactly" {
@@ -10172,7 +10204,7 @@ test "direct ora.try_stmt yielding fixed-iteration symbolic-target scf.for resul
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "direct ora.try_stmt yielding multi-target symbolic scf.for result currently degrades" {
+test "direct ora.try_stmt yielding multi-target symbolic scf.for result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -10279,12 +10311,28 @@ test "direct ora.try_stmt yielding multi-target symbolic scf.for result currentl
         1,
     ));
 
-    _ = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("ora.try_stmt result requires exact catch summary", encoder.degradationReason().?);
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit_op, 0));
+    const target_a_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_a_op, 0));
+    const target_b_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_b_op, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_op, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_a = z3.Z3_mk_bvsgt(z3_ctx.ctx, limit_ast, target_a_ast);
+    const reaches_b = z3.Z3_mk_bvsgt(z3_ctx.ctx, limit_ast, target_b_ast);
+    const catches = encoder.encodeAnd(&.{ encoder.encodeOr(&.{ reaches_a, reaches_b }), encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "direct ora.try_stmt yielding multi-target symbolic scf.while result currently degrades" {
+test "direct ora.try_stmt yielding multi-target symbolic scf.while result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -10411,9 +10459,25 @@ test "direct ora.try_stmt yielding multi-target symbolic scf.while result curren
         1,
     ));
 
-    _ = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("ora.try_stmt result requires exact catch summary", encoder.degradationReason().?);
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    try testing.expect(!encoder.isDegraded());
+
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit_op, 0));
+    const target_a_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_a_op, 0));
+    const target_b_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_b_op, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_op, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_a = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_a_ast);
+    const reaches_b = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_b_ast);
+    const catches = encoder.encodeAnd(&.{ encoder.encodeOr(&.{ reaches_a, reaches_b }), encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "direct ora.try_stmt yielding multi-iteration symbolic scf.while result encodes exactly" {
