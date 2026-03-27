@@ -1379,10 +1379,22 @@ pub const VerificationPass = struct {
     ) !usize {
         const function_name = self.current_function_name orelse "unknown";
         const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
-        const encoded = if (try self.encoder.tryEncodeAssertCondition(op, .Current)) |specialized|
-            specialized
+        const failing_op = if (mlir.oraValueIsAOpResult(condition_value))
+            mlir.oraOpResultGetOwner(condition_value)
         else
-            try self.encoder.encodeValue(condition_value);
+            op;
+        const encoded = blk: {
+            if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
+                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                return err;
+            }) |specialized| {
+                break :blk specialized;
+            }
+            break :blk self.encoder.encodeValue(condition_value) catch |err| {
+                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                return err;
+            };
+        };
         const extra_constraints = try self.encoder.takeConstraints(self.allocator);
         const safety_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
@@ -6660,6 +6672,7 @@ test "annotation extraction failure is reported as unknown verification error" {
     try testing.expectEqual(@as(usize, 1), result.errors.items.len);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "annotation extraction"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Unsupported"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "unsupported annotation condition"));
 }
 
 test "prepared queries include invariant-post for scf.for" {

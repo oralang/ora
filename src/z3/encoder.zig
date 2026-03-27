@@ -179,6 +179,10 @@ pub const Encoder = struct {
         self.recordDegradation(reason);
     }
 
+    pub fn noteDegradationAtOp(self: *Encoder, op: mlir.MlirOperation, reason: []const u8) void {
+        self.recordDegradation(self.formatDegradationAtOp(op, reason));
+    }
+
     pub fn getOrCreateCurrentGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         return try self.getOrCreateGlobal(name, sort);
     }
