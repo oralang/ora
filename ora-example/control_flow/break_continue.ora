@@ -23,7 +23,7 @@ contract BreakContinueTest {
         // Break in while loop
         var counter: u256 = 0;
         while (true) {
-            counter += 1;
+            counter = counter +% 1;
             if (counter > 5) {
                 break;
             }
