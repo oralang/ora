@@ -9,6 +9,7 @@ contract BalanceTracker {
     pub fn deposit(amount: u256)
         requires(amount > 0)
         requires(totalBalance <= std.constants.U256_MAX - amount)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
     {
         let sender: address = std.msg.sender();
         balances[sender] += amount;
@@ -17,6 +18,7 @@ contract BalanceTracker {
 
     pub fn withdraw(amount: u256)
         requires(amount > 0)
+        requires(totalBalance >= amount)
     {
         let sender: address = std.msg.sender();
         let current: u256 = balances[sender];
