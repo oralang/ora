@@ -695,6 +695,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range);
                     }
                 },
+                .eq, .ne, .lt, .le, .gt, .ge => {
+                    const lhs_type = mlir.oraValueGetType(lhs);
+                    const rhs_type = mlir.oraValueGetType(rhs);
+                    if (mlir.oraTypeIsAInteger(lhs_type) and mlir.oraTypeIsAInteger(rhs_type) and !mlir.oraTypeEqual(lhs_type, rhs_type)) {
+                        const lhs_expr = self.parent.file.expression(binary.lhs).*;
+                        const rhs_expr = self.parent.file.expression(binary.rhs).*;
+                        if (lhs_expr == .IntegerLiteral and rhs_expr != .IntegerLiteral) {
+                            lhs = try self.convertValueForFlow(lhs, rhs_type, binary.range);
+                        } else if (rhs_expr == .IntegerLiteral and lhs_expr != .IntegerLiteral) {
+                            rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range);
+                        } else {
+                            const lhs_bits = mlir.oraIntegerTypeGetWidth(lhs_type);
+                            const rhs_bits = mlir.oraIntegerTypeGetWidth(rhs_type);
+                            const common_type = if (lhs_bits >= rhs_bits) lhs_type else rhs_type;
+                            lhs = try self.convertValueForFlow(lhs, common_type, binary.range);
+                            rhs = try self.convertValueForFlow(rhs, common_type, binary.range);
+                        }
+                    }
+                },
                 else => {},
             }
 

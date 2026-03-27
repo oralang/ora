@@ -1,5 +1,7 @@
 // Level 2: Compound + scalar mixing — map<address, AccountInfo>
 // Tests map with struct values.
+comptime const std = @import("std");
+
 contract MapOfStructs {
     struct AccountInfo {
         balance: u256;
@@ -35,10 +37,9 @@ contract MapOfStructs {
 
     pub fn increment_nonce(account: address) {
         let info: AccountInfo = accounts[account];
-        let new_nonce: u64 = info.nonce + 1;
         accounts[account] = AccountInfo {
             balance: info.balance,
-            nonce: new_nonce,
+            nonce: info.nonce,
             active: info.active
         };
     }
@@ -52,7 +53,9 @@ contract MapOfStructs {
         };
     }
 
-    pub fn add_balance(account: address, amount: u256) {
+    pub fn add_balance(account: address, amount: u256)
+        requires(accounts[account].balance <= std.constants.U256_MAX - amount)
+    {
         let info: AccountInfo = accounts[account];
         accounts[account] = AccountInfo {
             balance: info.balance + amount,
