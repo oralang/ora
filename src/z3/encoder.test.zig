@@ -15916,7 +15916,7 @@ test "known callee nested map write set stays exact" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "known callee loop-carried nested map write set currently degrades" {
+test "known callee loop-carried nested map write set stays exact" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -15988,7 +15988,7 @@ test "known callee loop-carried nested map write set currently degrades" {
     mlir.oraBlockAppendOwnedOperation(loop_body, mlir.oraScfYieldOpCreate(
         mlir_ctx,
         loc,
-        &[_]mlir.MlirValue{mlir.oraOperationGetResult(inner_after, 0)},
+        &[_]mlir.MlirValue{carried_inner},
         1,
     ));
     mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
@@ -16028,8 +16028,19 @@ test "known callee loop-carried nested map write set currently degrades" {
     );
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("failed to recover known callee write set exactly", encoder.degradationReason().?);
+    try testing.expect(!encoder.isDegraded());
+
+    const allowances = encoder.global_map.get("allowances").?;
+    const owner_ast = try encoder.encodeValue(owner_val);
+    const spender_ast = try encoder.encodeValue(spender_val);
+    const value_ast = try encoder.encodeValue(value_val);
+    const inner_map = encoder.encodeSelect(allowances, owner_ast);
+    const observed = encoder.encodeSelect(inner_map, spender_ast);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, observed, value_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "summary precondition encoding failure degrades encoder" {

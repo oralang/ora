@@ -9179,6 +9179,10 @@ pub const Encoder = struct {
     }
 
     fn resolveGlobalNameFromMapOperand(self: *Encoder, value: mlir.MlirValue) ?[]const u8 {
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return null;
+            return self.resolveGlobalNameFromMapOperand(init_operand);
+        }
         if (!mlir.oraValueIsAOpResult(value)) return null;
         const owner = mlir.oraOpResultGetOwner(value);
         if (mlir.oraOperationIsNull(owner)) return null;
@@ -9225,6 +9229,10 @@ pub const Encoder = struct {
     }
 
     fn mapOperandUsesNestedGet(self: *Encoder, value: mlir.MlirValue) bool {
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return false;
+            return self.mapOperandUsesNestedGet(init_operand);
+        }
         if (!mlir.oraValueIsAOpResult(value)) return false;
         const owner = mlir.oraOpResultGetOwner(value);
         if (mlir.oraOperationIsNull(owner)) return false;
@@ -9289,7 +9297,12 @@ pub const Encoder = struct {
         defer chain.deinit(self.allocator);
 
         var root_candidate = map_operand;
-        while (mlir.oraValueIsAOpResult(root_candidate)) {
+        while (true) {
+            if (mlir.mlirValueIsABlockArgument(root_candidate)) {
+                root_candidate = self.tryResolveBlockArgInitOperand(root_candidate) orelse break;
+                continue;
+            }
+            if (!mlir.oraValueIsAOpResult(root_candidate)) break;
             const owner = mlir.oraOpResultGetOwner(root_candidate);
             if (mlir.oraOperationIsNull(owner)) break;
 
