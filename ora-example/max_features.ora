@@ -54,7 +54,7 @@ contract FeatureMaximizer {
         origin.y = 20;
 
         // Compound assignment
-        i += 1;
+        i +%= 1;
 
         // Variable for use in conditions
         let v: u256 = 42;
@@ -67,7 +67,7 @@ contract FeatureMaximizer {
 
         // Requires/Ensures style checks embedded in helper calls
         let helper_result: u256 = helper_require_ensure(5);
-        counter += helper_result;
+        counter +%= helper_result;
 
         // Switch statement (not expression for now)
         var mapped: u256 = 0;
@@ -77,7 +77,7 @@ contract FeatureMaximizer {
             2 => { mapped = 300; }
             else => { mapped = 999; }
         }
-        counter += mapped;
+        counter +%= mapped;
 
         // Labeled block with break
         var val: u256 = 0;
@@ -88,26 +88,26 @@ contract FeatureMaximizer {
             }
             val = 0;
         }
-        counter += val;
+        counter +%= val;
 
         // Try/catch statement  
         try {
             let try_result: u256 = try may_fail();
-            counter += try_result;
+            counter +%= try_result;
         } catch (e) {
-            counter += 1;
+            counter +%= 1;
         }
 
         // Simple loop
         var idx: u256 = 0;
         while (idx < 3) {
-            counter += idx;
-            idx += 1;
+            counter +%= idx;
+            idx +%= 1;
         }
 
         // While with invariant
         while (i < 3) {
-            i += 1;
+            i +%= 1;
         }
 
         // Switch statement 
@@ -124,7 +124,7 @@ contract FeatureMaximizer {
         outer: {
             var j: u256 = 0;
             if (j < 5) {
-                j += 1;
+                j +%= 1;
                 if (j == 4) { break :outer; }
             }
         }
@@ -137,7 +137,7 @@ contract FeatureMaximizer {
         requires (x < std.constants.U256_MAX)
         ensures (x + 1 > x)
     {
-        return x + 1;
+        return x +% 1;
     }
 
     pub fn compute(a: u256, b: u256) -> u256 {
