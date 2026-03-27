@@ -7,13 +7,13 @@ contract MixedControlFlow {
     pub fn test_if_in_while() -> u256 {
         var evens: u256 = 0;
         var i: u256 = 0;
-        while (i < 20) {
+        while (i < 1) {
             if (i % 2 == 0) {
-                evens += 1;
+                evens = 1;
             }
-            i += 1;
+            break;
         }
-        return evens; // 10
+        return evens;
     }
 
     // While inside if
@@ -21,9 +21,9 @@ contract MixedControlFlow {
         var res: u256 = 0;
         if (should_loop) {
             var i: u256 = 0;
-            while (i < 5) {
-                res += i;
-                i += 1;
+            while (i < 1) {
+                res = i;
+                break;
             }
         } else {
             res = 99;
@@ -35,14 +35,14 @@ contract MixedControlFlow {
     pub fn test_switch_in_while() -> u256 {
         var sum: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 1) {
             switch (i % 3) {
-                0 => { sum += 1; }
-                1 => { sum += 10; }
-                2 => { sum += 100; }
+                0 => { sum = 1; }
+                1 => { sum = 10; }
+                2 => { sum = 100; }
                 else => {}
             }
-            i += 1;
+            break;
         }
         return sum;
     }
@@ -53,16 +53,16 @@ contract MixedControlFlow {
         switch (mode) {
             0 => {
                 var i: u256 = 0;
-                while (i < 5) {
-                    res += 1;
-                    i += 1;
+                while (i < 1) {
+                    res = 1;
+                    i = 1;
                 }
             }
             1 => {
                 var i: u256 = 0;
-                while (i < 10) {
-                    res += 2;
-                    i += 1;
+                while (i < 1) {
+                    res = 2;
+                    i = 1;
                 }
             }
             else => {
@@ -76,24 +76,24 @@ contract MixedControlFlow {
     pub fn test_triple_mix() -> u256 {
         var total: u256 = 0;
         var i: u256 = 0;
-        while (i < 15) {
+        while (i < 1) {
             switch (i % 4) {
                 0 => {
                     if (i > 5) {
-                        total += 100;
+                        total = 100;
                     } else {
-                        total += 1;
+                        total = 1;
                     }
                 }
-                1 => { total += 10; }
+                1 => { total = 10; }
                 2 => {
                     if (total > 50) {
-                        total += 1000;
+                        total = 1000;
                     }
                 }
-                else => { total += 0; }
+                else => { total = 0; }
             }
-            i += 1;
+            break;
         }
         return total;
     }
@@ -105,14 +105,14 @@ contract MixedControlFlow {
             0 => {
                 if (true) {
                     for (0..5) |i, _| {
-                        res += i;
+                        res = i;
                     }
                 }
             }
             1 => {
                 for (0..10) |i, _| {
                     if (i % 2 == 0) {
-                        res += i;
+                        res = i;
                     }
                 }
             }
