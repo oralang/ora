@@ -22,6 +22,7 @@ contract OrderBook {
         requires(amount > 0)
         requires(price > 0)
         requires(nextOrderId < std.constants.U256_MAX)
+        requires(orderCount < std.constants.U256_MAX)
     {
         let maker: address = std.msg.sender();
         let orderId: u256 = nextOrderId;
@@ -41,7 +42,9 @@ contract OrderBook {
         return orderId;
     }
 
-    pub fn cancelOrder(orderId: u256) -> bool {
+    pub fn cancelOrder(orderId: u256) -> bool
+        requires(orderCount >= 1)
+    {
         let caller: address = std.msg.sender();
         let order: Order = orders[orderId];
 
@@ -65,7 +68,9 @@ contract OrderBook {
         return true;
     }
 
-    pub fn fillOrder(orderId: u256) -> bool {
+    pub fn fillOrder(orderId: u256) -> bool
+        requires(orderCount >= 1)
+    {
         let taker: address = std.msg.sender();
         let order: Order = orders[orderId];
 
