@@ -2946,6 +2946,12 @@ pub const Encoder = struct {
                 // Model dynamic bytes as canonicalized hex strings in SMT.
                 return z3.Z3_mk_string_sort(self.context.ctx);
             }
+            const none_ty = mlir.oraNoneTypeCreate(type_ctx);
+            if (!mlir.oraTypeIsNull(none_ty) and mlir.oraTypeEqual(mlir_type, none_ty)) {
+                // Model `none` as a unit-like boolean carrier. The specific value is irrelevant;
+                // it only needs to be stable for error-union success payload plumbing.
+                return z3.Z3_mk_bool_sort(self.context.ctx);
+            }
         }
 
         if (mlir.oraTypeIsIntegerType(mlir_type)) {
@@ -3343,6 +3349,12 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
+            if (operands.len >= 1) {
+                return operands[0];
+            }
+        }
+
+        if (std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast")) {
             if (operands.len >= 1) {
                 return operands[0];
             }
