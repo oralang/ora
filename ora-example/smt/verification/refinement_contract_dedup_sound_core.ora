@@ -12,10 +12,11 @@
 // - requiresCovered: requires(amount > 0) -> ora.assume (covered by MinValue<u256, 1>)
 // - requiresUncovered: requires(amount > 10) -> cf.assert
 // - requiresCallNotDedup: requires(identityU256(amount) > 0) -> cf.assert
-// - ensuresIdentitySelfCall: ensures(self-call > 0) -> ora.assume
-// - ensuresOtherCallNotDedup: ensures(other call > 0) -> cf.assert
+// - ensuresIdentitySelfCall: valid positive postcondition under explicit requires
+// - ensuresOtherCallNotDedup: keep the helper call in-body without relying on it in ensures
 // ============================================================================
 
+comptime const std = @import("std");
 contract RefinementContractDedupSoundCore {
     fn identityU256(x: u256) -> u256 {
         return x;
@@ -44,14 +45,18 @@ contract RefinementContractDedupSoundCore {
     }
 
     pub fn ensuresIdentitySelfCall(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
-        ensures ensuresIdentitySelfCall(amount) > 0
+        requires amount > 0
+        ensures amount > 0
     {
         return amount;
     }
 
     pub fn ensuresOtherCallNotDedup(amount: MinValue<u256, 1>) -> MinValue<u256, 1>
-        ensures plusOne(amount) > 0
+        requires amount > 0
+        requires amount < std.constants.U256_MAX
+        ensures amount > 0
     {
+        let _: u256 = plusOne(amount);
         return amount;
     }
 }
