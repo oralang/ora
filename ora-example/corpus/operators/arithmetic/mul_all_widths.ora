@@ -1,31 +1,31 @@
 contract MulAllWidths {
     pub fn mul_u8(a: u8, b: u8) -> u8 {
-        let res: u8 = a * b;
+        let res: u8 = a *% b;
         return res;
     }
 
     pub fn mul_u16(a: u16, b: u16) -> u16 {
-        let res: u16 = a * b;
+        let res: u16 = a *% b;
         return res;
     }
 
     pub fn mul_u32(a: u32, b: u32) -> u32 {
-        let res: u32 = a * b;
+        let res: u32 = a *% b;
         return res;
     }
 
     pub fn mul_u64(a: u64, b: u64) -> u64 {
-        let res: u64 = a * b;
+        let res: u64 = a *% b;
         return res;
     }
 
     pub fn mul_u128(a: u128, b: u128) -> u128 {
-        let res: u128 = a * b;
+        let res: u128 = a *% b;
         return res;
     }
 
     pub fn mul_u256(a: u256, b: u256) -> u256 {
-        let res: u256 = a * b;
+        let res: u256 = a *% b;
         return res;
     }
 }
