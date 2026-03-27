@@ -6682,10 +6682,6 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
             // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
             pm.addPass(createSIRCleanupPass());
 
-            // Add simple pass that runs canonicalization and DCE on each function
-            // This ensures both passes actually execute (nested passes weren't working)
-            pm.addPass(mlir::ora::createSimpleDCEPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added simple pass (canonicalize + DCE)");
         }
 
         // Run the pass
