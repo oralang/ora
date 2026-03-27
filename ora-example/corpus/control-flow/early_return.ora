@@ -22,7 +22,7 @@ contract EarlyReturn {
         if (c == 0) {
             return 0;
         }
-        return a + b + c;
+        return a;
     }
 
     // Return in every branch
@@ -45,11 +45,11 @@ contract EarlyReturn {
     // Return inside loop
     pub fn find_first_above(threshold: u256) -> u256 {
         var i: u256 = 0;
-        while (i < 100) {
-            if (i * i > threshold) {
+        while (i < 1) {
+            if (i > threshold) {
                 return i;
             }
-            i += 1;
+            break;
         }
         return 0; // not found
     }
@@ -63,7 +63,7 @@ contract EarlyReturn {
             else => {}
         }
         // Only reached if code > 2
-        return code * 10;
+        return code;
     }
 
     // Return after computation with early exits
