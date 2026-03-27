@@ -7600,9 +7600,9 @@ pub const Encoder = struct {
 
                 const lhs = mlir.oraOperationGetOperand(cmp_op, 0);
                 const rhs = mlir.oraOperationGetOperand(cmp_op, 1);
-                if (lhs.ptr == iv.ptr and self.tryGetConstIntValue(rhs) != null) {
+                if (lhs.ptr == iv.ptr) {
                     target_value = rhs;
-                } else if (rhs.ptr == iv.ptr and self.tryGetConstIntValue(lhs) != null) {
+                } else if (rhs.ptr == iv.ptr) {
                     target_value = lhs;
                 } else {
                     return null;
@@ -7618,8 +7618,6 @@ pub const Encoder = struct {
 
         const branch_op = if_op orelse return null;
         const target = target_value orelse return null;
-        const target_const = self.tryGetConstIntValue(target) orelse return null;
-        if (target_const < 0) return null;
 
         const false_pred = self.encodeBoolConstant(false);
         const then_pred = (try self.tryExtractCatchPredicateFromBlock(mlir.oraScfIfOpGetThenBlock(branch_op), mode, false_pred)) orelse return null;
