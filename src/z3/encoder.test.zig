@@ -16567,6 +16567,7 @@ test "scf.while result encoding degrades exact SMT modeling" {
     const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, encoded));
     try testing.expect(std.mem.indexOf(u8, encoded_text, "scf_while_result_") != null);
     try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("scf.while result requires loop summary", encoder.degradationReason().?);
 }
 
 test "scf.while zero-iteration result encodes exactly" {
@@ -17701,6 +17702,7 @@ test "scf.while unsigned swapped-compare decrement degrades exact SMT modeling" 
     _ = try encoder.encodeOperation(delta_op);
     _ = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
     try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("scf.while result requires loop summary", encoder.degradationReason().?);
 }
 
 test "scf.while signed swapped-compare decrement degrades exact SMT modeling" {
@@ -17757,6 +17759,7 @@ test "scf.while signed swapped-compare decrement degrades exact SMT modeling" {
     _ = try encoder.encodeOperation(delta_op);
     _ = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
     try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("scf.while result requires loop summary", encoder.degradationReason().?);
 }
 
 test "known pure callee canonical signed positive-delta decrement scf.while return encodes exactly" {

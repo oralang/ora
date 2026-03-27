@@ -119,7 +119,7 @@ no longer have the earlier unexplained `UNKNOWN` hotspot.
 
 ### Why This Matters
 
-Canonical loops are in much better shape. The remaining loop frontier is now the true exactness boundary:
+Canonical loops are in much better shape. The remaining loop frontier is now the main non-harness exactness boundary:
 
 - non-canonical `scf.while`
 - residual `scf.for` result/state cases that still need loop summaries
@@ -144,6 +144,14 @@ Still live:
 - `scf.while result requires loop summary`
 - `scf.for result requires loop summary`
 - general loop state summary non-exactness
+
+On the current branch, the explicit residual anchors are concentrated in the `scf.while` family:
+
+- generic non-canonical `scf.while` result fallback
+- unsigned swapped-compare decrement `scf.while`
+- signed swapped-compare decrement `scf.while`
+
+These are intentionally fail-closed and now regression-tested with exact degradation reasons.
 
 ### Anchor Repros
 
@@ -576,7 +584,7 @@ Primary target:
 | Workstream | Owner Type | Current Status | Anchor Repro | Blocking Files | Exit Criteria |
 | --- | --- | --- | --- | --- | --- |
 | Live `UNKNOWN` elimination | Core SMT owners + SMT execution solver/tractability owner | Done | [open_stream_add_unknown.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/open_stream_add_unknown.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [expr_lowering.zig](/Users/logic/Ora/Ora/src/hir/expr_lowering.zig) | No unexplained `UNKNOWN` in the narrow repro; corresponding real-contract obligations resolve to `UNSAT` or real `SAT`. |
-| Non-canonical loop exactness | Core SMT owners + SMT execution loop owner | Active | direct loop regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining loop degradations are either exact or explicitly preserved with named regressions and rationale. |
+| Non-canonical loop exactness | Core SMT owners + SMT execution loop owner | Active, primary remaining SMT slice | direct loop regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining loop degradations are either exact or explicitly preserved with named regressions and rationale. |
 | Interprocedural summary exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowly residual | helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Common helper shapes stay exact; remaining UF fallbacks are rare, deliberate, and tested. |
 | Struct/frame residuals | Core SMT owners + SMT execution struct/frame owner | Active | struct regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | No silent partial-frame behavior; metadata-miss cases are exact or explicit fail-closed boundaries. |
 | Residual `ora.try_stmt` exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowed | `try` regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining live-try degradations are narrow, justified, and regression-tested. |
@@ -593,7 +601,7 @@ Primary target:
 
 ## Immediate Next Actions
 
-1. Enumerate the remaining non-canonical loop degradations directly from [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig) and keep only the intentional fail-closed boundaries.
-2. Enumerate the remaining known-callee degradations that are not just opaque-callee/unknown-write-set fallbacks and assign each one an owner and repro.
-3. Keep the residual `ora.try_stmt` list limited to structurally recoverable catch-predicate families; leave opaque/disconnected cases explicitly fail-closed.
+1. Keep the remaining `scf.while` non-canonical degradations explicit, reason-checked, and small.
+2. Only reopen interprocedural or `ora.try_stmt` work if a new non-opaque, structurally recoverable degradation appears.
+3. Leave opaque/disconnected helper and catch-condition cases explicitly fail-closed unless there is a semantics-preserving recovery path.
 4. Refresh this document as each bucket is narrowed so the implementation team always works from branch reality, not stale audit state.
