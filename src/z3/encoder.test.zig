@@ -251,12 +251,6 @@ test "struct_field_update preserves untouched fields exactly" {
     const left_ast = try encoder.encodeOperation(extract_left);
     const right_ast = try encoder.encodeOperation(extract_right);
 
-    if (encoder.isDegraded()) {
-        std.debug.print("struct update degradation: {s}\n", .{encoder.degradationReason().?});
-    }
-    if (encoder.isDegraded()) {
-        std.debug.print("known callee scf.for carried struct degradation: {s}\n", .{encoder.degradationReason().?});
-    }
     try testing.expect(!encoder.isDegraded());
 
     const constraints = try encoder.takeConstraints(testing.allocator);
@@ -345,9 +339,6 @@ test "known pure callee returning updated struct preserves untouched fields exac
     const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, call_result, stringRef("right"), i256_ty);
     const right_ast = try encoder.encodeOperation(extract_right);
 
-    if (encoder.isDegraded()) {
-        std.debug.print("pure callee struct update degradation: {s}\n", .{encoder.degradationReason().?});
-    }
     try testing.expect(!encoder.isDegraded());
 
     const constraints = try encoder.takeConstraints(testing.allocator);
@@ -648,9 +639,6 @@ test "caller struct_field_update recovers untouched fields from known callee sco
     const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(updated, 0), stringRef("right"), i256_ty);
     const right_ast = try encoder.encodeOperation(extract_right);
 
-    if (encoder.isDegraded()) {
-        std.debug.print("scoped callee struct update degradation: {s}\n", .{encoder.degradationReason().?});
-    }
     try testing.expect(!encoder.isDegraded());
 
     const constraints = try encoder.takeConstraints(testing.allocator);
@@ -1939,9 +1927,6 @@ test "struct_field_update recovers untouched fields from scoped struct declarati
     const left_ast = try encoder.encodeOperation(extract_left);
     const right_ast = try encoder.encodeOperation(extract_right);
 
-    if (encoder.isDegraded()) {
-        std.debug.print("scoped struct update degradation: {s}\n", .{encoder.degradationReason().?});
-    }
     try testing.expect(!encoder.isDegraded());
 
     const constraints = try encoder.takeConstraints(testing.allocator);
