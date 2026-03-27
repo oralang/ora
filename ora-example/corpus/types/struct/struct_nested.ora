@@ -24,7 +24,7 @@ contract StructNested {
             id: 2,
             data: Inner { value: 100, flag: false }
         };
-        return o.id + o.data.value;
+        return o.data.value;
     }
 
     pub fn store_nested() {
