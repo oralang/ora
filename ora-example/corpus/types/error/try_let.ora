@@ -7,12 +7,12 @@ contract TryLet {
         if (x == 0) {
             return BadInput;
         }
-        return x * 2;
+        return x *% 2;
     }
 
     pub fn process(x: u256) -> !u256 | BadInput {
         let res: u256 = try validate(x);
-        return res + 1;
+        return res +% 1;
     }
 
     pub fn process_twice(x: u256) -> !u256 | BadInput {

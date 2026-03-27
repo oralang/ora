@@ -9,7 +9,7 @@ contract ErrorInLoop {
         if (id == 0) {
             return ProcessingError;
         }
-        return id * 2;
+        return id *% 2;
     }
 
     pub fn process_range(count: u256) -> !u256 | ProcessingError {
@@ -18,8 +18,8 @@ contract ErrorInLoop {
         while (i <= count) {
             let val: u256 = try validate_item(i);
             results[i] = val;
-            total = total + val;
-            i = i + 1;
+            total = total +% val;
+            i = i +% 1;
         }
         return total;
     }

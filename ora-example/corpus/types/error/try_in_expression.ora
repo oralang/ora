@@ -15,16 +15,16 @@ contract TryInExpression {
         if (x == 0) {
             return FailB;
         }
-        return x * 10;
+        return x *% 10;
     }
 
     pub fn sum_both(a: u256, b: u256) -> !u256 | FailA | FailB {
-        let sum: u256 = try get_a(a) + try get_b(b);
+        let sum: u256 = try get_a(a) +% try get_b(b);
         return sum;
     }
 
     pub fn mul_both(a: u256, b: u256) -> !u256 | FailA | FailB {
-        let product: u256 = try get_a(a) * try get_b(b);
+        let product: u256 = try get_a(a) *% try get_b(b);
         return product;
     }
 }

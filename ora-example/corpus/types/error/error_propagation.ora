@@ -16,7 +16,7 @@ contract ErrorPropagation {
         if (x > 1000000) {
             return ComputeError;
         }
-        return x * x;
+        return x *% x;
     }
 
     pub fn validate_then_compute(x: u256) -> !u256 | ValidationError | ComputeError {
@@ -27,6 +27,6 @@ contract ErrorPropagation {
 
     pub fn outer(x: u256) -> !u256 | ValidationError | ComputeError {
         let r: u256 = try validate_then_compute(x);
-        return r + 1;
+        return r +% 1;
     }
 }
