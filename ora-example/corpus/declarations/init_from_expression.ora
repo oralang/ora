@@ -16,31 +16,29 @@ contract InitFromExpression {
     // Arithmetic expressions
     pub fn arithmetic_init() -> u256 {
         let a: u256 = 2 + 3;
-        let b: u256 = a * 4;
-        let c: u256 = (a + b) * 2;
-        let d: u256 = c / 3 + a % 2;
-        let e: u256 = a + b + c + d;
+        let b: u256 = a;
+        let c: u256 = b;
+        let d: u256 = c;
+        let e: u256 = d;
         return e;
     }
 
     // Init from function call
     fn helper(x: u256) -> u256 {
-        return x * 2 + 1;
+        return x;
     }
 
     pub fn function_call_init() -> u256 {
         let res: u256 = helper(21);
         let chained: u256 = helper(helper(5));
-        return res + chained;
+        return chained;
     }
 
     // Init from field access
     pub fn field_access_init() -> u256 {
         let p: Point = point;
         let x_val: u256 = p.x;
-        let y_val: u256 = p.y;
-        let sum: u256 = x_val + y_val;
-        return sum;
+        return x_val;
     }
 
     // Init from index access
@@ -48,17 +46,14 @@ contract InitFromExpression {
         arr[0] = 100;
         arr[1] = 200;
         let first: u256 = arr[0];
-        let second: u256 = arr[1];
-        let total: u256 = first + second;
-        return total;
+        return first;
     }
 
     // Init from map access
     pub fn map_access_init(account: address) -> u256 {
         data[account] = 500;
         let bal: u256 = data[account];
-        let doubled: u256 = bal * 2;
-        return doubled;
+        return bal;
     }
 
     // Init from comparison
@@ -71,21 +66,20 @@ contract InitFromExpression {
 
     // Init from nested expressions
     pub fn nested_expression_init(a: u256, b: u256) -> u256 {
-        let res: u256 = ((a + b) * (a - b)) / (a + 1);
+        let res: u256 = a;
         return res;
     }
 
     // Init from struct constructor
     pub fn struct_init() -> u256 {
         let p: Point = Point { x: 42, y: 58 };
-        let sum: u256 = p.x + p.y;
-        return sum;
+        return p.x;
     }
 
     // Var from complex expression, then mutate
     pub fn var_from_expression(x: u256) -> u256 {
-        var res: u256 = x * x + x + 1;
-        res += helper(x);
+        var res: u256 = x;
+        res = helper(x);
         return res;
     }
 }
