@@ -69,7 +69,7 @@ contract SwitchNested {
                 switch (x) {
                     0 => { return 0; }
                     else => {
-                        var doubled: u256 = x * 2;
+                        var doubled: u256 = x;
                         return doubled;
                     }
                 }
