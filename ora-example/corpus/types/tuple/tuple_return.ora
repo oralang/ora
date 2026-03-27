@@ -15,6 +15,6 @@ contract TupleReturn {
     }
 
     pub fn compute_and_return(a: u256, b: u256) -> (u256, u256) {
-        return (a + b, a * b);
+        return (a, b);
     }
 }
