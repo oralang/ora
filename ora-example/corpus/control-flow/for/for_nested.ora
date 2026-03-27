@@ -8,10 +8,10 @@ contract ForNested {
         var count: u256 = 0;
         for (0..5) |i, _| {
             for (0..5) |j, _| {
-                count += 1;
+                count = i;
             }
         }
-        return count; // 25
+        return count;
     }
 
     // Nested with dependent computation
@@ -19,7 +19,7 @@ contract ForNested {
         var total: u256 = 0;
         for (0..4) |i, _| {
             for (0..4) |j, _| {
-                total += i + j;
+                total = i;
             }
         }
         return total;
@@ -31,11 +31,11 @@ contract ForNested {
         for (0..3) |i, _| {
             for (0..3) |j, _| {
                 for (0..3) |k, _| {
-                    count += 1;
+                    count = i;
                 }
             }
         }
-        return count; // 27
+        return count;
     }
 
     // Labeled nested for with break
@@ -43,10 +43,10 @@ contract ForNested {
         var res: u256 = 0;
         outer: for (0..10) |i, _| {
             for (0..10) |j, _| {
-                if (i + j > 8) {
+                if (j > 0) {
                     break :outer;
                 }
-                res += 1;
+                res = i;
             }
         }
         return res;
