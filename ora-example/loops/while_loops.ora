@@ -9,13 +9,13 @@ contract WhileLoopTest {
         
         // Basic while loop
         while (counter < 10) {
-            counter += 1;
+            counter +%= 1;
         }
         
         // While loop with complex condition
         counter = 0;
         while (counter < 20 && counter != 15) {
-            counter += 1;
+            counter +%= 1;
         }
     }
 }
