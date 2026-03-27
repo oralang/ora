@@ -55,7 +55,9 @@ contract MultiAsset {
         return true;
     }
 
-    pub fn burn(tokenId: u256, amount: u256) -> bool {
+    pub fn burn(tokenId: u256, amount: u256) -> bool
+        requires(totalSupplies[tokenId] >= amount)
+    {
         let sender: address = std.msg.sender();
         let senderBalance: u256 = balances[tokenId][sender];
 
