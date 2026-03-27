@@ -33,6 +33,9 @@ contract ErrorMultiple {
         if (amount == 0) {
             return ZeroAmount;
         }
+        if (balance > std.constants.U256_MAX - amount) {
+            return ZeroAmount;
+        }
         balance += amount;
         return true;
     }

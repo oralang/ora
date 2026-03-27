@@ -43,6 +43,9 @@ contract ErrorGuardPattern {
         if (amount == 0) {
             return InvalidAmount;
         }
+        if (balance > std.constants.U256_MAX - amount) {
+            return InvalidAmount;
+        }
         balance += amount;
         return balance;
     }

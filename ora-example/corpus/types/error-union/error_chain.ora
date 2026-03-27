@@ -17,7 +17,7 @@ contract ErrorChain {
     // Level B: intermediate computation, calls C
     pub fn compute(x: u256) -> !u256 | InputTooLarge | ComputationFailed {
         let valid: u256 = try validate_input(x);
-        let res: u256 = valid * valid;
+        let res: u256 = valid *% valid;
         if (res == 0) {
             return ComputationFailed;
         }
