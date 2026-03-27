@@ -13,7 +13,7 @@ contract MaxValueU256 {
     }
 
     pub fn addWithCap(amount: MaxValue<u256, 1000>) {
-        current = current + amount;
+        current = current +% amount;
     }
 
     pub fn compare(a: MaxValue<u256, 1000>, b: MaxValue<u256, 1000>) -> bool {

@@ -5,7 +5,7 @@ contract RefinementMix {
     storage var minDeposit: MinValue<u256, 1>;
 
     pub fn deposit(account: NonZeroAddress, amount: MinValue<u256, 1>) {
-        balances[account] = balances[account] + amount;
+        balances[account] = balances[account] +% amount;
     }
 
     pub fn withdraw(account: NonZeroAddress, amount: MinValue<u256, 1>) {
@@ -21,7 +21,7 @@ contract RefinementMix {
             return false;
         }
         balances[from] = senderBal - amount;
-        balances[to] = balances[to] + amount;
+        balances[to] = balances[to] +% amount;
         return true;
     }
 

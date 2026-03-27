@@ -13,7 +13,7 @@ contract MinValueU256 {
     }
 
     pub fn addToCounter(amount: MinValue<u256, 1>) {
-        counter = counter + amount;
+        counter = counter +% amount;
     }
 
     pub fn subtractFromCounter(amount: MinValue<u256, 1>) {
@@ -23,7 +23,7 @@ contract MinValueU256 {
     }
 
     pub fn multiply(a: MinValue<u256, 1>, b: MinValue<u256, 1>) -> u256 {
-        return a * b;
+        return a *% b;
     }
 
     pub fn compare(a: MinValue<u256, 1>, b: MinValue<u256, 1>) -> bool {

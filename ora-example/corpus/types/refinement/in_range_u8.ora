@@ -16,7 +16,7 @@ contract InRangeU8 {
     }
 
     pub fn add(a: InRange<u8, 0, 100>, b: InRange<u8, 0, 100>) -> u8 {
-        return a + b;
+        return a +% b;
     }
 
     pub fn toPlain(val: InRange<u8, 0, 100>) -> u8 {
