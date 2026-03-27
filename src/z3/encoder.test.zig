@@ -4821,7 +4821,7 @@ test "func.call summary with symbolic single-entry scf.while in ora.try_stmt pre
     try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") == null);
 }
 
-test "func.call summary with multi-iteration symbolic scf.while in ora.try_stmt currently degrades differing slots" {
+test "func.call summary with multi-iteration symbolic scf.while in ora.try_stmt encodes differing slots exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -4983,8 +4983,7 @@ test "func.call summary with multi-iteration symbolic scf.while in ora.try_stmt 
     );
     _ = try encoder.encodeOperation(call);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("try state summary is not encoded exactly", encoder.degradationReason().?);
+    try testing.expect(!encoder.isDegraded());
 
     const stable = encoder.global_map.get("stable").?;
     var solver = try Solver.init(&z3_ctx, testing.allocator);
@@ -4993,9 +4992,20 @@ test "func.call summary with multi-iteration symbolic scf.while in ora.try_stmt 
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 
     const counter = encoder.global_map.get("counter").?;
-    const counter_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, counter));
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit, 0));
+    const target_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_target = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_ast);
+    const catches = encoder.encodeAnd(&.{ reaches_target, encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
     _ = counter_pre;
-    try testing.expect(std.mem.indexOf(u8, counter_text, "undef_try_state_global") != null);
+    var counter_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer counter_solver.deinit();
+    counter_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), counter_solver.check());
 }
 
 test "func.call summary with dead zero-iteration scf.for in ora.try_stmt preserves state exactly" {
@@ -9548,7 +9558,7 @@ test "direct ora.try_stmt yielding finite scf.for result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "direct ora.try_stmt yielding multi-iteration symbolic scf.while result currently degrades" {
+test "direct ora.try_stmt yielding multi-iteration symbolic scf.while result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -9670,10 +9680,23 @@ test "direct ora.try_stmt yielding multi-iteration symbolic scf.while result cur
         1,
     ));
 
-    _ = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    try testing.expect(!encoder.isDegraded());
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("ora.try_stmt result requires exact catch summary", encoder.degradationReason().?);
+    const limit_ast = try encoder.encodeValue(mlir.oraOperationGetResult(limit_op, 0));
+    const target_ast = try encoder.encodeValue(mlir.oraOperationGetResult(target_op, 0));
+    const is_error_op = mlir.oraErrorIsErrorOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_op, 0));
+    const is_error = try encoder.encodeOperation(is_error_op);
+    const seven = try encoder.encodeIntegerConstant(7, 256);
+    const thirty_three = try encoder.encodeIntegerConstant(33, 256);
+    const reaches_target = z3.Z3_mk_bvugt(z3_ctx.ctx, limit_ast, target_ast);
+    const catches = encoder.encodeAnd(&.{ reaches_target, encoder.coerceBoolean(is_error) });
+    const expected = z3.Z3_mk_ite(z3_ctx.ctx, catches, thirty_three, seven);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, encoded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "direct ora.try_stmt composes nested escaping catch predicate exactly" {
