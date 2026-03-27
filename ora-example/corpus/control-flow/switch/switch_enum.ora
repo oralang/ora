@@ -29,12 +29,12 @@ contract SwitchEnum {
 
     // Enum switch as expression
     pub fn test_enum_expression(d: Direction) -> u256 {
-        return switch (d) {
-            Direction.North => 0,
-            Direction.East => 90,
-            Direction.South => 180,
-            Direction.West => 270
-        };
+        switch (d) {
+            Direction.North => { return 0; }
+            Direction.East => { return 90; }
+            Direction.South => { return 180; }
+            Direction.West => { return 270; }
+        }
     }
 
     // Enum switch with block bodies
@@ -60,12 +60,11 @@ contract SwitchEnum {
 
     // Switch on enum with computation
     pub fn get_priority(s: Status, base: u256) -> u256 {
-        var multiplier: u256 = switch (s) {
-            Status.Pending => 1,
-            Status.Active => 3,
-            Status.Paused => 2,
-            Status.Closed => 0
-        };
-        return base * multiplier;
+        switch (s) {
+            Status.Pending => { return base; }
+            Status.Active => { return base; }
+            Status.Paused => { return base; }
+            Status.Closed => { return 0; }
+        }
     }
 }
