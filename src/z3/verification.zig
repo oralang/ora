@@ -1893,7 +1893,9 @@ pub const VerificationPass = struct {
         }
 
         self.encoder.clearDegradation();
-        try self.extractAnnotationsFromMLIR(mlir_module);
+        self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
+            return try self.annotationExtractionFailureResult(err);
+        };
         if (self.encoder.isDegraded()) {
             return try self.degradedVerificationResult();
         }
@@ -2522,7 +2524,9 @@ pub const VerificationPass = struct {
 
     pub fn runVerificationPassPreparedSequential(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         self.encoder.clearDegradation();
-        try self.extractAnnotationsFromMLIR(mlir_module);
+        self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
+            return try self.annotationExtractionFailureResult(err);
+        };
         if (self.encoder.isDegraded()) {
             return try self.degradedVerificationResult();
         }
@@ -2619,7 +2623,9 @@ pub const VerificationPass = struct {
 
     fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         self.encoder.clearDegradation();
-        try self.extractAnnotationsFromMLIR(mlir_module);
+        self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
+            return try self.annotationExtractionFailureResult(err);
+        };
         if (self.encoder.isDegraded()) {
             return try self.degradedVerificationResult();
         }
@@ -3074,7 +3080,10 @@ pub const VerificationPass = struct {
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
         if (self.encoded_annotations.items.len == 0) {
-            try self.extractAnnotationsFromMLIR(mlir_module);
+            self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
+                const result = try self.annotationExtractionFailureResult(err);
+                return try self.buildUnknownSmtReport(source_file, &result);
+            };
         }
         if (self.encoder.isDegraded()) {
             return try self.buildDegradedSmtReport(source_file, verification_result);
@@ -4135,6 +4144,25 @@ pub const VerificationPass = struct {
             .counterexample = null,
             .allocator = self.allocator,
         });
+    }
+
+    fn annotationExtractionFailureResult(self: *VerificationPass, err: anyerror) !errors.VerificationResult {
+        var result = errors.VerificationResult.init(self.allocator);
+        const encoder_reason = self.encoder.degradationReason();
+        const message = if (encoder_reason) |reason|
+            try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted during annotation extraction: {s} ({s})",
+                .{ @errorName(err), reason },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted during annotation extraction: {s}",
+                .{@errorName(err)},
+            );
+        try self.addUnknownVerificationError(&result, message, "", 0, 0);
+        return result;
     }
 
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
@@ -6384,6 +6412,39 @@ fn buildPathAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, path_assume_value: i
     return module;
 }
 
+fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const body = mlir.oraModuleGetBody(module);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("broken_ensures"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public"))),
+    };
+    const func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &attrs, attrs.len, &[_]mlir.MlirType{i256_ty}, &[_]mlir.MlirLocation{loc}, 1);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func);
+    const arg = mlir.oraBlockGetArgument(func_body, 0);
+
+    const zero = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
+    );
+    const malformed_cmp = mlir.oraCmpOpCreate(mlir_ctx, loc, testStringRef(""), arg, mlir.oraOperationGetResult(zero, 0), i1_ty);
+    const ensures = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(malformed_cmp, 0));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{arg}, 1);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, zero);
+    mlir.oraBlockAppendOwnedOperation(func_body, malformed_cmp);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret);
+    mlir.oraBlockAppendOwnedOperation(body, func);
+    return module;
+}
+
 fn buildGlobalContractInvariantModule(mlir_ctx: mlir.MlirContext, invariant_value: i64) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -6575,6 +6636,30 @@ test "prepared queries include invariant-step for scf.for" {
         }
     }
     try testing.expectEqual(@as(usize, 1), step_count);
+}
+
+test "annotation extraction failure is reported as unknown verification error" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildMalformedAnnotationModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    const result = try pass.runVerificationPass(module);
+    defer {
+        var mutable = result;
+        mutable.deinit();
+    }
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "annotation extraction"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Unsupported"));
 }
 
 test "prepared queries include invariant-post for scf.for" {
