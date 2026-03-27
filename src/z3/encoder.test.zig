@@ -1416,7 +1416,7 @@ test "struct_field_update recovers untouched fields through ora.try_stmt source 
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "caller struct_field_update from known callee scf.for carried block arg metadata currently degrades" {
+test "caller struct_field_update from known callee scf.for carried block arg metadata preserves untouched fields exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -1511,9 +1511,20 @@ test "caller struct_field_update from known callee scf.for carried block arg met
 
     const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("buildPairViaForCarry"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{struct_ty}, 1);
     const updated = mlir.oraStructFieldUpdateOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(call, 0), stringRef("left"), seven);
-    _ = try encoder.encodeOperation(updated);
+    const updated_pair = mlir.oraOperationGetResult(updated, 0);
+    const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("right"), i256_ty);
+    const right_ast = try encoder.encodeOperation(extract_right);
 
-    try testing.expect(encoder.isDegraded());
+    try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "struct_field_update recovers untouched fields through scf.for carried block arg metadata" {
@@ -1709,7 +1720,7 @@ test "struct_field_update recovers untouched fields through scf.while carried bl
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "caller struct_field_update from known callee scf.while carried block arg metadata currently degrades" {
+test "caller struct_field_update from known callee scf.while carried block arg metadata preserves untouched fields exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -1818,9 +1829,20 @@ test "caller struct_field_update from known callee scf.while carried block arg m
 
     const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("buildPairViaWhileCarry"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{struct_ty}, 1);
     const updated = mlir.oraStructFieldUpdateOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(call, 0), stringRef("left"), seven);
-    _ = try encoder.encodeOperation(updated);
+    const updated_pair = mlir.oraOperationGetResult(updated, 0);
+    const extract_right = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, updated_pair, stringRef("right"), i256_ty);
+    const right_ast = try encoder.encodeOperation(extract_right);
 
-    try testing.expect(encoder.isDegraded());
+    try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "struct_field_update recovers untouched fields from scoped struct declaration metadata" {

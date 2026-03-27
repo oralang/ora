@@ -4658,6 +4658,50 @@ pub const Encoder = struct {
         );
     }
 
+    fn extractScfForYieldValue(self: *Encoder, for_op: mlir.MlirOperation, result_index: u32) ?mlir.MlirValue {
+        _ = self;
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return null;
+                return mlir.oraOperationGetOperand(current, result_index);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
+    }
+
+    fn extractScfWhileYieldValue(self: *Encoder, while_op: mlir.MlirOperation, result_index: u32) ?mlir.MlirValue {
+        _ = self;
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(while_op);
+        if (mlir.oraBlockIsNull(after_block)) return null;
+        var current = mlir.oraBlockGetFirstOperation(after_block);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = mlir.oraOperationGetName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                const num_operands: u32 = @intCast(mlir.oraOperationGetNumOperands(current));
+                if (result_index >= num_operands) return null;
+                return mlir.oraOperationGetOperand(current, result_index);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+        return null;
+    }
+
     fn tryLookupStructFieldNamesFromReturnBlock(
         self: *Encoder,
         block: mlir.MlirBlock,
@@ -9808,6 +9852,18 @@ pub const Encoder = struct {
             return try self.tryLookupStructFieldNamesFromValue(yielded_value);
         }
 
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const yielded_value = self.extractScfForYieldValue(owner, result_index) orelse return null;
+            return try self.tryLookupStructFieldNamesFromValue(yielded_value);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            const yielded_value = self.extractScfWhileYieldValue(owner, result_index) orelse return null;
+            return try self.tryLookupStructFieldNamesFromValue(yielded_value);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.switch_expr") or std.mem.eql(u8, op_name, "ora.switch")) {
             const result_index = self.getResultIndex(owner, value) orelse return null;
             const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(owner));
@@ -9902,6 +9958,18 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.execute_region")) {
             const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
             const yielded_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return .{ .ptr = null };
+            return try self.tryLookupStructFieldTypeFromValue(yielded_value, index);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.for")) {
+            const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
+            const yielded_value = self.extractScfForYieldValue(owner, result_index) orelse return .{ .ptr = null };
+            return try self.tryLookupStructFieldTypeFromValue(yielded_value, index);
+        }
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            const result_index = self.getResultIndex(owner, value) orelse return .{ .ptr = null };
+            const yielded_value = self.extractScfWhileYieldValue(owner, result_index) orelse return .{ .ptr = null };
             return try self.tryLookupStructFieldTypeFromValue(yielded_value, index);
         }
 
