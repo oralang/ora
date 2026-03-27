@@ -5,7 +5,9 @@ contract DataVault {
     storage var owners: map<u256, address>;
     storage var next_id: u256;
 
-    pub fn store(data: bytes) -> u256 {
+    pub fn store(data: bytes) -> u256
+        requires(next_id < std.constants.U256_MAX)
+    {
         let id: u256 = next_id;
         entries[id] = data;
         owners[id] = std.msg.sender;

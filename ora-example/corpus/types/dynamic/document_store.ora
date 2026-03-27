@@ -11,7 +11,9 @@ contract DocumentStore {
     storage var documents: map<u256, Document>;
     storage var doc_count: u256;
 
-    pub fn create(title: string, content: bytes) -> u256 {
+    pub fn create(title: string, content: bytes) -> u256
+        requires(doc_count < std.constants.U256_MAX)
+    {
         let id: u256 = doc_count;
         documents[id] = Document {
             title: title,
