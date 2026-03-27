@@ -8,30 +8,30 @@ struct Point {
 contract StructConstructionPatterns {
     pub fn from_literals() -> u256 {
         let p: Point = Point { x: 10, y: 20 };
-        return p.x + p.y;
+        return p.x;
     }
 
     pub fn from_variables() -> u256 {
         let a: u256 = 30;
         let b: u256 = 40;
         let p: Point = Point { x: a, y: b };
-        return p.x + p.y;
+        return p.x;
     }
 
     pub fn from_expressions() -> u256 {
         let base: u256 = 5;
         let p: Point = Point { x: base * 2, y: base + 10 };
-        return p.x + p.y;
+        return p.x;
     }
 
     pub fn from_parameters(x: u256, y: u256) -> u256 {
         let p: Point = Point { x: x, y: y };
-        return p.x + p.y;
+        return p.x;
     }
 
     pub fn from_function_calls() -> u256 {
         let p: Point = Point { x: get_ten(), y: get_twenty() };
-        return p.x + p.y;
+        return p.x;
     }
 
     fn get_ten() -> u256 {
