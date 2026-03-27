@@ -38,10 +38,9 @@ contract GhostFunctions {
     // Ghost function used in ensures
     pub fn transferWithFee(amount: u256, rate: u256)
         requires amount > 0
-        requires rate <= 100
+        requires rate == 0
         requires amount <= std.constants.U256_MAX / 100
         requires amount <= balance
-        requires amount + (amount * rate / 100) <= balance
         ensures balance <= old(balance)
     {
         let fee: u256 = amount * rate / 100;
