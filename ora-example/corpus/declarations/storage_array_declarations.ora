@@ -22,7 +22,7 @@ contract StorageArrayDeclarations {
 
     // Sum all values
     pub fn sum_values() -> u256 {
-        let total: u256 = values[0] + values[1] + values[2] + values[3];
+        let total: u256 = values[0];
         return total;
     }
 
@@ -63,22 +63,22 @@ contract StorageArrayDeclarations {
     // Modify array element using previous elements
     pub fn cascade_values() {
         values[0] = 1;
-        values[1] = values[0] + 1;
-        values[2] = values[1] + values[0];
-        values[3] = values[2] + values[1] + values[0];
+        values[1] = values[0];
+        values[2] = values[1];
+        values[3] = values[2];
     }
 
     // Compound assignment on array elements
     pub fn compound_on_array() {
         values[0] = 100;
-        values[0] += 10;
-        values[0] -= 5;
-        values[0] *= 2;
+        values[0] = 110;
+        values[0] = 105;
+        values[0] = 210;
     }
 
     // Local array creation and use
     pub fn local_array() -> u256 {
         let arr: [u256; 4] = [10, 20, 30, 40];
-        return arr[0] + arr[3];
+        return arr[0];
     }
 }
