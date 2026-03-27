@@ -44,7 +44,9 @@ contract ErrorUnionStruct {
         return updated;
     }
 
-    pub fn deposit_token(token_id: u256, amount: u256) {
+    pub fn deposit_token(token_id: u256, amount: u256)
+        requires(balances[token_id] <= std.constants.U256_MAX - amount)
+    {
         balances[token_id] += amount;
         update_times[token_id] = std.block.timestamp();
     }

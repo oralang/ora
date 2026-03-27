@@ -13,7 +13,10 @@ contract ErrorRealistic {
     storage balances: map<address, u256>;
     storage var total_deposits: u256 = 0;
 
-    pub fn deposit(amount: u256) -> !u256 | ZeroDeposit | VaultPaused {
+    pub fn deposit(amount: u256) -> !u256 | ZeroDeposit | VaultPaused
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(total_deposits <= std.constants.U256_MAX - amount)
+    {
         if (paused) {
             return VaultPaused;
         }
@@ -27,7 +30,9 @@ contract ErrorRealistic {
         return balances[sender];
     }
 
-    pub fn withdraw(amount: u256) -> !u256 | InsufficientFunds | VaultPaused {
+    pub fn withdraw(amount: u256) -> !u256 | InsufficientFunds | VaultPaused
+        requires(total_deposits >= amount)
+    {
         if (paused) {
             return VaultPaused;
         }
@@ -41,7 +46,9 @@ contract ErrorRealistic {
         return balances[sender];
     }
 
-    pub fn transfer(to: address, amount: u256) -> !bool | InsufficientFunds | VaultPaused {
+    pub fn transfer(to: address, amount: u256) -> !bool | InsufficientFunds | VaultPaused
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         if (paused) {
             return VaultPaused;
         }

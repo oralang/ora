@@ -70,7 +70,9 @@ contract MultiErrorContract {
 
     // --- Item management ---
 
-    pub fn create_item(id: u256, value: u256, deadline: u256) -> !u256 | NotOperator | Paused | InvalidId | AlreadyExists {
+    pub fn create_item(id: u256, value: u256, deadline: u256) -> !u256 | NotOperator | Paused | InvalidId | AlreadyExists
+        requires(item_count < std.constants.U256_MAX)
+    {
         try require_operator();
         try require_not_paused();
 
@@ -113,7 +115,9 @@ contract MultiErrorContract {
         items[id] = new_value;
     }
 
-    pub fn delete_item(id: u256) -> !void | NotOperator | Paused | NotFound {
+    pub fn delete_item(id: u256) -> !void | NotOperator | Paused | NotFound
+        requires(item_count > 0)
+    {
         try require_operator();
         try require_not_paused();
 
@@ -128,7 +132,10 @@ contract MultiErrorContract {
 
     // --- Cross-function propagation ---
 
-    pub fn transfer_item(from_id: u256, to_id: u256) -> !void | NotOperator | Paused | NotFound | Expired | InvalidId | AlreadyExists {
+    pub fn transfer_item(from_id: u256, to_id: u256) -> !void | NotOperator | Paused | NotFound | Expired | InvalidId | AlreadyExists
+        requires(item_count > 0)
+        requires(item_count < std.constants.U256_MAX)
+    {
         try require_operator();
         try require_not_paused();
 
