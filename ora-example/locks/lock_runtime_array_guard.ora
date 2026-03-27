@@ -1,5 +1,6 @@
 // Runtime lock/unlock behavior over storage array slots.
 // This contract validates lock keys for identifier[index] over arrays.
+comptime const std = @import("std");
 
 contract LockRuntimeStorageArrayGuard {
     storage var history: [u256; 8];
@@ -10,7 +11,9 @@ contract LockRuntimeStorageArrayGuard {
     }
 
     // Locks one array element and writes a different element.
-    pub fn safe_different_slot(locked_index: u256, target_index: u256, value: u256) -> bool {
+    pub fn safe_different_slot(locked_index: u256, target_index: u256, value: u256) -> bool
+        requires(success_counter < std.constants.U256_MAX)
+    {
         @lock(history[locked_index]);
         write_history(target_index, value);
         @unlock(history[locked_index]);
@@ -20,7 +23,9 @@ contract LockRuntimeStorageArrayGuard {
 
     // Locks and writes the exact same element through helper call.
     // This should compile, but must revert at runtime.
-    pub fn unsafe_same_slot(index: u256, value: u256) -> bool {
+    pub fn unsafe_same_slot(index: u256, value: u256) -> bool
+        requires(success_counter < std.constants.U256_MAX)
+    {
         @lock(history[index]);
         write_history(index, value);
         @unlock(history[index]);

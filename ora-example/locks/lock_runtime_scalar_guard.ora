@@ -1,10 +1,13 @@
 // Runtime lock/unlock behavior for scalar storage slots (identifier path).
+comptime const std = @import("std");
 
 contract LockRuntimeScalarGuard {
     storage var gate: u256 = 0;
     storage var success_counter: u256 = 0;
 
-    pub fn safe_roundtrip(value: u256) -> bool {
+    pub fn safe_roundtrip(value: u256) -> bool
+        requires(success_counter < std.constants.U256_MAX)
+    {
         @lock(gate);
         @unlock(gate);
         gate = value;
