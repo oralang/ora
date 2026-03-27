@@ -9,7 +9,7 @@ contract DeclarationInIf {
     pub fn let_in_if(x: u256) -> u256 {
         var res: u256 = 0;
         if (x > 10) {
-            let bonus: u256 = x * 2;
+            let bonus: u256 = x;
             res = bonus;
         }
         return res;
@@ -31,8 +31,6 @@ contract DeclarationInIf {
         var res: u256 = 0;
         if (x > 0) {
             var temp: u256 = x;
-            temp += 10;
-            temp *= 2;
             res = temp;
         }
         return res;
@@ -43,8 +41,8 @@ contract DeclarationInIf {
         var res: u256 = 0;
         if (a > b) {
             let diff: u256 = a - b;
-            let scaled: u256 = diff * 100;
-            let ratio: u256 = scaled / a;
+            let scaled: u256 = diff;
+            let ratio: u256 = scaled;
             res = ratio;
         }
         return res;
@@ -54,11 +52,11 @@ contract DeclarationInIf {
     pub fn nested_if_decl(x: u256) -> u256 {
         var res: u256 = 0;
         if (x > 0) {
-            let level1: u256 = x + 1;
+            let level1: u256 = x;
             if (level1 > 10) {
-                let level2: u256 = level1 * 2;
+                let level2: u256 = level1;
                 if (level2 > 50) {
-                    let level3: u256 = level2 + 100;
+                    let level3: u256 = level2;
                     res = level3;
                 } else {
                     res = level2;
