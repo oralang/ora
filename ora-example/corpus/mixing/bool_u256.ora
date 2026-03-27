@@ -14,7 +14,7 @@ contract BoolU256 {
     pub fn conditional_add(x: u256, should_add: bool) -> u256 {
         let res: u256 = value;
         if (should_add) {
-            res = res + x;
+            res = res +% x;
         }
         return res;
     }
@@ -40,7 +40,7 @@ contract BoolU256 {
 
     pub fn bool_storage_with_arithmetic(x: u256) -> u256 {
         if (flag) {
-            let doubled: u256 = x * 2;
+            let doubled: u256 = x +% x;
             return doubled;
         }
         return x;

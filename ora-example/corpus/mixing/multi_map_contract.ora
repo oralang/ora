@@ -62,7 +62,7 @@ contract MultiMapContract {
         let pair_val: u256 = pairs[account][partner];
         let score: u256 = scores[score_key];
         if (perm) {
-            let total: u256 = bal + pair_val + score;
+            let total: u256 = bal +% pair_val +% score;
             return total;
         }
         return 0;

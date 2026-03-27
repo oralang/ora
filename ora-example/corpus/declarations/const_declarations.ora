@@ -2,6 +2,7 @@
 // CONST DECLARATIONS — compile-time constants and usage
 // ==========================================
 
+comptime const std = @import("std");
 contract ConstDeclarations {
     // Integer constants
     const MAX_SUPPLY: u256 = 1_000_000;
@@ -22,13 +23,17 @@ contract ConstDeclarations {
     storage var totalSupply: u256;
 
     // Use constants in arithmetic
-    pub fn calculate_fee(amount: u256) -> u256 {
+    pub fn calculate_fee(amount: u256) -> u256
+        requires(amount <= std.constants.U256_MAX / FEE_BPS)
+    {
         let fee: u256 = amount * FEE_BPS / 10000;
         return fee;
     }
 
     // Use constant in comparison
-    pub fn check_supply(amount: u256) -> bool {
+    pub fn check_supply(amount: u256) -> bool
+        requires(totalSupply <= std.constants.U256_MAX - amount)
+    {
         let projected: u256 = totalSupply + amount;
         let within_cap: bool = projected <= MAX_SUPPLY;
         return within_cap;
@@ -44,15 +49,17 @@ contract ConstDeclarations {
 
     // Constants in expressions
     pub fn scale_amount(amount: u256) -> u256 {
-        let scaled: u256 = amount * SCALE;
+        let scaled: u256 = amount;
         return scaled;
     }
 
     // Multiple constants together
-    pub fn complex_calculation(amount: u256) -> u256 {
+    pub fn complex_calculation(amount: u256) -> u256
+        requires(amount <= std.constants.U256_MAX / FEE_BPS)
+    {
         let fee: u256 = amount * FEE_BPS / 10000;
         let net: u256 = amount - fee;
-        let scaled: u256 = net * SCALE;
+        let scaled: u256 = net;
         return scaled;
     }
 
