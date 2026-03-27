@@ -147,7 +147,9 @@ contract TokenWithBitfield {
         return true;
     }
 
-    pub fn burn(amount: u256) -> bool {
+    pub fn burn(amount: u256) -> bool
+        requires(totalSupply >= amount)
+    {
         let cfg: TokenConfig = config;
         if (!cfg.burnable) {
             return false;
