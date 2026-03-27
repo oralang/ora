@@ -1,5 +1,7 @@
 // Level 4: Complex mixing — token with metadata
 // Struct with string name, u8 decimals, u256 supply, map balances.
+comptime const std = @import("std");
+
 contract TokenWithMetadata {
     struct TokenInfo {
         decimals: u8;
@@ -36,7 +38,9 @@ contract TokenWithMetadata {
         return balances[account];
     }
 
-    pub fn transfer(from: address, to: address, amount: u256) -> bool {
+    pub fn transfer(from: address, to: address, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         let i: TokenInfo = info;
         if (i.paused) {
             return false;
@@ -73,7 +77,10 @@ contract TokenWithMetadata {
         return false;
     }
 
-    pub fn mint(to: address, amount: u256) {
+    pub fn mint(to: address, amount: u256)
+        requires(info.total_supply <= std.constants.U256_MAX - amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         let i: TokenInfo = info;
         let new_supply: u256 = i.total_supply + amount;
         info = TokenInfo {
