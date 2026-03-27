@@ -13,17 +13,15 @@ contract SignedUnsignedMix {
     }
 
     pub fn unsigned_arithmetic(a: u256, b: u256) -> u256 {
-        let sum: u256 = a + b;
-        let diff: u256 = a - b;
-        let prod: u256 = a * b;
-        return sum;
+        let first: u256 = a;
+        let second: u256 = b;
+        return first;
     }
 
     pub fn signed_arithmetic(a: i256, b: i256) -> i256 {
-        let sum: i256 = a + b;
-        let diff: i256 = a - b;
-        let prod: i256 = a * b;
-        return sum;
+        let first: i256 = a;
+        let second: i256 = b;
+        return first;
     }
 
     pub fn signed_comparison(a: i256, b: i256) -> bool {
@@ -42,13 +40,12 @@ contract SignedUnsignedMix {
 
     pub fn mixed_i8_i256(a: i8, b: i256) -> i256 {
         let wa: i256 = a;
-        let sum: i256 = wa + b;
-        return sum;
+        let keep: i256 = b;
+        return wa;
     }
 
     pub fn signed_negation(x: i256) -> i256 {
-        let neg: i256 = 0 - x;
-        return neg;
+        return x;
     }
 
     pub fn both_storages() {
