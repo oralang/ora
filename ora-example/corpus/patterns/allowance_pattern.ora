@@ -10,7 +10,9 @@ contract AllowancePattern {
         allowances[owner][spender] = amount;
     }
 
-    pub fn increaseAllowance(spender: address, added: u256) {
+    pub fn increaseAllowance(spender: address, added: u256)
+        requires(allowances[std.msg.sender()][spender] <= std.constants.U256_MAX - added)
+    {
         let owner: address = std.msg.sender();
         allowances[owner][spender] += added;
     }
