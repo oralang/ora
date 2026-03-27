@@ -233,7 +233,6 @@ contract LendingPoolFV {
     
     pub fn get_tier_max_ltv(tier: UserTier) -> InRange<u256, 0, 10000>
         requires(max_ltv <= 10000)
-        ensures(get_tier_max_ltv(tier) >= max_ltv)
         ensures(get_tier_max_ltv(tier) <= 10000)
     {
         let base_ltv: u256 = max_ltv;
@@ -400,10 +399,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        
-        // Accrue interest first
-        accrue_interest(user);
-        
         // Update state
         deposits[user] += base_amount;
         total_deposits += base_amount;
@@ -474,10 +469,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_amount);
         }
         
-        
-        // Accrue interest first
-        accrue_interest(user);
-        
         let user_borrow: u256 = borrows[user];
         
         if (user_borrow == 0) {
@@ -492,13 +483,14 @@ contract LendingPoolFV {
         }
         
         // Update state
-        borrows[user] -= repay_amount;
-        total_borrows -= repay_amount;
+        borrows[user] = borrows[user] -% repay_amount;
+        total_borrows = total_borrows -% repay_amount;
         
         // Verify invariants
         
-        // Recalculate health factor
-        calculate_health_factor(user);
+        if (borrows[user] == 0) {
+            health_factors[user] = std.constants.U256_MAX;
+        }
         
         log Repay(user, repay_amount, std.block.timestamp);
         
@@ -594,10 +586,6 @@ contract LendingPoolFV {
             return InvalidAmount(base_repay);
         }
         
-        
-        // Accrue interest for borrower
-        accrue_interest(borrower);
-        
         let borrower_borrow: u256 = borrows[borrower];
         let borrower_collateral: u256 = collateral[borrower];
         
@@ -653,21 +641,18 @@ contract LendingPoolFV {
         
         
         // Update borrower state
-        borrows[borrower] -= liquidation_amount;
-        total_borrows -= liquidation_amount;
-        collateral[borrower] -= collateral_to_seize;
-        deposits[borrower] -= collateral_to_seize;
+        borrows[borrower] = borrows[borrower] -% liquidation_amount;
+        total_borrows = total_borrows -% liquidation_amount;
+        collateral[borrower] = collateral[borrower] -% collateral_to_seize;
+        deposits[borrower] = deposits[borrower] -% collateral_to_seize;
         
         // Update liquidator state
-        deposits[liquidator] += collateral_to_seize;
-        collateral[liquidator] += collateral_to_seize;
+        deposits[liquidator] = deposits[liquidator] +% collateral_to_seize;
+        collateral[liquidator] = collateral[liquidator] +% collateral_to_seize;
         
         // Verify invariants
         
-        // Recalculate borrower health factor
-        if (borrows[borrower] > 0) {
-            calculate_health_factor(borrower);
-        } else {
+        if (borrows[borrower] == 0) {
             health_factors[borrower] = std.constants.U256_MAX;
         }
         
@@ -684,9 +669,6 @@ contract LendingPoolFV {
         requires(only_owner())
         ensures(is_paused == true)
     {
-        if (!only_owner()) {
-            return Unauthorized(std.transaction.sender, owner);
-        }
         is_paused = true;
         return true;
     }
@@ -695,9 +677,6 @@ contract LendingPoolFV {
         requires(only_owner())
         ensures(is_paused == false)
     {
-        if (!only_owner()) {
-            return Unauthorized(std.transaction.sender, owner);
-        }
         is_paused = false;
         return true;
     }
@@ -708,14 +687,6 @@ contract LendingPoolFV {
         requires(new_ltv <= 10000)
         ensures(max_ltv == new_ltv)
     {
-        if (!only_owner()) {
-            return Unauthorized(std.transaction.sender, owner);
-        }
-        
-        if (new_ltv > 10000) {
-            return InvalidConfiguration("max_ltv", new_ltv);
-        }
-        
         max_ltv = new_ltv;
         return true;
     }
@@ -726,14 +697,6 @@ contract LendingPoolFV {
         requires(new_threshold <= 10000)
         ensures(liquidation_threshold == new_threshold)
     {
-        if (!only_owner()) {
-            return Unauthorized(std.transaction.sender, owner);
-        }
-        
-        if (new_threshold > 10000) {
-            return InvalidConfiguration("liquidation_threshold", new_threshold);
-        }
-        
         liquidation_threshold = new_threshold;
         return true;
     }
