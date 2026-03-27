@@ -50,6 +50,8 @@ contract VerifiedVault {
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
         requires(amount > 0)
         requires(balances[std.msg.sender()] >= amount)
+        requires(totalDeposits >= amount)
+        requires(specSum >= amount)
         requires(totalWithdrawEvents <= std.constants.U256_MAX - amount)
         ensures(totalDeposits == old(totalDeposits) - amount)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
