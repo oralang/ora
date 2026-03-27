@@ -347,6 +347,9 @@ const ConstEvaluator = struct {
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
             .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExprImpl(binary.lhs, use_cache), try self.evalExprImpl(binary.rhs, use_cache)),
             .Call => |call| blk: {
+                if (try self.evalCallCtValue(call, use_cache)) |ct_value| {
+                    break :blk try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
+                }
                 break :blk try self.evalCall(call, use_cache);
             },
             .Builtin => |builtin| blk: {
