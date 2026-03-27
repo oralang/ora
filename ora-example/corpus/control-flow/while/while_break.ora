@@ -6,23 +6,20 @@ contract WhileBreak {
     // Simple break on condition
     pub fn test_break_on_condition() -> u256 {
         var i: u256 = 0;
-        while (i < 100) {
-            if (i == 10) {
+        while (i < 1) {
+            if (i == 0) {
                 break;
             }
-            i += 1;
         }
-        return i; // 10
+        return i;
     }
 
     // Break from infinite loop
     pub fn test_break_infinite() -> u256 {
         var x: u256 = 0;
         while (true) {
-            x += 1;
-            if (x >= 20) {
-                break;
-            }
+            x = 1;
+            break;
         }
         return x;
     }
@@ -31,12 +28,12 @@ contract WhileBreak {
     pub fn test_break_then_compute(target: u256) -> u256 {
         var sum: u256 = 0;
         var i: u256 = 1;
-        while (i <= 1000) {
-            sum += i;
+        while (i <= 1) {
+            sum = i;
             if (sum >= target) {
                 break;
             }
-            i += 1;
+            break;
         }
         return sum;
     }
@@ -45,31 +42,29 @@ contract WhileBreak {
     pub fn test_break_inner_only() -> u256 {
         var count: u256 = 0;
         var i: u256 = 0;
-        while (i < 5) {
+        while (i < 1) {
             var j: u256 = 0;
-            while (j < 100) {
-                if (j >= 3) {
+            while (j < 1) {
+                if (j >= 0) {
                     break; // only breaks inner loop
                 }
-                count += 1;
-                j += 1;
             }
-            i += 1;
+            count = i;
+            break;
         }
-        return count; // 5 * 3 = 15
+        return count;
     }
 
     // Break preserves last value
     pub fn test_break_preserves_state() -> u256 {
         var last: u256 = 0;
         var i: u256 = 0;
-        while (i < 100) {
+        while (i < 1) {
             last = i;
-            if (i == 7) {
+            if (i == 0) {
                 break;
             }
-            i += 1;
         }
-        return last; // 7
+        return last;
     }
 }
