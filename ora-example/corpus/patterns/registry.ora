@@ -7,7 +7,9 @@ contract Registry {
     storage var registered: map<address, bool>;
     storage var count: u256 = 0;
 
-    pub fn register(name: string) {
+    pub fn register(name: string)
+        requires(count < std.constants.U256_MAX)
+    {
         let sender: address = std.msg.sender();
         if (!registered[sender]) {
             names[sender] = name;

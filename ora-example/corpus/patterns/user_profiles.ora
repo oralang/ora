@@ -61,7 +61,9 @@ contract UserProfiles {
         return true;
     }
 
-    pub fn addReputation(user: address, points: u256) -> bool {
+    pub fn addReputation(user: address, points: u256) -> bool
+        requires(profiles[user].reputation <= std.constants.U256_MAX - points)
+    {
         if (!registered[user]) {
             return false;
         }
