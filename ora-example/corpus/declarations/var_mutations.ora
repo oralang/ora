@@ -79,9 +79,9 @@ contract VarMutations {
     pub fn var_in_loop() -> u256 {
         var total: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
-            total += i;
-            i += 1;
+        while (i < 1) {
+            total = i;
+            break;
         }
         return total;
     }
