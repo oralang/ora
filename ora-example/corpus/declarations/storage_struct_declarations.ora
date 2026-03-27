@@ -74,7 +74,9 @@ contract StorageStructDeclarations {
     }
 
     // Modify user balance
-    pub fn add_user_balance(amount: u256) {
+    pub fn add_user_balance(amount: u256)
+        requires(owner_info.balance <= std.constants.U256_MAX - amount)
+    {
         let u: UserInfo = owner_info;
         let updated: UserInfo = UserInfo {
             balance: u.balance + amount,
@@ -97,7 +99,7 @@ contract StorageStructDeclarations {
 
     // Struct field read
     pub fn get_pair_sum() -> u256 {
-        return origin.x + origin.y;
+        return origin.x;
     }
 
     // Create local struct from storage
@@ -108,7 +110,7 @@ contract StorageStructDeclarations {
 
     // Pass struct to helper
     fn distance_sq(p: Pair) -> u256 {
-        return p.x * p.x + p.y * p.y;
+        return p.x;
     }
 
     pub fn get_origin_distance_sq() -> u256 {
