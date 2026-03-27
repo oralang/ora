@@ -3093,8 +3093,9 @@ pub const VerificationPass = struct {
     ) !SmtReportArtifacts {
         if (self.encoded_annotations.items.len == 0) {
             self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
-                const result = try self.annotationExtractionFailureResult(err);
-                return try self.buildUnknownSmtReport(source_file, &result);
+                var result = try self.annotationExtractionFailureResult(err);
+                defer result.deinit();
+                return try self.buildVerificationFailureSmtReport(source_file, &result);
             };
         }
         if (self.encoder.isDegraded()) {
@@ -3289,6 +3290,48 @@ pub const VerificationPass = struct {
             generated_at_unix,
             queries.items,
             report_runs,
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        return .{
+            .markdown = markdown,
+            .json = json,
+        };
+    }
+
+    fn buildVerificationFailureSmtReport(
+        self: *VerificationPass,
+        source_file: []const u8,
+        verification_result: *const errors.VerificationResult,
+    ) !SmtReportArtifacts {
+        const generated_at_unix = std.time.timestamp();
+        const summary = ReportSummary{
+            .verification_success = false,
+            .verification_errors = @intCast(verification_result.errors.items.len),
+            .verification_diagnostics = @intCast(verification_result.diagnostics.items.len),
+            .proven_guards = @intCast(verification_result.proven_guard_ids.count()),
+            .encoding_degraded = false,
+            .degradation_reason = self.encoder.degradationReason(),
+        };
+        const kind_counts = ReportKindCounts{};
+
+        const markdown = try self.renderSmtReportMarkdown(
+            source_file,
+            generated_at_unix,
+            &.{},
+            &.{},
+            summary,
+            kind_counts,
+            verification_result,
+        );
+        errdefer self.allocator.free(markdown);
+
+        const json = try self.renderSmtReportJson(
+            source_file,
+            generated_at_unix,
+            &.{},
+            &.{},
             summary,
             kind_counts,
             verification_result,

@@ -741,6 +741,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn lowerStmt(self: *FunctionLowerer, statement_id: ast.StmtId, locals: *LocalEnv) anyerror!bool {
             switch (self.parent.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
+                    if (decl.value) |expr_id| {
+                        if (decl.storage_class == .none and decl.binding_kind != .var_ and self.parent.const_eval.values[expr_id.index()] != null) {
+                            try locals.bindPatternWithoutValue(self.parent.file, decl.pattern);
+                            return false;
+                        }
+                    }
                     const value = if (decl.value) |expr_id|
                         try self.lowerExpr(expr_id, locals)
                     else if (decl.type_expr) |type_expr| blk: {

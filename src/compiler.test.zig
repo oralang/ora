@@ -2962,7 +2962,32 @@ test "compiler supports comptime while statements" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 5 : i256"));
+}
+
+test "compiler folds comptime shifts before MLIR verification" {
+    const source_text =
+        \\contract ComptimeShiftProbe {
+        \\    pub fn test_large_shr() -> u256 {
+        \\        const x: u256 = 1 >> 300;
+        \\        const y: u256 = 255 >> 256;
+        \\        const z: u256 = 1 >> 8;
+        \\        const w: u256 = 256 >> 4;
+        \\        return x + y + z + w;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 16 : i256"));
+    try testing.expect(std.mem.count(u8, hir_text, "arith.constant") == 1);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return"));
 }
 
 test "compiler semantic queries index names and infer expression types" {
@@ -8342,7 +8367,8 @@ test "compiler lowers destructuring assignment through struct field extracts" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.count(u8, hir_text, "ora.struct_field_extract") >= 2);
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 9 : i256"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 

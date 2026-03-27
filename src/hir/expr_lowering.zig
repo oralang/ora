@@ -66,8 +66,47 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
+        fn tryLowerConstEvalValue(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?mlir.MlirValue {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            const expr = self.parent.file.expression(expr_id).*;
+            switch (expr) {
+                .Binary, .Unary, .Comptime, .Group, .Name => {},
+                else => return null,
+            }
+
+            const result_type = self.parent.lowerExprType(expr_id);
+            const loc = self.parent.location(exprRange(self.parent.file, expr_id));
+            return switch (value) {
+                .integer => |integer| blk: {
+                    const attr = if (integer.toInt(i64)) |small|
+                        mlir.oraIntegerAttrCreateI64FromType(result_type, small)
+                    else |_| blk2: {
+                        const text = try integer.toString(self.parent.allocator, 10, .lower);
+                        defer self.parent.allocator.free(text);
+                        break :blk2 mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
+                    };
+                    break :blk appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, result_type, attr));
+                },
+                .boolean => |boolean| blk: {
+                    break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), if (boolean) 1 else 0));
+                },
+                .string => |text| blk: {
+                    const op = mlir.oraStringConstantOpCreate(self.parent.context, loc, strRef(text), stringType(self.parent.context));
+                    mlir.oraOperationSetAttributeByName(
+                        op,
+                        strRef("length"),
+                        mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), @intCast(text.len)),
+                    );
+                    break :blk appendValueOp(self.block, op);
+                },
+            };
+        }
+
         pub fn lowerExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *LocalEnv) anyerror!mlir.MlirValue {
             const expr = self.parent.file.expression(expr_id).*;
+            if (try @This().tryLowerConstEvalValue(self, expr_id)) |folded| {
+                return folded;
+            }
             const loc = self.parent.location(exprRange(self.parent.file, expr_id));
             return switch (expr) {
                 .TypeValue => |type_value| blk: {
