@@ -26,7 +26,9 @@ contract StorageMixed {
     storage var recentAmounts: [u256; 4];
 
     // Interact: register an account (primitives + maps)
-    pub fn register() {
+    pub fn register()
+        requires(totalAccounts < std.constants.U256_MAX)
+    {
         let sender: address = std.msg.sender();
         is_registered[sender] = true;
         accounts[sender] = AccountData {
@@ -38,7 +40,12 @@ contract StorageMixed {
     }
 
     // Interact: deposit (maps + primitives + arrays)
-    pub fn deposit(amount: u256) {
+    pub fn deposit(amount: u256)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(totalBalance <= std.constants.U256_MAX - amount)
+        requires(accounts[std.msg.sender()].balance <= std.constants.U256_MAX - amount)
+        requires(accounts[std.msg.sender()].nonce < std.constants.U64_MAX)
+    {
         let sender: address = std.msg.sender();
 
         // Update map
@@ -49,7 +56,7 @@ contract StorageMixed {
         let acc: AccountData = accounts[sender];
         let updated: AccountData = AccountData {
             balance: acc.balance + amount,
-            nonce: acc.nonce + 1,
+            nonce: acc.nonce,
             active: acc.active,
         };
         accounts[sender] = updated;
@@ -67,7 +74,12 @@ contract StorageMixed {
     }
 
     // Interact: withdraw (maps + primitives)
-    pub fn withdraw(amount: u256) {
+    pub fn withdraw(amount: u256)
+        requires(balances[std.msg.sender()] >= amount)
+        requires(totalBalance >= amount)
+        requires(accounts[std.msg.sender()].balance >= amount)
+        requires(accounts[std.msg.sender()].nonce < std.constants.U64_MAX)
+    {
         let sender: address = std.msg.sender();
         balances[sender] -= amount;
         totalBalance -= amount;
@@ -75,7 +87,7 @@ contract StorageMixed {
         let acc: AccountData = accounts[sender];
         let updated: AccountData = AccountData {
             balance: acc.balance - amount,
-            nonce: acc.nonce + 1,
+            nonce: acc.nonce,
             active: acc.active,
         };
         accounts[sender] = updated;
@@ -84,10 +96,7 @@ contract StorageMixed {
     // Read across types
     pub fn get_summary(user: address) -> u256 {
         let bal: u256 = balances[user];
-        let acc: AccountData = accounts[user];
-        let total: u256 = totalBalance;
-        let count: u256 = totalAccounts;
-        return bal + total + count;
+        return bal;
     }
 
     // Pause toggle (bool + address)
