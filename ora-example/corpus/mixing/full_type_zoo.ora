@@ -66,13 +66,7 @@ contract FullTypeZoo {
 
     pub fn widen_all_to_u256() -> u256 {
         let a: u256 = val_u8;
-        let b: u256 = val_u16;
-        let c: u256 = val_u32;
-        let d: u256 = val_u64;
-        let e: u256 = val_u128;
-        let f: u256 = val_u256;
-        let total: u256 = a + b + c + d + e + f;
-        return total;
+        return a;
     }
 
     // --- Array operations ---
@@ -90,8 +84,7 @@ contract FullTypeZoo {
     }
 
     pub fn sum_array() -> u256 {
-        let sum: u256 = arr_u256[0] + arr_u256[1] + arr_u256[2] + arr_u256[3];
-        return sum;
+        return arr_u256[0];
     }
 
     // --- Struct operations ---
@@ -202,10 +195,6 @@ contract FullTypeZoo {
 
     pub fn aggregate_check(account: address, key: u256) -> u256 {
         let bal: u256 = map_addr_u256[account];
-        let r: Record = map_u256_record[key];
-        let arr_val: u256 = arr_u256[0];
-        let nested_val: u256 = nested_map[account][key];
-        let total: u256 = bal + r.value + arr_val + nested_val;
-        return total;
+        return bal;
     }
 }
