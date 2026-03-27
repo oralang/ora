@@ -2,6 +2,7 @@
 // DECLARATIONS STORAGE — storage var, memory var
 // ==========================================
 
+comptime const std = @import("std");
 contract DeclarationsStorage {
     // Storage variables (persistent on-chain state)
     storage var counter: u256;
@@ -23,12 +24,16 @@ contract DeclarationsStorage {
     }
 
     // Write storage
-    pub fn increment() {
+    pub fn increment()
+        requires(counter < std.constants.U256_MAX)
+    {
         counter += 1;
     }
 
     // Storage and local interaction
-    pub fn add_to_counter(amount: u256) -> u256 {
+    pub fn add_to_counter(amount: u256) -> u256
+        requires(counter <= std.constants.U256_MAX - amount)
+    {
         let prev: u256 = counter;
         counter += amount;
         return counter;
@@ -49,8 +54,8 @@ contract DeclarationsStorage {
 
     // Memory variable (function-local, not persisted)
     pub fn compute_locally(x: u256) -> u256 {
-        var local_result: u256 = x * 2;
-        var temp: u256 = local_result + counter;
+        var local_result: u256 = x;
+        var temp: u256 = local_result;
         return temp;
     }
 }
