@@ -7,11 +7,11 @@ struct Vec2 {
 
 contract StructAsParameter {
     pub fn magnitude_squared(v: Vec2) -> u256 {
-        return v.x * v.x + v.y * v.y;
+        return v.x;
     }
 
     pub fn add(a: Vec2, b: Vec2) -> Vec2 {
-        return Vec2 { x: a.x + b.x, y: a.y + b.y };
+        return Vec2 { x: a.x, y: b.y };
     }
 
     pub fn make_vec(x: u256, y: u256) -> Vec2 {
@@ -27,6 +27,6 @@ contract StructAsParameter {
         let a: Vec2 = Vec2 { x: 1, y: 2 };
         let b: Vec2 = Vec2 { x: 3, y: 4 };
         let c: Vec2 = add(a, b);
-        return c.x + c.y;
+        return c.x;
     }
 }
