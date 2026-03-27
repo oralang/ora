@@ -3,6 +3,7 @@
 // ============================================================================
 // Tests that writing to transient storage records a write effect
 // ============================================================================
+comptime const std = @import("std");
 
 contract TStoreWriteEffect {
     tstore var temp_counter: u256;
@@ -29,14 +30,19 @@ contract TStoreWriteEffect {
     // TStore write in loop records write effect per iteration
     pub fn testTStoreWriteInLoop() {
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 10)
+            invariant(i <= 10)
+            invariant(i < std.constants.U256_MAX)
+        {
             temp_counter = i; // Write effect per iteration
             i += 1;
         }
     }
 
     // Compound assignment records write effect
-    pub fn testTStoreCompoundAssign() {
+    pub fn testTStoreCompoundAssign()
+        requires(temp_counter <= std.constants.U256_MAX - 10)
+    {
         temp_counter += 10; // Read + Write effect
     }
 
@@ -47,4 +53,3 @@ contract TStoreWriteEffect {
         temp_counter = 0; // Clear guard: Write effect
     }
 }
-
