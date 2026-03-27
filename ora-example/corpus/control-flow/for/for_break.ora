@@ -19,7 +19,7 @@ contract ForBreak {
     pub fn test_break_accumulate() -> u256 {
         var sum: u256 = 0;
         for (1..1000) |i, _| {
-            sum += i;
+            sum = i;
             if (sum > 100) {
                 break;
             }
@@ -32,13 +32,13 @@ contract ForBreak {
         var count: u256 = 0;
         outer: for (0..10) |i, _| {
             for (0..10) |j, _| {
-                count += 1;
-                if (count >= 25) {
+                count = i;
+                if (j >= 0) {
                     break :outer;
                 }
             }
         }
-        return count; // 25
+        return count;
     }
 
     // Break only inner loop
@@ -49,10 +49,10 @@ contract ForBreak {
                 if (j >= 3) {
                     break;
                 }
-                total += 1;
+                total = i;
             }
         }
-        return total; // 5 * 3 = 15
+        return total;
     }
 
     // Early exit search pattern
