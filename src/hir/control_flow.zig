@@ -28,6 +28,7 @@ const namedBoolAttr = support.namedBoolAttr;
 const namedStringAttr = support.namedStringAttr;
 const strRef = support.strRef;
 const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
+const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyContainsSwitchBreak = analysis.bodyContainsSwitchBreak;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectIfCarriedLocals = analysis.collectIfCarriedLocals;
@@ -419,28 +420,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
                 return false;
             }
+            const has_loop_control = bodyContainsLoopControl(self.parent.file, while_stmt.body);
 
             const loc = self.parent.location(while_stmt.range);
             const created_deferred_return = has_return and self.deferred_return_flag == null;
             if (created_deferred_return) {
                 try self.ensureDeferredReturnSlots(while_stmt.range);
             }
-            const break_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
-            if (mlir.oraOperationIsNull(break_flag_alloc)) return error.MlirOperationCreationFailed;
-            const break_flag = appendValueOp(self.block, break_flag_alloc);
+            var break_flag = std.mem.zeroes(mlir.MlirValue);
+            var continue_flag = std.mem.zeroes(mlir.MlirValue);
+            if (has_loop_control) {
+                const break_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
+                if (mlir.oraOperationIsNull(break_flag_alloc)) return error.MlirOperationCreationFailed;
+                break_flag = appendValueOp(self.block, break_flag_alloc);
 
-            const break_flag_zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const clear_break = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, break_flag_zero, break_flag, null, 0);
-            if (mlir.oraOperationIsNull(clear_break)) return error.MlirOperationCreationFailed;
-            appendOp(self.block, clear_break);
+                const break_flag_zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                const clear_break = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, break_flag_zero, break_flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_break)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, clear_break);
 
-            const continue_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
-            if (mlir.oraOperationIsNull(continue_flag_alloc)) return error.MlirOperationCreationFailed;
-            const continue_flag = appendValueOp(self.block, continue_flag_alloc);
-            const continue_flag_zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, continue_flag, null, 0);
-            if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
-            appendOp(self.block, clear_continue);
+                const continue_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
+                if (mlir.oraOperationIsNull(continue_flag_alloc)) return error.MlirOperationCreationFailed;
+                continue_flag = appendValueOp(self.block, continue_flag_alloc);
+                const continue_flag_zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, continue_flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, clear_continue);
+            }
 
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
@@ -504,15 +510,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 condition = appendValueOp(before_block, cmp);
             }
 
-            const break_flag_value = appendValueOp(before_block, blk: {
-                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, break_flag, null, 0, boolType(self.parent.context));
-                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
-                break :blk load;
-            });
-            const break_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const loop_enabled = before_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
-            if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
-            condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, loop_enabled), condition));
+            if (has_loop_control) {
+                const break_flag_value = appendValueOp(before_block, blk: {
+                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, break_flag, null, 0, boolType(self.parent.context));
+                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                    break :blk load;
+                });
+                const break_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                const loop_enabled = before_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
+                if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
+                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, loop_enabled), condition));
+            }
             if (has_return) {
                 const return_flag = self.deferred_return_flag.?;
                 const return_flag_value = appendValueOp(before_block, blk: {
@@ -560,10 +568,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (carried_locals.items, 0..) |local_id, index| {
                 try body_locals.setValue(local_id, mlir.oraBlockGetArgument(after_block, index));
             }
-            const clear_continue_body = appendValueOp(after_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue_body, continue_flag, null, 0);
-            if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
-            appendOp(after_block, clear_continue_store);
+            if (has_loop_control) {
+                const clear_continue_body = appendValueOp(after_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+                const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue_body, continue_flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
+                appendOp(after_block, clear_continue_store);
+            }
             for (while_stmt.invariants) |expr_id| {
                 const value = try body_lowerer.lowerExpr(expr_id, &body_locals);
                 const op = mlir.oraInvariantOpCreate(
