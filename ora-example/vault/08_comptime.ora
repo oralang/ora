@@ -18,7 +18,10 @@ contract Vault {
         return MIN_DEPOSIT;
     }
 
-    pub fn deposit(amount: u256) {
+    pub fn deposit(amount: u256)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+    {
         let sender: address = std.msg.sender();
         balances[sender] += amount;
         totalDeposits += amount;
