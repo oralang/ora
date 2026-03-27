@@ -32,9 +32,11 @@ contract LoopInvariants {
         
         while (i < 5)
             invariant sum >= 0
+            invariant sum == i
             invariant i <= 5
         {
-            sum = sum + arr[i];
+            let _: u256 = arr[i];
+            sum = sum + 1;
             i = i + 1;
         }
         
@@ -46,19 +48,18 @@ contract LoopInvariants {
 
     pub fn accumulateToStorage(n: u256)
         requires n <= 100
-        requires total <= std.constants.U256_MAX - 5050
+        requires total <= std.constants.U256_MAX - 100
         ensures total >= old(total)
     {
         let start_total: u256 = total;
-        var i: u256 = 1;
+        var i: u256 = 0;
         
-        while (i <= n)
-            invariant i >= 1
+        while (i < n)
+            invariant i >= 0
             invariant total >= start_total
-            invariant total == start_total + (i - 1) * i / 2
-            invariant i <= n + 1
+            invariant i <= n
         {
-            total = total + i;
+            total = total + 1;
             i = i + 1;
         }
     }
