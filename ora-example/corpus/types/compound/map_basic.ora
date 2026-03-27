@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract MapBasic {
     storage var balances: map<address, u256>;
     storage var flags: map<u256, bool>;
@@ -10,11 +12,15 @@ contract MapBasic {
         return balances[account];
     }
 
-    pub fn add_balance(account: address, amount: u256) {
+    pub fn add_balance(account: address, amount: u256)
+        requires(balances[account] <= std.constants.U256_MAX - amount)
+    {
         balances[account] += amount;
     }
 
-    pub fn sub_balance(account: address, amount: u256) {
+    pub fn sub_balance(account: address, amount: u256)
+        requires(balances[account] >= amount)
+    {
         balances[account] -= amount;
     }
 
@@ -26,7 +32,10 @@ contract MapBasic {
         return flags[key];
     }
 
-    pub fn transfer(from: address, to: address, amount: u256) {
+    pub fn transfer(from: address, to: address, amount: u256)
+        requires(balances[from] >= amount)
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         balances[from] -= amount;
         balances[to] += amount;
     }
