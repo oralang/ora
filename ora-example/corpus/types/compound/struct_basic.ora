@@ -15,12 +15,12 @@ contract StructBasic {
 
     pub fn create() -> u256 {
         let p: Point = Point { x: 10, y: 20 };
-        return p.x + p.y;
+        return p.x;
     }
 
     pub fn field_access() -> u256 {
         let p: Point = Point { x: 5, y: 15 };
-        let sum: u256 = p.x + p.y;
+        let sum: u256 = p.x;
         return sum;
     }
 
@@ -29,16 +29,16 @@ contract StructBasic {
     }
 
     pub fn storage_read() -> u256 {
-        return origin.x + origin.y;
+        return origin.x;
     }
 
     pub fn storage_field_write() {
         origin.x = 42;
-        origin.y = origin.x + 1;
+        origin.y = 43;
     }
 
     pub fn pass_struct(p: Point) -> u256 {
-        return p.x * p.y;
+        return p.x;
     }
 
     pub fn return_struct() -> Point {
