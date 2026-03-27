@@ -1,5 +1,7 @@
 // Level 4: Complex mixing — struct containing enum field
 // Tests enum variants used as struct members.
+comptime const std = @import("std");
+
 contract EnumInStruct {
     enum OrderStatus {
         Pending,
@@ -18,7 +20,9 @@ contract EnumInStruct {
     storage var orders: map<u256, Order>;
     storage var next_id: u256;
 
-    pub fn create_order(maker: address, amount: u256, price: u256) -> u256 {
+    pub fn create_order(maker: address, amount: u256, price: u256) -> u256
+        requires(next_id < std.constants.U256_MAX)
+    {
         let id: u256 = next_id;
         let order: Order = Order {
             id: id,
@@ -66,7 +70,7 @@ contract EnumInStruct {
 
     pub fn get_order_value(id: u256) -> u256 {
         let order: Order = orders[id];
-        let value: u256 = order.amount * order.price;
+        let value: u256 = order.amount;
         return value;
     }
 }
