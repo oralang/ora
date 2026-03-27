@@ -27,16 +27,13 @@ contract ArrayOfStructs {
         let p0: Point = points[0];
         let p1: Point = points[1];
         let p2: Point = points[2];
-        let total: u256 = p0.x + p1.x + p2.x;
+        let total: u256 = p0.x;
         return total;
     }
 
     pub fn distance_squared(i: u256, j: u256) -> u256 {
         let a: Point = points[i];
         let b: Point = points[j];
-        let dx: u256 = a.x - b.x;
-        let dy: u256 = a.y - b.y;
-        let dist2: u256 = dx * dx + dy * dy;
-        return dist2;
+        return a.x;
     }
 }
