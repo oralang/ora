@@ -21,14 +21,14 @@ contract InRangePercentage {
     }
 
     pub fn calculateFee(amount: u256) -> u256 {
-        return amount * feeRate / 10000;
+        return amount *% feeRate / 10000;
     }
 
     pub fn calculateReward(amount: u256) -> u256 {
-        return amount * rewardRate / 10000;
+        return amount *% rewardRate / 10000;
     }
 
     pub fn totalRate() -> u256 {
-        return feeRate + rewardRate;
+        return feeRate +% rewardRate;
     }
 }

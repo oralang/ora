@@ -19,7 +19,7 @@ contract InRangeBasic {
     }
 
     pub fn addRanged(a: InRange<u256, 1, 100>, b: InRange<u256, 1, 100>) -> u256 {
-        return a + b;
+        return a +% b;
     }
 
     pub fn toPlain(val: InRange<u256, 1, 100>) -> u256 {

@@ -28,13 +28,13 @@ contract RefinementAssignment {
     }
 
     pub fn refinedInArithmetic(a: MinValue<u256, 1>, b: u256) -> u256 {
-        let res: u256 = a + b;
+        let res: u256 = a +% b;
         return res;
     }
 
     pub fn chainedAssignment(val: MinValue<u256, 1>) -> u256 {
         let a: u256 = val;
-        let b: u256 = a + 1;
+        let b: u256 = a +% 1;
         return b;
     }
 }

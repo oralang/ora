@@ -5,7 +5,7 @@ contract NonZeroInMap {
     storage var approved: map<NonZeroAddress, bool>;
 
     pub fn deposit(account: NonZeroAddress, amount: u256) {
-        balances[account] = balances[account] + amount;
+        balances[account] = balances[account] +% amount;
     }
 
     pub fn withdraw(account: NonZeroAddress, amount: u256) {
@@ -21,7 +21,7 @@ contract NonZeroInMap {
             return false;
         }
         balances[from] = senderBal - amount;
-        balances[to] = balances[to] + amount;
+        balances[to] = balances[to] +% amount;
         return true;
     }
 
