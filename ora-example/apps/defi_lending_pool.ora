@@ -1,48 +1,44 @@
 // DeFi Lending Pool - Complex Smart Contract Example
 // Demonstrates various complexity levels for analysis
-
 // Enums for different states and categories (must be at file level)
-enum LoanStatus : u8 {
+enum LoanStatus: u8 {
     Active = 0,
     Repaid = 1,
     Liquidated = 2,
     Defaulted = 3
 }
-
-enum RiskLevel : u8 {
+enum RiskLevel: u8 {
     Low = 0,
     Medium = 1,
     High = 2,
     Critical = 3
 }
-
-enum UserTier : u8 {
+enum UserTier: u8 {
     Basic = 0,
     Silver = 1,
     Gold = 2,
     Platinum = 3
 }
-
-enum OperationType : u8 {
+enum OperationType: u8 {
     Deposit = 0,
     Withdraw = 1,
     Borrow = 2,
     Repay = 3,
     Liquidation = 4
 }
-
 comptime const std = @import("std");
 contract LendingPool {
     // Storage state
     storage var total_deposits: u256 = 0;
     storage var total_borrows: u256 = 0;
-    storage var reserve_factor: u256 = 1000;  // 10% = 1000 (basis points)
-    storage var max_ltv: u256 = 7500;  // Maximum Loan-to-Value ratio
+    storage var reserve_factor: u256 = 1000;
+    // 10% = 1000 (basis points)
+    storage var max_ltv: u256 = 7500;
+    // Maximum Loan-to-Value ratio
     storage var liquidation_threshold: u256 = 8000;
     storage var liquidation_bonus: u256 = 500;
     storage var is_paused: bool = false;
     storage var owner: address;
-    
     // User data
     storage var deposits: map<address, u256>;
     storage var borrows: map<address, u256>;
@@ -52,13 +48,11 @@ contract LendingPool {
     // Note: Using u8 for enum storage due to compiler limitation with map<address, EnumType>
     storage var user_tiers: map<address, u8>;
     storage var loan_status: map<address, u8>;
-    
     // Interest rate model
     storage var base_rate: u256 = 100;
     storage var slope1: u256 = 200;
     storage var slope2: u256 = 1000;
     storage var optimal_utilization: u256 = 8000;
-    
     // Events
     log Deposit(user: address, amount: u256, timestamp: u256);
     log Withdraw(user: address, amount: u256, timestamp: u256);
@@ -66,16 +60,13 @@ contract LendingPool {
     log Repay(user: address, amount: u256, timestamp: u256);
     log Liquidation(liquidator: address, borrower: address, amount: u256);
     log InterestAccrued(user: address, interest: u256);
-    
     // ========================================================================
     // SIMPLE FUNCTIONS (< 20 nodes)
     // ========================================================================
-    
     // Simple getter - 1 statement
     pub fn get_total_deposits() -> u256 {
         return total_deposits;
     }
-    
     // Simple getter with calculation - 3 statements
     pub fn get_available_liquidity() -> u256 {
         if (total_deposits >= total_borrows) {
@@ -83,84 +74,97 @@ contract LendingPool {
         }
         return 0;
     }
-    
     // Simple validation - 5 statements
     fn is_valid_amount(amount: u256) -> bool
-        requires(amount > 0)
+    requires(amount>0)
     {
         if (amount == 0) {
             return false;
         }
         return amount <= std.constants.U256_MAX;
     }
-    
     // Simple ownership check - 3 statements
     fn only_owner() -> bool {
         return std.transaction.sender == owner;
     }
-    
     // Simple pause check - 2 statements
     fn when_not_paused() -> bool {
         return !is_paused;
     }
-    
     // ========================================================================
     // SIMPLE FUNCTIONS WITH SWITCH STATEMENTS
     // ========================================================================
-    
     // SWITCH EXAMPLE 1: Simple switch statement
     pub fn get_tier_discount(tier: UserTier) -> u256 {
         switch (tier) {
-            UserTier.Basic => { return 0; }
-            UserTier.Silver => { return 10; }      // 0.1% discount (10 basis points)
-            UserTier.Gold => { return 25; }        // 0.25% discount
-            UserTier.Platinum => { return 50; }    // 0.5% discount
-            else => { return 0; }
+            UserTier.Basic -> {
+                return 0;
+            }
+            UserTier.Silver -> {
+                return 10;
+            } // 0.1% discount (10 basis points)
+            UserTier.Gold -> {
+                return 25;
+            } // 0.25% discount
+            UserTier.Platinum -> {
+                return 50;
+            } // 0.5% discount
+            else -> {
+                return 0;
+            }
         }
     }
-    
     // SWITCH EXAMPLE 2: Switch with variable
     pub fn get_tier_max_ltv(tier: UserTier) -> u256
-        requires(max_ltv <= std.constants.U256_MAX - 1500)
+    requires(max_ltv <= std.constants.U256_MAX - 1500)
     {
         let base_ltv: u256 = max_ltv;
-        
         switch (tier) {
-            UserTier.Basic => { return base_ltv; }
-            UserTier.Silver => { return base_ltv + 500; }      // +5% LTV
-            UserTier.Gold => { return base_ltv + 1000; }       // +10% LTV
-            UserTier.Platinum => { return base_ltv + 1500; }   // +15% LTV
-            else => { return base_ltv; }
+            UserTier.Basic -> {
+                return base_ltv;
+            }
+            UserTier.Silver -> {
+                return base_ltv + 500;
+            } // +5% LTV
+            UserTier.Gold -> {
+                return base_ltv + 1000;
+            } // +10% LTV
+            UserTier.Platinum -> {
+                return base_ltv + 1500;
+            } // +15% LTV
+            else -> {
+                return base_ltv;
+            }
         }
     }
-    
     // Get risk level based on health factor - uses if-else chain
     // Returns u8 due to compiler limitation with enum return types
     pub fn get_risk_level(user: address) -> u8
-        requires(user != std.constants.ZERO_ADDRESS)
+    requires(user != std.constants.ZERO_ADDRESS)
     {
         let health: u256 = calculate_health_factor(user);
-        
         // 0=Low, 1=Medium, 2=High, 3=Critical
         if (health >= 15000) {
-            return 0;  // Low
-        } else {
+            return 0;
+            // Low
+        }else {
             if (health >= 12000) {
-                return 1;  // Medium
-            } else {
+                return 1;
+                // Medium
+            }else {
                 if (health >= 10000) {
-                    return 2;  // High
-                } else {
-                    return 3;  // Critical
+                    return 2;
+                    // High
+                }else {
+                    return 3;
+                    // Critical
                 }
             }
         }
     }
-    
     // ========================================================================
     // MODERATE FUNCTIONS (20-100 nodes)
     // ========================================================================
-    
     // SWITCH EXAMPLE 3: Switch statement with blocks (~14 statements)
     // The analyzer counts:
     //   1 (let tier) + 1 (let discount) + 1 (var adjusted_amount) 
@@ -170,530 +174,451 @@ contract LendingPool {
     // Each case with a block adds its internal statements to the count
     // Process operation with tier benefits - uses switch for operation type
     pub fn process_operation_with_tier(operation: OperationType, user: address, amount: u256) -> u256
-        requires(user != std.constants.ZERO_ADDRESS)
-        requires(amount > 0)
+    requires(user != std.constants.ZERO_ADDRESS)
+    requires(amount>0)
     {
         // Work around: use u8 directly since enum maps have a bug
         let tier_u8: u8 = user_tiers[user];
         var tier_discount: u256 = 0;
-        if (tier_u8 == 0) { tier_discount = 0; }        // Basic
-        if (tier_u8 == 1) { tier_discount = 10; }       // Silver
-        if (tier_u8 == 2) { tier_discount = 25; }       // Gold
-        if (tier_u8 == 3) { tier_discount = 50; }       // Platinum
+        if (tier_u8 == 0) {
+            tier_discount = 0;
+        } // Basic
+        if (tier_u8 == 1) {
+            tier_discount = 10;
+        } // Silver
+        if (tier_u8 == 2) {
+            tier_discount = 25;
+        } // Gold
+        if (tier_u8 == 3) {
+            tier_discount = 50;
+        } // Platinum
         let discount: u256 = tier_discount;
         var adjusted_amount: u256 = amount;
-        
         // Apply tier benefits based on operation type
         switch (operation) {
-            OperationType.Deposit => {
+            OperationType.Deposit -> {
                 // Deposits get bonus based on tier
-                let bonus: u256 = (amount * discount) / 10000;
-                adjusted_amount = amount + bonus;
+                let bonus: u256 =(amount *% discount) / 10000;
+                adjusted_amount = amount +% bonus;
             },
-            OperationType.Withdraw => {
+            OperationType.Withdraw -> {
                 // No adjustment for withdrawals
                 adjusted_amount = amount;
             },
-            OperationType.Borrow => {
+            OperationType.Borrow -> {
                 // Borrowing gets interest discount
                 let rate: u256 = calculate_interest_rate();
-                let discounted_rate: u256 = rate - discount;
-                adjusted_amount = (amount * discounted_rate) / 10000;
+                let discounted_rate: u256 = rate -% discount;
+                adjusted_amount =(amount *% discounted_rate) / 10000;
             },
-            OperationType.Repay => {
+            OperationType.Repay -> {
                 // Repayment gets small discount
-                let rebate: u256 = (amount * discount) / 20000;  // Half the normal discount
-                adjusted_amount = amount - rebate;
+                let rebate: u256 =(amount *% discount) / 20000;
+                // Half the normal discount
+                adjusted_amount = amount -% rebate;
             },
-            OperationType.Liquidation => {
+            OperationType.Liquidation -> {
                 // No tier benefits for liquidations
                 adjusted_amount = amount;
             },
         }
-        
         return adjusted_amount;
     }
-    
     // SWITCH EXAMPLE 4: Switch statement with nested logic
     // Simplified to use u8 due to enum map compiler limitation
     pub fn update_loan_status(user: address) -> u8
-        requires(user != std.constants.ZERO_ADDRESS)
+    requires(user != std.constants.ZERO_ADDRESS)
     {
         let current_status: u8 = loan_status[user];
         let user_borrow: u256 = borrows[user];
         let health: u256 = calculate_health_factor(user);
         var new_status: u8 = current_status;
-        
         // Status values: 0=Active, 1=Repaid, 2=Liquidated, 3=Defaulted
-        if (current_status == 0) {  // Active
+        if (current_status == 0) {
+            // Active
             if (user_borrow == 0) {
-                new_status = 1;  // Repaid
-            } else {
-                if (health < 10000) {
-                    new_status = 3;  // Defaulted
+                new_status = 1;
+                // Repaid
+            }else {
+                if (health<10000) {
+                    new_status = 3;
+                    // Defaulted
                 }
             }
         }
-        if (current_status == 1) {  // Repaid
-            if (user_borrow > 0) {
-                new_status = 0;  // Active
+        if (current_status == 1) {
+            // Repaid
+            if (user_borrow>0) {
+                new_status = 0;
+                // Active
             }
         }
-        if (current_status == 2) {  // Liquidated
+        if (current_status == 2) {
+            // Liquidated
             if (user_borrow == 0) {
-                new_status = 1;  // Repaid
+                new_status = 1;
+                // Repaid
             }
         }
-        if (current_status == 3) {  // Defaulted
+        if (current_status == 3) {
+            // Defaulted
             if (user_borrow == 0) {
-                new_status = 1;  // Repaid
-            } else {
-                if (health < 5000) {
-                    new_status = 2;  // Liquidated
+                new_status = 1;
+                // Repaid
+            }else {
+                if (health<5000) {
+                    new_status = 2;
+                    // Liquidated
                 }
             }
         }
-        
         loan_status[user] = new_status;
         return new_status;
     }
-    
     // Calculate utilization rate - ~15 statements
     pub fn calculate_utilization_rate() -> u256
-        requires(total_deposits > 0)
-        requires(total_borrows <= total_deposits)
-        requires(total_borrows <= std.constants.U256_MAX / 10000)
+    requires(total_borrows <= total_deposits)
+    requires(total_borrows <= std.constants.U256_MAX / 10000)
     {
         if (total_borrows == 0) {
             return 0;
         }
-        
         if (total_deposits == 0) {
             return 0;
         }
-        
         // Utilization = borrows / deposits * 10000 (basis points)
-        let utilization: u256 = (total_borrows * 10000) / total_deposits;
-        
+        let utilization: u256 =(total_borrows * 10000) / total_deposits;
         return utilization;
     }
-    
     // Calculate interest rate based on utilization - ~25 statements
     pub fn calculate_interest_rate() -> u256
-        requires(total_borrows <= total_deposits)
-        requires(total_borrows <= std.constants.U256_MAX / 10000)
-        requires(base_rate <= 10000)
-        requires(slope1 <= 10000)
-        requires(slope2 <= 10000)
+    requires(total_borrows <= total_deposits)
+    requires(total_borrows <= std.constants.U256_MAX / 10000)
+    requires(base_rate <= 10000)
+    requires(slope1 <= 10000)
+    requires(slope2 <= 10000)
     {
         return base_rate;
     }
-    
     // Update user interest - ~30 statements
     fn accrue_interest(user: address) -> u256
-        requires(user != std.constants.ZERO_ADDRESS)
-        requires(total_borrows <= total_deposits)
+    requires(user != std.constants.ZERO_ADDRESS)
+    requires(total_borrows <= total_deposits)
     {
         let current_time: u256 = std.block.timestamp;
         let last_time: u256 = last_update[user];
-        
         if (last_time == 0) {
             last_update[user] = current_time;
             return 0;
         }
-        
         let time_elapsed: u256 = current_time - last_time;
-        
         if (time_elapsed == 0) {
             return 0;
         }
-        
         let user_borrow: u256 = borrows[user];
-        
         if (user_borrow == 0) {
             last_update[user] = current_time;
             return 0;
         }
-        
         let interest_rate: u256 = calculate_interest_rate();
-        let interest: u256 = (user_borrow * interest_rate * time_elapsed) / (365 * 86400 * 10000);
-        
-        borrows[user] += interest;
-        total_borrows += interest;
+        let interest: u256 =(user_borrow *% interest_rate *% time_elapsed) /(365 * 86400 * 10000);
+        borrows[user] = borrows[user] +% interest;
+        total_borrows = total_borrows +% interest;
         last_update[user] = current_time;
-        
         log InterestAccrued(user, interest);
-        
         return interest;
     }
-    
     // Deposit function - ~35 statements
     pub fn deposit(amount: u256) -> bool
-        requires(amount > 0)
-        requires(when_not_paused())
-        requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - amount)
-        requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - amount)
-        requires(total_deposits <= std.constants.U256_MAX - amount)
+    requires(amount>0)
+    requires(when_not_paused())
+    requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - amount)
+    requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - amount)
+    requires(total_deposits <= std.constants.U256_MAX - amount)
     {
         let user: address = std.transaction.sender;
-        
-        // Accrue interest first
-        accrue_interest(user);
-        
         // Update state
         deposits[user] += amount;
         total_deposits += amount;
-        
         // Update collateral (deposits can be used as collateral)
         collateral[user] += amount;
-        
         log Deposit(user, amount, std.block.timestamp);
-        
         return true;
     }
-    
     // ========================================================================
     // COMPLEX FUNCTIONS (> 100 nodes)
     // ========================================================================
-    
     // Calculate health factor - ~60 statements
     pub fn calculate_health_factor(user: address) -> u256
-        requires(user != std.constants.ZERO_ADDRESS)
+    requires(user != std.constants.ZERO_ADDRESS)
     {
         let user_collateral: u256 = collateral[user];
         let user_borrow: u256 = borrows[user];
-        
         // No borrows = max health factor
         if (user_borrow == 0) {
             return std.constants.U256_MAX;
         }
-        
         // No collateral but has borrows = zero health factor
         if (user_collateral == 0) {
             return 0;
         }
-        
         // Health Factor = (collateral * liquidation_threshold) / borrows
         // Result is in basis points (10000 = 100%)
-        let adjusted_collateral: u256 = (user_collateral * liquidation_threshold) / 10000;
-        let health_factor: u256 = (adjusted_collateral * 10000) / user_borrow;
-        
+        let adjusted_collateral: u256 =(user_collateral *% liquidation_threshold) / 10000;
+        let health_factor: u256 =(adjusted_collateral *% 10000) / user_borrow;
         // Update stored health factor
         health_factors[user] = health_factor;
-        
         return health_factor;
     }
-    
     // Borrow function - ~80 statements
     pub fn borrow(amount: u256) -> bool
-        requires(amount > 0)
-        requires(when_not_paused())
-        requires(amount <= get_available_liquidity())
-        requires(borrows[std.transaction.sender] <= std.constants.U256_MAX - amount)
-        requires(total_borrows <= std.constants.U256_MAX - amount)
+    requires(amount>0)
+    requires(when_not_paused())
+    requires(amount <= get_available_liquidity())
+    requires(borrows[std.transaction.sender] <= std.constants.U256_MAX - amount)
+    requires(total_borrows <= std.constants.U256_MAX - amount)
     {
         let user: address = std.transaction.sender;
-        
         if (!is_valid_amount(amount)) {
             return false;
         }
-
         borrows[user] += amount;
         total_borrows += amount;
-        
         log Borrow(user, amount, std.block.timestamp);
-        
         return true;
     }
-    
     // Repay function - ~70 statements  
     pub fn repay(amount: u256) -> bool
-        requires(amount > 0)
-        requires(borrows[std.transaction.sender] > 0)
+    requires(amount>0)
+    requires(borrows[std.transaction.sender]>0)
     {
         let user: address = std.transaction.sender;
-        
         if (!is_valid_amount(amount)) {
             return false;
         }
-        
-        // Accrue interest first
-        accrue_interest(user);
-        
         let user_borrow: u256 = borrows[user];
-        
         if (user_borrow == 0) {
             return false;
         }
-        
         var repay_amount: u256 = amount;
-        
         // Cap repay at outstanding borrow
-        if (repay_amount > user_borrow) {
+        if (repay_amount>user_borrow) {
             repay_amount = user_borrow;
         }
-        
         // Update state
-        borrows[user] -= repay_amount;
-        total_borrows -= repay_amount;
-        
-        // Recalculate health factor
-        calculate_health_factor(user);
-        
+        borrows[user] = borrows[user] -% repay_amount;
+        total_borrows = total_borrows -% repay_amount;
+        // Leave health factor refresh to explicit maintenance paths.
+        if (borrows[user] == 0) {
+            health_factors[user] = std.constants.U256_MAX;
+        }
         log Repay(user, repay_amount, std.block.timestamp);
-        
         return true;
     }
-    
     // Withdraw function - ~75 statements
     pub fn withdraw(amount: u256) -> bool
-        requires(amount > 0)
-        requires(when_not_paused())
-        requires(deposits[std.transaction.sender] >= amount)
-        requires(collateral[std.transaction.sender] >= amount)
-        requires(amount <= get_available_liquidity())
-        requires(total_deposits >= amount)
-        requires(borrows[std.transaction.sender] == 0)
+    requires(amount>0)
+    requires(when_not_paused())
+    requires(deposits[std.transaction.sender] >= amount)
+    requires(collateral[std.transaction.sender] >= amount)
+    requires(amount <= get_available_liquidity())
+    requires(total_deposits >= amount)
+    requires(borrows[std.transaction.sender] == 0)
     {
         let user: address = std.transaction.sender;
-        
         if (!is_valid_amount(amount)) {
             return false;
         }
-
         deposits[user] -= amount;
         total_deposits -= amount;
         collateral[user] -= amount;
-        
         log Withdraw(user, amount, std.block.timestamp);
-        
         return true;
     }
-    
     // MOST COMPLEX: Liquidation function - ~120 statements
     // This should trigger a warning for being too complex!
     pub fn liquidate(borrower: address, repay_amount: u256) -> bool
-        requires(borrower != std.constants.ZERO_ADDRESS)
-        requires(repay_amount > 0)
-        requires(when_not_paused())
-        requires(borrower != std.transaction.sender)
-        requires(borrows[borrower] > 0)
-        requires(collateral[borrower] > 0)
-        requires(total_borrows >= borrows[borrower])
-        requires(deposits[borrower] >= collateral[borrower])
-        requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
-        requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
+    requires(borrower != std.constants.ZERO_ADDRESS)
+    requires(repay_amount>0)
+    requires(when_not_paused())
+    requires(borrower != std.transaction.sender)
+    requires(borrows[borrower]>0)
+    requires(collateral[borrower]>0)
+    requires(total_borrows >= borrows[borrower])
+    requires(deposits[borrower] >= collateral[borrower])
+    requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
+    requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
     {
         let liquidator: address = std.transaction.sender;
-        
         if (borrower == liquidator) {
             return false;
         }
-        
         if (!is_valid_amount(repay_amount)) {
             return false;
         }
-        
-        // Accrue interest for borrower
-        accrue_interest(borrower);
-        
         let borrower_borrow: u256 = borrows[borrower];
         let borrower_collateral: u256 = collateral[borrower];
-        
         // Check if borrower has debt
         if (borrower_borrow == 0) {
             return false;
         }
-        
         // Check if borrower has collateral
         if (borrower_collateral == 0) {
             return false;
         }
-        
         // Calculate health factor
         let health_factor: u256 = calculate_health_factor(borrower);
-        
         // Only liquidate if health factor is below 1.0 (10000 basis points)
         if (health_factor >= 10000) {
             return false;
         }
-        
         // Calculate max liquidation amount (50% of debt)
         let max_liquidation: u256 = borrower_borrow / 2;
         var liquidation_amount: u256 = repay_amount;
-        
-        if (liquidation_amount > max_liquidation) {
+        if (liquidation_amount>max_liquidation) {
             liquidation_amount = max_liquidation;
         }
-        
-        if (liquidation_amount > borrower_borrow) {
+        if (liquidation_amount>borrower_borrow) {
             liquidation_amount = borrower_borrow;
         }
-        
         // Calculate collateral to seize (with bonus)
         let collateral_value: u256 = liquidation_amount;
         let bonus: u256 = 0;
         var collateral_to_seize: u256 = collateral_value;
-        
         // Check if borrower has enough collateral
-        if (collateral_to_seize > borrower_collateral) {
+        if (collateral_to_seize>borrower_collateral) {
             collateral_to_seize = borrower_collateral;
         }
-        
         // Validation checks
         if (liquidation_amount == 0) {
             return false;
         }
-        
         if (collateral_to_seize == 0) {
             return false;
         }
-        
         // Update borrower state
-        borrows[borrower] -= liquidation_amount;
-        total_borrows -= liquidation_amount;
-        collateral[borrower] -= collateral_to_seize;
-        deposits[borrower] -= collateral_to_seize;
-        
+        borrows[borrower] = borrows[borrower] -% liquidation_amount;
+        total_borrows = total_borrows -% liquidation_amount;
+        collateral[borrower] = collateral[borrower] -% collateral_to_seize;
+        deposits[borrower] = deposits[borrower] -% collateral_to_seize;
         // Update liquidator state
-        deposits[liquidator] += collateral_to_seize;
-        collateral[liquidator] += collateral_to_seize;
-        
-        // Recalculate borrower health factor
-        if (borrows[borrower] > 0) {
-            calculate_health_factor(borrower);
-        } else {
+        deposits[liquidator] = deposits[liquidator] +% collateral_to_seize;
+        collateral[liquidator] = collateral[liquidator] +% collateral_to_seize;
+        // Leave health factor refresh to explicit maintenance paths.
+        if (borrows[borrower] == 0) {
             health_factors[borrower] = std.constants.U256_MAX;
         }
-        
         log Liquidation(liquidator, borrower, liquidation_amount);
-        
         return true;
     }
-    
     // ✗ EXTREMELY COMPLEX: Full portfolio rebalancing - ~110+ statements
     // This will trigger ✗ Complex warning (> 100 statements)
     // Demonstrates a function that's too complex and needs refactoring
     pub fn rebalance_user_portfolio(user: address, target_health: u256) -> bool
-        requires(user != std.constants.ZERO_ADDRESS)
-        requires(target_health >= 10000)
-        requires(target_health <= 20000)
-        requires(target_health == 10000)
-        requires(liquidation_threshold > 0)
-        requires(total_borrows <= total_deposits)
+    requires(user != std.constants.ZERO_ADDRESS)
+    requires(target_health >= 10000)
+    requires(target_health <= 20000)
+    requires(target_health == 10000)
+    requires(liquidation_threshold>0)
+    requires(total_borrows <= total_deposits)
     {
         let current_health: u256 = calculate_health_factor(user);
         return current_health >= target_health;
     }
-    
     // EXTREMELY COMPLEX: This inline function is way too complex! - ~110 statements
     // Should trigger a warning: "inline but high complexity"
     fn complex_risk_assessment(user: address) -> u256
-        requires(user != std.constants.ZERO_ADDRESS)
+    requires(user != std.constants.ZERO_ADDRESS)
     {
         var risk_score: u256 = 0;
-        
         let user_deposit: u256 = deposits[user];
         let user_borrow: u256 = borrows[user];
         let user_collateral: u256 = collateral[user];
-        
         // Factor 1: Utilization ratio (0-2500 points)
-        if (user_borrow > 0) {
-            if (user_deposit > 0) {
+        if (user_borrow>0) {
+            if (user_deposit>0) {
                 var utilization: u256 = std.constants.U256_MAX;
                 if (user_borrow <= std.constants.U256_MAX / 10000) {
-                    utilization = (user_borrow * 10000) / user_deposit;
+                    utilization =(user_borrow * 10000) / user_deposit;
                 }
-                
-                if (utilization < 2000) {
+                if (utilization<2000) {
                     risk_score += 0;
-                } else {
-                    if (utilization < 5000) {
+                }else {
+                    if (utilization<5000) {
                         risk_score += 500;
-                    } else {
-                        if (utilization < 7500) {
+                    }else {
+                        if (utilization<7500) {
                             risk_score += 1500;
-                        } else {
+                        }else {
                             risk_score += 2500;
                         }
                     }
                 }
             }
         }
-        
         // Factor 2: Health factor (0-3000 points)
         let health: u256 = calculate_health_factor(user);
-        
-        if (health < 10000) {
+        if (health<10000) {
             risk_score += 3000;
-        } else {
-            if (health < 12000) {
+        }else {
+            if (health<12000) {
                 risk_score += 2000;
-            } else {
-                if (health < 15000) {
+            }else {
+                if (health<15000) {
                     risk_score += 1000;
-                } else {
+                }else {
                     risk_score += 0;
                 }
             }
         }
-        
         // Factor 3: Account age and activity (0-1500 points)
         let last_activity: u256 = last_update[user];
         let current_time: u256 = std.block.timestamp;
-        
-        if (last_activity > 0) {
+        if (last_activity>0) {
             let time_since_activity: u256 = current_time - last_activity;
             let one_day: u256 = 86400;
-            
-            if (time_since_activity > one_day * 30) {
+            if (time_since_activity>one_day * 30) {
                 risk_score += 1500;
-            } else {
-                if (time_since_activity > one_day * 7) {
+            }else {
+                if (time_since_activity>one_day * 7) {
                     risk_score += 1000;
-                } else {
-                    if (time_since_activity > one_day) {
+                }else {
+                    if (time_since_activity>one_day) {
                         risk_score += 500;
                     }
                 }
             }
         }
-        
         // Factor 4: Collateral concentration (0-2000 points)
-        if (user_collateral > 0) {
+        if (user_collateral>0) {
             let total_pool: u256 = total_deposits;
-            
-            if (total_pool > 0) {
+            if (total_pool>0) {
                 var concentration: u256 = std.constants.U256_MAX;
                 if (user_collateral <= std.constants.U256_MAX / 10000) {
-                    concentration = (user_collateral * 10000) / total_pool;
+                    concentration =(user_collateral * 10000) / total_pool;
                 }
-                
-                if (concentration > 1000) {
+                if (concentration>1000) {
                     risk_score += 2000;
-                } else {
-                    if (concentration > 500) {
+                }else {
+                    if (concentration>500) {
                         risk_score += 1000;
-                    } else {
-                        if (concentration > 100) {
+                    }else {
+                        if (concentration>100) {
                             risk_score += 500;
                         }
                     }
                 }
             }
         }
-        
         // Factor 5: Interest rate environment (0-1000 points)
         let current_rate: u256 = calculate_interest_rate();
-        
-        if (current_rate > 2000) {
+        if (current_rate>2000) {
             risk_score += 1000;
-        } else {
-            if (current_rate > 1000) {
+        }else {
+            if (current_rate>1000) {
                 risk_score += 500;
             }
         }
-        
         return risk_score;
     }
 }
