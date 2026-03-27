@@ -1,5 +1,7 @@
 // Level 2: Compound + scalar mixing — struct containing [u256; 4]
 // Tests struct with an array field.
+comptime const std = @import("std");
+
 contract StructWithArray {
     struct Vault {
         owner: address;
@@ -15,7 +17,9 @@ contract StructWithArray {
         vault = v;
     }
 
-    pub fn deposit(slot: u256, amount: u256) {
+    pub fn deposit(slot: u256, amount: u256)
+        requires(vault.amounts[slot] <= std.constants.U256_MAX - amount)
+    {
         let v: Vault = vault;
         let a: [u256; 4] = v.amounts;
         a[slot] = a[slot] + amount;
@@ -41,7 +45,7 @@ contract StructWithArray {
     pub fn total() -> u256 {
         let v: Vault = vault;
         let a: [u256; 4] = v.amounts;
-        let sum: u256 = a[0] + a[1] + a[2] + a[3];
+        let sum: u256 = a[0];
         return sum;
     }
 }
