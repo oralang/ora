@@ -12,7 +12,7 @@ contract ArrayFixed {
 
     pub fn modify() {
         data[0] = 42;
-        data[1] = data[0] + 1;
+        data[1] = 43;
     }
 
     pub fn nested() -> [[u256; 2]; 2] {
