@@ -542,12 +542,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const lhs_type = mlir.oraValueGetType(lhs);
                     const rhs_type = mlir.oraValueGetType(rhs);
                     if (mlir.oraTypeIsAInteger(lhs_type) and mlir.oraTypeIsAInteger(rhs_type) and !mlir.oraTypeEqual(lhs_type, rhs_type)) {
-                        switch (self.parent.file.expression(binary.lhs).*) {
-                            .IntegerLiteral => lhs = try self.convertValueForFlow(lhs, rhs_type, binary.range),
-                            else => switch (self.parent.file.expression(binary.rhs).*) {
-                                .IntegerLiteral => rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range),
-                                else => {},
-                            },
+                        if (mlir.oraTypeIsAInteger(result_type)) {
+                            lhs = try self.convertValueForFlow(lhs, result_type, binary.range);
+                            rhs = try self.convertValueForFlow(rhs, result_type, binary.range);
+                        } else {
+                            switch (self.parent.file.expression(binary.lhs).*) {
+                                .IntegerLiteral => lhs = try self.convertValueForFlow(lhs, rhs_type, binary.range),
+                                else => switch (self.parent.file.expression(binary.rhs).*) {
+                                    .IntegerLiteral => rhs = try self.convertValueForFlow(rhs, lhs_type, binary.range),
+                                    else => {},
+                                },
+                            }
                         }
                     }
                 },
