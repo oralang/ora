@@ -2,60 +2,58 @@
 // ERROR HANDLING TEST
 // ==========================================
 // This file tests error declarations and error handling
-
 // Top-level error declarations
+// InsufficientBalance is a error with two parameters: required and available
 error InsufficientBalance(required: u256, available: u256);
+// InvalidAddress is a nullary error
 error InvalidAddress;
+// Unauthorized is a error with two parameters: caller and required
 error Unauthorized(caller: address, required: address);
+// InvalidAmount is a error with one parameter: amount
 error InvalidAmount(amount: u256);
+// ZeroValueNotAllowed is a nullary error
 error ZeroValueNotAllowed;
+// ValueTooLarge is a nullary error
 error ValueTooLarge;
-
+// ValueTooSmall is a nullary error
+error ValueTooSmall;
 comptime const std = @import("std");
 contract ErrorHandlingTest {
     storage var owner: address;
     storage var balance: u256;
-    
     pub fn init() {
         owner = std.transaction.sender;
         balance = 1000;
     }
-    
     // Function that can return errors
-    pub fn transfer(recipient: address, amount: u256) -> !bool | InsufficientBalance | InvalidAddress
-        requires(amount > 0)
+    pub fn transfer(recipient: address, amount: u256) -> !bool|InsufficientBalance|InvalidAddress
+    requires(amount>0)
     {
         // Check for zero address
         if (recipient == 0x0000000000000000000000000000000000000000) {
             return InvalidAddress;
         }
-        
         // Check balance
-        if (balance < amount) {
+        if (balance<amount) {
             // Return error with parameters
             return InsufficientBalance(amount, balance);
         }
-        
         // Perform transfer
         balance -= amount;
         return true;
     }
-    
     // Function with multiple possible errors
-    pub fn admin_operation(amount: u256) -> !bool | Unauthorized | InvalidAmount {
+    pub fn admin_operation(amount: u256) -> !bool|Unauthorized|InvalidAmount {
         // Check authorization
         if (std.transaction.sender != owner) {
             return Unauthorized(std.transaction.sender, owner);
         }
-        
         // Check amount
         if (amount == 0) {
             return InvalidAmount(amount);
         }
-        
         return true;
     }
-    
     // Function that handles errors with try/catch
     pub fn safe_transfer(to: address, amount: u256) -> bool {
         try {
@@ -66,48 +64,45 @@ contract ErrorHandlingTest {
             return false;
         }
     }
-    
     // Function that propagates errors
-    pub fn proxy_transfer(to: address, amount: u256) -> !bool | InsufficientBalance | InvalidAddress {
+    pub fn proxy_transfer(to: address, amount: u256) -> !bool|InsufficientBalance|InvalidAddress {
         // This will propagate any errors from transfer
         return transfer(to, amount);
     }
-    
     // Function with custom error handling logic
-    pub fn batch_transfer(recipients: [address; 5], amounts: [u256; 5]) -> u256 {
+    pub fn batch_transfer(recipients:[address; 5], amounts:[u256; 5]) -> u256 {
         var success_count: u256 = 0;
         var failed_count: u256 = 0;
         var i: u256 = 0;
-
-        while (i < 5) {
+        while (i<5)
+            invariant i <= 5
+            invariant success_count <= i
+            invariant failed_count <= i
+        {
             // Try transfer and handle errors
             try {
                 var transfer_result: bool = try transfer(recipients[i], amounts[i]);
                 if (transfer_result) {
-                    success_count += 1;
+                    success_count = success_count +% 1;
                 } else {
-                    failed_count += 1;
+                    failed_count = failed_count +% 1;
                 }
             } catch (err) {
-                failed_count += 1;
+                failed_count = failed_count +% 1;
             }
-            i += 1;
+            i = i +% 1;
         }
-
         // ABI return types are limited; return success_count for now.
         return success_count;
     }
-    
     // Function with inline error creation
     pub fn verify_operation(value: u256) -> !bool {
         if (value == 0) {
             return ZeroValueNotAllowed;
         }
-        
-        if (value > 1000) {
+        if (value>1000) {
             return ValueTooLarge;
         }
-        
         return true;
     }
 }
