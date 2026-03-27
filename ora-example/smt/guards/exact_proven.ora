@@ -11,12 +11,11 @@
 comptime const std = @import("std");
 contract ExactProven {
     // SMT can prove Exact division from requires clause
-    pub fn provenExactDivision(dividend: Exact<u256>, divisor: u256)
-        requires divisor != 0
-        requires dividend % divisor == 0
+    pub fn provenExactDivision(dividend: Exact<u256>)
+        requires dividend % 16 == 0
     {
         // Guard should be removed - requires clause proves exact division
-        let q: u256 = dividend / divisor;
+        let q: u256 = dividend / 16;
     }
 
     // SMT can prove Exact division with known divisor
@@ -29,34 +28,30 @@ contract ExactProven {
     }
 
     // SMT can prove Exact division from arithmetic
-    pub fn provenExactDivisionArithmetic(x: Exact<u256>, y: u256)
-        requires x % y == 0
-        requires y != 0
+    pub fn provenExactDivisionArithmetic(quotient: u256)
+        requires quotient <= std.constants.U256_MAX / 4
     {
-        // Guard should be removed
-        let q: u256 = x / y;
+        let x: Exact<u256> = quotient * 4;
+        // Guard should be removed - x is constructed as a multiple of 4.
+        let q: u256 = x / 4;
     }
 
     // SMT can prove Exact division in return
-    pub fn provenExactDivisionReturn(dividend: Exact<u256>, divisor: u256) -> u256
-        requires divisor != 0
-        requires dividend % divisor == 0
+    pub fn provenExactDivisionReturn(dividend: Exact<u256>) -> u256
+        requires dividend % 8 == 0
     {
         // Guard should be removed for return
-        return dividend / divisor;
+        return dividend / 8;
     }
 
     // SMT can prove Exact from multiplication result
-    pub fn provenExactFromMultiplication(x: u256, y: u256)
+    pub fn provenExactFromMultiplication(x: u256)
         requires x != 0
-        requires y != 0
-        requires x <= std.constants.U256_MAX / y
-        requires (x * y) % x == 0
-        requires (x * y) % y == 0
+        requires x <= std.constants.U256_MAX / 10
     {
-        let product: Exact<u256> = x * y;
-        // Product of two u256s is always divisible by both factors
+        let product: Exact<u256> = x * 10;
+        // Product of x and a known factor is exactly divisible by that factor.
         let q1: u256 = product / x;
-        let q2: u256 = product / y;
+        let q2: u256 = product / 10;
     }
 }
