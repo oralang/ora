@@ -9829,6 +9829,118 @@ test "direct ora.try_stmt yielding fixed-iteration symbolic-target scf.for resul
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct ora.try_stmt yielding multi-target symbolic scf.for result currently degrades" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const limit_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("multiTargetLimit"), index_ty);
+    const target_a_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("multiTargetA"), index_ty);
+    const target_b_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("multiTargetB"), index_ty);
+    const maybe_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("multiTargetMaybe"), eu_ty);
+
+    const outer_try = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const outer_try_block = mlir.oraTryStmtOpGetTryBlock(outer_try);
+    const outer_catch_block = mlir.oraTryStmtOpGetCatchBlock(outer_try);
+
+    const zero_idx_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        index_ty,
+        mlir.oraIntegerAttrCreateI64FromType(index_ty, 0),
+    );
+    const one_idx_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        index_ty,
+        mlir.oraIntegerAttrCreateI64FromType(index_ty, 1),
+    );
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, zero_idx_op);
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, one_idx_op);
+
+    const for_op = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(zero_idx_op, 0),
+        mlir.oraOperationGetResult(limit_op, 0),
+        mlir.oraOperationGetResult(one_idx_op, 0),
+        &[_]mlir.MlirValue{},
+        0,
+        false,
+    );
+    const body = mlir.oraScfForOpGetBodyBlock(for_op);
+    const iv = mlir.oraBlockGetArgument(body, 0);
+    const cmp_a = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, iv, mlir.oraOperationGetResult(target_a_op, 0));
+    mlir.oraBlockAppendOwnedOperation(body, cmp_a);
+    const no_results = [_]mlir.MlirType{};
+    const if_a = mlir.oraScfIfOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(cmp_a, 0), &no_results, no_results.len, true);
+    const then_a = mlir.oraScfIfOpGetThenBlock(if_a);
+    const else_a = mlir.oraScfIfOpGetElseBlock(if_a);
+    const unwrap_a = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(then_a, unwrap_a);
+    mlir.oraBlockAppendOwnedOperation(then_a, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    const cmp_b = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 0, iv, mlir.oraOperationGetResult(target_b_op, 0));
+    mlir.oraBlockAppendOwnedOperation(else_a, cmp_b);
+    const if_b = mlir.oraScfIfOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(cmp_b, 0), &no_results, no_results.len, true);
+    const then_b = mlir.oraScfIfOpGetThenBlock(if_b);
+    const else_b = mlir.oraScfIfOpGetElseBlock(if_b);
+    const unwrap_b = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(maybe_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(then_b, unwrap_b);
+    mlir.oraBlockAppendOwnedOperation(then_b, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(else_b, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+    mlir.oraBlockAppendOwnedOperation(else_a, if_b);
+    mlir.oraBlockAppendOwnedOperation(else_a, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(body, if_a);
+    mlir.oraBlockAppendOwnedOperation(body, mlir.oraScfYieldOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0));
+
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, for_op);
+    const try_value_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    );
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, try_value_op);
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(try_value_op, 0)},
+        1,
+    ));
+
+    const catch_value_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33),
+    );
+    mlir.oraBlockAppendOwnedOperation(outer_catch_block, catch_value_op);
+    mlir.oraBlockAppendOwnedOperation(outer_catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(catch_value_op, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.try_stmt result requires exact catch summary", encoder.degradationReason().?);
+}
+
 test "direct ora.try_stmt yielding multi-iteration symbolic scf.while result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
