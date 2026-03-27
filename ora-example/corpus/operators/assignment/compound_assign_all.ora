@@ -3,22 +3,26 @@ contract CompoundAssignAll {
     storage var mask: u256;
 
     pub fn add_assign(x: u256) {
-        val += x;
+        val +%= x;
     }
 
     pub fn sub_assign(x: u256) {
-        val -= x;
+        val -%= x;
     }
 
     pub fn mul_assign(x: u256) {
-        val *= x;
+        val *%= x;
     }
 
-    pub fn div_assign(x: u256) {
+    pub fn div_assign(x: u256)
+        requires(x != 0)
+    {
         val /= x;
     }
 
-    pub fn mod_assign(x: u256) {
+    pub fn mod_assign(x: u256)
+        requires(x != 0)
+    {
         val %= x;
     }
 
@@ -34,19 +38,23 @@ contract CompoundAssignAll {
         mask ^= x;
     }
 
-    pub fn shl_assign(x: u256) {
+    pub fn shl_assign(x: u256)
+        requires(x < 256)
+    {
         val <<= x;
     }
 
-    pub fn shr_assign(x: u256) {
+    pub fn shr_assign(x: u256)
+        requires(x < 256)
+    {
         val >>= x;
     }
 
     pub fn all_in_sequence() {
         val = 100;
-        val += 10;
-        val -= 5;
-        val *= 2;
+        val +%= 10;
+        val -%= 5;
+        val *%= 2;
         val /= 3;
         val %= 7;
         mask = 0xFF;
