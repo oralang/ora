@@ -3834,8 +3834,9 @@ pub const Encoder = struct {
             return operands[0];
         }
 
-        // unsupported operation - fail verification/compilation immediately.
-        std.debug.print("z3 encoder unsupported op: {s}\n", .{op_name});
+        // Unsupported operations still fail closed, but the surrounding encoder
+        // and verification paths now attach op/location context before surfacing
+        // the error to callers.
         return error.UnsupportedOperation;
     }
 
