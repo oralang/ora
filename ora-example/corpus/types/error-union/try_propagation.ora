@@ -30,6 +30,6 @@ contract TryPropagation {
     // Nested propagation: caller of validate_and_double also uses try
     pub fn process(x: u256) -> !u256 | InvalidInput | Overflow {
         let res: u256 = try validate_and_double(x);
-        return res + 1;
+        return res +% 1;
     }
 }

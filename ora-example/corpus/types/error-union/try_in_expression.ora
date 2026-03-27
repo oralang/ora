@@ -24,19 +24,19 @@ contract TryInExpression {
     pub fn process(raw: u256) -> !u256 | ParseError | ValidationError {
         let parsed: u256 = try parse_amount(raw);
         let valid: u256 = try validate_amount(parsed);
-        return valid * 2;
+        return valid *% 2;
     }
 
     // try used in arithmetic expression
     pub fn add_parsed(a: u256, b: u256) -> !u256 | ParseError {
-        let sum: u256 = try parse_amount(a) + try parse_amount(b);
+        let sum: u256 = try parse_amount(a) +% try parse_amount(b);
         return sum;
     }
 
     // try result assigned then used
     pub fn check_and_return(raw: u256) -> !u256 | ParseError {
         let amount: u256 = try parse_amount(raw);
-        let doubled: u256 = amount * 2;
+        let doubled: u256 = amount *% 2;
         return doubled;
     }
 }

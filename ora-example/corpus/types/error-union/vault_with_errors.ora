@@ -35,6 +35,12 @@ contract VaultWithErrors {
         if (amount == 0) {
             return ZeroAmount;
         }
+        if (balances[std.msg.sender()] > std.constants.U256_MAX - amount) {
+            return ZeroAmount;
+        }
+        if (total_deposited > std.constants.U256_MAX - amount) {
+            return ZeroAmount;
+        }
 
         locked = true;
         let sender: address = std.msg.sender();
@@ -49,6 +55,9 @@ contract VaultWithErrors {
         try require_not_locked();
         if (amount == 0) {
             return ZeroAmount;
+        }
+        if (total_deposited < amount) {
+            return InsufficientBalance(amount, total_deposited);
         }
 
         locked = true;
@@ -73,6 +82,10 @@ contract VaultWithErrors {
         locked = true;
         let sender: address = std.msg.sender();
         let amount: u256 = balances[sender];
+        if (total_deposited < amount) {
+            locked = false;
+            return Unauthorized;
+        }
         balances[sender] = 0;
         total_deposited -= amount;
         locked = false;

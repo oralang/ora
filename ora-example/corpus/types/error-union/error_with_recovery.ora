@@ -21,7 +21,7 @@ contract ErrorWithRecovery {
     pub fn fresh_lookup(key: u256) -> !u256 | LookupFailed | StaleData {
         let val: u256 = try lookup(key);
         let ts: u256 = timestamps[key];
-        if (ts > 0 and std.block.timestamp() - ts > 3600) {
+        if (ts > 0 and std.block.timestamp() >= ts and std.block.timestamp() - ts > 3600) {
             return StaleData;
         }
         return val;
@@ -43,7 +43,7 @@ contract ErrorWithRecovery {
             let val: u256 = try fresh_lookup(key);
             return val;
         } catch (e) {
-            return key * 2 + 1;
+            return key *% 2 +% 1;
         }
     }
 
