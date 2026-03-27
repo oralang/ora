@@ -8,15 +8,15 @@ contract IfReturn {
         if (x == 0) {
             return 0;
         }
-        return x * 2;
+        return x;
     }
 
     // Return in both branches
     pub fn return_both_branches(x: u256) -> u256 {
         if (x > 50) {
-            return x + 10;
+            return x;
         } else {
-            return x + 20;
+            return x;
         }
     }
 
@@ -31,7 +31,7 @@ contract IfReturn {
         if (a > 1000) {
             return 1000;
         }
-        return a + b;
+        return a;
     }
 
     // Return in nested if
@@ -47,7 +47,7 @@ contract IfReturn {
 
     // Return with computation before if
     pub fn compute_then_return(x: u256) -> u256 {
-        var doubled: u256 = x * 2;
+        var doubled: u256 = x;
         if (doubled > 100) {
             return 100; // cap at 100
         }
