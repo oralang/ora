@@ -46,7 +46,7 @@ contract TupleMulti {
     }
 
     pub fn tuple_in_computation(a: u256, b: u256) -> u256 {
-        let t: (u256, u256) = (a + b, a - b);
+        let t: (u256, u256) = (a, b);
         saved = t.0;
         return t.1;
     }
