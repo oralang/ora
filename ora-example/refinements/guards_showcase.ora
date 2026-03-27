@@ -72,11 +72,10 @@ contract GuardShowcase {
     }
 
     // Exact division
-    pub fn provenExact(dividend: Exact<u256>, divisor: u256)
-        requires(divisor != 0)
-        requires(dividend % divisor == 0)
+    pub fn provenExact(dividend: Exact<u256>)
+        requires(dividend % 10 == 0)
     {
-        let q: u256 = dividend / divisor;
+        let q: u256 = dividend / 10;
     }
 
     pub fn runtimeExact(dividend: u256, divisor: u256) -> bool {
@@ -100,13 +99,10 @@ contract GuardShowcase {
         let c: Scaled<u256, 18> = a + b;
     }
 
-    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> bool {
-        if (a != 0) {
-            if (b > std.constants.U256_MAX / a) {
-                return false;
-            }
-        }
+    pub fn scaledMul(a: Scaled<u256, 18>)
+        requires(a <= std.constants.U256_MAX / 1_000_000)
+    {
+        let b: Scaled<u256, 6> = 1_000_000;
         let c: Scaled<u256, 24> = a * b;
-        return true;
     }
 }
