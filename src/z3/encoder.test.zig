@@ -15965,6 +15965,7 @@ test "known callee loop-carried nested map write set currently degrades" {
     _ = try encoder.encodeOperation(call);
 
     try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("failed to recover known callee write set exactly", encoder.degradationReason().?);
 }
 
 test "summary precondition encoding failure degrades encoder" {
