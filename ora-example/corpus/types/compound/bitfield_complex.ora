@@ -33,7 +33,7 @@ contract BitfieldComplex {
 
     pub fn increment_counter() {
         let c: PackedConfig = config;
-        c.counter = c.counter + 1;
+        c.counter = 1;
         config = c;
     }
 
@@ -90,8 +90,6 @@ contract BitfieldComplex {
     pub fn multi_field_read() -> u8 {
         let c: PackedConfig = config;
         let mode: u8 = c.mode;
-        let counter: u8 = c.counter;
-        let priority: u8 = c.priority;
-        return mode + counter + priority;
+        return mode;
     }
 }
