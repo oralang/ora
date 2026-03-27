@@ -1,3 +1,5 @@
+comptime const std = @import("std");
+
 contract MapNested {
     storage var allowances: map<address, map<address, u256>>;
     storage var permissions: map<address, map<u256, bool>>;
@@ -10,15 +12,21 @@ contract MapNested {
         return allowances[owner][spender];
     }
 
-    pub fn increase_allowance(owner: address, spender: address, added: u256) {
+    pub fn increase_allowance(owner: address, spender: address, added: u256)
+        requires(allowances[owner][spender] <= std.constants.U256_MAX - added)
+    {
         allowances[owner][spender] += added;
     }
 
-    pub fn decrease_allowance(owner: address, spender: address, removed: u256) {
+    pub fn decrease_allowance(owner: address, spender: address, removed: u256)
+        requires(allowances[owner][spender] >= removed)
+    {
         allowances[owner][spender] -= removed;
     }
 
-    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256) {
+    pub fn transfer_from(owner: address, spender: address, to: address, amount: u256)
+        requires(allowances[owner][spender] >= amount)
+    {
         allowances[owner][spender] -= amount;
         // Would also update balances in a real contract
     }
