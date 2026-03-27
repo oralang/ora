@@ -4050,33 +4050,53 @@ pub const Encoder = struct {
         while (!mlir.oraBlockIsNull(current_block)) {
             const parent_op = mlir.mlirBlockGetParentOperation(current_block);
             if (mlir.oraOperationIsNull(parent_op)) break;
-            const parent_block = mlir.mlirOperationGetBlock(parent_op);
-            if (mlir.oraBlockIsNull(parent_block)) {
-                current_block = current_block;
-                break;
-            }
-            current_block = parent_block;
+            if (self.findErrorDeclIdInOperation(parent_op, sym_name)) |id| return id;
+            current_block = mlir.mlirOperationGetBlock(parent_op);
         }
 
-        var current = mlir.oraBlockGetFirstOperation(current_block);
-        while (!mlir.oraOperationIsNull(current)) {
-            const name_ref = self.getOperationName(current);
-            defer @import("mlir_c_api").freeStringRef(name_ref);
-            const op_name = if (name_ref.data == null or name_ref.length == 0)
-                ""
-            else
-                name_ref.data[0..name_ref.length];
-            if (std.mem.eql(u8, op_name, "ora.error.decl")) {
-                const candidate_name = self.getStringAttr(current, "sym_name") orelse "";
-                if (std.mem.eql(u8, candidate_name, sym_name)) {
-                    const attr = mlir.oraOperationGetAttributeByName(current, mlir.oraStringRefCreate("ora.error_id".ptr, "ora.error_id".len));
-                    if (!mlir.oraAttributeIsNull(attr)) {
-                        return @intCast(mlir.oraIntegerAttrGetValueSInt(attr));
-                    }
+        if (!mlir.oraBlockIsNull(current_block)) {
+            var current = mlir.oraBlockGetFirstOperation(current_block);
+            while (!mlir.oraOperationIsNull(current)) {
+                if (self.findErrorDeclIdInOperation(current, sym_name)) |id| return id;
+                current = mlir.oraOperationGetNextInBlock(current);
+            }
+        }
+        return null;
+    }
+
+    fn findErrorDeclIdInOperation(self: *Encoder, op: mlir.MlirOperation, sym_name: []const u8) ?u256 {
+        const name_ref = self.getOperationName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.error.decl")) {
+            const candidate_name = self.getStringAttr(op, "sym_name") orelse "";
+            if (std.mem.eql(u8, candidate_name, sym_name)) {
+                const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.error_id".ptr, "ora.error_id".len));
+                if (!mlir.oraAttributeIsNull(attr)) {
+                    return @intCast(mlir.oraIntegerAttrGetValueSInt(attr));
                 }
             }
-            current = mlir.oraOperationGetNextInBlock(current);
         }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, @intCast(region_idx));
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    if (self.findErrorDeclIdInOperation(nested, sym_name)) |id| return id;
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+
         return null;
     }
 
