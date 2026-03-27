@@ -4627,6 +4627,12 @@ fn buildRelevantSymbolSetForAnnotation(
     errdefer symbols.deinit();
 
     try collectAstSymbols(self, ann.condition, &symbols);
+    for (ann.path_constraints) |path_constraint| {
+        try collectAstSymbols(self, path_constraint, &symbols);
+    }
+    for (ann.extra_constraints) |extra_constraint| {
+        try collectAstSymbols(self, extra_constraint, &symbols);
+    }
     if (ann.old_condition) |old_cond| {
         try collectAstSymbols(self, old_cond, &symbols);
     }
@@ -4636,6 +4642,7 @@ fn buildRelevantSymbolSetForAnnotation(
     if (ann.loop_exit_condition) |exit_cond| {
         try collectAstSymbols(self, exit_cond, &symbols);
     }
+    try expandRelevantSymbolsFromSimpleEqualities(self, &symbols, ann.path_constraints);
     try expandRelevantSymbolsFromSimpleEqualities(self, &symbols, ann.extra_constraints);
 
     return symbols;
