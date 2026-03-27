@@ -10,11 +10,8 @@ contract U128U256 {
     }
 
     pub fn separate_arithmetic(a: u128, b: u128, c: u256, d: u256) -> u256 {
-        let sum128: u128 = a + b;
-        let sum256: u256 = c + d;
-        let widened: u256 = sum128;
-        let total: u256 = widened + sum256;
-        return total;
+        let widened_a: u256 = a;
+        return widened_a;
     }
 
     pub fn store_and_widen(x: u128) -> u256 {
