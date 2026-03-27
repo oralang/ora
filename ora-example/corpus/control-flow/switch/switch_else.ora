@@ -20,7 +20,7 @@ contract SwitchElse {
             3 => { return 30; }
             else => {
                 // Everything else gets default processing
-                return x * 100;
+                return x;
             }
         }
     }
