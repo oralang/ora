@@ -361,6 +361,51 @@ pub const Encoder = struct {
         try self.tuple_values.put(result_id, .{ .elements = elements });
     }
 
+    fn tryResolveTupleElementsFromValue(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        mode: EncodeMode,
+    ) EncodeError!?[]z3.Z3_ast {
+        const value_id = @intFromPtr(value.ptr);
+        if (self.tuple_values.get(value_id)) |cached| {
+            return try self.allocator.dupe(z3.Z3_ast, cached.elements);
+        }
+
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const name_ref = self.getOperationName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, name, "ora.tuple_create")) {
+            const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(owner));
+            var elements = try self.allocator.alloc(z3.Z3_ast, num_operands);
+            for (0..num_operands) |i| {
+                const operand = mlir.oraOperationGetOperand(owner, @intCast(i));
+                elements[i] = try self.encodeValueWithMode(operand, mode);
+            }
+            return elements;
+        }
+
+        if ((std.mem.eql(u8, name, "func.call") or std.mem.eql(u8, name, "call")) and self.verify_calls) {
+            const operands = try self.encodeOperationOperandsWithMode(owner, mode);
+            defer self.allocator.free(operands);
+
+            const callee = try self.getOpaqueCalleeKey(owner);
+            defer self.allocator.free(callee);
+            if (self.function_ops.get(callee)) |func_op| {
+                return try self.tryInlinePureCallTupleElements(owner, callee, func_op, operands, mode);
+            }
+        }
+
+        return null;
+    }
+
     fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
         return self.written_global_slots.contains(name);
     }
@@ -3282,6 +3327,11 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.tuple_extract")) {
             const tuple_operand = mlir.oraOperationGetOperand(mlir_op, 0);
             const tuple_id = @intFromPtr(tuple_operand.ptr);
+            if (!self.tuple_values.contains(tuple_id)) {
+                if (try self.tryResolveTupleElementsFromValue(tuple_operand, mode)) |elements| {
+                    try self.putTupleValue(tuple_id, elements);
+                }
+            }
             if (self.tuple_values.get(tuple_id)) |tuple| {
                 const index_attr = mlir.oraOperationGetAttributeByName(mlir_op, .{ .data = "index".ptr, .length = 5 });
                 if (!mlir.oraAttributeIsNull(index_attr)) {
@@ -4610,6 +4660,71 @@ pub const Encoder = struct {
         }
 
         return encoded;
+    }
+
+    fn tryInlinePureCallTupleElements(
+        self: *Encoder,
+        call_op: mlir.MlirOperation,
+        callee: []const u8,
+        func_op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        mode: EncodeMode,
+    ) EncodeError!?[]z3.Z3_ast {
+        if (self.functionHasWriteEffect(func_op)) return null;
+        if (self.inlineStackContains(callee)) return null;
+        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
+
+        var summary_encoder = Encoder.init(self.context, self.allocator);
+        defer summary_encoder.deinit();
+        summary_encoder.setVerifyCalls(self.verify_calls);
+        summary_encoder.setVerifyState(self.verify_state);
+        summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+        try summary_encoder.copyFunctionRegistryFrom(self);
+        try summary_encoder.copyStructRegistryFrom(self);
+        try summary_encoder.copyInlineStackFrom(self);
+        try summary_encoder.copyEnvMapFrom(self);
+        try summary_encoder.copyReturnPathAssumptionsFrom(self);
+        try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
+        try summary_encoder.copyGlobalEntryMapFrom(self);
+        try summary_encoder.pushInlineFunction(callee);
+
+        const body_region = mlir.oraOperationGetRegion(func_op, 0);
+        if (mlir.oraRegionIsNull(body_region)) return null;
+        const entry_block = mlir.oraRegionGetFirstBlock(body_region);
+        if (mlir.oraBlockIsNull(entry_block)) return null;
+
+        const arg_count = mlir.oraBlockGetNumArguments(entry_block);
+        const bind_count = @min(arg_count, operands.len);
+        for (0..bind_count) |i| {
+            const arg_value = mlir.oraBlockGetArgument(entry_block, i);
+            try summary_encoder.bindValue(arg_value, operands[i]);
+        }
+
+        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        defer callee_requires.deinit(self.allocator);
+        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
+
+        const return_value = try summary_encoder.extractFunctionReturnValue(func_op, 0) orelse return null;
+        const elements = try summary_encoder.tryResolveTupleElementsFromValue(return_value, mode) orelse return null;
+        if (summary_encoder.isDegraded()) {
+            self.recordCalleeResultDegradation(
+                call_op,
+                callee,
+                summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call tuple result",
+            );
+        }
+
+        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+        defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
+        for (extra_constraints) |cst| self.addConstraint(cst);
+
+        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+        defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
+        if (!self.functionIsExternallyVerified(func_op)) {
+            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
+        }
+
+        return elements;
     }
 
     fn extractFunctionReturnExpr(
