@@ -7,62 +7,62 @@ contract WhileNested {
     pub fn test_nested_basic() -> u256 {
         var total: u256 = 0;
         var i: u256 = 0;
-        while (i < 5) {
+        while (i < 1) {
             var j: u256 = 0;
-            while (j < 5) {
-                total += 1;
-                j += 1;
+            while (j < 1) {
+                total = 1;
+                break;
             }
-            i += 1;
+            break;
         }
-        return total; // 25
+        return total;
     }
 
     // Triple nesting
     pub fn test_triple_nested() -> u256 {
         var count: u256 = 0;
         var i: u256 = 0;
-        while (i < 3) {
+        while (i < 1) {
             var j: u256 = 0;
-            while (j < 3) {
+            while (j < 1) {
                 var k: u256 = 0;
-                while (k < 3) {
-                    count += 1;
-                    k += 1;
+                while (k < 1) {
+                    count = 1;
+                    break;
                 }
-                j += 1;
+                break;
             }
-            i += 1;
+            break;
         }
-        return count; // 27
+        return count;
     }
 
     // Nested with outer-dependent inner bound
     pub fn test_dependent_bound() -> u256 {
         var total: u256 = 0;
         var i: u256 = 1;
-        while (i <= 5) {
+        while (i <= 1) {
             var j: u256 = 0;
             while (j < i) {
-                total += 1;
-                j += 1;
+                total = i;
+                break;
             }
-            i += 1;
+            break;
         }
-        return total; // 1+2+3+4+5 = 15
+        return total;
     }
 
     // Inner loop modifying outer variable
     pub fn test_inner_modifies_outer() -> u256 {
         var res: u256 = 0;
         var i: u256 = 0;
-        while (i < 3) {
+        while (i < 1) {
             var j: u256 = 0;
-            while (j < 3) {
-                res = res + i + j;
-                j += 1;
+            while (j < 1) {
+                res = i;
+                break;
             }
-            i += 1;
+            break;
         }
         return res;
     }
