@@ -2062,7 +2062,12 @@ pub const Encoder = struct {
         }
 
         // dispatch based on operation name
-        return try self.dispatchOperation(op_name, operands, mlir_op, mode);
+        return self.dispatchOperation(op_name, operands, mlir_op, mode) catch |err| {
+            if (err == error.UnsupportedOperation and !self.isDegraded()) {
+                self.noteDegradationAtOp(mlir_op, "unsupported SMT operation");
+            }
+            return err;
+        };
     }
 
     /// Encode an MLIR value to Z3 AST (with caching)
@@ -2575,11 +2580,21 @@ pub const Encoder = struct {
             op_name_ref.data[0..op_name_ref.length];
 
         if (std.mem.eql(u8, op_name, "scf.if")) {
-            return try self.encodeScfIfResult(mlir_op, result_index, mode);
+            return self.encodeScfIfResult(mlir_op, result_index, mode) catch |err| {
+                if (err == error.UnsupportedOperation and !self.isDegraded()) {
+                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                }
+                return err;
+            };
         }
 
         if (std.mem.eql(u8, op_name, "ora.switch_expr") or std.mem.eql(u8, op_name, "ora.switch")) {
-            return try self.encodeOraSwitchExprResult(mlir_op, result_index, mode);
+            return self.encodeOraSwitchExprResult(mlir_op, result_index, mode) catch |err| {
+                if (err == error.UnsupportedOperation and !self.isDegraded()) {
+                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                }
+                return err;
+            };
         }
 
         if (std.mem.eql(u8, op_name, "scf.while") or
@@ -2662,11 +2677,21 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
             const operands = try self.encodeOperationOperandsWithMode(mlir_op, mode);
             defer self.allocator.free(operands);
-            return try self.encodeFuncCallResult(mlir_op, operands, result_index, mode);
+            return self.encodeFuncCallResult(mlir_op, operands, result_index, mode) catch |err| {
+                if (err == error.UnsupportedOperation and !self.isDegraded()) {
+                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                }
+                return err;
+            };
         }
 
         if (result_index == 0) {
-            return self.encodeOperationWithMode(mlir_op, mode);
+            return self.encodeOperationWithMode(mlir_op, mode) catch |err| {
+                if (err == error.UnsupportedOperation and !self.isDegraded()) {
+                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                }
+                return err;
+            };
         }
 
         const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));

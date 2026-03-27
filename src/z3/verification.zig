@@ -6672,7 +6672,6 @@ test "annotation extraction failure is reported as unknown verification error" {
     try testing.expectEqual(@as(usize, 1), result.errors.items.len);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "annotation extraction"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Unsupported"));
-    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "unsupported annotation condition"));
 }
 
 test "prepared queries include invariant-post for scf.for" {
