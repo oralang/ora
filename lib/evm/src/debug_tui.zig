@@ -12,6 +12,7 @@ const DebugInfo = ora_evm.DebugInfo;
 const Color = tui.color.Color;
 const Style = tui.style.Style;
 const BorderStyle = tui.style.BorderStyle;
+const Rect = tui.layout.Rect;
 
 const AppConfig = struct {
     bytecode_path: []u8,
@@ -39,6 +40,7 @@ const DebuggerView = struct {
     calldata: []const u8,
     scroll_line: u32 = 1,
     focus_line: ?u32 = null,
+    active_evm_tab: usize = 0,
     status: []const u8 = "ready",
 
     fn init(
@@ -69,13 +71,29 @@ const DebuggerView = struct {
             return;
         }
 
-        const left_width: u16 = if (width >= 120) width - 38 else if (width >= 90) width - 30 else width;
-        const right_width: u16 = if (width > left_width + 2) width - left_width - 2 else 0;
-
         self.drawHeader(screen, width);
-        self.drawSourcePane(screen, left_width, height);
-        if (right_width > 0) self.drawBindingsPane(screen, left_width + 1, right_width, height);
         self.drawFooter(screen, width, height);
+
+        const content_bounds = Rect.init(0, 3, width, height - 5);
+        if (content_bounds.width < 20 or content_bounds.height < 6) return;
+
+        const source_pane = SourcePane{ .view = self };
+        const bindings_pane = BindingsPane{ .view = self };
+        const evm_pane = EvmPane{ .view = self };
+        var right_split = tui.split_view.SplitView(BindingsPane, EvmPane)
+            .vertical(bindings_pane, evm_pane)
+            .withRatio(0.42)
+            .withMinSize(8);
+        right_split.divider_style = Style.default.setFg(Color.fromRGB(78, 88, 99));
+
+        var main_split = tui.split_view.SplitView(SourcePane, @TypeOf(right_split))
+            .horizontal(source_pane, right_split)
+            .withRatio(if (width >= 140) 0.72 else 0.68)
+            .withMinSize(18);
+        main_split.divider_style = Style.default.setFg(Color.fromRGB(78, 88, 99));
+
+        var content_ctx = ctx.child(content_bounds);
+        main_split.render(&content_ctx);
     }
 
     pub fn handleEvent(self: *DebuggerView, event: tui.Event) tui.EventResult {
@@ -95,6 +113,34 @@ const DebuggerView = struct {
                         'q' => {
                             if (self.app) |app| app.quit();
                             return .consumed;
+                        },
+                        '[' => {
+                            self.prevEvmTab();
+                            return .needs_redraw;
+                        },
+                        ']' => {
+                            self.nextEvmTab();
+                            return .needs_redraw;
+                        },
+                        '1' => {
+                            self.active_evm_tab = 0;
+                            return .needs_redraw;
+                        },
+                        '2' => {
+                            self.active_evm_tab = 1;
+                            return .needs_redraw;
+                        },
+                        '3' => {
+                            self.active_evm_tab = 2;
+                            return .needs_redraw;
+                        },
+                        '4' => {
+                            self.active_evm_tab = 3;
+                            return .needs_redraw;
+                        },
+                        '5' => {
+                            self.active_evm_tab = 4;
+                            return .needs_redraw;
                         },
                         'j' => {
                             self.scrollDown();
@@ -239,6 +285,18 @@ const DebuggerView = struct {
         }
     }
 
+    fn nextEvmTab(self: *DebuggerView) void {
+        self.active_evm_tab = (self.active_evm_tab + 1) % evm_tab_defs.len;
+    }
+
+    fn prevEvmTab(self: *DebuggerView) void {
+        if (self.active_evm_tab == 0) {
+            self.active_evm_tab = evm_tab_defs.len - 1;
+        } else {
+            self.active_evm_tab -= 1;
+        }
+    }
+
     fn drawHeader(self: *DebuggerView, screen: anytype, width: u16) void {
         const source_name = std.fs.path.basename(self.source_path);
         const line = self.focus_line orelse self.debugger.currentSourceLine() orelse 0;
@@ -277,19 +335,13 @@ const DebuggerView = struct {
         putStringClipped(screen, 0, 2, width, current_text);
     }
 
-    fn drawSourcePane(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
-        if (width < 8 or height < 8) return;
+    fn drawSourcePaneInBounds(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        if (bounds.width < 8 or bounds.height < 4) return;
 
-        const pane_top: u16 = 3;
-        const pane_height = height - 5;
-        screen.setStyle(Style.default.setFg(Color.fromRGB(120, 131, 142)));
-        screen.drawBox(0, pane_top, width, pane_height, BorderStyle.single);
+        drawPanelBox(screen, bounds, " Source ");
 
-        screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
-        putStringClipped(screen, 2, pane_top, width - 4, " Source ");
-
-        const content_top = pane_top + 1;
-        const content_height = pane_height - 2;
+        const content_top = bounds.y + 1;
+        const content_height = bounds.height - 2;
         const current_line = self.focus_line orelse self.debugger.currentSourceLine() orelse 0;
         const start_line = self.scroll_line;
         const end_line = @min(self.debugger.totalSourceLines(), start_line + content_height - 1);
@@ -298,54 +350,225 @@ const DebuggerView = struct {
         var row = start_line;
         while (y < content_height) : (y += 1) {
             screen.setStyle(Style.default);
-            screen.fill(1, content_top + y, width - 2, 1, ' ');
+            screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
             if (row <= end_line) {
                 const line_text = self.debugger.getSourceLineText(row) orelse "";
                 const trimmed = std.mem.trimRight(u8, line_text, "\r");
                 if (row == current_line) {
                     screen.setStyle(Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250)));
-                    screen.fill(1, content_top + y, width - 2, 1, ' ');
+                    screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
                 } else {
                     screen.setStyle(Style.default.setFg(Color.fromRGB(208, 214, 220)));
                 }
 
                 var label_buf: [16]u8 = undefined;
                 const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{row}) catch "   ?";
-                putStringClipped(screen, 2, content_top + y, 5, label);
+                putStringClipped(screen, bounds.x + 2, content_top + y, 5, label);
                 screen.setStyle(if (row == current_line)
                     Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
                 else
                     Style.default.setFg(Color.fromRGB(208, 214, 220)));
-                putStringClipped(screen, 7, content_top + y, width - 9, trimmed);
+                putStringClipped(screen, bounds.x + 7, content_top + y, bounds.width - 9, trimmed);
                 row += 1;
             }
         }
     }
 
-    fn drawBindingsPane(self: *DebuggerView, screen: anytype, start_x: u16, width: u16, height: u16) void {
-        if (width < 12 or height < 8) return;
+    fn drawFooter(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
+        _ = self;
+        screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
+        screen.fill(0, height - 2, width, 1, ' ');
+        putStringClipped(screen, 0, height - 2, width, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  [/] tabs  q quit ");
 
-        const pane_top: u16 = 3;
-        const pane_height = height - 5;
-        screen.setStyle(Style.default.setFg(Color.fromRGB(120, 131, 142)));
-        screen.drawBox(start_x, pane_top, width, pane_height, BorderStyle.single);
+        screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(168, 176, 184)));
+        screen.fill(0, height - 1, width, 1, ' ');
+        putStringClipped(screen, 0, height - 1, width, " debugger values show folded constants or rooted runtime values when readable ");
+    }
 
-        const bindings = self.debugger.getVisibleBindings(self.allocator) catch &.{};
-        defer if (bindings.len > 0) self.allocator.free(bindings);
+    fn drawCallTab(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        fillPanel(screen, bounds);
+
+        const frame = self.debugger.evm.getCurrentFrame() orelse {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, "no active frame");
+            return;
+        };
+
+        var row: u16 = 0;
+        var buf: [256]u8 = undefined;
+        var addr_buf: [64]u8 = undefined;
+
+        screen.setStyle(Style.default.setFg(Color.fromRGB(214, 220, 226)));
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), "Execution")) return;
+        row += 1;
+
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "pc={d}  opcode={s}  gas={d}", .{
+            self.debugger.getPC(),
+            self.debugger.getCurrentOpcodeName(),
+            self.debugger.getGasRemaining(),
+        }) catch "pc")) return;
+        row += 1;
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "depth={d}  stack={d}  mem={d} bytes", .{
+            self.debugger.getCallDepth(),
+            self.debugger.getStack().len,
+            frame.memory_size,
+        }) catch "depth")) return;
+        row += 2;
+
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), "Call")) return;
+        row += 1;
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "caller={s}", .{formatAddressHex(&addr_buf, frame.caller)}) catch "caller")) return;
+        row += 1;
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "callee={s}", .{formatAddressHex(&addr_buf, frame.address)}) catch "callee")) return;
+        row += 1;
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "value={d}  calldata={d} bytes", .{
+            frame.value,
+            frame.calldata.len,
+        }) catch "value")) return;
+        row += 2;
+
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), "Status")) return;
+        row += 1;
+        _ = putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "state={s}  stop={s}", .{
+            if (self.debugger.isHalted()) "halted" else "running",
+            @tagName(self.debugger.stop_reason),
+        }) catch "state");
+    }
+
+    fn drawStackTab(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        fillPanel(screen, bounds);
+        const stack = self.debugger.getStack();
+        if (stack.len == 0) {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, "stack is empty");
+            return;
+        }
+
+        const max_rows: usize = @max(1, bounds.height - 1);
+        const shown = @min(stack.len, max_rows);
+        var i: usize = 0;
+        while (i < shown) : (i += 1) {
+            const stack_index = stack.len - 1 - i;
+            var buf: [256]u8 = undefined;
+            const prefix = if (i == 0) "top" else "   ";
+            const line = std.fmt.bufPrint(&buf, "{s} [{d:>2}] 0x{x}", .{ prefix, stack_index, stack[stack_index] }) catch "stack";
+            const style = if (i == 0)
+                Style.default.setFg(Color.fromRGB(245, 247, 250)).bold()
+            else
+                Style.default.setFg(Color.fromRGB(214, 220, 226));
+            if (!putPanelLine(screen, bounds, @intCast(i), style, line)) break;
+        }
+    }
+
+    fn drawMemoryTab(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        fillPanel(screen, bounds);
+        const frame = self.debugger.evm.getCurrentFrame() orelse {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, "no active frame");
+            return;
+        };
+        if (frame.memory_size == 0) {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, "memory is empty");
+            return;
+        }
+
+        const max_words: u32 = @min(@as(u32, bounds.height), 8);
+        var word: u32 = 0;
+        while (word < max_words) : (word += 1) {
+            const offset = word * 32;
+            if (offset >= frame.memory_size) break;
+            var word_value: u256 = 0;
+            var j: u32 = 0;
+            while (j < 32 and offset + j < frame.memory_size) : (j += 1) {
+                word_value = (word_value << 8) | frame.readMemory(offset + j);
+            }
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "0x{X:0>4}  0x{x}", .{ offset, word_value }) catch "mem";
+            if (!putPanelLine(screen, bounds, @intCast(word), Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
+        }
+    }
+
+    fn drawStorageTab(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        self.drawStorageMapTab(screen, bounds, false);
+    }
+
+    fn drawTransientTab(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+        self.drawStorageMapTab(screen, bounds, true);
+    }
+
+    fn drawStorageMapTab(self: *DebuggerView, screen: anytype, bounds: Rect, transient: bool) void {
+        fillPanel(screen, bounds);
+        const frame = self.debugger.evm.getCurrentFrame() orelse {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, "no active frame");
+            return;
+        };
+
+        var count: usize = 0;
+        var row: u16 = 0;
+        if (transient) {
+            var it = self.debugger.evm.storage.transient.iterator();
+            while (it.next()) |entry| {
+                if (!std.mem.eql(u8, entry.key_ptr.address[0..], frame.address.bytes[0..])) continue;
+                if (row >= bounds.height) break;
+                var buf: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "slot 0x{x} = 0x{x}", .{ entry.key_ptr.slot, entry.value_ptr.* }) catch "slot";
+                if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
+                row += 1;
+                count += 1;
+            }
+        } else {
+            var it = self.debugger.evm.storage.storage.iterator();
+            while (it.next()) |entry| {
+                if (!std.mem.eql(u8, entry.key_ptr.address[0..], frame.address.bytes[0..])) continue;
+                if (row >= bounds.height) break;
+                var buf: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "slot 0x{x} = 0x{x}", .{ entry.key_ptr.slot, entry.value_ptr.* }) catch "slot";
+                if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
+                row += 1;
+                count += 1;
+            }
+        }
+
+        if (count == 0) {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            putStringClipped(screen, bounds.x + 1, bounds.y + 1, bounds.width - 2, if (transient) "no transient slots for current contract" else "no storage slots for current contract");
+        }
+    }
+};
+
+const SourcePane = struct {
+    view: *DebuggerView,
+
+    pub fn render(self: *const SourcePane, ctx: *tui.RenderContext) void {
+        self.view.drawSourcePaneInBounds(ctx.screen, ctx.bounds);
+    }
+};
+
+const BindingsPane = struct {
+    view: *DebuggerView,
+
+    pub fn render(self: *const BindingsPane, ctx: *tui.RenderContext) void {
+        const screen = ctx.screen;
+        const bounds = ctx.bounds;
+        if (bounds.width < 12 or bounds.height < 4) return;
+
+        const bindings = self.view.debugger.getVisibleBindings(self.view.allocator) catch &.{};
+        defer if (bindings.len > 0) self.view.allocator.free(bindings);
 
         var title_buf: [64]u8 = undefined;
         const title = std.fmt.bufPrint(&title_buf, " Bindings [{d}] ", .{bindings.len}) catch " Bindings ";
-        screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
-        putStringClipped(screen, start_x + 2, pane_top, width - 4, title);
+        drawPanelBox(screen, bounds, title);
 
-        const content_top = pane_top + 1;
-        const content_height = pane_height - 2;
+        const content_top = bounds.y + 1;
+        const content_height = bounds.height - 2;
         screen.setStyle(Style.default.setFg(Color.fromRGB(192, 199, 207)).dim());
-        putStringClipped(screen, start_x + 2, content_top, width - 4, "name = value / runtime");
+        putStringClipped(screen, bounds.x + 2, content_top, bounds.width - 4, "name = value / runtime");
 
         if (bindings.len == 0) {
             screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
-            putStringClipped(screen, start_x + 2, content_top + 2, width - 4, "no visible bindings");
+            putStringClipped(screen, bounds.x + 2, content_top + 2, bounds.width - 4, "no visible bindings");
             return;
         }
 
@@ -356,27 +579,92 @@ const DebuggerView = struct {
             var row_buf: [256]u8 = undefined;
             const row_text = if (binding.folded_value) |folded|
                 std.fmt.bufPrint(&row_buf, "{s} = {s}", .{ binding.name, folded }) catch binding.name
-            else if ((self.debugger.getVisibleBindingValueByName(self.allocator, binding.name) catch null)) |value|
+            else if ((self.view.debugger.getVisibleBindingValueByName(self.view.allocator, binding.name) catch null)) |value|
                 std.fmt.bufPrint(&row_buf, "{s} = {d}", .{ binding.name, value }) catch binding.name
             else
                 std.fmt.bufPrint(&row_buf, "{s} [{s}]", .{ binding.name, binding.runtime_kind }) catch binding.name;
 
             screen.setStyle(Style.default.setFg(Color.fromRGB(214, 220, 226)));
-            putStringClipped(screen, start_x + 2, y, width - 4, row_text);
+            putStringClipped(screen, bounds.x + 2, y, bounds.width - 4, row_text);
         }
     }
+};
 
-    fn drawFooter(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
-        _ = self;
-        screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
-        screen.fill(0, height - 2, width, 1, ' ');
-        putStringClipped(screen, 0, height - 2, width, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  q quit ");
+const EvmTabKind = enum { call, stack, memory, storage, tstore };
 
-        screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(168, 176, 184)));
-        screen.fill(0, height - 1, width, 1, ' ');
-        putStringClipped(screen, 0, height - 1, width, " debugger values show folded constants or rooted runtime values when readable ");
+const EvmTabContent = struct {
+    view: *DebuggerView,
+    tab: EvmTabKind,
+
+    pub fn render(self: *const EvmTabContent, ctx: *tui.RenderContext) void {
+        switch (self.tab) {
+            .call => self.view.drawCallTab(ctx.screen, ctx.bounds),
+            .stack => self.view.drawStackTab(ctx.screen, ctx.bounds),
+            .memory => self.view.drawMemoryTab(ctx.screen, ctx.bounds),
+            .storage => self.view.drawStorageTab(ctx.screen, ctx.bounds),
+            .tstore => self.view.drawTransientTab(ctx.screen, ctx.bounds),
+        }
     }
 };
+
+const evm_tab_defs = [_]tui.tabs.Tab{
+    .{ .label = "Call" },
+    .{ .label = "Stack" },
+    .{ .label = "Memory" },
+    .{ .label = "Storage" },
+    .{ .label = "TStore" },
+};
+
+const EvmPane = struct {
+    view: *DebuggerView,
+
+    pub fn render(self: *const EvmPane, ctx: *tui.RenderContext) void {
+        const contents = [_]EvmTabContent{
+            .{ .view = self.view, .tab = .call },
+            .{ .view = self.view, .tab = .stack },
+            .{ .view = self.view, .tab = .memory },
+            .{ .view = self.view, .tab = .storage },
+            .{ .view = self.view, .tab = .tstore },
+        };
+        var tabs = tui.tabs.Tabs(EvmTabContent).init(&evm_tab_defs, &contents);
+        tabs.active = self.view.active_evm_tab;
+        tabs.tab_style = Style.default.setFg(Color.fromRGB(160, 170, 180));
+        tabs.active_tab_style = Style.default.setFg(Color.fromRGB(238, 242, 248)).bold().underline();
+        tabs.separator = "  ";
+        tabs.render(ctx);
+    }
+};
+
+fn drawPanelBox(screen: anytype, bounds: Rect, title: []const u8) void {
+    screen.setStyle(Style.default.setFg(Color.fromRGB(120, 131, 142)));
+    screen.drawBox(bounds.x, bounds.y, bounds.width, bounds.height, BorderStyle.single);
+    screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
+    putStringClipped(screen, bounds.x + 2, bounds.y, bounds.width - 4, title);
+}
+
+fn fillPanel(screen: anytype, bounds: Rect) void {
+    screen.setStyle(Style.default);
+    screen.fill(bounds.x, bounds.y, bounds.width, bounds.height, ' ');
+}
+
+fn putPanelLine(screen: anytype, bounds: Rect, row: u16, style: Style, text: []const u8) bool {
+    if (row >= bounds.height) return false;
+    screen.setStyle(style);
+    putStringClipped(screen, bounds.x + 1, bounds.y + row, bounds.width - 2, text);
+    return true;
+}
+
+fn formatU256Hex(buf: []u8, value: u256) []const u8 {
+    return std.fmt.bufPrint(buf, "0x{x}", .{value}) catch "0x?";
+}
+
+fn formatAddressHex(buf: []u8, address: primitives.Address) []const u8 {
+    if (buf.len < 42) return "0x?";
+    buf[0] = '0';
+    buf[1] = 'x';
+    _ = std.fmt.bufPrint(buf[2..], "{x}", .{address.bytes}) catch return "0x?";
+    return buf[0..42];
+}
 
 fn putStringClipped(screen: anytype, x: u16, y: u16, max_width: u16, text: []const u8) void {
     if (max_width == 0) return;
