@@ -16,6 +16,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Casting.h"
+#include <cstdio>
 
 using namespace mlir;
 
@@ -690,6 +691,336 @@ namespace mlir
                     os << "\n";
             }
 
+            os.flush();
+            return out;
+        }
+
+        static void emitJsonString(raw_ostream &os, StringRef text)
+        {
+            os << "\"";
+            for (char c : text)
+            {
+                switch (c)
+                {
+                case '"':
+                    os << "\\\"";
+                    break;
+                case '\\':
+                    os << "\\\\";
+                    break;
+                case '\n':
+                    os << "\\n";
+                    break;
+                case '\r':
+                    os << "\\r";
+                    break;
+                case '\t':
+                    os << "\\t";
+                    break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        char buf[7];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                        os << buf;
+                    }
+                    else
+                    {
+                        os << c;
+                    }
+                    break;
+                }
+            }
+            os << "\"";
+        }
+
+        // Helper: emit a single JSON location entry
+        static void emitLocEntry(raw_ostream &os, uint32_t idx, FileLineColLoc fileLoc, bool &firstEntry)
+        {
+            if (!firstEntry)
+                os << ",";
+            os << "{\"idx\":" << idx << ",\"file\":";
+            emitJsonString(os, fileLoc.getFilename());
+            os << ",\"line\":" << fileLoc.getLine()
+               << ",\"col\":" << fileLoc.getColumn() << "}";
+            firstEntry = false;
+        }
+
+        template <typename CallbackT>
+        static void visitSerializedSIROps(ModuleOp module, CallbackT callback)
+        {
+            SmallVector<func::FuncOp, 8> funcs;
+            for (func::FuncOp func : module.getOps<func::FuncOp>())
+                funcs.push_back(func);
+
+            llvm::stable_sort(funcs, [&](func::FuncOp a, func::FuncOp b) {
+                auto rank = [](func::FuncOp f) -> int {
+                    if (f.getName() == "init")
+                        return 0;
+                    if (f.getName() == "main")
+                        return 2;
+                    return 1;
+                };
+                int ra = rank(a);
+                int rb = rank(b);
+                if (ra != rb)
+                    return ra < rb;
+                return false;
+            });
+
+            uint32_t opIndex = 0;
+
+            for (size_t funcIndex = 0; funcIndex < funcs.size(); ++funcIndex)
+            {
+                func::FuncOp func = funcs[funcIndex];
+
+                // --- Same block ordering as emitSIRText ---
+                // We need to replicate the NameTable for const dedup/bitcast skip logic
+                NameTable names;
+
+                bool first = true;
+                unsigned bbId = 0;
+                SmallVector<Block *, 16> blocks;
+                for (Block &block : func.getBlocks())
+                {
+                    std::string blockName;
+                    if (!block.empty())
+                    {
+                        if (auto attr = block.back().getAttrOfType<StringAttr>("sir.block_name"))
+                            blockName = attr.getValue().str();
+                    }
+                    if (blockName.empty())
+                    {
+                        if (first)
+                        {
+                            blockName = "entry";
+                            first = false;
+                        }
+                        else
+                            blockName = "bb" + std::to_string(bbId++);
+                    }
+                    blockName = names.allocateName(blockName);
+                    names.blockNames[&block] = blockName;
+                    blocks.push_back(&block);
+                }
+
+                // Block ordering by sir.block_order attribute
+                bool hasOrder = false;
+                llvm::SmallVector<std::pair<int64_t, Block *>, 16> ordered;
+                ordered.reserve(blocks.size());
+                for (size_t i = 0; i < blocks.size(); ++i)
+                {
+                    Block *block = blocks[i];
+                    int64_t order = static_cast<int64_t>(i);
+                    if (!block->empty())
+                    {
+                        if (auto attr = block->back().getAttrOfType<IntegerAttr>("sir.block_order"))
+                        {
+                            order = attr.getInt();
+                            hasOrder = true;
+                        }
+                    }
+                    ordered.push_back({order, block});
+                }
+                if (hasOrder)
+                {
+                    llvm::stable_sort(ordered, [](const auto &a, const auto &b) { return a.first < b.first; });
+                    blocks.clear();
+                    for (auto &pair : ordered)
+                        blocks.push_back(pair.second);
+                }
+
+                // Pre-assign names (same as emitSIRText) to set up const dedup state
+                for (Block &block : func.getBlocks())
+                {
+                    for (BlockArgument arg : block.getArguments())
+                        names.nameFor(arg);
+                    for (Operation &op : block)
+                    {
+                        if (auto cst = dyn_cast<sir::ConstOp>(op))
+                        {
+                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                            {
+                                std::string key = formatConstKey(intAttr.getValue());
+                                auto it = names.constNames.find(key);
+                                if (it != names.constNames.end())
+                                {
+                                    Value defVal = it->second;
+                                    if (auto defOp = defVal.getDefiningOp())
+                                    {
+                                        if (defOp->getBlock() == &block && defOp->isBeforeInBlock(&op))
+                                        {
+                                            names.valueNames[cst.getResult()] = names.nameFor(defVal);
+                                            continue;
+                                        }
+                                    }
+                                }
+                                names.nameFor(cst.getResult());
+                                names.constNames[key] = cst.getResult();
+                                continue;
+                            }
+                        }
+                        if (auto bitcast = dyn_cast<sir::BitcastOp>(op))
+                        {
+                            if (bitcast->getNumOperands() == 1 && bitcast->getNumResults() == 1)
+                            {
+                                names.valueNames[bitcast.getResult()] = names.nameFor(bitcast.getOperand());
+                                continue;
+                            }
+                        }
+                        for (Value res : op.getResults())
+                            names.nameFor(res);
+                    }
+                }
+
+                // --- Iterate ops, matching emitSIRText's skip/expand logic ---
+                for (Block *blockPtr : blocks)
+                {
+                    Block &block = *blockPtr;
+
+                    for (Operation &op : block)
+                    {
+                        if (op.hasTrait<OpTrait::IsTerminator>())
+                            continue;
+
+                        // Skip: deduped constant (same logic as emitOperation line 283-301)
+                        if (auto cst = dyn_cast<sir::ConstOp>(op))
+                        {
+                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                            {
+                                std::string key = formatConstKey(intAttr.getValue());
+                                auto it = names.constNames.find(key);
+                                if (it != names.constNames.end())
+                                {
+                                    Value defVal = it->second;
+                                    if (auto defOp = defVal.getDefiningOp())
+                                    {
+                                        if (defOp->getBlock() == op.getBlock() && defOp->isBeforeInBlock(&op))
+                                            continue; // skipped — not in SIR text
+                                    }
+                                }
+                            }
+                        }
+
+                        // Skip: already-emitted constant (line 303-310)
+                        if (isa<sir::ConstOp>(op) && op.getNumResults() == 1)
+                        {
+                            std::string name = names.nameFor(op.getResult(0));
+                            if (names.emittedDefs.find(name) != names.emittedDefs.end())
+                                continue; // skipped
+                            names.emittedDefs.insert(name);
+                        }
+
+                        // Skip: bitcast (line 312-323)
+                        if (isa<sir::BitcastOp>(op))
+                            continue;
+
+                        // Skip: ErrorDeclOp (line 324-325)
+                        if (isa<sir::ErrorDeclOp>(op))
+                            continue;
+
+                        // Expand: SelectOp → 5 or 6 SIR ops (line 329-357)
+                        if (isa<sir::SelectOp>(op))
+                        {
+                            // SelectOp emits: maybe const 0x0, sub, and, not, and, or
+                            // Check if zero const needs to be emitted
+                            std::string zeroKey = formatConstKey(APInt(256, 0));
+                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
+                            uint32_t expandCount = needsZero ? 6 : 5;
+                            for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
+                            {
+                                callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
+                                opIndex++;
+                            }
+                            continue;
+                        }
+
+                        // Normal op: 1 SIR text line
+                        callback(opIndex, op, func, block, names, false, 0, 1);
+                        opIndex++;
+                    }
+
+                    // Terminator: always 1 SIR text line
+                    if (!block.empty())
+                    {
+                        Operation &term = block.back();
+                        callback(opIndex, term, func, block, names, false, 0, 1);
+                        opIndex++;
+                    }
+                }
+            }
+        }
+
+        std::string extractSIRLocations(ModuleOp module)
+        {
+            // Extract source locations from SIR MLIR ops as JSON.
+            // CRITICAL: The op indexing must exactly match what emitSIRText()
+            // produces, because Sensei parses the text sequentially. Skipped ops
+            // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too.
+            // Expanded ops (SelectOp → 5-6 SIR ops) must produce matching indices.
+
+            std::string out;
+            llvm::raw_string_ostream os(out);
+            os << "[";
+            bool firstEntry = true;
+
+            visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp, Block &, NameTable &, bool, uint32_t, uint32_t) {
+                if (auto fileLoc = dyn_cast<FileLineColLoc>(op.getLoc()))
+                    emitLocEntry(os, opIndex, fileLoc, firstEntry);
+            });
+
+            os << "]";
+            os.flush();
+            return out;
+        }
+
+        std::string extractSIRDebugInfo(ModuleOp module)
+        {
+            std::string out;
+            llvm::raw_string_ostream os(out);
+            os << "{\"version\":1,\"ops\":[";
+            bool firstEntry = true;
+
+            visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp func, Block &block, NameTable &names, bool synthetic, uint32_t syntheticIndex, uint32_t syntheticCount) {
+                if (!firstEntry)
+                    os << ",";
+
+                os << "{\"idx\":" << opIndex << ",\"op\":";
+                emitJsonString(os, op.getName().getStringRef());
+                os << ",\"function\":";
+                emitJsonString(os, func.getName());
+                os << ",\"block\":";
+                emitJsonString(os, names.blockNames[&block]);
+                os << ",\"file\":";
+                if (auto fileLoc = dyn_cast<FileLineColLoc>(op.getLoc()))
+                {
+                    emitJsonString(os, fileLoc.getFilename());
+                    os << ",\"line\":" << fileLoc.getLine()
+                       << ",\"col\":" << fileLoc.getColumn();
+                }
+                else
+                {
+                    os << "null,\"line\":null,\"col\":null";
+                }
+                os << ",\"result_names\":[";
+                for (unsigned i = 0; i < op.getNumResults(); ++i)
+                {
+                    if (i != 0)
+                        os << ",";
+                    emitJsonString(os, names.nameFor(op.getResult(i)));
+                }
+                os << "],\"is_terminator\":" << (op.hasTrait<OpTrait::IsTerminator>() ? "true" : "false")
+                   << ",\"is_synthetic\":" << (synthetic ? "true" : "false");
+                if (synthetic)
+                {
+                    os << ",\"synthetic_index\":" << syntheticIndex
+                       << ",\"synthetic_count\":" << syntheticCount;
+                }
+                os << "}";
+                firstEntry = false;
+            });
+
+            os << "]}";
             os.flush();
             return out;
         }

@@ -156,6 +156,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
+            FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, op);
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(if_stmt.range, locals);
                 if (then_is_early_return_only) {
@@ -266,6 +267,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
+                FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, op);
             }
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(try_stmt.range, locals);
@@ -404,6 +406,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
+                FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, while_op);
             }
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(block_stmt.range, locals);
@@ -590,6 +593,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
+            FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, while_op);
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(while_stmt.range, locals);
             }
@@ -670,6 +674,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, op);
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, op);
+                FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, op);
             }
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(switch_stmt.range, locals);
@@ -861,6 +866,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (carried_locals.items.len > 0) {
                 try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
+                FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, while_op);
             }
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(switch_stmt.range, locals);

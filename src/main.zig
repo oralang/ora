@@ -32,6 +32,7 @@ const MlirOptions = struct {
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     debug_enabled: bool = false,
+    debug_info: bool = false,
     canonicalize: bool = true,
     validate_mlir: bool = true,
     verify_z3: bool = true,
@@ -289,6 +290,7 @@ pub fn main() !void {
     const mlir_print_op_on_diagnostic: bool = parsed.mlir_print_op_on_diagnostic;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     var debug_enabled: bool = parsed.debug;
+    const debug_info: bool = parsed.debug_info;
     if (!debug_enabled) {
         if (std.posix.getenv("ORA_DEBUG")) |env_value| {
             if (env_value[0] != 0 and env_value[0] != '0') {
@@ -366,6 +368,7 @@ pub fn main() !void {
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
         .debug_enabled = debug_enabled,
+        .debug_info = debug_info,
         .canonicalize = canonicalize_mlir,
         .validate_mlir = validate_mlir,
         .verify_z3 = verify_z3,
@@ -1109,6 +1112,7 @@ fn printUsage() !void {
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
+    try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
     try stdout.flush();
 }
@@ -1492,7 +1496,424 @@ fn exitOnCompilationErrors(
 }
 
 fn writeJsonString(writer: anytype, text: []const u8) !void {
-    try std.json.Stringify.value(text, .{}, writer);
+    try writer.writeByte('"');
+    for (text) |c| switch (c) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        else => {
+            if (c < 32) {
+                try writer.print("\\u{X:0>4}", .{@as(u32, c)});
+            } else {
+                try writer.writeByte(c);
+            }
+        },
+    };
+    try writer.writeByte('"');
+}
+
+const DebugLocalInfo = struct {
+    id: u32,
+    scope_id: u32,
+    file_id: compiler.FileId,
+    name: []const u8,
+    kind: []const u8,
+    binding_kind: ?[]const u8,
+    storage_class: ?[]const u8,
+    decl_range: compiler.TextRange,
+    live_range: compiler.TextRange,
+};
+
+const DebugScopeInfo = struct {
+    id: u32,
+    parent: ?u32,
+    file_id: compiler.FileId,
+    file_path: []const u8,
+    function_name: []const u8,
+    contract_name: ?[]const u8,
+    kind: []const u8,
+    label: ?[]const u8,
+    range: compiler.TextRange,
+    local_start: usize,
+    local_count: usize,
+};
+
+const DebugSourceScopeBundle = struct {
+    scopes: []const DebugScopeInfo,
+    locals: []const DebugLocalInfo,
+};
+
+const ScopeBuildState = struct {
+    next_scope_id: u32 = 0,
+    next_local_id: u32 = 0,
+};
+
+const ExtraScopeBinding = struct {
+    pattern_id: compiler.PatternId,
+    kind: []const u8,
+    binding_kind: ?compiler.ast.BindingKind = null,
+    storage_class: ?compiler.ast.StorageClass = null,
+    decl_range: compiler.TextRange,
+    live_range: compiler.TextRange,
+};
+
+fn debugBindingKindName(kind: compiler.ast.BindingKind) []const u8 {
+    return switch (kind) {
+        .let_ => "let",
+        .var_ => "var",
+        .constant => "const",
+        .immutable => "immutable",
+    };
+}
+
+fn debugStorageClassName(storage_class: compiler.ast.StorageClass) ?[]const u8 {
+    return switch (storage_class) {
+        .none => null,
+        .storage => "storage",
+        .memory => "memory",
+        .tstore => "tstore",
+    };
+}
+
+fn lineColumnForOffset(sources: *const compiler.source.SourceStore, file_id: compiler.FileId, offset: u32) compiler.source.LineColumn {
+    return sources.lineColumn(.{ .file_id = file_id, .range = .empty(offset) });
+}
+
+fn writeDebugRangeJson(
+    writer: anytype,
+    sources: *const compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    range: compiler.TextRange,
+) !void {
+    const start = lineColumnForOffset(sources, file_id, range.start);
+    const end = lineColumnForOffset(sources, file_id, range.end);
+    try writer.print(
+        "{{\"start\":{{\"line\":{d},\"col\":{d},\"offset\":{d}}},\"end\":{{\"line\":{d},\"col\":{d},\"offset\":{d}}}}}",
+        .{ start.line, start.column, range.start, end.line, end.column, range.end },
+    );
+}
+
+fn appendPatternDebugLocals(
+    allocator: std.mem.Allocator,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    scope_id: u32,
+    pattern_id: compiler.PatternId,
+    kind: []const u8,
+    binding_kind: ?compiler.ast.BindingKind,
+    storage_class: ?compiler.ast.StorageClass,
+    decl_range: compiler.TextRange,
+    live_range: compiler.TextRange,
+    next_local_id: *u32,
+    locals: *std.ArrayList(DebugLocalInfo),
+) !void {
+    switch (ast_file.pattern(pattern_id).*) {
+        .Name => |name| {
+            try locals.append(allocator, .{
+                .id = next_local_id.*,
+                .scope_id = scope_id,
+                .file_id = file_id,
+                .name = name.name,
+                .kind = kind,
+                .binding_kind = if (binding_kind) |value| debugBindingKindName(value) else null,
+                .storage_class = if (storage_class) |value| debugStorageClassName(value) else null,
+                .decl_range = decl_range,
+                .live_range = live_range,
+            });
+            next_local_id.* += 1;
+        },
+        .StructDestructure => |destructure| {
+            for (destructure.fields) |field| {
+                try appendPatternDebugLocals(
+                    allocator,
+                    ast_file,
+                    file_id,
+                    scope_id,
+                    field.binding,
+                    kind,
+                    binding_kind,
+                    storage_class,
+                    field.range,
+                    live_range,
+                    next_local_id,
+                    locals,
+                );
+            }
+        },
+        .Field => |field| try appendPatternDebugLocals(
+            allocator,
+            ast_file,
+            file_id,
+            scope_id,
+            field.base,
+            kind,
+            binding_kind,
+            storage_class,
+            decl_range,
+            live_range,
+            next_local_id,
+            locals,
+        ),
+        .Index => |index| try appendPatternDebugLocals(
+            allocator,
+            ast_file,
+            file_id,
+            scope_id,
+            index.base,
+            kind,
+            binding_kind,
+            storage_class,
+            decl_range,
+            live_range,
+            next_local_id,
+            locals,
+        ),
+        .Error => {},
+    }
+}
+
+fn collectBodyScopeDebugInfo(
+    allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    function_name: []const u8,
+    contract_name: ?[]const u8,
+    body_id: compiler.BodyId,
+    parent_scope_id: ?u32,
+    kind: []const u8,
+    label: ?[]const u8,
+    extra_bindings: []const ExtraScopeBinding,
+    state: *ScopeBuildState,
+    scopes: *std.ArrayList(DebugScopeInfo),
+    locals: *std.ArrayList(DebugLocalInfo),
+) !void {
+    const body = ast_file.body(body_id).*;
+    const scope_id = state.next_scope_id;
+    state.next_scope_id += 1;
+    const local_start = locals.items.len;
+
+    for (extra_bindings) |binding| {
+        try appendPatternDebugLocals(
+            allocator,
+            ast_file,
+            file_id,
+            scope_id,
+            binding.pattern_id,
+            binding.kind,
+            binding.binding_kind,
+            binding.storage_class,
+            binding.decl_range,
+            binding.live_range,
+            &state.next_local_id,
+            locals,
+        );
+    }
+
+    for (body.statements) |statement_id| {
+        switch (ast_file.statement(statement_id).*) {
+            .VariableDecl => |decl| {
+                try appendPatternDebugLocals(
+                    allocator,
+                    ast_file,
+                    file_id,
+                    scope_id,
+                    decl.pattern,
+                    "local",
+                    decl.binding_kind,
+                    decl.storage_class,
+                    decl.range,
+                    .{ .start = decl.range.start, .end = body.range.end },
+                    &state.next_local_id,
+                    locals,
+                );
+            },
+            else => {},
+        }
+    }
+
+    try scopes.append(allocator, .{
+        .id = scope_id,
+        .parent = parent_scope_id,
+        .file_id = file_id,
+        .file_path = db.sources.file(file_id).path,
+        .function_name = function_name,
+        .contract_name = contract_name,
+        .kind = kind,
+        .label = label,
+        .range = body.range,
+        .local_start = local_start,
+        .local_count = locals.items.len - local_start,
+    });
+
+    for (body.statements) |statement_id| {
+        switch (ast_file.statement(statement_id).*) {
+            .If => |if_stmt| {
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, if_stmt.then_body, scope_id, "if_then", null, &.{}, state, scopes, locals);
+                if (if_stmt.else_body) |else_body| {
+                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, else_body, scope_id, "if_else", null, &.{}, state, scopes, locals);
+                }
+            },
+            .While => |while_stmt| {
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, while_stmt.body, scope_id, "while", while_stmt.label, &.{}, state, scopes, locals);
+            },
+            .For => |for_stmt| {
+                var bindings = std.ArrayList(ExtraScopeBinding){};
+                defer bindings.deinit(allocator);
+                try bindings.append(allocator, .{
+                    .pattern_id = for_stmt.item_pattern,
+                    .kind = "for_item",
+                    .decl_range = compiler.source.rangeOf(ast_file.pattern(for_stmt.item_pattern).*),
+                    .live_range = ast_file.body(for_stmt.body).*.range,
+                });
+                if (for_stmt.index_pattern) |index_pattern| {
+                    try bindings.append(allocator, .{
+                        .pattern_id = index_pattern,
+                        .kind = "for_index",
+                        .decl_range = compiler.source.rangeOf(ast_file.pattern(index_pattern).*),
+                        .live_range = ast_file.body(for_stmt.body).*.range,
+                    });
+                }
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, for_stmt.body, scope_id, "for", for_stmt.label, bindings.items, state, scopes, locals);
+            },
+            .Switch => |switch_stmt| {
+                for (switch_stmt.arms) |arm| {
+                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, arm.body, scope_id, "switch_arm", null, &.{}, state, scopes, locals);
+                }
+                if (switch_stmt.else_body) |else_body| {
+                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, else_body, scope_id, "switch_else", null, &.{}, state, scopes, locals);
+                }
+            },
+            .Try => |try_stmt| {
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, try_stmt.try_body, scope_id, "try", null, &.{}, state, scopes, locals);
+                if (try_stmt.catch_clause) |catch_clause| {
+                    var catch_bindings: [1]ExtraScopeBinding = undefined;
+                    const catch_items = if (catch_clause.error_pattern) |pattern_id| blk: {
+                        catch_bindings[0] = .{
+                            .pattern_id = pattern_id,
+                            .kind = "catch_error",
+                            .decl_range = catch_clause.range,
+                            .live_range = ast_file.body(catch_clause.body).*.range,
+                        };
+                        break :blk catch_bindings[0..1];
+                    } else &.{};
+                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, catch_clause.body, scope_id, "catch", null, catch_items, state, scopes, locals);
+                }
+            },
+            .Block => |block_stmt| {
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "block", null, &.{}, state, scopes, locals);
+            },
+            .LabeledBlock => |block_stmt| {
+                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "labeled_block", block_stmt.label, &.{}, state, scopes, locals);
+            },
+            else => {},
+        }
+    }
+}
+
+fn collectItemDebugScopes(
+    allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    item_id: compiler.ItemId,
+    inherited_contract_name: ?[]const u8,
+    state: *ScopeBuildState,
+    scopes: *std.ArrayList(DebugScopeInfo),
+    locals: *std.ArrayList(DebugLocalInfo),
+) !void {
+    switch (ast_file.item(item_id).*) {
+        .Contract => |contract_item| {
+            for (contract_item.members) |member_id| {
+                try collectItemDebugScopes(allocator, db, ast_file, file_id, member_id, contract_item.name, state, scopes, locals);
+            }
+        },
+        .Impl => |impl_item| {
+            for (impl_item.methods) |method_id| {
+                try collectItemDebugScopes(allocator, db, ast_file, file_id, method_id, inherited_contract_name, state, scopes, locals);
+            }
+        },
+        .Function => |function_item| {
+            if (function_item.is_comptime or function_item.is_ghost) return;
+            var param_bindings: std.ArrayList(ExtraScopeBinding) = .{};
+            defer param_bindings.deinit(allocator);
+            for (function_item.parameters) |parameter| {
+                if (parameter.is_comptime) continue;
+                try param_bindings.append(allocator, .{
+                    .pattern_id = parameter.pattern,
+                    .kind = "param",
+                    .decl_range = parameter.range,
+                    .live_range = ast_file.body(function_item.body).*.range,
+                });
+            }
+            try collectBodyScopeDebugInfo(
+                allocator,
+                db,
+                ast_file,
+                file_id,
+                function_item.name,
+                inherited_contract_name,
+                function_item.body,
+                null,
+                "function",
+                null,
+                param_bindings.items,
+                state,
+                scopes,
+                locals,
+            );
+        },
+        else => {},
+    }
+}
+
+fn buildSourceScopeDebugInfo(
+    allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    root_module_id: compiler.ModuleId,
+) !DebugSourceScopeBundle {
+    var scopes: std.ArrayList(DebugScopeInfo) = .{};
+    var locals: std.ArrayList(DebugLocalInfo) = .{};
+    errdefer scopes.deinit(allocator);
+    errdefer locals.deinit(allocator);
+
+    var state = ScopeBuildState{};
+    const root_module = db.sources.module(root_module_id);
+    const package = db.sources.package(root_module.package_id);
+    for (package.modules.items) |module_id| {
+        const module = db.sources.module(module_id);
+        const ast_file = try db.astFile(module.file_id);
+        for (ast_file.root_items) |item_id| {
+            try collectItemDebugScopes(allocator, db, ast_file, module.file_id, item_id, null, &state, &scopes, &locals);
+        }
+    }
+
+    return .{
+        .scopes = try scopes.toOwnedSlice(allocator),
+        .locals = try locals.toOwnedSlice(allocator),
+    };
+}
+
+fn posBeforeOrEqual(line_a: u32, col_a: u32, line_b: u32, col_b: u32) bool {
+    return line_a < line_b or (line_a == line_b and col_a <= col_b);
+}
+
+fn posStrictlyBefore(line_a: u32, col_a: u32, line_b: u32, col_b: u32) bool {
+    return line_a < line_b or (line_a == line_b and col_a < col_b);
+}
+
+fn posInRange(
+    sources: *const compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    range: compiler.TextRange,
+    line: u32,
+    col: u32,
+) bool {
+    const start = lineColumnForOffset(sources, file_id, range.start);
+    const end = lineColumnForOffset(sources, file_id, range.end);
+    return posBeforeOrEqual(start.line, start.column, line, col) and posStrictlyBefore(line, col, end.line, end.column);
 }
 
 fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
@@ -1776,7 +2197,7 @@ fn runCompilerMlirEmit(
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
     if (mlir_options.emit_mlir_sir) {
-        if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module)) {
+        if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module, mlir_options.debug_info)) {
             try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             std.process.exit(1);
@@ -1855,6 +2276,14 @@ fn runMlirEmitAdvanced(
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
+    const source_scopes = if (mlir_options.debug_info)
+        try buildSourceScopeDebugInfo(allocator, &compilation.db, compilation.root_module_id)
+    else
+        null;
+    defer if (source_scopes) |bundle| {
+        allocator.free(bundle.scopes);
+        allocator.free(bundle.locals);
+    };
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
@@ -1925,7 +2354,7 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
 
-    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+    if (mlir_options.canonicalize and !mlir_options.debug_info and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
         m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
@@ -1983,7 +2412,7 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.emit_mlir_sir) {
-        if (!c.oraConvertToSIR(ctx, final_module)) {
+        if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             std.process.exit(1);
@@ -2094,6 +2523,31 @@ fn runMlirEmitAdvanced(
         }
         m.end();
 
+        // Extract source locations from SIR MLIR (sidecar to SIR text).
+        // Op indices match the SIR text op ordering for later correlation
+        // with Sensei's bytecode offsets.
+        const mlir_c_api = @import("mlir_c_api");
+        const sir_locations_ref = c.oraExtractSIRLocations(ctx, final_module);
+        defer if (sir_locations_ref.data != null) {
+            mlir_c_api.freeStringRef(sir_locations_ref);
+        };
+        const sir_locations: ?[]const u8 = if (sir_locations_ref.data != null and sir_locations_ref.length > 0)
+            sir_locations_ref.data[0..sir_locations_ref.length]
+        else
+            null;
+
+        const sir_debug_info_ref: c.MlirStringRef = if (mlir_options.debug_info)
+            c.oraExtractSIRDebugInfo(ctx, final_module)
+        else
+            .{ .data = null, .length = 0 };
+        defer if (sir_debug_info_ref.data != null) {
+            mlir_c_api.freeStringRef(sir_debug_info_ref);
+        };
+        const sir_debug_info: ?[]const u8 = if (sir_debug_info_ref.data != null and sir_debug_info_ref.length > 0)
+            sir_debug_info_ref.data[0..sir_debug_info_ref.length]
+        else
+            null;
+
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
         if (mlir_options.emit_sir_text) {
             if (mlir_options.output_dir) |output_dir| {
@@ -2116,7 +2570,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
             m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, sir_text, file_path, mlir_options.output_dir, stdout);
+            try emitBytecodeFromSirText(allocator, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_debug_info, source_scopes, stdout);
             m.end();
         }
     }
@@ -2528,9 +2982,13 @@ fn resolveSenseiSirPath(allocator: std.mem.Allocator) ![]const u8 {
 
 fn emitBytecodeFromSirText(
     allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
+    sir_locations_json: ?[]const u8,
+    sir_debug_info_json: ?[]const u8,
+    source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
 ) !void {
     const sir_path = try resolveSenseiSirPath(allocator);
@@ -2541,7 +2999,13 @@ fn emitBytecodeFromSirText(
     const sir_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, sir_extension });
     defer allocator.free(sir_filename);
 
-    const temp_dir = "/tmp/ora_sir";
+    const temp_root = "/tmp/ora_sir";
+    std.fs.makeDirAbsolute(temp_root) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const temp_dir = try std.fmt.allocPrint(allocator, "{s}/{x}", .{ temp_root, std.crypto.random.int(u64) });
+    defer allocator.free(temp_dir);
     std.fs.makeDirAbsolute(temp_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -2553,8 +3017,28 @@ fn emitBytecodeFromSirText(
     defer sir_file.close();
     try sir_file.writeAll(sir_text);
 
-    var argv = [_][]const u8{ sir_path, sir_file_path };
-    var child = std.process.Child.init(&argv, allocator);
+    // If we have source locations, tell Sensei to produce a source map
+    const sensei_srcmap_path = if (sir_locations_json != null)
+        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "sensei_srcmap.json" })
+    else
+        null;
+    defer if (sensei_srcmap_path) |p| allocator.free(p);
+
+    // Build argv: sir <input> [--source-map <path>]
+    var argv_buf: [4][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = sir_path;
+    argc += 1;
+    argv_buf[argc] = sir_file_path;
+    argc += 1;
+    if (sensei_srcmap_path) |srcmap_path| {
+        argv_buf[argc] = "--source-map";
+        argc += 1;
+        argv_buf[argc] = srcmap_path;
+        argc += 1;
+    }
+    const argv = argv_buf[0..argc];
+    var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -2613,6 +3097,9 @@ fn emitBytecodeFromSirText(
         std.process.exit(1);
     }
 
+    var bytecode_output_path: ?[]const u8 = null;
+    defer if (bytecode_output_path) |p| allocator.free(p);
+
     if (output_dir) |out_dir| {
         const out_is_file = std.mem.endsWith(u8, out_dir, ".hex") or
             std.mem.endsWith(u8, out_dir, ".bytecode") or
@@ -2625,6 +3112,7 @@ fn emitBytecodeFromSirText(
                 try std.fs.cwd().createFile(out_dir, .{});
             defer out_file.close();
             try out_file.writeAll(bytecode);
+            bytecode_output_path = try allocator.dupe(u8, out_dir);
             try stdout.print("Bytecode saved to {s}\n", .{out_dir});
         } else {
             std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
@@ -2641,11 +3129,354 @@ fn emitBytecodeFromSirText(
             var out_file = try std.fs.cwd().createFile(output_file, .{});
             defer out_file.close();
             try out_file.writeAll(bytecode);
+            bytecode_output_path = try allocator.dupe(u8, output_file);
             try stdout.print("Bytecode saved to {s}\n", .{output_file});
         }
     } else {
         try stdout.print("{s}\n", .{bytecode});
     }
+
+    // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
+    // into final .sourcemap.json
+    if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
+        try mergeSourceMaps(allocator, sir_locations_json.?, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
+    }
+    if (sir_debug_info_json != null and bytecode_output_path != null) {
+        try writeDebugInfoSidecar(allocator, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
+    }
+}
+
+fn mergeSourceMaps(
+    allocator: std.mem.Allocator,
+    sir_locations_json: []const u8,
+    sensei_srcmap_path: []const u8,
+    bytecode_output_path: []const u8,
+    stdout: anytype,
+) !void {
+    // Read Sensei's source map: {"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
+    const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
+        try stdout.print("Warning: could not read Sensei source map: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(sensei_json);
+
+    // Parse Sensei ops into a map: op_idx → pc
+    const SenseiMap = struct { ops: []const struct { idx: u32, pc: u32 } = &.{} };
+    const sensei_parsed = std.json.parseFromSlice(SenseiMap, allocator, sensei_json, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        try stdout.print("Warning: could not parse Sensei source map: {}\n", .{err});
+        return;
+    };
+    defer sensei_parsed.deinit();
+
+    // Build lookup: op_idx → pc
+    var idx_to_pc = std.AutoHashMap(u32, u32).init(allocator);
+    defer idx_to_pc.deinit();
+    var max_mapped_idx: u32 = 0;
+    var have_mapped_idx = false;
+    for (sensei_parsed.value.ops) |op| {
+        try idx_to_pc.put(op.idx, op.pc);
+        if (!have_mapped_idx or op.idx > max_mapped_idx) {
+            max_mapped_idx = op.idx;
+            have_mapped_idx = true;
+        }
+    }
+
+    // Parse SIR locations: [{"idx":0,"file":"main.ora","line":3,"col":5},...]
+    const LocEntry = struct { idx: u32, file: []const u8, line: u32, col: u32 };
+    const sir_locs = std.json.parseFromSlice([]const LocEntry, allocator, sir_locations_json, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        try stdout.print("Warning: could not parse SIR locations: {}\n", .{err});
+        return;
+    };
+    defer sir_locs.deinit();
+
+    // Merge: for each SIR location entry, look up its PC from Sensei
+    // Collect unique source files
+    var sources: std.ArrayList([]const u8) = .{};
+    defer sources.deinit(allocator);
+    var source_indices = std.StringHashMap(u32).init(allocator);
+    defer source_indices.deinit();
+
+    // Build merged entries
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    const writer = out.writer(allocator);
+
+    try writer.writeAll("{\"version\":1,\"sources\":[");
+
+    // First pass: collect sources and build entries
+    const MergedEntry = struct { pc: u32, src: u32, line: u32, col: u32, stmt: bool };
+    var entries: std.ArrayList(MergedEntry) = .{};
+    defer entries.deinit(allocator);
+
+    var missing_idx_count: usize = 0;
+    var missing_idx_examples: [8]u32 = undefined;
+    var missing_idx_examples_len: usize = 0;
+    var untranslated_tail_count: usize = 0;
+
+    for (sir_locs.value) |loc| {
+        const pc = idx_to_pc.get(loc.idx) orelse {
+            if (have_mapped_idx and loc.idx > max_mapped_idx) {
+                untranslated_tail_count += 1;
+            } else {
+                missing_idx_count += 1;
+                if (missing_idx_examples_len < missing_idx_examples.len) {
+                    missing_idx_examples[missing_idx_examples_len] = loc.idx;
+                    missing_idx_examples_len += 1;
+                }
+            }
+            continue;
+        };
+
+        // Get or create source index
+        const src_idx = source_indices.get(loc.file) orelse blk: {
+            const idx: u32 = @intCast(sources.items.len);
+            try sources.append(allocator, loc.file);
+            try source_indices.put(loc.file, idx);
+            break :blk idx;
+        };
+
+        try entries.append(allocator, .{ .pc = pc, .src = src_idx, .line = loc.line, .col = loc.col, .stmt = false });
+    }
+
+    if (missing_idx_count != 0) {
+        try stdout.print("Error: source map index mismatch ({d} MLIR location entries had no bytecode PC)\n", .{missing_idx_count});
+        if (missing_idx_examples_len != 0) {
+            try stdout.print("  missing op indices:", .{});
+            for (missing_idx_examples[0..missing_idx_examples_len]) |idx| {
+                try stdout.print(" {d}", .{idx});
+            }
+            try stdout.print("\n", .{});
+        }
+        try stdout.flush();
+        return error.SourceMapMismatch;
+    }
+
+    if (untranslated_tail_count != 0) {
+        try stdout.print("Note: dropped {d} untranslated tail source locations beyond backend op index {d}\n", .{
+            untranslated_tail_count,
+            max_mapped_idx,
+        });
+    }
+
+    // Sort entries by PC
+    std.mem.sort(MergedEntry, entries.items, {}, struct {
+        fn lessThan(_: void, a: MergedEntry, b: MergedEntry) bool {
+            if (a.pc != b.pc) return a.pc < b.pc;
+            if (a.src != b.src) return a.src < b.src;
+            if (a.line != b.line) return a.line < b.line;
+            return a.col < b.col;
+        }
+    }.lessThan);
+
+    var prev_line: ?u32 = null;
+    var prev_src: ?u32 = null;
+    for (entries.items) |*entry| {
+        entry.stmt = (prev_line == null) or (entry.line != prev_line.?) or (entry.src != prev_src.?);
+        prev_line = entry.line;
+        prev_src = entry.src;
+    }
+
+    // Emit sources array
+    for (sources.items, 0..) |src, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeJsonString(writer, src);
+    }
+    try writer.writeAll("],\"entries\":[");
+
+    // Emit entries
+    for (entries.items, 0..) |entry, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.print("{{\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}}}", .{
+            entry.pc, entry.src, entry.line, entry.col, if (entry.stmt) "true" else "false",
+        });
+    }
+    try writer.writeAll("]}");
+
+    // Write the merged source map next to the bytecode artifact.
+    const basename = std.fs.path.stem(bytecode_output_path);
+    const srcmap_name = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sourcemap.json" });
+    defer allocator.free(srcmap_name);
+    const srcmap_path = if (std.fs.path.dirname(bytecode_output_path)) |dir|
+        try std.fs.path.join(allocator, &[_][]const u8{ dir, srcmap_name })
+    else
+        try allocator.dupe(u8, srcmap_name);
+    defer allocator.free(srcmap_path);
+
+    var srcmap_file = try std.fs.cwd().createFile(srcmap_path, .{});
+    defer srcmap_file.close();
+    try srcmap_file.writeAll(out.items);
+
+    try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
+}
+
+fn writeDebugInfoSidecar(
+    allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
+    sir_debug_info_json: []const u8,
+    source_scopes: ?DebugSourceScopeBundle,
+    bytecode_output_path: []const u8,
+    stdout: anytype,
+) !void {
+    const VisibilityOp = struct {
+        idx: u32,
+        file: ?[]const u8 = null,
+        line: ?u32 = null,
+        col: ?u32 = null,
+    };
+    const VisibilityParse = struct {
+        ops: []const VisibilityOp = &.{},
+    };
+
+    const basename = std.fs.path.stem(bytecode_output_path);
+    const debug_name = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".debug.json" });
+    defer allocator.free(debug_name);
+    const debug_path = if (std.fs.path.dirname(bytecode_output_path)) |dir|
+        try std.fs.path.join(allocator, &[_][]const u8{ dir, debug_name })
+    else
+        try allocator.dupe(u8, debug_name);
+    defer allocator.free(debug_path);
+
+    var debug_file = try std.fs.cwd().createFile(debug_path, .{});
+    defer debug_file.close();
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    const writer = out.writer(allocator);
+    const parsed_visibility = std.json.parseFromSlice(VisibilityParse, allocator, sir_debug_info_json, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        try stdout.print("Warning: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
+        return;
+    };
+    defer parsed_visibility.deinit();
+
+    const trimmed = std.mem.trim(u8, sir_debug_info_json, " \n\r\t");
+    if (std.mem.startsWith(u8, trimmed, "{\"version\":1,")) {
+        try writer.writeAll("{\"version\":2,");
+        try writer.writeAll(trimmed["{\"version\":1,".len..trimmed.len - 1]);
+    } else if (trimmed.len != 0 and trimmed[trimmed.len - 1] == '}') {
+        try writer.writeAll(trimmed[0 .. trimmed.len - 1]);
+    } else {
+        try writer.writeAll(trimmed);
+    }
+
+    try writer.writeAll(",\"source_scopes\":[");
+    if (source_scopes) |scope_info| {
+        for (scope_info.scopes, 0..) |scope, scope_index| {
+            if (scope_index != 0) try writer.writeAll(",");
+            try writer.print("{{\"id\":{d},\"parent\":", .{scope.id});
+            if (scope.parent) |parent| {
+                try writer.print("{d}", .{parent});
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"file\":");
+            try writeJsonString(writer, scope.file_path);
+            try writer.writeAll(",\"function\":");
+            try writeJsonString(writer, scope.function_name);
+            try writer.writeAll(",\"contract\":");
+            if (scope.contract_name) |contract_name| {
+                try writeJsonString(writer, contract_name);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, scope.kind);
+            try writer.writeAll(",\"label\":");
+            if (scope.label) |label| {
+                try writeJsonString(writer, label);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"range\":");
+            try writeDebugRangeJson(writer, sources, scope.file_id, scope.range);
+            try writer.writeAll(",\"locals\":[");
+            var first_local = true;
+            for (scope_info.locals[scope.local_start .. scope.local_start + scope.local_count]) |local| {
+                if (!first_local) try writer.writeAll(",");
+                first_local = false;
+                try writer.print("{{\"id\":{d},\"name\":", .{local.id});
+                try writeJsonString(writer, local.name);
+                try writer.writeAll(",\"kind\":");
+                try writeJsonString(writer, local.kind);
+                try writer.writeAll(",\"binding_kind\":");
+                if (local.binding_kind) |binding_kind| {
+                    try writeJsonString(writer, binding_kind);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"storage_class\":");
+                if (local.storage_class) |storage_class| {
+                    try writeJsonString(writer, storage_class);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"decl\":");
+                try writeDebugRangeJson(writer, sources, local.file_id, local.decl_range);
+                try writer.writeAll(",\"live\":");
+                try writeDebugRangeJson(writer, sources, local.file_id, local.live_range);
+                try writer.writeAll("}");
+            }
+            try writer.writeAll("]}");
+        }
+    }
+    try writer.writeAll("],\"op_visibility\":[");
+    if (source_scopes) |scope_info| {
+        var first_visibility = true;
+        for (parsed_visibility.value.ops) |op| {
+            const file = op.file orelse continue;
+            const line = op.line orelse continue;
+            const col = op.col orelse continue;
+
+            var visible_scope_count: usize = 0;
+            var visible_local_count: usize = 0;
+            for (scope_info.scopes) |scope| {
+                if (!std.mem.eql(u8, scope.file_path, file)) continue;
+                if (!posInRange(sources, scope.file_id, scope.range, line, col)) continue;
+                visible_scope_count += 1;
+                for (scope_info.locals[scope.local_start .. scope.local_start + scope.local_count]) |local| {
+                    if (posInRange(sources, local.file_id, local.live_range, line, col)) {
+                        visible_local_count += 1;
+                    }
+                }
+            }
+            if (visible_scope_count == 0 and visible_local_count == 0) continue;
+
+            if (!first_visibility) try writer.writeAll(",");
+            first_visibility = false;
+            try writer.print("{{\"idx\":{d},\"scope_ids\":[", .{op.idx});
+
+            var first_scope = true;
+            for (scope_info.scopes) |scope| {
+                if (!std.mem.eql(u8, scope.file_path, file)) continue;
+                if (!posInRange(sources, scope.file_id, scope.range, line, col)) continue;
+                if (!first_scope) try writer.writeAll(",");
+                first_scope = false;
+                try writer.print("{d}", .{scope.id});
+            }
+
+            try writer.writeAll("],\"visible_local_ids\":[");
+            var first_local_id = true;
+            for (scope_info.scopes) |scope| {
+                if (!std.mem.eql(u8, scope.file_path, file)) continue;
+                if (!posInRange(sources, scope.file_id, scope.range, line, col)) continue;
+                for (scope_info.locals[scope.local_start .. scope.local_start + scope.local_count]) |local| {
+                    if (!posInRange(sources, local.file_id, local.live_range, line, col)) continue;
+                    if (!first_local_id) try writer.writeAll(",");
+                    first_local_id = false;
+                    try writer.print("{d}", .{local.id});
+                }
+            }
+            try writer.writeAll("]}");
+        }
+    }
+    try writer.writeAll("]}");
+    try debug_file.writeAll(out.items);
+
+    try stdout.print("Debug info saved to {s}\n", .{debug_path});
 }
 
 test "build config init_args: validates init parameters" {

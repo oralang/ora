@@ -6622,7 +6622,7 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
 // Ora to SIR Conversion
 //===----------------------------------------------------------------------===//
 
-bool oraConvertToSIR(MlirContext ctx, MlirModule module)
+bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
 {
     try
     {
@@ -6673,7 +6673,7 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         {
             pm.addPass(createOraToSIRPass());
         }
-        const bool enable_post_sir_passes = true;
+        const bool enable_post_sir_passes = !debugInfo;
         if (enable_post_sir_passes)
         {
             // Add optimization pass (for SIR-specific optimizations like constant folding)
@@ -6769,6 +6769,48 @@ MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
         (void)ctx;
         ModuleOp moduleOp = unwrap(module);
         std::string out = mlir::ora::emitSIRText(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRLocations(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRLocations(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRDebugInfo(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRDebugInfo(moduleOp);
         if (out.empty())
             return oraStringRefCreate(nullptr, 0);
         char *buf = static_cast<char *>(std::malloc(out.size()));

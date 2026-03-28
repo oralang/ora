@@ -72,6 +72,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 parent.lowerTypeExpr(parameter.type_expr);
                             const parsed = support.parseIntLiteral(integer_text) orelse 0;
                             const value = appendValueOp(block, createIntegerConstant(parent.context, parent.location(parameter.range), param_type, parsed));
+                            @This().annotatePatternValue(&self, parameter.pattern, value);
                             self.locals.bindPattern(parent.file, parameter.pattern, value) catch {};
                         }
                     }
@@ -683,6 +684,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendScfYieldFromLocals(else_block, range, &else_locals, loop_context.carried_locals);
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, loop_context.carried_locals, if_op);
+            @This().annotateCarriedLocalResults(self, loop_context.carried_locals, if_op);
             return terminated;
         }
 
@@ -742,6 +744,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals, if_op);
+            @This().annotateCarriedLocalResults(self, carried_locals, if_op);
             return terminated;
         }
 
@@ -797,6 +800,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendScfYieldFromLocals(else_block, range, &else_locals, loop_context.carried_locals);
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, loop_context.carried_locals, if_op);
+            @This().annotateCarriedLocalResults(self, loop_context.carried_locals, if_op);
             return terminated;
         }
 
@@ -1408,6 +1412,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const range = patternRange(self.parent.file, pattern_id);
                     const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, range);
+                    @This().annotatePatternValue(self, pattern_id, converted);
                     try locals.bindPattern(self.parent.file, pattern_id, converted);
                 },
             }
@@ -1660,6 +1665,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (locals.lookupName(name.name)) |local_id| {
                         const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
                         const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
+                        @This().annotateLocalValue(self, local_id, converted);
                         try locals.setValue(local_id, converted);
                         return;
                     }
@@ -2462,6 +2468,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                 if (carried_locals.items.len > 0) {
                     try FunctionLowerer.writeBackCarriedLocals(&body_locals, carried_locals.items, if_op);
+                    @This().annotateCarriedLocalResults(self, carried_locals.items, if_op);
                 }
             } else {
                 try @This().lowerLoopInvariants(&body_lowerer, for_stmt.invariants, &body_locals);
@@ -2471,6 +2478,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
+            @This().annotateCarriedLocalResults(self, carried_locals.items, for_op);
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(for_stmt.range, locals);
             }
@@ -2645,6 +2653,41 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn writeBackCarriedLocals(locals: *LocalEnv, carried_locals: []const LocalId, op: mlir.MlirOperation) anyerror!void {
             for (carried_locals, 0..) |local_id, index| {
                 try locals.setValue(local_id, mlir.oraOperationGetResult(op, index));
+            }
+        }
+
+        fn annotatePatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue) void {
+            const name = patternName(self.parent.file, pattern_id) orelse return;
+            @This().annotateValueName(self, name, value);
+        }
+
+        fn annotateLocalValue(self: *FunctionLowerer, local_id: LocalId, value: mlir.MlirValue) void {
+            const name = patternName(self.parent.file, local_id) orelse return;
+            @This().annotateValueName(self, name, value);
+        }
+
+        pub fn annotateCarriedLocalResults(self: *FunctionLowerer, carried_locals: []const LocalId, op: mlir.MlirOperation) void {
+            for (carried_locals, 0..) |local_id, index| {
+                if (index >= mlir.oraOperationGetNumResults(op)) break;
+                @This().annotateLocalValue(self, local_id, mlir.oraOperationGetResult(op, index));
+            }
+        }
+
+        fn annotateValueName(self: *FunctionLowerer, name: []const u8, value: mlir.MlirValue) void {
+            _ = self;
+            if (name.len == 0) return;
+            if (!mlir.oraValueIsAOpResult(value)) return;
+
+            const owner = mlir.oraOpResultGetOwner(value);
+            if (mlir.oraOperationIsNull(owner)) return;
+
+            const num_results = mlir.oraOperationGetNumResults(owner);
+            var result_index: usize = 0;
+            while (result_index < num_results) : (result_index += 1) {
+                const candidate = mlir.oraOperationGetResult(owner, result_index);
+                if (!mlir.mlirValueEqual(candidate, value)) continue;
+                mlir.oraOperationSetResultName(owner, @intCast(result_index), strRef(name));
+                return;
             }
         }
     };
