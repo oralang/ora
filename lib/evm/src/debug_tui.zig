@@ -34,9 +34,11 @@ const AppConfig = struct {
 const DebuggerView = struct {
     allocator: std.mem.Allocator,
     debugger: *Debugger,
+    app: ?*tui.App = null,
     source_path: []const u8,
     calldata: []const u8,
     scroll_line: u32 = 1,
+    focus_line: ?u32 = null,
     status: []const u8 = "ready",
 
     fn init(
@@ -63,7 +65,7 @@ const DebuggerView = struct {
         const height = ctx.bounds.height;
         if (width < 40 or height < 10) {
             screen.setStyle(Style.default.setFg(Color.light_red).bold());
-            screen.putStringAt(1, 1, "Terminal too small for debugger view");
+            putStringClipped(screen, 1, 1, width - 2, "Terminal too small for debugger view");
             return;
         }
 
@@ -90,6 +92,10 @@ const DebuggerView = struct {
                         'n' => return self.runStep(.over),
                         'o' => return self.runStep(.out),
                         'c' => return self.runStep(.continue_),
+                        'q' => {
+                            if (self.app) |app| app.quit();
+                            return .consumed;
+                        },
                         'j' => {
                             self.scrollDown();
                             return .needs_redraw;
@@ -126,6 +132,7 @@ const DebuggerView = struct {
     fn runStep(self: *DebuggerView, comptime mode: enum { in, over, out, continue_ }) tui.EventResult {
         if (self.debugger.isHalted()) {
             self.status = "halted";
+            self.syncFocusFromDebugger();
             return .needs_redraw;
         }
         switch (mode) {
@@ -147,6 +154,9 @@ const DebuggerView = struct {
             },
         }
         self.status = @tagName(self.debugger.stop_reason);
+        if (!self.shouldPreserveFocusOnTerminalStop()) {
+            self.syncFocusFromDebugger();
+        }
         self.centerOnCurrentLine();
         return .needs_redraw;
     }
@@ -160,6 +170,7 @@ const DebuggerView = struct {
         if (self.debugger.currentEntry()) |entry| {
             if (entry.is_statement) {
                 self.status = "ready";
+                self.syncFocusFromDebugger();
                 self.centerOnCurrentLine();
                 return;
             }
@@ -175,11 +186,32 @@ const DebuggerView = struct {
         }
 
         if (self.debugger.isHalted()) self.status = @tagName(self.debugger.stop_reason);
+        self.syncFocusFromDebugger();
         self.centerOnCurrentLine();
     }
 
+    fn syncFocusFromDebugger(self: *DebuggerView) void {
+        if (self.debugger.currentEntry()) |entry| {
+            if (entry.is_statement) {
+                self.focus_line = entry.line;
+                return;
+            }
+        }
+        if (self.focus_line == null) {
+            self.focus_line = self.debugger.currentSourceLine();
+        }
+    }
+
+    fn shouldPreserveFocusOnTerminalStop(self: *const DebuggerView) bool {
+        if (!self.debugger.isHalted()) return false;
+        return switch (self.debugger.stop_reason) {
+            .execution_finished, .execution_reverted, .execution_error => true,
+            else => false,
+        };
+    }
+
     fn centerOnCurrentLine(self: *DebuggerView) void {
-        const line = self.debugger.currentSourceLine() orelse return;
+        const line = self.focus_line orelse return;
         if (line > 8) self.scroll_line = line - 8 else self.scroll_line = 1;
     }
 
@@ -205,7 +237,7 @@ const DebuggerView = struct {
 
     fn drawHeader(self: *DebuggerView, screen: anytype, width: u16) void {
         const source_name = std.fs.path.basename(self.source_path);
-        const line = self.debugger.currentSourceLine() orelse 0;
+        const line = self.focus_line orelse self.debugger.currentSourceLine() orelse 0;
         const entry = self.debugger.currentEntry();
 
         screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
@@ -213,7 +245,7 @@ const DebuggerView = struct {
 
         var title: [256]u8 = undefined;
         const title_text = std.fmt.bufPrint(&title, " Ora EVM Debugger | {s}", .{source_name}) catch "Ora EVM Debugger";
-        screen.putStringAt(0, 0, title_text);
+        putStringClipped(screen, 0, 0, width, title_text);
 
         screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(211, 219, 227)));
         screen.fill(0, 1, width, 2, ' ');
@@ -228,7 +260,7 @@ const DebuggerView = struct {
             self.debugger.getCallDepth(),
             self.debugger.getGasRemaining(),
         }) catch "status";
-        screen.putStringAt(0, 1, status_text);
+        putStringClipped(screen, 0, 1, width, status_text);
 
         var current: [512]u8 = undefined;
         const current_source = if (line != 0) blk: {
@@ -238,7 +270,7 @@ const DebuggerView = struct {
             break :blk "";
         } else "";
         const current_text = std.fmt.bufPrint(&current, " current={s}", .{current_source}) catch "current=";
-        screen.putStringAt(0, 2, current_text);
+        putStringClipped(screen, 0, 2, width, current_text);
     }
 
     fn drawSourcePane(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
@@ -250,11 +282,11 @@ const DebuggerView = struct {
         screen.drawBox(0, pane_top, width, pane_height, BorderStyle.single);
 
         screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
-        screen.putStringAt(2, pane_top, " Source ");
+        putStringClipped(screen, 2, pane_top, width - 4, " Source ");
 
         const content_top = pane_top + 1;
         const content_height = pane_height - 2;
-        const current_line = self.debugger.currentSourceLine() orelse 0;
+        const current_line = self.focus_line orelse self.debugger.currentSourceLine() orelse 0;
         const start_line = self.scroll_line;
         const end_line = @min(self.debugger.totalSourceLines(), start_line + content_height - 1);
 
@@ -275,12 +307,12 @@ const DebuggerView = struct {
 
                 var label_buf: [16]u8 = undefined;
                 const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{row}) catch "   ?";
-                screen.putStringAt(2, content_top + y, label);
+                putStringClipped(screen, 2, content_top + y, 5, label);
                 screen.setStyle(if (row == current_line)
                     Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
                 else
                     Style.default.setFg(Color.fromRGB(208, 214, 220)));
-                screen.putStringAt(7, content_top + y, trimmed);
+                putStringClipped(screen, 7, content_top + y, width - 9, trimmed);
                 row += 1;
             }
         }
@@ -300,16 +332,16 @@ const DebuggerView = struct {
         var title_buf: [64]u8 = undefined;
         const title = std.fmt.bufPrint(&title_buf, " Bindings [{d}] ", .{bindings.len}) catch " Bindings ";
         screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
-        screen.putStringAt(start_x + 2, pane_top, title);
+        putStringClipped(screen, start_x + 2, pane_top, width - 4, title);
 
         const content_top = pane_top + 1;
         const content_height = pane_height - 2;
         screen.setStyle(Style.default.setFg(Color.fromRGB(192, 199, 207)).dim());
-        screen.putStringAt(start_x + 2, content_top, "name = value / runtime");
+        putStringClipped(screen, start_x + 2, content_top, width - 4, "name = value / runtime");
 
         if (bindings.len == 0) {
             screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
-            screen.putStringAt(start_x + 2, content_top + 2, "no visible bindings");
+            putStringClipped(screen, start_x + 2, content_top + 2, width - 4, "no visible bindings");
             return;
         }
 
@@ -326,7 +358,7 @@ const DebuggerView = struct {
                 std.fmt.bufPrint(&row_buf, "{s} [{s}]", .{ binding.name, binding.runtime_kind }) catch binding.name;
 
             screen.setStyle(Style.default.setFg(Color.fromRGB(214, 220, 226)));
-            screen.putStringAt(start_x + 2, y, row_text);
+            putStringClipped(screen, start_x + 2, y, width - 4, row_text);
         }
     }
 
@@ -334,13 +366,26 @@ const DebuggerView = struct {
         _ = self;
         screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
         screen.fill(0, height - 2, width, 1, ' ');
-        screen.putStringAt(0, height - 2, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  Ctrl+Q quit ");
+        putStringClipped(screen, 0, height - 2, width, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  q quit ");
 
         screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(168, 176, 184)));
         screen.fill(0, height - 1, width, 1, ' ');
-        screen.putStringAt(0, height - 1, " debugger values show folded constants or rooted runtime values when readable ");
+        putStringClipped(screen, 0, height - 1, width, " debugger values show folded constants or rooted runtime values when readable ");
     }
 };
+
+fn putStringClipped(screen: anytype, x: u16, y: u16, max_width: u16, text: []const u8) void {
+    if (max_width == 0) return;
+    const clipped = clipTextBytes(text, max_width);
+    screen.putStringAt(x, y, clipped);
+}
+
+fn clipTextBytes(text: []const u8, max_width: u16) []const u8 {
+    const limit: usize = @intCast(max_width);
+    if (text.len <= limit) return text;
+    if (limit == 0) return "";
+    return text[0..limit];
+}
 
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
@@ -425,6 +470,7 @@ pub fn main() !void {
         .poll_timeout_ms = 16,
     });
     defer app.deinit();
+    root.app = &app;
     try app.setRoot(&root);
     try app.run();
 }
