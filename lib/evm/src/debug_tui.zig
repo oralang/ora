@@ -406,7 +406,7 @@ const DebuggerView = struct {
                     Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
                 else
                     Style.default.setFg(Color.fromRGB(208, 214, 220)));
-                putStringClipped(screen, bounds.x + 7, content_top + y, bounds.width - 9, trimmed);
+                putStringClipped(screen, bounds.x + 7, content_top + y, bounds.width - 8, trimmed);
                 row += 1;
             }
         }
@@ -695,6 +695,8 @@ fn fillPanel(screen: anytype, bounds: Rect) void {
 
 fn putPanelLine(screen: anytype, bounds: Rect, row: u16, style: Style, text: []const u8) bool {
     if (row >= bounds.height) return false;
+    screen.setStyle(Style.default);
+    screen.fill(bounds.x + 1, bounds.y + row, bounds.width - 2, 1, ' ');
     screen.setStyle(style);
     putStringClipped(screen, bounds.x + 1, bounds.y + row, bounds.width - 2, text);
     return true;
@@ -705,17 +707,14 @@ fn formatU256Hex(buf: []u8, value: u256) []const u8 {
 }
 
 fn formatShortU256Hex(buf: []u8, value: u256) []const u8 {
-    const full = std.fmt.bufPrint(buf, "{x}", .{value}) catch return "0x?";
+    var full_buf: [80]u8 = undefined;
+    const full = std.fmt.bufPrint(&full_buf, "{x}", .{value}) catch return "0x?";
     if (full.len <= 14) {
         return std.fmt.bufPrint(buf, "0x{s}", .{full}) catch "0x?";
     }
-    var out: [32]u8 = undefined;
     const prefix = full[0..6];
     const suffix = full[full.len - 4 ..];
-    const text = std.fmt.bufPrint(&out, "0x{s}..{s}", .{ prefix, suffix }) catch "0x?";
-    const len = @min(text.len, buf.len);
-    @memcpy(buf[0..len], text[0..len]);
-    return buf[0..len];
+    return std.fmt.bufPrint(buf, "0x{s}..{s}", .{ prefix, suffix }) catch "0x?";
 }
 
 fn formatAddressHex(buf: []u8, address: primitives.Address) []const u8 {
