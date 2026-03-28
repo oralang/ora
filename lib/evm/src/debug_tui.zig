@@ -191,6 +191,10 @@ const DebuggerView = struct {
     }
 
     fn syncFocusFromDebugger(self: *DebuggerView) void {
+        if (self.debugger.lastStatementLine()) |line| {
+            self.focus_line = line;
+            return;
+        }
         if (self.debugger.currentEntry()) |entry| {
             if (entry.is_statement) {
                 self.focus_line = entry.line;

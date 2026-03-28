@@ -29,6 +29,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         steps_executed: u64,
         /// Safety limit to prevent infinite loops
         max_steps: u64,
+        last_statement_line: ?u32,
 
         pub const State = enum {
             paused,
@@ -63,7 +64,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             source_text: []const u8,
         ) !Self {
             const lines = try buildLineIndex(allocator, source_text);
-            return Self{
+            var self = Self{
                 .evm = evm,
                 .src_map = src_map,
                 .debug_info = null,
@@ -75,7 +76,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .allocator = allocator,
                 .steps_executed = 0,
                 .max_steps = 10_000_000,
+                .last_statement_line = null,
             };
+            self.updateLastStatementLine();
+            return self;
         }
 
         pub fn deinit(self: *Self) void {
@@ -449,6 +453,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             return entry.line;
         }
 
+        pub fn lastStatementLine(self: *const Self) ?u32 {
+            return self.last_statement_line;
+        }
+
         /// Get the text of a source line (1-based).
         pub fn getSourceLineText(self: *const Self, line: u32) ?[]const u8 {
             if (line == 0 or line > self.source_lines.len) return null;
@@ -528,6 +536,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             };
 
             self.steps_executed += 1;
+            self.updateLastStatementLine();
 
             // Check if frame finished after step
             if (self.evm.getCurrentFrame()) |f| {
@@ -545,6 +554,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             const frame = self.evm.getCurrentFrame() orelse return false;
             const entry = self.src_map.getEntry(frame.pc) orelse return false;
             return entry.is_statement;
+        }
+
+        fn updateLastStatementLine(self: *Self) void {
+            const entry = self.currentEntry() orelse return;
+            if (!entry.is_statement) return;
+            self.last_statement_line = entry.line;
         }
 
         fn currentStatementKey(self: *const Self) ?StatementKey {
