@@ -387,27 +387,18 @@ const DebuggerView = struct {
         var y: u16 = 0;
         var row = start_line;
         while (y < content_height) : (y += 1) {
-            screen.setStyle(Style.default);
-            screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
             if (row <= end_line) {
                 const line_text = self.debugger.getSourceLineText(row) orelse "";
                 const trimmed = std.mem.trimRight(u8, line_text, "\r");
-                if (row == current_line) {
-                    screen.setStyle(Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250)));
-                    screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
-                } else {
-                    screen.setStyle(Style.default.setFg(Color.fromRGB(208, 214, 220)));
-                }
-
-                var label_buf: [16]u8 = undefined;
-                const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{row}) catch "   ?";
-                putStringClipped(screen, bounds.x + 2, content_top + y, 5, label);
-                screen.setStyle(if (row == current_line)
+                const style = if (row == current_line)
                     Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
                 else
-                    Style.default.setFg(Color.fromRGB(208, 214, 220)));
-                putStringClipped(screen, bounds.x + 7, content_top + y, bounds.width - 8, trimmed);
+                    Style.default.setFg(Color.fromRGB(208, 214, 220));
+                drawSourceRow(screen, bounds, content_top + y, row, trimmed, style);
                 row += 1;
+            } else {
+                screen.setStyle(Style.default);
+                screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
             }
         }
     }
@@ -691,6 +682,31 @@ fn drawPanelBox(screen: anytype, bounds: Rect, title: []const u8) void {
 fn fillPanel(screen: anytype, bounds: Rect) void {
     screen.setStyle(Style.default);
     screen.fill(bounds.x, bounds.y, bounds.width, bounds.height, ' ');
+}
+
+fn drawSourceRow(screen: anytype, bounds: Rect, y: u16, line_no: u32, text: []const u8, style: Style) void {
+    const inner_width = bounds.width - 2;
+    if (inner_width == 0) return;
+
+    var row_buf: [2048]u8 = undefined;
+    const width = @min(@as(usize, @intCast(inner_width)), row_buf.len);
+    @memset(row_buf[0..width], ' ');
+
+    var label_buf: [16]u8 = undefined;
+    const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{line_no}) catch "   ?";
+
+    const label_start: usize = if (width > 1) 1 else 0;
+    const label_len = @min(label.len, width - label_start);
+    @memcpy(row_buf[label_start .. label_start + label_len], label[0..label_len]);
+
+    const text_start: usize = if (width > 6) 6 else width;
+    if (text_start < width) {
+        const text_len = @min(text.len, width - text_start);
+        @memcpy(row_buf[text_start .. text_start + text_len], text[0..text_len]);
+    }
+
+    screen.setStyle(style);
+    screen.putStringAt(bounds.x + 1, y, row_buf[0..width]);
 }
 
 fn putPanelLine(screen: anytype, bounds: Rect, row: u16, style: Style, text: []const u8) bool {
