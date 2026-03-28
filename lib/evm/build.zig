@@ -9,10 +9,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const tui_dep = b.dependency("tui", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const primitives_mod = voltaire_dep.module("primitives");
     const crypto_mod = voltaire_dep.module("crypto");
     const precompiles_mod = voltaire_dep.module("precompiles");
     const blockchain_mod = voltaire_dep.module("blockchain");
+    const tui_mod = tui_dep.module("tui");
 
     const bootstrap_crypto = b.addSystemCommand(&.{
         "cargo",
@@ -45,6 +50,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "voltaire", .module = primitives_mod },
                 .{ .name = "crypto", .module = crypto_mod },
                 .{ .name = "precompiles", .module = precompiles_mod },
+                .{ .name = "tui", .module = tui_mod },
             },
         }),
     });
