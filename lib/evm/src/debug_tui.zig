@@ -46,6 +46,7 @@ const DebuggerView = struct {
     debugger: *Debugger,
     app: ?*tui.App = null,
     source_path: []const u8,
+    source_area: tui.TextArea,
     calldata: []const u8,
     scroll_line: u32 = 1,
     focus_line: ?u32 = null,
@@ -57,17 +58,29 @@ const DebuggerView = struct {
         allocator: std.mem.Allocator,
         debugger: *Debugger,
         source_path: []const u8,
+        source_text: []const u8,
         calldata: []const u8,
     ) !DebuggerView {
+        var source_area = try tui.TextArea.initWithContent(allocator, source_text);
+        source_area.read_only = true;
+        source_area.show_line_numbers = false;
+        source_area.style = Style.default.setFg(Color.fromRGB(208, 214, 220));
+        source_area.cursor_line_style = Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250));
+
         var self = DebuggerView{
             .allocator = allocator,
             .debugger = debugger,
             .source_path = source_path,
+            .source_area = source_area,
             .calldata = calldata,
         };
         try self.primeInitialStop();
         self.previous_snapshot = self.captureSnapshot();
         return self;
+    }
+
+    fn deinit(self: *DebuggerView) void {
+        self.source_area.deinit();
     }
 
     pub fn render(self: *DebuggerView, ctx: *tui.RenderContext) void {
@@ -373,34 +386,23 @@ const DebuggerView = struct {
         putStringClipped(screen, 0, 2, width, current_text);
     }
 
-    fn drawSourcePaneInBounds(self: *DebuggerView, screen: anytype, bounds: Rect) void {
+    fn drawSourcePaneInBounds(self: *DebuggerView, ctx: *tui.RenderContext) void {
+        const screen = ctx.screen;
+        const bounds = ctx.bounds;
         if (bounds.width < 8 or bounds.height < 4) return;
 
         drawPanelBox(screen, bounds, " Source ");
 
-        const content_top = bounds.y + 1;
-        const content_height = bounds.height - 2;
         const current_line = self.focus_line orelse self.debugger.currentSourceLine() orelse 0;
-        const start_line = self.scroll_line;
-        const end_line = @min(self.debugger.totalSourceLines(), start_line + content_height - 1);
 
-        var y: u16 = 0;
-        var row = start_line;
-        while (y < content_height) : (y += 1) {
-            if (row <= end_line) {
-                const line_text = self.debugger.getSourceLineText(row) orelse "";
-                const trimmed = std.mem.trimRight(u8, line_text, "\r");
-                const style = if (row == current_line)
-                    Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
-                else
-                    Style.default.setFg(Color.fromRGB(208, 214, 220));
-                drawSourceRow(screen, bounds, content_top + y, row, trimmed, style);
-                row += 1;
-            } else {
-                screen.setStyle(Style.default);
-                screen.fill(bounds.x + 1, content_top + y, bounds.width - 2, 1, ' ');
-            }
-        }
+        self.source_area.cursor_line = if (current_line > 0) current_line - 1 else 0;
+        self.source_area.cursor_col = 0;
+        self.source_area.scroll_y = if (self.scroll_line > 0) self.scroll_line - 1 else 0;
+        self.source_area.scroll_x = 0;
+
+        const inner = Rect.init(bounds.x + 1, bounds.y + 1, bounds.width - 2, bounds.height - 2);
+        var child = ctx.child(inner);
+        self.source_area.render(&child);
     }
 
     fn drawFooter(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
@@ -579,7 +581,7 @@ const SourcePane = struct {
     view: *DebuggerView,
 
     pub fn render(self: *const SourcePane, ctx: *tui.RenderContext) void {
-        self.view.drawSourcePaneInBounds(ctx.screen, ctx.bounds);
+        self.view.drawSourcePaneInBounds(ctx);
     }
 };
 
@@ -682,31 +684,6 @@ fn drawPanelBox(screen: anytype, bounds: Rect, title: []const u8) void {
 fn fillPanel(screen: anytype, bounds: Rect) void {
     screen.setStyle(Style.default);
     screen.fill(bounds.x, bounds.y, bounds.width, bounds.height, ' ');
-}
-
-fn drawSourceRow(screen: anytype, bounds: Rect, y: u16, line_no: u32, text: []const u8, style: Style) void {
-    const inner_width = bounds.width - 2;
-    if (inner_width == 0) return;
-
-    var row_buf: [2048]u8 = undefined;
-    const width = @min(@as(usize, @intCast(inner_width)), row_buf.len);
-    @memset(row_buf[0..width], ' ');
-
-    var label_buf: [16]u8 = undefined;
-    const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{line_no}) catch "   ?";
-
-    const label_start: usize = if (width > 1) 1 else 0;
-    const label_len = @min(label.len, width - label_start);
-    @memcpy(row_buf[label_start .. label_start + label_len], label[0..label_len]);
-
-    const text_start: usize = if (width > 6) 6 else width;
-    if (text_start < width) {
-        const text_len = @min(text.len, width - text_start);
-        @memcpy(row_buf[text_start .. text_start + text_len], text[0..text_len]);
-    }
-
-    screen.setStyle(style);
-    screen.putStringAt(bounds.x + 1, y, row_buf[0..width]);
 }
 
 fn putPanelLine(screen: anytype, bounds: Rect, row: u16, style: Style, text: []const u8) bool {
@@ -825,7 +802,8 @@ pub fn main() !void {
         source_map.deinit();
     }
 
-    var root = try DebuggerView.init(allocator, &debugger, config.source_path, config.calldata);
+    var root = try DebuggerView.init(allocator, &debugger, config.source_path, source_text, config.calldata);
+    defer root.deinit();
 
     var app = try tui.App.init(.{
         .alternate_screen = true,
