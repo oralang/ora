@@ -541,7 +541,7 @@ fn rangeSize(range: frontend.Range) u64 {
     return @as(u64, line_span) * 1_000_000 + @as(u64, char_span);
 }
 
-fn toLspKind(kind: SymbolKind) u8 {
+pub fn toLspKind(kind: SymbolKind) u8 {
     return switch (kind) {
         .contract => 5,
         .function => 12,

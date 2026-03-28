@@ -12,7 +12,7 @@ contract MaxValueU8 {
     }
 
     pub fn add(a: MaxValue<u8, 100>, b: MaxValue<u8, 100>) -> u8 {
-        return a + b;
+        return a +% b;
     }
 
     pub fn isHalf(val: MaxValue<u8, 100>) -> bool {

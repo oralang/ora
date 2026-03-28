@@ -20,6 +20,7 @@ const code_lens_api = ora_root.lsp.code_lens;
 const inlay_hints_api = ora_root.lsp.inlay_hints;
 const folding_api = ora_root.lsp.folding;
 const formatting_api = @import("formatting.zig");
+const compiler = ora_root.compiler;
 const Allocator = std.mem.Allocator;
 
 const DocumentStore = struct {
@@ -121,6 +122,13 @@ pub const Handler = struct {
             .renameProvider = .{ .RenameOptions = .{ .prepareProvider = true } },
             .documentHighlightProvider = .{ .bool = true },
             .foldingRangeProvider = .{ .bool = true },
+            .workspaceSymbolProvider = .{ .bool = true },
+            .codeActionProvider = .{ .CodeActionOptions = .{
+                .codeActionKinds = &.{ .quickfix, .@"source.organizeImports" },
+            } },
+            .selectionRangeProvider = .{ .bool = true },
+            .documentLinkProvider = .{ .resolveProvider = false },
+            .callHierarchyProvider = .{ .bool = true },
             .documentFormattingProvider = .{ .bool = true },
             .inlayHintProvider = .{ .InlayHintOptions = .{ .resolveProvider = false } },
             .codeLensProvider = .{ .resolveProvider = false },
@@ -341,7 +349,7 @@ pub const Handler = struct {
             if (std.mem.eql(u8, other_uri, uri)) continue;
             const other_source = entry.value_ptr.*;
 
-            const other_refs = try self.findNameReferencesInSource(other_source, target_name);
+            const other_refs = try self.findImportedReferencesInSource(other_uri, other_source, uri, target_name);
             defer self.allocator.free(other_refs);
             for (other_refs) |ref| {
                 try all_locations.append(arena, .{
@@ -365,7 +373,24 @@ pub const Handler = struct {
         const completion_items = try completion_api.completionAt(self.allocator, source, position, trigger_char);
         defer completion_api.deinitItems(self.allocator, completion_items);
 
-        const result = try arena.alloc(types.CompletionItem, completion_items.len);
+        const snippets = &[_]struct { label: []const u8, body: []const u8, detail: []const u8 }{
+            .{ .label = "contract", .body = "contract ${1:Name} {\n\t$0\n}", .detail = "Contract declaration" },
+            .{ .label = "fn", .body = "fn ${1:name}(${2}) -> ${3:u256} {\n\t$0\n}", .detail = "Function declaration" },
+            .{ .label = "pub fn", .body = "pub fn ${1:name}(${2}) -> ${3:u256} {\n\t$0\n}", .detail = "Public function declaration" },
+            .{ .label = "if", .body = "if (${1:condition}) {\n\t$0\n}", .detail = "If statement" },
+            .{ .label = "while", .body = "while (${1:condition}) {\n\t$0\n}", .detail = "While loop" },
+            .{ .label = "for", .body = "for (${1:item} in ${2:iterable}) {\n\t$0\n}", .detail = "For loop" },
+            .{ .label = "struct", .body = "struct ${1:Name} {\n\t${2:field}: ${3:u256},\n}", .detail = "Struct declaration" },
+            .{ .label = "requires", .body = "requires(${1:condition})", .detail = "Precondition clause" },
+            .{ .label = "ensures", .body = "ensures(${1:condition})", .detail = "Postcondition clause" },
+            .{ .label = "import", .body = "const ${1:name} = @import(\"${2:path}.ora\");", .detail = "Import declaration" },
+            .{ .label = "storage", .body = "storage var ${1:name}: ${2:u256};", .detail = "Storage variable" },
+            .{ .label = "event", .body = "log ${1:Name}(${2:param}: ${3:u256});", .detail = "Event/log declaration" },
+        };
+
+        const is_line_start = isAtLineStart(source, position);
+        const snippet_count: usize = if (is_line_start and trigger_char == null) snippets.len else 0;
+        const result = try arena.alloc(types.CompletionItem, completion_items.len + snippet_count);
         for (completion_items, 0..) |item, i| {
             result[i] = .{
                 .label = try arena.dupe(u8, item.label),
@@ -375,6 +400,15 @@ pub const Handler = struct {
                     .kind = .markdown,
                     .value = try arena.dupe(u8, doc),
                 } } else null,
+            };
+        }
+        for (snippets[0..snippet_count], completion_items.len..) |snip, i| {
+            result[i] = .{
+                .label = snip.label,
+                .kind = .Snippet,
+                .detail = snip.detail,
+                .insertTextFormat = .Snippet,
+                .insertText = snip.body,
             };
         }
 
@@ -424,7 +458,7 @@ pub const Handler = struct {
             if (std.mem.eql(u8, other_uri, uri)) continue;
 
             const other_source = entry.value_ptr.*;
-            const other_ranges = try self.findNameReferencesInSource(other_source, target_name);
+            const other_ranges = try self.findImportedReferencesInSource(other_uri, other_source, uri, target_name);
             defer self.allocator.free(other_ranges);
             if (other_ranges.len == 0) continue;
 
@@ -603,6 +637,433 @@ pub const Handler = struct {
         return result;
     }
 
+    pub fn @"textDocument/codeAction"(self: *Handler, arena: Allocator, params: types.CodeActionParams) !lsp.ResultType("textDocument/codeAction") {
+        _ = self;
+
+        const Slice = @typeInfo(lsp.ResultType("textDocument/codeAction")).optional.child;
+        const CodeActionOrCommand = @typeInfo(Slice).pointer.child;
+
+        var results = std.ArrayList(CodeActionOrCommand){};
+
+        for (params.context.diagnostics) |diag| {
+            if (std.mem.indexOf(u8, diag.message, "expected ';'") != null) {
+                const insert_pos = diag.range.end;
+                const edits = try arena.alloc(types.TextEdit, 1);
+                edits[0] = .{ .range = .{ .start = insert_pos, .end = insert_pos }, .newText = ";" };
+                var changes: lsp.parser.Map(types.DocumentUri, []const types.TextEdit) = .{};
+                try changes.map.put(arena, params.textDocument.uri, edits);
+                try results.append(arena, .{ .CodeAction = .{
+                    .title = "Insert missing ';'",
+                    .kind = .quickfix,
+                    .diagnostics = try arena.dupe(types.Diagnostic, &.{diag}),
+                    .edit = .{ .changes = changes },
+                    .isPreferred = true,
+                } });
+            }
+        }
+
+        if (results.items.len == 0) return null;
+        return try results.toOwnedSlice(arena);
+    }
+
+    pub fn @"workspace/symbol"(self: *Handler, arena: Allocator, params: types.WorkspaceSymbolParams) !lsp.ResultType("workspace/symbol") {
+        const query = params.query;
+        var symbols = std.ArrayList(types.SymbolInformation){};
+
+        var doc_it = self.docs.docs.iterator();
+        while (doc_it.next()) |entry| {
+            const doc_uri = entry.key_ptr.*;
+            const doc_source = entry.value_ptr.*;
+
+            var index = try semantic_index.indexDocument(self.allocator, doc_source);
+            defer index.deinit(self.allocator);
+
+            for (index.symbols) |sym| {
+                if (sym.parent != null) continue;
+                if (query.len > 0 and !fuzzyMatch(sym.name, query)) continue;
+
+                try symbols.append(arena, .{
+                    .name = try arena.dupe(u8, sym.name),
+                    .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
+                    .location = .{
+                        .uri = try arena.dupe(u8, doc_uri),
+                        .range = toLspRange(sym.selection_range),
+                    },
+                    .containerName = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+                });
+            }
+        }
+
+        if (symbols.items.len == 0) return null;
+        return .{ .array_of_SymbolInformation = try symbols.toOwnedSlice(arena) };
+    }
+
+    // --- Selection Range ---
+
+    pub fn @"textDocument/selectionRange"(self: *Handler, arena: Allocator, params: types.SelectionRangeParams) !lsp.ResultType("textDocument/selectionRange") {
+        const source = self.docs.docs.get(params.textDocument.uri) orelse return null;
+
+        var parse_result = compiler.syntax.parse(self.allocator, compiler.FileId.fromIndex(0), source) catch return null;
+        defer parse_result.deinit();
+
+        var lower_result = compiler.ast.lower(self.allocator, &parse_result.tree) catch return null;
+        defer lower_result.deinit();
+
+        const result = try arena.alloc(types.SelectionRange, params.positions.len);
+        for (params.positions, 0..) |pos, i| {
+            const offset = positionToOffset(source, pos.line, pos.character);
+            result[i] = try buildSelectionRange(arena, &lower_result.file, source, offset);
+        }
+        return result;
+    }
+
+    fn buildSelectionRange(
+        arena: Allocator,
+        file: *const compiler.ast.AstFile,
+        source: []const u8,
+        offset: u32,
+    ) !types.SelectionRange {
+        var ranges = std.ArrayList(types.Range){};
+        defer ranges.deinit(arena);
+
+        for (file.root_items) |item_id| {
+            try collectContainingRanges(&ranges, arena, file, source, item_id, offset);
+        }
+
+        std.mem.sort(types.Range, ranges.items, {}, struct {
+            fn cmp(_: void, a: types.Range, b: types.Range) bool {
+                return rangeSpan(a) > rangeSpan(b);
+            }
+            fn rangeSpan(r: types.Range) u64 {
+                const lines = if (r.end.line >= r.start.line) r.end.line - r.start.line else 0;
+                const chars = if (r.end.character >= r.start.character) r.end.character - r.start.character else 0;
+                return @as(u64, lines) * 100000 + chars;
+            }
+        }.cmp);
+
+        var current: types.SelectionRange = if (ranges.items.len > 0)
+            .{ .range = ranges.items[0] }
+        else
+            .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } } };
+
+        for (ranges.items[1..]) |r| {
+            const parent = try arena.create(types.SelectionRange);
+            parent.* = current;
+            current = .{ .range = r, .parent = parent };
+        }
+        return current;
+    }
+
+    fn collectContainingRanges(
+        ranges: *std.ArrayList(types.Range),
+        arena: Allocator,
+        file: *const compiler.ast.AstFile,
+        source: []const u8,
+        item_id: compiler.ast.ItemId,
+        offset: u32,
+    ) !void {
+        const item = file.item(item_id).*;
+        const item_range = itemTextRange(item) orelse return;
+        if (offset < item_range.start or offset > item_range.end) return;
+
+        try ranges.append(arena, offsetRangeToLsp(source, item_range));
+
+        switch (item) {
+            .Contract => |c| {
+                for (c.members) |mid| try collectContainingRanges(ranges, arena, file, source, mid, offset);
+            },
+            .Function => |f| try collectBodyContainingRanges(ranges, arena, file, source, f.body, offset),
+            else => {},
+        }
+    }
+
+    fn collectBodyContainingRanges(
+        ranges: *std.ArrayList(types.Range),
+        arena: Allocator,
+        file: *const compiler.ast.AstFile,
+        source: []const u8,
+        body_id: compiler.ast.BodyId,
+        offset: u32,
+    ) !void {
+        const body = file.body(body_id).*;
+        for (body.statements) |stmt_id| {
+            const stmt = file.statement(stmt_id).*;
+            const sr = stmtTextRange(stmt) orelse continue;
+            if (offset < sr.start or offset > sr.end) continue;
+            try ranges.append(arena, offsetRangeToLsp(source, sr));
+            switch (stmt) {
+                .If => |s| {
+                    try collectBodyContainingRanges(ranges, arena, file, source, s.then_body, offset);
+                    if (s.else_body) |eb| try collectBodyContainingRanges(ranges, arena, file, source, eb, offset);
+                },
+                .While => |s| try collectBodyContainingRanges(ranges, arena, file, source, s.body, offset),
+                .For => |s| try collectBodyContainingRanges(ranges, arena, file, source, s.body, offset),
+                .Block => |s| try collectBodyContainingRanges(ranges, arena, file, source, s.body, offset),
+                else => {},
+            }
+        }
+    }
+
+    fn itemTextRange(item: compiler.ast.nodes.Item) ?compiler.TextRange {
+        return switch (item) {
+            .Import => |i| i.range,
+            .Contract => |c| c.range,
+            .Function => |f| f.range,
+            .Struct => |s| s.range,
+            .Bitfield => |b| b.range,
+            .Enum => |e| e.range,
+            .Trait => |t| t.range,
+            .Impl => |i| i.range,
+            .TypeAlias => |t| t.range,
+            .LogDecl => |l| l.range,
+            .ErrorDecl => |e| e.range,
+            .Field => |f| f.range,
+            .Constant => |c| c.range,
+            .GhostBlock => |g| g.range,
+            .Error => null,
+        };
+    }
+
+    fn stmtTextRange(stmt: compiler.ast.nodes.Stmt) ?compiler.TextRange {
+        return switch (stmt) {
+            .Error => null,
+            inline else => |s| s.range,
+        };
+    }
+
+    // --- Document Link ---
+
+    pub fn @"textDocument/documentLink"(self: *Handler, arena: Allocator, params: types.DocumentLinkParams) !lsp.ResultType("textDocument/documentLink") {
+        const uri = params.textDocument.uri;
+        const source = self.docs.docs.get(uri) orelse return null;
+
+        var resolution = try workspace.resolveDocumentImports(
+            self.allocator,
+            uri,
+            source,
+            .{ .workspace_roots = self.workspace_roots.items },
+        );
+        defer resolution.deinit(self.allocator);
+
+        if (resolution.imports.len == 0) return null;
+
+        var links = std.ArrayList(types.DocumentLink){};
+        for (resolution.imports) |imp| {
+            const target_uri = try workspace.pathToFileUri(arena, imp.resolved_path);
+            const path_range = findImportPathRange(source, imp.specifier) orelse continue;
+            try links.append(arena, .{
+                .range = path_range,
+                .target = target_uri,
+                .tooltip = try std.fmt.allocPrint(arena, "Open {s}", .{imp.specifier}),
+            });
+        }
+
+        if (links.items.len == 0) return null;
+        return try links.toOwnedSlice(arena);
+    }
+
+    fn findImportPathRange(source: []const u8, specifier: []const u8) ?types.Range {
+        var line: u32 = 0;
+        var col: u32 = 0;
+        var i: usize = 0;
+        while (i < source.len) : (i += 1) {
+            if (source[i] == '\n') {
+                line += 1;
+                col = 0;
+                continue;
+            }
+            if (i + specifier.len <= source.len and std.mem.eql(u8, source[i .. i + specifier.len], specifier)) {
+                // Verify it's inside a string literal (preceded by quote)
+                if (i > 0 and source[i - 1] == '"') {
+                    return .{
+                        .start = .{ .line = line, .character = col },
+                        .end = .{ .line = line, .character = col + @as(u32, @intCast(specifier.len)) },
+                    };
+                }
+            }
+            col += 1;
+        }
+        return null;
+    }
+
+    // --- Call Hierarchy ---
+
+    pub fn @"textDocument/prepareCallHierarchy"(self: *Handler, arena: Allocator, params: types.CallHierarchyPrepareParams) !lsp.ResultType("textDocument/prepareCallHierarchy") {
+        const uri = params.textDocument.uri;
+        const source = self.docs.docs.get(uri) orelse return null;
+        const position: frontend.Position = .{
+            .line = params.position.line,
+            .character = params.position.character,
+        };
+
+        var index = try semantic_index.indexDocument(self.allocator, source);
+        defer index.deinit(self.allocator);
+
+        const sym_idx = semantic_index.findSymbolAtPosition(index.symbols, position) orelse return null;
+        const sym = index.symbols[sym_idx];
+        if (sym.kind != .function and sym.kind != .method) return null;
+
+        const result = try arena.alloc(types.CallHierarchyItem, 1);
+        result[0] = .{
+            .name = try arena.dupe(u8, sym.name),
+            .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
+            .uri = try arena.dupe(u8, uri),
+            .range = toLspRange(sym.range),
+            .selectionRange = toLspRange(sym.selection_range),
+            .detail = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+        };
+        return result;
+    }
+
+    pub fn @"callHierarchy/incomingCalls"(self: *Handler, arena: Allocator, params: types.CallHierarchyIncomingCallsParams) !lsp.ResultType("callHierarchy/incomingCalls") {
+        const target_name = params.item.name;
+        var calls = std.ArrayList(types.CallHierarchyIncomingCall){};
+
+        var doc_it = self.docs.docs.iterator();
+        while (doc_it.next()) |entry| {
+            const doc_uri = entry.key_ptr.*;
+            const doc_source = entry.value_ptr.*;
+
+            var index = try semantic_index.indexDocument(self.allocator, doc_source);
+            defer index.deinit(self.allocator);
+
+            // Find call sites: scan for Call expressions to target_name inside functions
+            var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, doc_source, lexer_mod.LexerConfig.development());
+            defer lex.deinit();
+            const tokens = lex.scanTokens() catch continue;
+            defer self.allocator.free(tokens);
+
+            for (index.symbols) |sym| {
+                if (sym.kind != .function and sym.kind != .method) continue;
+
+                var has_call = false;
+                var call_ranges = std.ArrayList(types.Range){};
+                defer call_ranges.deinit(arena);
+
+                for (tokens) |tok| {
+                    if (tok.type != .Identifier) continue;
+                    if (!std.mem.eql(u8, tok.lexeme, target_name)) continue;
+                    const tok_line = if (tok.line > 0) tok.line - 1 else 0;
+                    const tok_char = if (tok.column > 0) tok.column - 1 else 0;
+                    const pos = frontend.Position{ .line = tok_line, .character = tok_char };
+
+                    if (positionInRange(pos, sym.range)) {
+                        has_call = true;
+                        const len = @as(u32, @intCast(tok.lexeme.len));
+                        try call_ranges.append(arena, .{
+                            .start = .{ .line = tok_line, .character = tok_char },
+                            .end = .{ .line = tok_line, .character = tok_char + len },
+                        });
+                    }
+                }
+
+                if (has_call) {
+                    try calls.append(arena, .{
+                        .from = .{
+                            .name = try arena.dupe(u8, sym.name),
+                            .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
+                            .uri = try arena.dupe(u8, doc_uri),
+                            .range = toLspRange(sym.range),
+                            .selectionRange = toLspRange(sym.selection_range),
+                            .detail = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+                        },
+                        .fromRanges = try call_ranges.toOwnedSlice(arena),
+                    });
+                }
+            }
+        }
+
+        if (calls.items.len == 0) return null;
+        return try calls.toOwnedSlice(arena);
+    }
+
+    pub fn @"callHierarchy/outgoingCalls"(self: *Handler, arena: Allocator, params: types.CallHierarchyOutgoingCallsParams) !lsp.ResultType("callHierarchy/outgoingCalls") {
+        const caller_uri = params.item.uri;
+        const caller_source = self.docs.docs.get(caller_uri) orelse return null;
+        const caller_range = params.item.range;
+
+        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, caller_source, lexer_mod.LexerConfig.development());
+        defer lex.deinit();
+        const tokens = lex.scanTokens() catch return null;
+        defer self.allocator.free(tokens);
+
+        var index = try semantic_index.indexDocument(self.allocator, caller_source);
+        defer index.deinit(self.allocator);
+
+        // Collect unique call targets within the caller's range
+        const CallTarget = struct { name: []const u8, range: types.Range };
+        var targets = std.ArrayList(CallTarget){};
+        defer targets.deinit(self.allocator);
+
+        for (tokens, 0..) |tok, ti| {
+            if (tok.type != .Identifier) continue;
+            const tok_line = if (tok.line > 0) tok.line - 1 else 0;
+            const tok_char = if (tok.column > 0) tok.column - 1 else 0;
+            const pos = frontend.Position{ .line = tok_line, .character = tok_char };
+
+            if (!positionInRange(pos, .{
+                .start = .{ .line = caller_range.start.line, .character = caller_range.start.character },
+                .end = .{ .line = caller_range.end.line, .character = caller_range.end.character },
+            })) continue;
+
+            // Check if this identifier is followed by `(`
+            if (ti + 1 < tokens.len and tokens[ti + 1].type == .LeftParen) {
+                const len = @as(u32, @intCast(tok.lexeme.len));
+                var already_listed = false;
+                for (targets.items) |t| {
+                    if (std.mem.eql(u8, t.name, tok.lexeme)) {
+                        already_listed = true;
+                        break;
+                    }
+                }
+                if (!already_listed) {
+                    try targets.append(self.allocator, .{
+                        .name = tok.lexeme,
+                        .range = .{
+                            .start = .{ .line = tok_line, .character = tok_char },
+                            .end = .{ .line = tok_line, .character = tok_char + len },
+                        },
+                    });
+                }
+            }
+        }
+
+        if (targets.items.len == 0) return null;
+
+        var calls = std.ArrayList(types.CallHierarchyOutgoingCall){};
+        for (targets.items) |target| {
+            // Try to find the function symbol
+            for (index.symbols) |sym| {
+                if (sym.kind != .function and sym.kind != .method) continue;
+                if (!std.mem.eql(u8, sym.name, target.name)) continue;
+
+                try calls.append(arena, .{
+                    .to = .{
+                        .name = try arena.dupe(u8, sym.name),
+                        .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
+                        .uri = try arena.dupe(u8, caller_uri),
+                        .range = toLspRange(sym.range),
+                        .selectionRange = toLspRange(sym.selection_range),
+                        .detail = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+                    },
+                    .fromRanges = try arena.dupe(types.Range, &.{target.range}),
+                });
+                break;
+            }
+        }
+
+        if (calls.items.len == 0) return null;
+        return try calls.toOwnedSlice(arena);
+    }
+
+    fn positionInRange(pos: frontend.Position, range: frontend.Range) bool {
+        if (pos.line < range.start.line) return false;
+        if (pos.line > range.end.line) return false;
+        if (pos.line == range.start.line and pos.character < range.start.character) return false;
+        if (pos.line == range.end.line and pos.character > range.end.character) return false;
+        return true;
+    }
+
     fn identifierAtPosition(self: *Handler, source: []const u8, position: frontend.Position) !?[]const u8 {
         var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, source, lexer_mod.LexerConfig.development());
         defer lex.deinit();
@@ -621,25 +1082,85 @@ pub const Handler = struct {
         return null;
     }
 
-    fn findNameReferencesInSource(self: *Handler, source: []const u8, name: []const u8) ![]frontend.Range {
-        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, source, lexer_mod.LexerConfig.development());
+    /// Find references to `target_name` (defined in `target_uri`) inside
+    /// another file.  Only returns matches where the other file actually
+    /// imports the target file — an `alias.target_name` field-access pattern.
+    fn findImportedReferencesInSource(
+        self: *Handler,
+        other_uri: []const u8,
+        other_source: []const u8,
+        target_uri: []const u8,
+        target_name: []const u8,
+    ) ![]frontend.Range {
+        const empty = try self.allocator.alloc(frontend.Range, 0);
+
+        const target_path = try workspace.fileUriToPathAlloc(self.allocator, target_uri) orelse return empty;
+        defer self.allocator.free(target_path);
+        const norm_target = try workspace.normalizePathAlloc(self.allocator, target_path);
+        defer self.allocator.free(norm_target);
+
+        var resolution = try workspace.resolveDocumentImports(
+            self.allocator,
+            other_uri,
+            other_source,
+            .{ .workspace_roots = self.workspace_roots.items },
+        );
+        defer resolution.deinit(self.allocator);
+
+        var aliases = std.ArrayList([]const u8){};
+        defer aliases.deinit(self.allocator);
+        for (resolution.imports) |imp| {
+            const norm_imp = try workspace.normalizePathAlloc(self.allocator, imp.resolved_path);
+            defer self.allocator.free(norm_imp);
+            if (std.mem.eql(u8, norm_imp, norm_target)) {
+                if (imp.alias) |alias| try aliases.append(self.allocator, alias);
+            }
+        }
+        if (aliases.items.len == 0) {
+            self.allocator.free(empty);
+            return try self.allocator.alloc(frontend.Range, 0);
+        }
+
+        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, other_source, lexer_mod.LexerConfig.development());
         defer lex.deinit();
-        const tokens = lex.scanTokens() catch return try self.allocator.alloc(frontend.Range, 0);
+        const tokens = lex.scanTokens() catch {
+            self.allocator.free(empty);
+            return try self.allocator.alloc(frontend.Range, 0);
+        };
         defer self.allocator.free(tokens);
 
+        self.allocator.free(empty);
         var ranges = std.ArrayList(frontend.Range){};
         errdefer ranges.deinit(self.allocator);
 
-        for (tokens) |token| {
-            if (token.type != .Identifier) continue;
-            if (!std.mem.eql(u8, token.lexeme, name)) continue;
-            const start_line = if (token.line > 0) token.line - 1 else 0;
-            const start_char = if (token.column > 0) token.column - 1 else 0;
-            const lexeme_len = @as(u32, @intCast(token.lexeme.len));
-            try ranges.append(self.allocator, .{
-                .start = .{ .line = start_line, .character = start_char },
-                .end = .{ .line = start_line, .character = start_char + lexeme_len },
-            });
+        // Match patterns:  alias . target_name
+        var i: usize = 0;
+        while (i < tokens.len) : (i += 1) {
+            const tok = tokens[i];
+            if (tok.type != .Identifier) continue;
+
+            var is_alias = false;
+            for (aliases.items) |alias| {
+                if (std.mem.eql(u8, tok.lexeme, alias)) {
+                    is_alias = true;
+                    break;
+                }
+            }
+            if (!is_alias) continue;
+
+            if (i + 2 < tokens.len and tokens[i + 1].type == .Dot) {
+                const member = tokens[i + 2];
+                if (member.type == .Identifier and std.mem.eql(u8, member.lexeme, target_name)) {
+                    const start_line = if (member.line > 0) member.line - 1 else 0;
+                    const start_char = if (member.column > 0) member.column - 1 else 0;
+                    const len = @as(u32, @intCast(member.lexeme.len));
+                    try ranges.append(self.allocator, .{
+                        .start = .{ .line = start_line, .character = start_char },
+                        .end = .{ .line = start_line, .character = start_char + len },
+                    });
+                    i += 2;
+                }
+            }
         }
 
         return ranges.toOwnedSlice(self.allocator);
@@ -838,6 +1359,56 @@ pub const Handler = struct {
     }
 };
 
+fn isAtLineStart(source: []const u8, position: frontend.Position) bool {
+    var line: u32 = 0;
+    var line_start: usize = 0;
+    for (source, 0..) |c, i| {
+        if (line == position.line) {
+            const prefix = source[line_start..@min(line_start + position.character, source.len)];
+            for (prefix) |ch| {
+                if (ch != ' ' and ch != '\t') return false;
+            }
+            return true;
+        }
+        if (c == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    return line == position.line;
+}
+
+fn positionToOffset(source: []const u8, line: u32, character: u32) u32 {
+    var cur_line: u32 = 0;
+    var i: u32 = 0;
+    while (i < source.len and cur_line < line) : (i += 1) {
+        if (source[i] == '\n') cur_line += 1;
+    }
+    return i + character;
+}
+
+fn offsetToLspPosition(source: []const u8, offset: u32) types.Position {
+    var line: u32 = 0;
+    var col: u32 = 0;
+    const end = @min(offset, @as(u32, @intCast(source.len)));
+    for (source[0..end]) |c| {
+        if (c == '\n') {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    return .{ .line = line, .character = col };
+}
+
+fn offsetRangeToLsp(source: []const u8, tr: compiler.TextRange) types.Range {
+    return .{
+        .start = offsetToLspPosition(source, tr.start),
+        .end = offsetToLspPosition(source, tr.end),
+    };
+}
+
 fn toLspRange(range: frontend.Range) types.Range {
     return .{
         .start = .{ .line = range.start.line, .character = range.start.character },
@@ -990,6 +1561,16 @@ fn toLspPositionEncoding(encoding: text_edits.PositionEncoding) types.PositionEn
         .utf16 => .@"utf-16",
         .utf32 => .@"utf-32",
     };
+}
+
+/// Case-insensitive subsequence match (the standard for workspace symbol filtering).
+fn fuzzyMatch(name: []const u8, query: []const u8) bool {
+    var qi: usize = 0;
+    for (name) |c| {
+        if (qi >= query.len) break;
+        if (std.ascii.toLower(c) == std.ascii.toLower(query[qi])) qi += 1;
+    }
+    return qi == query.len;
 }
 
 fn convertDocumentSymbol(arena: Allocator, symbol: semantic_index.DocumentSymbol) !types.DocumentSymbol {
