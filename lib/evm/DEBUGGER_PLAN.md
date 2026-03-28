@@ -59,6 +59,25 @@ There is now also a first source-level scope/liveness layer in the same sidecar:
 
 This is still lexical scope/liveness, not exact runtime storage locations, but it is the first debugger-grade answer to “what names are in scope here?” that survives MLIR/SIR optimization.
 
+There is now also a first honest runtime-location classification on each visible name:
+
+- each local/field in `source_scopes` includes `runtime`
+  - `kind`
+  - optional `name`
+  - `editable`
+- current kinds:
+  - `ssa` for ordinary locals, params, loop items, catch payloads
+  - `storage_field`
+  - `memory_field`
+  - `tstore_field`
+  - `optimized_out` for names with no stable runtime home
+
+This is intentionally conservative. It does **not** pretend SSA values are mutable debugger slots. It gives the debugger enough information to:
+
+- expose rooted contract state (`storage_field`, `memory_field`, `tstore_field`) as editable
+- expose plain locals/params as inspectable but not writable
+- avoid lying about optimized-away values
+
 This document should now be treated as the repo source of truth. The copy in `~/.claude/plans/` is useful as scratch history, but it should not lead the implementation.
 
 ## Context

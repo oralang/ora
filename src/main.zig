@@ -1524,6 +1524,9 @@ const DebugLocalInfo = struct {
     storage_class: ?[]const u8,
     decl_range: compiler.TextRange,
     live_range: compiler.TextRange,
+    runtime_kind: []const u8,
+    runtime_name: ?[]const u8,
+    editable: bool,
 };
 
 const DebugScopeInfo = struct {
@@ -1551,12 +1554,16 @@ const ScopeBuildState = struct {
 };
 
 const ExtraScopeBinding = struct {
-    pattern_id: compiler.PatternId,
+    pattern_id: ?compiler.PatternId = null,
+    name: ?[]const u8 = null,
     kind: []const u8,
     binding_kind: ?compiler.ast.BindingKind = null,
     storage_class: ?compiler.ast.StorageClass = null,
     decl_range: compiler.TextRange,
     live_range: compiler.TextRange,
+    runtime_kind: []const u8 = "ssa",
+    runtime_name: ?[]const u8 = null,
+    editable: bool = false,
 };
 
 fn debugBindingKindName(kind: compiler.ast.BindingKind) []const u8 {
@@ -1606,6 +1613,9 @@ fn appendPatternDebugLocals(
     storage_class: ?compiler.ast.StorageClass,
     decl_range: compiler.TextRange,
     live_range: compiler.TextRange,
+    runtime_kind: []const u8,
+    runtime_name: ?[]const u8,
+    editable: bool,
     next_local_id: *u32,
     locals: *std.ArrayList(DebugLocalInfo),
 ) !void {
@@ -1621,6 +1631,9 @@ fn appendPatternDebugLocals(
                 .storage_class = if (storage_class) |value| debugStorageClassName(value) else null,
                 .decl_range = decl_range,
                 .live_range = live_range,
+                .runtime_kind = runtime_kind,
+                .runtime_name = runtime_name,
+                .editable = editable,
             });
             next_local_id.* += 1;
         },
@@ -1637,6 +1650,9 @@ fn appendPatternDebugLocals(
                     storage_class,
                     field.range,
                     live_range,
+                    runtime_kind,
+                    runtime_name,
+                    editable,
                     next_local_id,
                     locals,
                 );
@@ -1653,6 +1669,9 @@ fn appendPatternDebugLocals(
             storage_class,
             decl_range,
             live_range,
+            runtime_kind,
+            runtime_name,
+            editable,
             next_local_id,
             locals,
         ),
@@ -1667,6 +1686,9 @@ fn appendPatternDebugLocals(
             storage_class,
             decl_range,
             live_range,
+            runtime_kind,
+            runtime_name,
+            editable,
             next_local_id,
             locals,
         ),
@@ -1696,20 +1718,41 @@ fn collectBodyScopeDebugInfo(
     const local_start = locals.items.len;
 
     for (extra_bindings) |binding| {
-        try appendPatternDebugLocals(
-            allocator,
-            ast_file,
-            file_id,
-            scope_id,
-            binding.pattern_id,
-            binding.kind,
-            binding.binding_kind,
-            binding.storage_class,
-            binding.decl_range,
-            binding.live_range,
-            &state.next_local_id,
-            locals,
-        );
+        if (binding.pattern_id) |pattern_id| {
+            try appendPatternDebugLocals(
+                allocator,
+                ast_file,
+                file_id,
+                scope_id,
+                pattern_id,
+                binding.kind,
+                binding.binding_kind,
+                binding.storage_class,
+                binding.decl_range,
+                binding.live_range,
+                binding.runtime_kind,
+                binding.runtime_name,
+                binding.editable,
+                &state.next_local_id,
+                locals,
+            );
+        } else if (binding.name) |name| {
+            try locals.append(allocator, .{
+                .id = state.next_local_id,
+                .scope_id = scope_id,
+                .file_id = file_id,
+                .name = name,
+                .kind = binding.kind,
+                .binding_kind = if (binding.binding_kind) |value| debugBindingKindName(value) else null,
+                .storage_class = if (binding.storage_class) |value| debugStorageClassName(value) else null,
+                .decl_range = binding.decl_range,
+                .live_range = binding.live_range,
+                .runtime_kind = binding.runtime_kind,
+                .runtime_name = binding.runtime_name,
+                .editable = binding.editable,
+            });
+            state.next_local_id += 1;
+        }
     }
 
     for (body.statements) |statement_id| {
@@ -1726,6 +1769,20 @@ fn collectBodyScopeDebugInfo(
                     decl.storage_class,
                     decl.range,
                     .{ .start = decl.range.start, .end = body.range.end },
+                    switch (decl.storage_class) {
+                        .storage => "storage_field",
+                        .memory => "memory_field",
+                        .tstore => "tstore_field",
+                        .none => "ssa",
+                    },
+                    switch (decl.storage_class) {
+                        .none => null,
+                        else => switch (ast_file.pattern(decl.pattern).*) {
+                            .Name => |name| name.name,
+                            else => null,
+                        },
+                    },
+                    decl.storage_class != .none,
                     &state.next_local_id,
                     locals,
                 );
@@ -1762,18 +1819,24 @@ fn collectBodyScopeDebugInfo(
             .For => |for_stmt| {
                 var bindings = std.ArrayList(ExtraScopeBinding){};
                 defer bindings.deinit(allocator);
-                try bindings.append(allocator, .{
-                    .pattern_id = for_stmt.item_pattern,
-                    .kind = "for_item",
-                    .decl_range = compiler.source.rangeOf(ast_file.pattern(for_stmt.item_pattern).*),
-                    .live_range = ast_file.body(for_stmt.body).*.range,
-                });
+                    try bindings.append(allocator, .{
+                        .pattern_id = for_stmt.item_pattern,
+                        .kind = "for_item",
+                        .decl_range = compiler.source.rangeOf(ast_file.pattern(for_stmt.item_pattern).*),
+                        .live_range = ast_file.body(for_stmt.body).*.range,
+                        .runtime_kind = "ssa",
+                        .runtime_name = null,
+                        .editable = false,
+                    });
                 if (for_stmt.index_pattern) |index_pattern| {
                     try bindings.append(allocator, .{
                         .pattern_id = index_pattern,
                         .kind = "for_index",
                         .decl_range = compiler.source.rangeOf(ast_file.pattern(index_pattern).*),
                         .live_range = ast_file.body(for_stmt.body).*.range,
+                        .runtime_kind = "ssa",
+                        .runtime_name = null,
+                        .editable = false,
                     });
                 }
                 try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, for_stmt.body, scope_id, "for", for_stmt.label, bindings.items, state, scopes, locals);
@@ -1796,6 +1859,9 @@ fn collectBodyScopeDebugInfo(
                             .kind = "catch_error",
                             .decl_range = catch_clause.range,
                             .live_range = ast_file.body(catch_clause.body).*.range,
+                            .runtime_kind = "ssa",
+                            .runtime_name = null,
+                            .editable = false,
                         };
                         break :blk catch_bindings[0..1];
                     } else &.{};
@@ -1846,7 +1912,36 @@ fn collectItemDebugScopes(
                     .kind = "param",
                     .decl_range = parameter.range,
                     .live_range = ast_file.body(function_item.body).*.range,
+                    .runtime_kind = "ssa",
+                    .runtime_name = null,
+                    .editable = false,
                 });
+            }
+            if (function_item.parent_contract) |contract_item_id| {
+                const contract_item = ast_file.item(contract_item_id).*;
+                if (contract_item == .Contract) {
+                    for (contract_item.Contract.members) |member_id| {
+                        const member = ast_file.item(member_id).*;
+                        if (member != .Field) continue;
+                        const field = member.Field;
+                        try param_bindings.append(allocator, .{
+                            .name = field.name,
+                            .kind = "field",
+                            .binding_kind = field.binding_kind,
+                            .storage_class = field.storage_class,
+                            .decl_range = field.range,
+                            .live_range = ast_file.body(function_item.body).*.range,
+                            .runtime_kind = switch (field.storage_class) {
+                                .storage => "storage_field",
+                                .memory => "memory_field",
+                                .tstore => "tstore_field",
+                                .none => "optimized_out",
+                            },
+                            .runtime_name = field.name,
+                            .editable = field.storage_class != .none,
+                        });
+                    }
+                }
             }
             try collectBodyScopeDebugInfo(
                 allocator,
@@ -3414,6 +3509,17 @@ fn writeDebugInfoSidecar(
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.writeAll(",\"runtime\":{");
+                try writer.writeAll("\"kind\":");
+                try writeJsonString(writer, local.runtime_kind);
+                try writer.writeAll(",\"name\":");
+                if (local.runtime_name) |runtime_name| {
+                    try writeJsonString(writer, runtime_name);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.print(",\"editable\":{s}", .{if (local.editable) "true" else "false"});
+                try writer.writeAll("}");
                 try writer.writeAll(",\"decl\":");
                 try writeDebugRangeJson(writer, sources, local.file_id, local.decl_range);
                 try writer.writeAll(",\"live\":");
