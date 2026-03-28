@@ -117,6 +117,7 @@ const App = struct {
     }
 
     fn run(self: *App) !void {
+        try self.primeInitialStop();
         try self.terminal.enableRawMode();
         try self.terminal.enterAltScreen();
         while (true) {
@@ -133,6 +134,35 @@ const App = struct {
                 else => {},
             }
         }
+    }
+
+    fn primeInitialStop(self: *App) !void {
+        if (self.debugger.isHalted()) {
+            self.status = "halted";
+            return;
+        }
+
+        if (self.debugger.currentEntry()) |entry| {
+            if (entry.is_statement) {
+                self.status = "ready";
+                self.centerOnCurrentLine();
+                return;
+            }
+        }
+
+        var attempts: usize = 0;
+        while (!self.debugger.isHalted() and attempts < 64) : (attempts += 1) {
+            try self.debugger.stepIn();
+            self.status = @tagName(self.debugger.stop_reason);
+            if (self.debugger.currentEntry()) |entry| {
+                if (entry.is_statement) break;
+            }
+        }
+
+        if (self.debugger.isHalted()) {
+            self.status = @tagName(self.debugger.stop_reason);
+        }
+        self.centerOnCurrentLine();
     }
 
     fn doStepIn(self: *App) !void {
