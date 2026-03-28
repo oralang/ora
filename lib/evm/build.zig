@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     debug_probe_exe.step.dependOn(&bootstrap_crypto.step);
+    b.installArtifact(debug_probe_exe);
     const run_debug_probe = b.addRunArtifact(debug_probe_exe);
     if (b.args) |args| run_debug_probe.addArgs(args);
 
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     debug_tui_exe.step.dependOn(&bootstrap_crypto.step);
+    b.installArtifact(debug_tui_exe);
     const run_debug_tui = b.addRunArtifact(debug_tui_exe);
     if (b.args) |args| run_debug_tui.addArgs(args);
 
