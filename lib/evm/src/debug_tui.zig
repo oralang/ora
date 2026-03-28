@@ -1,4 +1,5 @@
 const std = @import("std");
+const tui = @import("tui");
 const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
 
@@ -7,6 +8,10 @@ const Frame = ora_evm.Frame(.{});
 const Debugger = ora_evm.Debugger(.{});
 const SourceMap = ora_evm.SourceMap;
 const DebugInfo = ora_evm.DebugInfo;
+
+const Color = tui.color.Color;
+const Style = tui.style.Style;
+const BorderStyle = tui.style.BorderStyle;
 
 const AppConfig = struct {
     bytecode_path: []u8,
@@ -26,117 +31,127 @@ const AppConfig = struct {
     }
 };
 
-const Terminal = struct {
-    stdout: std.fs.File,
-    stdin: std.fs.File,
-    original: std.posix.termios,
-    raw_enabled: bool = false,
-
-    const Size = struct {
-        rows: u16,
-        cols: u16,
-    };
-
-    fn init() !Terminal {
-        return .{
-            .stdout = std.fs.File.stdout(),
-            .stdin = std.fs.File.stdin(),
-            .original = try std.posix.tcgetattr(std.posix.STDIN_FILENO),
-        };
-    }
-
-    fn enableRawMode(self: *Terminal) !void {
-        var raw = self.original;
-        raw.iflag.IXON = false;
-        raw.iflag.ICRNL = false;
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.ISIG = false;
-        raw.lflag.IEXTEN = false;
-        raw.oflag.OPOST = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
-        self.raw_enabled = true;
-    }
-
-    fn restore(self: *Terminal) void {
-        if (self.raw_enabled) {
-            std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original) catch {};
-            self.raw_enabled = false;
-        }
-        self.writeAll("\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
-    }
-
-    fn enterAltScreen(self: *Terminal) !void {
-        try self.writeAll("\x1b[?1049h\x1b[?25l");
-    }
-
-    fn clear(self: *Terminal) !void {
-        try self.writeAll("\x1b[2J\x1b[H");
-    }
-
-    fn size(self: *Terminal) Size {
-        _ = self;
-        var ws: std.posix.winsize = undefined;
-        const rc = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
-        if (std.posix.errno(rc) == .SUCCESS and ws.row > 0 and ws.col > 0) {
-            return .{ .rows = ws.row, .cols = ws.col };
-        }
-        return .{ .rows = 24, .cols = 100 };
-    }
-
-    fn readByte(self: *Terminal) !u8 {
-        var byte: [1]u8 = undefined;
-        _ = try self.stdin.read(&byte);
-        return byte[0];
-    }
-
-    fn writeAll(self: *Terminal, bytes: []const u8) !void {
-        try self.stdout.writeAll(bytes);
-    }
-};
-
-const App = struct {
+const DebuggerView = struct {
     allocator: std.mem.Allocator,
-    debugger: Debugger,
-    source_map: SourceMap,
-    source_text: []u8,
-    terminal: Terminal,
+    debugger: *Debugger,
+    source_path: []const u8,
+    calldata: []const u8,
     scroll_line: u32 = 1,
     status: []const u8 = "ready",
-    calldata: []const u8,
-    bytecode_path: []const u8,
-    source_path: []const u8,
 
-    fn deinit(self: *App) void {
-        self.terminal.restore();
-        self.debugger.deinit();
-        self.source_map.deinit();
-        self.allocator.free(self.source_text);
+    fn init(
+        allocator: std.mem.Allocator,
+        debugger: *Debugger,
+        source_path: []const u8,
+        calldata: []const u8,
+    ) !DebuggerView {
+        var self = DebuggerView{
+            .allocator = allocator,
+            .debugger = debugger,
+            .source_path = source_path,
+            .calldata = calldata,
+        };
+        try self.primeInitialStop();
+        return self;
     }
 
-    fn run(self: *App) !void {
-        try self.primeInitialStop();
-        try self.terminal.enableRawMode();
-        try self.terminal.enterAltScreen();
-        while (true) {
-            try self.render();
-            const ch = try self.terminal.readByte();
-            switch (ch) {
-                'q' => return,
-                's' => try self.doStepIn(),
-                'n' => try self.doStepOver(),
-                'o' => try self.doStepOut(),
-                'c' => try self.doContinue(),
-                'j' => self.scrollDown(),
-                'k' => self.scrollUp(),
-                else => {},
-            }
+    pub fn render(self: *DebuggerView, ctx: *tui.RenderContext) void {
+        const screen = ctx.screen;
+        screen.clear();
+
+        const width = ctx.bounds.width;
+        const height = ctx.bounds.height;
+        if (width < 40 or height < 10) {
+            screen.setStyle(Style.default.setFg(Color.light_red).bold());
+            screen.putStringAt(1, 1, "Terminal too small for debugger view");
+            return;
+        }
+
+        const left_width: u16 = if (width >= 120) width - 38 else if (width >= 90) width - 30 else width;
+        const right_width: u16 = if (width > left_width + 2) width - left_width - 2 else 0;
+
+        self.drawHeader(screen, width);
+        self.drawSourcePane(screen, left_width, height);
+        if (right_width > 0) self.drawBindingsPane(screen, left_width + 1, right_width, height);
+        self.drawFooter(screen, width, height);
+    }
+
+    pub fn handleEvent(self: *DebuggerView, event: tui.Event) tui.EventResult {
+        switch (event) {
+            .key => |key_event| {
+                if (key_event.modifiers.ctrl and key_event.key == .char) {
+                    const c = key_event.key.char;
+                    if (c == 'c' or c == 'q' or c == 'C' or c == 'Q') return .ignored;
+                }
+
+                switch (key_event.key) {
+                    .char => |c| switch (c) {
+                        's' => return self.runStep(.in),
+                        'n' => return self.runStep(.over),
+                        'o' => return self.runStep(.out),
+                        'c' => return self.runStep(.continue_),
+                        'j' => {
+                            self.scrollDown();
+                            return .needs_redraw;
+                        },
+                        'k' => {
+                            self.scrollUp();
+                            return .needs_redraw;
+                        },
+                        else => return .ignored,
+                    },
+                    .down => {
+                        self.scrollDown();
+                        return .needs_redraw;
+                    },
+                    .up => {
+                        self.scrollUp();
+                        return .needs_redraw;
+                    },
+                    .page_down => {
+                        self.scroll_page(8);
+                        return .needs_redraw;
+                    },
+                    .page_up => {
+                        self.scroll_page(-8);
+                        return .needs_redraw;
+                    },
+                    else => return .ignored,
+                }
+            },
+            else => return .ignored,
         }
     }
 
-    fn primeInitialStop(self: *App) !void {
+    fn runStep(self: *DebuggerView, comptime mode: enum { in, over, out, continue_ }) tui.EventResult {
+        if (self.debugger.isHalted()) {
+            self.status = "halted";
+            return .needs_redraw;
+        }
+        switch (mode) {
+            .in => self.debugger.stepIn() catch {
+                self.status = "execution_error";
+                return .needs_redraw;
+            },
+            .over => self.debugger.stepOver() catch {
+                self.status = "execution_error";
+                return .needs_redraw;
+            },
+            .out => self.debugger.stepOut() catch {
+                self.status = "execution_error";
+                return .needs_redraw;
+            },
+            .continue_ => self.debugger.continue_() catch {
+                self.status = "execution_error";
+                return .needs_redraw;
+            },
+        }
+        self.status = @tagName(self.debugger.stop_reason);
+        self.centerOnCurrentLine();
+        return .needs_redraw;
+    }
+
+    fn primeInitialStop(self: *DebuggerView) !void {
         if (self.debugger.isHalted()) {
             self.status = "halted";
             return;
@@ -159,106 +174,52 @@ const App = struct {
             }
         }
 
-        if (self.debugger.isHalted()) {
-            self.status = @tagName(self.debugger.stop_reason);
-        }
+        if (self.debugger.isHalted()) self.status = @tagName(self.debugger.stop_reason);
         self.centerOnCurrentLine();
     }
 
-    fn doStepIn(self: *App) !void {
-        if (self.debugger.isHalted()) {
-            self.status = "halted";
-            return;
-        }
-        try self.debugger.stepIn();
-        self.status = @tagName(self.debugger.stop_reason);
-        self.centerOnCurrentLine();
+    fn centerOnCurrentLine(self: *DebuggerView) void {
+        const line = self.debugger.currentSourceLine() orelse return;
+        if (line > 8) self.scroll_line = line - 8 else self.scroll_line = 1;
     }
 
-    fn doStepOver(self: *App) !void {
-        if (self.debugger.isHalted()) {
-            self.status = "halted";
-            return;
-        }
-        try self.debugger.stepOver();
-        self.status = @tagName(self.debugger.stop_reason);
-        self.centerOnCurrentLine();
-    }
-
-    fn doStepOut(self: *App) !void {
-        if (self.debugger.isHalted()) {
-            self.status = "halted";
-            return;
-        }
-        try self.debugger.stepOut();
-        self.status = @tagName(self.debugger.stop_reason);
-        self.centerOnCurrentLine();
-    }
-
-    fn doContinue(self: *App) !void {
-        if (self.debugger.isHalted()) {
-            self.status = "halted";
-            return;
-        }
-        try self.debugger.continue_();
-        self.status = @tagName(self.debugger.stop_reason);
-        self.centerOnCurrentLine();
-    }
-
-    fn scrollDown(self: *App) void {
+    fn scrollDown(self: *DebuggerView) void {
         const total = self.debugger.totalSourceLines();
         if (self.scroll_line < total) self.scroll_line += 1;
     }
 
-    fn scrollUp(self: *App) void {
+    fn scrollUp(self: *DebuggerView) void {
         if (self.scroll_line > 1) self.scroll_line -= 1;
     }
 
-    fn centerOnCurrentLine(self: *App) void {
-        const line = self.debugger.currentSourceLine() orelse return;
-        const height: u32 = 18;
-        if (line > height / 2) {
-            self.scroll_line = line - height / 2;
+    fn scroll_page(self: *DebuggerView, delta: i32) void {
+        if (delta < 0) {
+            const amount: u32 = @intCast(-delta);
+            if (self.scroll_line > amount) self.scroll_line -= amount else self.scroll_line = 1;
         } else {
-            self.scroll_line = 1;
+            self.scroll_line += @intCast(delta);
+            const total = self.debugger.totalSourceLines();
+            if (self.scroll_line > total) self.scroll_line = total;
         }
     }
 
-    fn render(self: *App) !void {
-        const size = self.terminal.size();
-        const total_rows: usize = @intCast(size.rows);
-        const total_cols: usize = @intCast(size.cols);
-        const header_rows: usize = 4;
-        const footer_rows: usize = 2;
-        const content_rows = if (total_rows > header_rows + footer_rows) total_rows - header_rows - footer_rows else 1;
-        const right_width: usize = if (total_cols >= 120) 40 else if (total_cols >= 100) 34 else @min(@as(usize, 30), total_cols / 3);
-        const divider_width: usize = if (right_width > 0) 3 else 0;
-        const left_width = if (total_cols > right_width + divider_width) total_cols - right_width - divider_width else total_cols;
-
-        try self.terminal.clear();
-
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
-
+    fn drawHeader(self: *DebuggerView, screen: anytype, width: u16) void {
+        const source_name = std.fs.path.basename(self.source_path);
         const line = self.debugger.currentSourceLine() orelse 0;
         const entry = self.debugger.currentEntry();
-        const bindings = try self.debugger.getVisibleBindings(self.allocator);
-        defer self.allocator.free(bindings);
-        const source_name = std.fs.path.basename(self.source_path);
 
-        try writer.writeAll("\x1b[7m");
-        var title = std.ArrayList(u8){};
-        defer title.deinit(self.allocator);
-        const title_writer = title.writer(self.allocator);
-        try title_writer.print(" Ora EVM Debugger | {s} ", .{source_name});
-        try writePadded(writer, title.items, total_cols);
-        try writer.writeAll("\x1b[0m\n");
+        screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
+        screen.fill(0, 0, width, 1, ' ');
 
-        var summary = std.ArrayList(u8){};
-        defer summary.deinit(self.allocator);
-        const summary_writer = summary.writer(self.allocator);
-        try summary_writer.print(" status={s}  line={d}  pc={d}  idx={?d}  opcode={s}  depth={d}  gas={d}", .{
+        var title: [256]u8 = undefined;
+        const title_text = std.fmt.bufPrint(&title, " Ora EVM Debugger | {s}", .{source_name}) catch "Ora EVM Debugger";
+        screen.putStringAt(0, 0, title_text);
+
+        screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(211, 219, 227)));
+        screen.fill(0, 1, width, 2, ' ');
+
+        var status: [512]u8 = undefined;
+        const status_text = std.fmt.bufPrint(&status, " status={s}  line={d}  pc={d}  idx={?d}  opcode={s}  depth={d}  gas={d}", .{
             self.status,
             line,
             self.debugger.getPC(),
@@ -266,140 +227,118 @@ const App = struct {
             self.debugger.getCurrentOpcodeName(),
             self.debugger.getCallDepth(),
             self.debugger.getGasRemaining(),
-        });
-        try writePadded(writer, summary.items, total_cols);
-        try writer.writeByte('\n');
+        }) catch "status";
+        screen.putStringAt(0, 1, status_text);
 
-        var context = std.ArrayList(u8){};
-        defer context.deinit(self.allocator);
-        const context_writer = context.writer(self.allocator);
-        try context_writer.print(" visible bindings={d}", .{bindings.len});
-        if (line != 0) {
+        var current: [512]u8 = undefined;
+        const current_source = if (line != 0) blk: {
             if (self.debugger.getSourceLineText(line)) |line_text| {
-                try context_writer.print("  current=`{s}`", .{std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t")});
+                break :blk std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t");
             }
-        }
-        try writePadded(writer, context.items, total_cols);
-        try writer.writeByte('\n');
+            break :blk "";
+        } else "";
+        const current_text = std.fmt.bufPrint(&current, " current={s}", .{current_source}) catch "current=";
+        screen.putStringAt(0, 2, current_text);
+    }
 
-        var source_header = std.ArrayList(u8){};
-        defer source_header.deinit(self.allocator);
-        const source_header_writer = source_header.writer(self.allocator);
-        try source_header_writer.print("Source [{s}]", .{source_name});
-        try renderPaneHeader(writer, left_width, source_header.items);
-        if (right_width > 0) {
-            try writer.writeAll(" | ");
-            var binding_header = std.ArrayList(u8){};
-            defer binding_header.deinit(self.allocator);
-            const binding_header_writer = binding_header.writer(self.allocator);
-            try binding_header_writer.print("Bindings [{d}]", .{bindings.len});
-            try renderPaneHeader(writer, right_width, binding_header.items);
-        }
-        try writer.writeByte('\n');
+    fn drawSourcePane(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
+        if (width < 8 or height < 8) return;
 
+        const pane_top: u16 = 3;
+        const pane_height = height - 5;
+        screen.setStyle(Style.default.setFg(Color.fromRGB(120, 131, 142)));
+        screen.drawBox(0, pane_top, width, pane_height, BorderStyle.single);
+
+        screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
+        screen.putStringAt(2, pane_top, " Source ");
+
+        const content_top = pane_top + 1;
+        const content_height = pane_height - 2;
+        const current_line = self.debugger.currentSourceLine() orelse 0;
         const start_line = self.scroll_line;
-        const end_line = @min(self.debugger.totalSourceLines(), start_line + @as(u32, @intCast(content_rows)) - 1);
-        var row: u32 = start_line;
-        while (row <= end_line) : (row += 1) {
-            const left_text = try self.renderSourceRow(self.allocator, row, left_width, line);
-            defer self.allocator.free(left_text);
-            try writer.writeAll(left_text);
+        const end_line = @min(self.debugger.totalSourceLines(), start_line + content_height - 1);
 
-            if (@as(usize, @intCast(row - start_line)) < content_rows) {
-                const right_text = try self.renderBindingRow(self.allocator, bindings, @intCast(row - start_line), right_width);
-                defer self.allocator.free(right_text);
-                if (right_width > 0) {
-                    try writer.writeAll(" | ");
-                    try writer.writeAll(right_text);
+        var y: u16 = 0;
+        var row = start_line;
+        while (y < content_height) : (y += 1) {
+            screen.setStyle(Style.default);
+            screen.fill(1, content_top + y, width - 2, 1, ' ');
+            if (row <= end_line) {
+                const line_text = self.debugger.getSourceLineText(row) orelse "";
+                const trimmed = std.mem.trimRight(u8, line_text, "\r");
+                if (row == current_line) {
+                    screen.setStyle(Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250)));
+                    screen.fill(1, content_top + y, width - 2, 1, ' ');
+                } else {
+                    screen.setStyle(Style.default.setFg(Color.fromRGB(208, 214, 220)));
                 }
+
+                var label_buf: [16]u8 = undefined;
+                const label = std.fmt.bufPrint(&label_buf, "{d:>4} ", .{row}) catch "   ?";
+                screen.putStringAt(2, content_top + y, label);
+                screen.setStyle(if (row == current_line)
+                    Style.default.setBg(Color.fromRGB(48, 58, 69)).setFg(Color.fromRGB(245, 247, 250))
+                else
+                    Style.default.setFg(Color.fromRGB(208, 214, 220)));
+                screen.putStringAt(7, content_top + y, trimmed);
+                row += 1;
             }
-            try writer.writeByte('\n');
         }
-
-        var remaining = content_rows - @as(usize, @intCast(end_line - start_line + 1));
-        while (remaining > 0) : (remaining -= 1) {
-            try writeSpaces(writer, left_width);
-            if (right_width > 0) {
-                try writer.writeAll(" | ");
-                const idx = content_rows - remaining;
-                const right_text = try self.renderBindingRow(self.allocator, bindings, idx, right_width);
-                defer self.allocator.free(right_text);
-                try writer.writeAll(right_text);
-            }
-            try writer.writeByte('\n');
-        }
-
-        try writer.writeAll("\x1b[7m");
-        try writePadded(writer, " keys: s step-in  n step-over  o step-out  c continue  j/k scroll  q quit ", total_cols);
-        try writer.writeAll("\x1b[0m\n");
-        try writePadded(writer, " visible values show folded constants or concrete rooted runtime values when readable ", total_cols);
-        try writer.writeByte('\n');
-
-        try self.terminal.writeAll(buffer.items);
     }
 
-    fn renderSourceRow(
-        self: *App,
-        allocator: std.mem.Allocator,
-        line_number: u32,
-        width: usize,
-        current_line: u32,
-    ) ![]u8 {
-        const raw_line = self.debugger.getSourceLineText(line_number) orelse "";
-        const trimmed = std.mem.trimRight(u8, raw_line, "\r");
-        var row = std.ArrayList(u8){};
-        errdefer row.deinit(allocator);
-        const writer = row.writer(allocator);
-        const text_width = if (width > 8) width - 8 else 0;
-        if (line_number == current_line) try writer.writeAll("\x1b[48;5;236m");
-        try writer.print("{d:>4} | ", .{line_number});
-        try writeTruncated(writer, trimmed, text_width);
-        const used = @min(trimmed.len, text_width);
-        if (text_width > used) try writeSpaces(writer, text_width - used);
-        if (line_number == current_line) try writer.writeAll("\x1b[0m");
-        const owned = try row.toOwnedSlice(allocator);
-        return owned;
+    fn drawBindingsPane(self: *DebuggerView, screen: anytype, start_x: u16, width: u16, height: u16) void {
+        if (width < 12 or height < 8) return;
+
+        const pane_top: u16 = 3;
+        const pane_height = height - 5;
+        screen.setStyle(Style.default.setFg(Color.fromRGB(120, 131, 142)));
+        screen.drawBox(start_x, pane_top, width, pane_height, BorderStyle.single);
+
+        const bindings = self.debugger.getVisibleBindings(self.allocator) catch &.{};
+        defer if (bindings.len > 0) self.allocator.free(bindings);
+
+        var title_buf: [64]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, " Bindings [{d}] ", .{bindings.len}) catch " Bindings ";
+        screen.setStyle(Style.default.setFg(Color.fromRGB(222, 228, 235)).bold());
+        screen.putStringAt(start_x + 2, pane_top, title);
+
+        const content_top = pane_top + 1;
+        const content_height = pane_height - 2;
+        screen.setStyle(Style.default.setFg(Color.fromRGB(192, 199, 207)).dim());
+        screen.putStringAt(start_x + 2, content_top, "name = value / runtime");
+
+        if (bindings.len == 0) {
+            screen.setStyle(Style.default.setFg(Color.fromRGB(150, 158, 166)).italic());
+            screen.putStringAt(start_x + 2, content_top + 2, "no visible bindings");
+            return;
+        }
+
+        var i: usize = 0;
+        while (i < bindings.len and i + 1 < content_height) : (i += 1) {
+            const binding = bindings[i];
+            const y = content_top + 1 + @as(u16, @intCast(i));
+            var row_buf: [256]u8 = undefined;
+            const row_text = if (binding.folded_value) |folded|
+                std.fmt.bufPrint(&row_buf, "{s} = {s}", .{ binding.name, folded }) catch binding.name
+            else if ((self.debugger.getVisibleBindingValueByName(self.allocator, binding.name) catch null)) |value|
+                std.fmt.bufPrint(&row_buf, "{s} = {d}", .{ binding.name, value }) catch binding.name
+            else
+                std.fmt.bufPrint(&row_buf, "{s} [{s}]", .{ binding.name, binding.runtime_kind }) catch binding.name;
+
+            screen.setStyle(Style.default.setFg(Color.fromRGB(214, 220, 226)));
+            screen.putStringAt(start_x + 2, y, row_text);
+        }
     }
 
-    fn renderBindingRow(
-        self: *App,
-        allocator: std.mem.Allocator,
-        bindings: []const DebugInfo.VisibleBinding,
-        index: usize,
-        width: usize,
-    ) ![]u8 {
-        if (width == 0) return try allocator.dupe(u8, "");
+    fn drawFooter(self: *DebuggerView, screen: anytype, width: u16, height: u16) void {
+        _ = self;
+        screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
+        screen.fill(0, height - 2, width, 1, ' ');
+        screen.putStringAt(0, height - 2, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  Ctrl+Q quit ");
 
-        var row = std.ArrayList(u8){};
-        errdefer row.deinit(allocator);
-        const writer = row.writer(allocator);
-
-        if (index == 0) {
-            try writePadded(writer, "name = value / runtime", width);
-        } else if (index - 1 < bindings.len) {
-            const binding = bindings[index - 1];
-            if (binding.folded_value) |folded| {
-                try writer.print("{s} = {s}", .{ binding.name, folded });
-            } else if (try self.debugger.getVisibleBindingValueByName(allocator, binding.name)) |value| {
-                try writer.print("{s} = {d}", .{ binding.name, value });
-            } else {
-                try writer.print("{s} [{s}]", .{ binding.name, binding.runtime_kind });
-            }
-            const owned = try row.toOwnedSlice(allocator);
-            if (owned.len <= width) {
-                defer allocator.free(owned);
-                return try padOwned(allocator, owned, width);
-            }
-            defer allocator.free(owned);
-            return try truncateOwned(allocator, owned, width);
-        } else {
-            if (bindings.len == 0 and index == 1) {
-                try writePadded(writer, "(no visible bindings at this stop)", width);
-            } else {
-                try writeSpaces(writer, width);
-            }
-        }
-        return try row.toOwnedSlice(allocator);
+        screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(168, 176, 184)));
+        screen.fill(0, height - 1, width, 1, ' ');
+        screen.putStringAt(0, height - 1, " debugger values show folded constants or rooted runtime values when readable ");
     }
 };
 
@@ -421,6 +360,7 @@ pub fn main() !void {
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
 
     const source_text = try std.fs.cwd().readFileAlloc(allocator, config.source_path, 16 * 1024 * 1024);
+    defer allocator.free(source_text);
 
     var debug_info_json: ?[]u8 = null;
     defer if (debug_info_json) |bytes| allocator.free(bytes);
@@ -432,7 +372,7 @@ pub fn main() !void {
 
     var evm: Evm = undefined;
     try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
-    errdefer evm.deinit();
+    defer evm.deinit();
 
     const caller = primitives.Address.fromU256(0x100);
     const contract = primitives.Address.fromU256(0x200);
@@ -461,30 +401,31 @@ pub fn main() !void {
         false,
     ));
 
-    const debugger = blk: {
+    var debugger = blk: {
         if (debug_info) |info| {
             debug_info = null;
             break :blk try Debugger.initWithDebugInfo(allocator, &evm, source_map, info, source_text);
         }
         break :blk try Debugger.init(allocator, &evm, source_map, source_text);
     };
-
-    var app = App{
-        .allocator = allocator,
-        .debugger = debugger,
-        .source_map = source_map,
-        .source_text = source_text,
-        .terminal = try Terminal.init(),
-        .status = "ready",
-        .calldata = config.calldata,
-        .bytecode_path = config.bytecode_path,
-        .source_path = config.source_path,
-    };
     defer {
-        app.deinit();
-        evm.deinit();
+        debugger.deinit();
+        source_map.deinit();
     }
-    app.centerOnCurrentLine();
+
+    var root = try DebuggerView.init(allocator, &debugger, config.source_path, config.calldata);
+
+    var app = try tui.App.init(.{
+        .alternate_screen = true,
+        .hide_cursor = true,
+        .enable_mouse = false,
+        .enable_paste = false,
+        .enable_focus = false,
+        .target_fps = 30,
+        .poll_timeout_ms = 16,
+    });
+    defer app.deinit();
+    try app.setRoot(&root);
     try app.run();
 }
 
@@ -830,69 +771,6 @@ fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
         out[i] = try std.fmt.parseInt(u8, trimmed[i * 2 .. i * 2 + 2], 16);
     }
     return out;
-}
-
-fn writeHex(writer: anytype, bytes: []const u8) !void {
-    for (bytes) |byte| {
-        try writer.print("{x:0>2}", .{byte});
-    }
-}
-
-fn writeTruncated(writer: anytype, text: []const u8, width: usize) !void {
-    if (width == 0) return;
-    if (text.len <= width) {
-        try writer.writeAll(text);
-        if (text.len < width) try writeSpaces(writer, width - text.len);
-        return;
-    }
-    if (width <= 1) {
-        try writer.writeByte(text[0]);
-        return;
-    }
-    try writer.writeAll(text[0 .. width - 1]);
-    try writer.writeByte('~');
-}
-
-fn writePadded(writer: anytype, text: []const u8, width: usize) !void {
-    if (text.len >= width) {
-        try writeTruncated(writer, text, width);
-        return;
-    }
-    try writer.writeAll(text);
-    try writeSpaces(writer, width - text.len);
-}
-
-fn renderPaneHeader(writer: anytype, width: usize, title: []const u8) !void {
-    if (width == 0) return;
-    if (title.len >= width) {
-        try writeTruncated(writer, title, width);
-        return;
-    }
-    try writer.writeAll(title);
-    if (width > title.len) {
-        try writeSpaces(writer, width - title.len);
-    }
-}
-
-fn writeSpaces(writer: anytype, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) try writer.writeByte(' ');
-}
-
-fn truncateOwned(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]u8 {
-    var out = std.ArrayList(u8){};
-    errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
-    try writeTruncated(writer, text, width);
-    return try out.toOwnedSlice(allocator);
-}
-
-fn padOwned(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]u8 {
-    var out = std.ArrayList(u8){};
-    errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
-    try writePadded(writer, text, width);
-    return try out.toOwnedSlice(allocator);
 }
 
 const OraAbi = struct {

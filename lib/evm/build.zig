@@ -50,7 +50,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "voltaire", .module = primitives_mod },
                 .{ .name = "crypto", .module = crypto_mod },
                 .{ .name = "precompiles", .module = precompiles_mod },
-                .{ .name = "tui", .module = tui_mod },
             },
         }),
     });
@@ -69,6 +68,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "voltaire", .module = primitives_mod },
                 .{ .name = "crypto", .module = crypto_mod },
                 .{ .name = "precompiles", .module = precompiles_mod },
+                .{ .name = "tui", .module = tui_mod },
             },
         }),
     });
