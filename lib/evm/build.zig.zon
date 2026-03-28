@@ -1,0 +1,19 @@
+.{
+    .name = .ora_evm,
+    .version = "0.0.0",
+    .fingerprint = 0x953ec4ef3870178a,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .voltaire = .{
+            .path = "../../../voltaire",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "LICENSE",
+        "DEBUGGER_PLAN.md",
+    },
+}
