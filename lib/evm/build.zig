@@ -52,6 +52,24 @@ pub fn build(b: *std.Build) void {
     const run_debug_probe = b.addRunArtifact(debug_probe_exe);
     if (b.args) |args| run_debug_probe.addArgs(args);
 
+    const debug_tui_exe = b.addExecutable(.{
+        .name = "ora-evm-debug-tui",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/debug_tui.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ora_evm", .module = evm_mod },
+                .{ .name = "voltaire", .module = primitives_mod },
+                .{ .name = "crypto", .module = crypto_mod },
+                .{ .name = "precompiles", .module = precompiles_mod },
+            },
+        }),
+    });
+    debug_tui_exe.step.dependOn(&bootstrap_crypto.step);
+    const run_debug_tui = b.addRunArtifact(debug_tui_exe);
+    if (b.args) |args| run_debug_tui.addArgs(args);
+
     const unit_tests = b.addTest(.{
         .name = "ora-evm-unit-tests",
         .root_module = evm_mod,
@@ -87,4 +105,7 @@ pub fn build(b: *std.Build) void {
 
     const debug_probe_step = b.step("debug-probe", "Run the Ora EVM debugger probe against emitted bytecode");
     debug_probe_step.dependOn(&run_debug_probe.step);
+
+    const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
+    debug_tui_step.dependOn(&run_debug_tui.step);
 }
