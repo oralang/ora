@@ -32,6 +32,15 @@ const AppConfig = struct {
     }
 };
 
+const Snapshot = struct {
+    stack_len: usize = 0,
+    stack_top_count: usize = 0,
+    stack_top: [8]u256 = [_]u256{0} ** 8,
+    memory_size: u32 = 0,
+    memory_word_count: usize = 0,
+    memory_words: [8]u256 = [_]u256{0} ** 8,
+};
+
 const DebuggerView = struct {
     allocator: std.mem.Allocator,
     debugger: *Debugger,
@@ -41,6 +50,7 @@ const DebuggerView = struct {
     scroll_line: u32 = 1,
     focus_line: ?u32 = null,
     active_evm_tab: usize = 0,
+    previous_snapshot: Snapshot = .{},
     status: []const u8 = "ready",
 
     fn init(
@@ -56,6 +66,7 @@ const DebuggerView = struct {
             .calldata = calldata,
         };
         try self.primeInitialStop();
+        self.previous_snapshot = self.captureSnapshot();
         return self;
     }
 
@@ -181,6 +192,7 @@ const DebuggerView = struct {
             self.syncFocusFromDebugger();
             return .needs_redraw;
         }
+        self.previous_snapshot = self.captureSnapshot();
         switch (mode) {
             .in => self.debugger.stepIn() catch {
                 self.status = "execution_error";
@@ -289,6 +301,32 @@ const DebuggerView = struct {
         self.active_evm_tab = (self.active_evm_tab + 1) % evm_tab_defs.len;
     }
 
+    fn captureSnapshot(self: *DebuggerView) Snapshot {
+        var snapshot = Snapshot{};
+        const stack = self.debugger.getStack();
+        snapshot.stack_len = stack.len;
+        snapshot.stack_top_count = @min(stack.len, snapshot.stack_top.len);
+        var i: usize = 0;
+        while (i < snapshot.stack_top_count) : (i += 1) {
+            snapshot.stack_top[i] = stack[stack.len - 1 - i];
+        }
+
+        const frame = self.debugger.evm.getCurrentFrame() orelse return snapshot;
+        snapshot.memory_size = frame.memory_size;
+        snapshot.memory_word_count = @min(@as(usize, @intCast((frame.memory_size + 31) / 32)), snapshot.memory_words.len);
+        var word: usize = 0;
+        while (word < snapshot.memory_word_count) : (word += 1) {
+            const offset: u32 = @intCast(word * 32);
+            var value: u256 = 0;
+            var j: u32 = 0;
+            while (j < 32 and offset + j < frame.memory_size) : (j += 1) {
+                value = (value << 8) | frame.readMemory(offset + j);
+            }
+            snapshot.memory_words[word] = value;
+        }
+        return snapshot;
+    }
+
     fn prevEvmTab(self: *DebuggerView) void {
         if (self.active_evm_tab == 0) {
             self.active_evm_tab = evm_tab_defs.len - 1;
@@ -378,7 +416,7 @@ const DebuggerView = struct {
         _ = self;
         screen.setStyle(Style.default.setBg(Color.fromRGB(232, 239, 246)).setFg(Color.fromRGB(25, 31, 36)).bold());
         screen.fill(0, height - 2, width, 1, ' ');
-        putStringClipped(screen, 0, height - 2, width, " s step-in  n step-over  o step-out  c continue  arrows/jk scroll  [/] tabs  q quit ");
+        putStringClipped(screen, 0, height - 2, width, " s step-in  n step-over  o step-out  c continue  j/k scroll  [/] tabs  q quit ");
 
         screen.setStyle(Style.default.setBg(Color.fromRGB(26, 29, 33)).setFg(Color.fromRGB(168, 176, 184)));
         screen.fill(0, height - 1, width, 1, ' ');
@@ -408,7 +446,7 @@ const DebuggerView = struct {
             self.debugger.getGasRemaining(),
         }) catch "pc")) return;
         row += 1;
-        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "depth={d}  stack={d}  mem={d} bytes", .{
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "depth={d}  stack={d}  mem={d}B", .{
             self.debugger.getCallDepth(),
             self.debugger.getStack().len,
             frame.memory_size,
@@ -421,7 +459,7 @@ const DebuggerView = struct {
         row += 1;
         if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "callee={s}", .{formatAddressHex(&addr_buf, frame.address)}) catch "callee")) return;
         row += 1;
-        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "value={d}  calldata={d} bytes", .{
+        if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), std.fmt.bufPrint(&buf, "value={d}  calldata={d}B", .{
             frame.value,
             frame.calldata.len,
         }) catch "value")) return;
@@ -451,8 +489,11 @@ const DebuggerView = struct {
             const stack_index = stack.len - 1 - i;
             var buf: [256]u8 = undefined;
             const prefix = if (i == 0) "top" else "   ";
-            const line = std.fmt.bufPrint(&buf, "{s} [{d:>2}] 0x{x}", .{ prefix, stack_index, stack[stack_index] }) catch "stack";
-            const style = if (i == 0)
+            const line = std.fmt.bufPrint(&buf, "{s} [{d:>2}] {s}", .{ prefix, stack_index, formatShortU256Hex(buf[64..], stack[stack_index]) }) catch "stack";
+            const changed = i >= self.previous_snapshot.stack_top_count or self.previous_snapshot.stack_top[i] != stack[stack_index] or self.previous_snapshot.stack_len != stack.len;
+            const style = if (changed)
+                Style.default.setFg(Color.fromRGB(255, 214, 102)).bold()
+            else if (i == 0)
                 Style.default.setFg(Color.fromRGB(245, 247, 250)).bold()
             else
                 Style.default.setFg(Color.fromRGB(214, 220, 226));
@@ -484,8 +525,13 @@ const DebuggerView = struct {
                 word_value = (word_value << 8) | frame.readMemory(offset + j);
             }
             var buf: [256]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "0x{X:0>4}  0x{x}", .{ offset, word_value }) catch "mem";
-            if (!putPanelLine(screen, bounds, @intCast(word), Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
+            const line = std.fmt.bufPrint(&buf, "0x{X:0>4}  {s}", .{ offset, formatShortU256Hex(buf[64..], word_value) }) catch "mem";
+            const changed = word >= self.previous_snapshot.memory_word_count or self.previous_snapshot.memory_words[word] != word_value or self.previous_snapshot.memory_size != frame.memory_size;
+            const style = if (changed)
+                Style.default.setFg(Color.fromRGB(255, 214, 102)).bold()
+            else
+                Style.default.setFg(Color.fromRGB(214, 220, 226));
+            if (!putPanelLine(screen, bounds, @intCast(word), style, line)) break;
         }
     }
 
@@ -513,7 +559,7 @@ const DebuggerView = struct {
                 if (!std.mem.eql(u8, entry.key_ptr.address[0..], frame.address.bytes[0..])) continue;
                 if (row >= bounds.height) break;
                 var buf: [256]u8 = undefined;
-                const line = std.fmt.bufPrint(&buf, "slot 0x{x} = 0x{x}", .{ entry.key_ptr.slot, entry.value_ptr.* }) catch "slot";
+                const line = std.fmt.bufPrint(&buf, "slot {s} = {s}", .{ formatShortU256Hex(buf[80..120], entry.key_ptr.slot), formatShortU256Hex(buf[120..], entry.value_ptr.*) }) catch "slot";
                 if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
                 row += 1;
                 count += 1;
@@ -524,7 +570,7 @@ const DebuggerView = struct {
                 if (!std.mem.eql(u8, entry.key_ptr.address[0..], frame.address.bytes[0..])) continue;
                 if (row >= bounds.height) break;
                 var buf: [256]u8 = undefined;
-                const line = std.fmt.bufPrint(&buf, "slot 0x{x} = 0x{x}", .{ entry.key_ptr.slot, entry.value_ptr.* }) catch "slot";
+                const line = std.fmt.bufPrint(&buf, "slot {s} = {s}", .{ formatShortU256Hex(buf[80..120], entry.key_ptr.slot), formatShortU256Hex(buf[120..], entry.value_ptr.*) }) catch "slot";
                 if (!putPanelLine(screen, bounds, row, Style.default.setFg(Color.fromRGB(214, 220, 226)), line)) break;
                 row += 1;
                 count += 1;
@@ -611,8 +657,8 @@ const evm_tab_defs = [_]tui.tabs.Tab{
     .{ .label = "Call" },
     .{ .label = "Stack" },
     .{ .label = "Memory" },
-    .{ .label = "Storage" },
-    .{ .label = "TStore" },
+    .{ .label = "Stor" },
+    .{ .label = "TStor" },
 };
 
 const EvmPane = struct {
@@ -656,6 +702,20 @@ fn putPanelLine(screen: anytype, bounds: Rect, row: u16, style: Style, text: []c
 
 fn formatU256Hex(buf: []u8, value: u256) []const u8 {
     return std.fmt.bufPrint(buf, "0x{x}", .{value}) catch "0x?";
+}
+
+fn formatShortU256Hex(buf: []u8, value: u256) []const u8 {
+    const full = std.fmt.bufPrint(buf, "{x}", .{value}) catch return "0x?";
+    if (full.len <= 14) {
+        return std.fmt.bufPrint(buf, "0x{s}", .{full}) catch "0x?";
+    }
+    var out: [32]u8 = undefined;
+    const prefix = full[0..6];
+    const suffix = full[full.len - 4 ..];
+    const text = std.fmt.bufPrint(&out, "0x{s}..{s}", .{ prefix, suffix }) catch "0x?";
+    const len = @min(text.len, buf.len);
+    @memcpy(buf[0..len], text[0..len]);
+    return buf[0..len];
 }
 
 fn formatAddressHex(buf: []u8, address: primitives.Address) []const u8 {
