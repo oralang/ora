@@ -1706,6 +1706,14 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module);
 
+    /// Extract SIR module global slot assignments as a JSON object.
+    /// Example: {"counter":0,"balances":1}
+    /// Returns null string ref on failure or when no slot metadata is present.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRGlobalSlots(
+        MlirContext ctx,
+        MlirModule module);
+
     //===----------------------------------------------------------------------===//
     // Integer Attribute Creation with Full Precision (u256 support)
     //===----------------------------------------------------------------------===//

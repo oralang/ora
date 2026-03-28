@@ -15,7 +15,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -128,6 +130,29 @@ namespace mlir
                     pos = close + 1;
                 }
                 return out.base != AbiBase::Unknown;
+            }
+
+            static uint64_t computeDebugNamedMemoryReserveBytes(ModuleOp module)
+            {
+                if (!module || !module->hasAttr("ora.debug_info"))
+                    return 0;
+                auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
+                if (!slotsAttr || slotsAttr.empty())
+                    return 0;
+
+                uint64_t maxSlot = 0;
+                bool found = false;
+                for (NamedAttribute attr : slotsAttr)
+                {
+                    auto slotAttr = llvm::dyn_cast<IntegerAttr>(attr.getValue());
+                    if (!slotAttr)
+                        continue;
+                    maxSlot = std::max<uint64_t>(maxSlot, slotAttr.getValue().getZExtValue());
+                    found = true;
+                }
+                if (!found)
+                    return 0;
+                return (maxSlot + 1) * 32;
             }
 
             struct AbiLayout
@@ -983,7 +1008,16 @@ namespace mlir
                     // Without this, malloc may start at address 0 and clobber scratch state.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(loc, ptrType, c32_entry);
                     Value heapBase = builder.create<sir::CodeSizeOp>(loc, u256Type);
-                    builder.create<sir::StoreOp>(loc, freePtrSlot, heapBase);
+                    Value initialFreePtr = heapBase;
+                    if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
+                    {
+                        Value reservedBytes = builder.create<sir::ConstOp>(
+                            loc,
+                            u256Type,
+                            IntegerAttr::get(i64Type, debugNamedMemoryBytes));
+                        initialFreePtr = builder.create<sir::AddOp>(loc, u256Type, heapBase, reservedBytes);
+                    }
+                    builder.create<sir::StoreOp>(loc, freePtrSlot, initialFreePtr);
 
                     Value cv = builder.create<sir::CallValueOp>(loc, u256Type);
                     setResultName(cv.getDefiningOp(), "cv");

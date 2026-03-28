@@ -11,6 +11,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/APInt.h"
+#include <optional>
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -37,6 +38,59 @@ static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
     Value v = ensureU256(rewriter, loc, value);
     Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, v);
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
+}
+
+static bool isDebugInfoLoweringEnabled(Operation *op)
+{
+    if (!op)
+        return false;
+    if (auto module = op->getParentOfType<ModuleOp>())
+        return module->hasAttr("ora.debug_info");
+    return false;
+}
+
+static std::optional<uint64_t> lookupNamedRootSlot(Operation *op, StringRef rootName)
+{
+    if (!op)
+        return std::nullopt;
+    auto module = op->getParentOfType<ModuleOp>();
+    if (!module)
+        return std::nullopt;
+    auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
+    if (!slotsAttr)
+        return std::nullopt;
+    if (auto slotAttr = llvm::dyn_cast_or_null<IntegerAttr>(slotsAttr.get(rootName)))
+        return slotAttr.getValue().getZExtValue();
+    return std::nullopt;
+}
+
+static Value buildDebugNamedMemoryPtr(
+    PatternRewriter &rewriter,
+    Location loc,
+    Operation *op,
+    StringRef rootName)
+{
+    auto slot = lookupNamedRootSlot(op, rootName);
+    if (!slot)
+        return Value();
+
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
+    auto ui64Type = mlir::IntegerType::get(ctx, evm::kU64Bits, mlir::IntegerType::Unsigned);
+
+    Value base = rewriter.create<sir::CodeSizeOp>(loc, u256Type);
+    const uint64_t byteOffset = slot.value() * evm::kWordBytes;
+    Value addr = base;
+    if (byteOffset != 0)
+    {
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, byteOffset));
+        addr = rewriter.create<sir::AddOp>(loc, u256Type, base, offset);
+    }
+    return rewriter.create<sir::BitcastOp>(loc, ptrType, addr);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +167,16 @@ LogicalResult ConvertMLoadOp::matchAndRewrite(
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
 
+    if (isDebugInfoLoweringEnabled(op.getOperation()))
+    {
+        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
+        {
+            Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
+            rewriter.replaceOp(op, result);
+            return success();
+        }
+    }
+
     // Allocate a word-sized slot and load from it.
     Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
         mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
@@ -134,6 +198,17 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+
+    if (isDebugInfoLoweringEnabled(op.getOperation()))
+    {
+        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
+        {
+            Value val = ensureU256(rewriter, loc, adaptor.getValue());
+            rewriter.create<sir::StoreOp>(loc, ptr, val);
+            rewriter.eraseOp(op);
+            return success();
+        }
+    }
 
     Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
         mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));

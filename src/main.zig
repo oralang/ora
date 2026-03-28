@@ -1526,7 +1526,11 @@ const DebugLocalInfo = struct {
     live_range: compiler.TextRange,
     runtime_kind: []const u8,
     runtime_name: ?[]const u8,
+    runtime_location_kind: ?[]const u8,
+    runtime_location_root: ?[]const u8,
+    runtime_location_slot: ?u64,
     editable: bool,
+    folded_value: ?[]const u8,
 };
 
 const DebugScopeInfo = struct {
@@ -1553,6 +1557,16 @@ const ScopeBuildState = struct {
     next_local_id: u32 = 0,
 };
 
+const DebugGlobalSlots = std.StringHashMap(u64);
+
+fn deinitDebugGlobalSlots(allocator: std.mem.Allocator, slots: *DebugGlobalSlots) void {
+    var it = slots.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+    }
+    slots.deinit();
+}
+
 const ExtraScopeBinding = struct {
     pattern_id: ?compiler.PatternId = null,
     name: ?[]const u8 = null,
@@ -1563,8 +1577,20 @@ const ExtraScopeBinding = struct {
     live_range: compiler.TextRange,
     runtime_kind: []const u8 = "ssa",
     runtime_name: ?[]const u8 = null,
+    runtime_location_kind: ?[]const u8 = null,
+    runtime_location_root: ?[]const u8 = null,
+    runtime_location_slot: ?u64 = null,
     editable: bool = false,
+    folded_value: ?[]const u8 = null,
 };
+
+fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
+    return switch (value) {
+        .integer => |integer| try integer.toString(allocator, 10, .lower),
+        .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
+        .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+    };
+}
 
 fn debugBindingKindName(kind: compiler.ast.BindingKind) []const u8 {
     return switch (kind) {
@@ -1581,6 +1607,53 @@ fn debugStorageClassName(storage_class: compiler.ast.StorageClass) ?[]const u8 {
         .storage => "storage",
         .memory => "memory",
         .tstore => "tstore",
+    };
+}
+
+fn debugBindingEditable(
+    storage_class: compiler.ast.StorageClass,
+    runtime_location_slot: ?u64,
+) bool {
+    return switch (storage_class) {
+        .storage, .memory, .tstore => runtime_location_slot != null,
+        .none => false,
+    };
+}
+
+fn debugRuntimeKindForStorageClass(
+    storage_class: compiler.ast.StorageClass,
+    runtime_location_slot: ?u64,
+) []const u8 {
+    return switch (storage_class) {
+        .storage => "storage_field",
+        .memory => if (runtime_location_slot != null) "memory_field" else "opaque_memory_field",
+        .tstore => "tstore_field",
+        .none => "ssa",
+    };
+}
+
+fn debugRuntimeLocationKindForStorageClass(
+    storage_class: compiler.ast.StorageClass,
+    runtime_location_slot: ?u64,
+) ?[]const u8 {
+    if (runtime_location_slot == null) return null;
+    return switch (storage_class) {
+        .storage => "storage_root",
+        .memory => "memory_root",
+        .tstore => "tstore_root",
+        .none => null,
+    };
+}
+
+fn debugRuntimeLocationRootForStorageClass(
+    storage_class: compiler.ast.StorageClass,
+    runtime_location_slot: ?u64,
+    root_name: ?[]const u8,
+) ?[]const u8 {
+    if (runtime_location_slot == null) return null;
+    return switch (storage_class) {
+        .storage, .memory, .tstore => root_name,
+        .none => null,
     };
 }
 
@@ -1615,7 +1688,11 @@ fn appendPatternDebugLocals(
     live_range: compiler.TextRange,
     runtime_kind: []const u8,
     runtime_name: ?[]const u8,
+    runtime_location_kind: ?[]const u8,
+    runtime_location_root: ?[]const u8,
+    runtime_location_slot: ?u64,
     editable: bool,
+    folded_value: ?[]const u8,
     next_local_id: *u32,
     locals: *std.ArrayList(DebugLocalInfo),
 ) !void {
@@ -1633,7 +1710,11 @@ fn appendPatternDebugLocals(
                 .live_range = live_range,
                 .runtime_kind = runtime_kind,
                 .runtime_name = runtime_name,
+                .runtime_location_kind = runtime_location_kind,
+                .runtime_location_root = runtime_location_root,
+                .runtime_location_slot = runtime_location_slot,
                 .editable = editable,
+                .folded_value = folded_value,
             });
             next_local_id.* += 1;
         },
@@ -1652,7 +1733,11 @@ fn appendPatternDebugLocals(
                     live_range,
                     runtime_kind,
                     runtime_name,
+                    runtime_location_kind,
+                    runtime_location_root,
+                    runtime_location_slot,
                     editable,
+                    folded_value,
                     next_local_id,
                     locals,
                 );
@@ -1671,7 +1756,11 @@ fn appendPatternDebugLocals(
             live_range,
             runtime_kind,
             runtime_name,
+            runtime_location_kind,
+            runtime_location_root,
+            runtime_location_slot,
             editable,
+            folded_value,
             next_local_id,
             locals,
         ),
@@ -1688,7 +1777,11 @@ fn appendPatternDebugLocals(
             live_range,
             runtime_kind,
             runtime_name,
+            runtime_location_kind,
+            runtime_location_root,
+            runtime_location_slot,
             editable,
+            folded_value,
             next_local_id,
             locals,
         ),
@@ -1699,6 +1792,8 @@ fn appendPatternDebugLocals(
 fn collectBodyScopeDebugInfo(
     allocator: std.mem.Allocator,
     db: *compiler.CompilerDb,
+    const_eval: *const compiler.sema.ConstEvalResult,
+    global_slots: *const DebugGlobalSlots,
     ast_file: *const compiler.ast.AstFile,
     file_id: compiler.FileId,
     function_name: []const u8,
@@ -1732,7 +1827,11 @@ fn collectBodyScopeDebugInfo(
                 binding.live_range,
                 binding.runtime_kind,
                 binding.runtime_name,
+                binding.runtime_location_kind,
+                binding.runtime_location_root,
+                binding.runtime_location_slot,
                 binding.editable,
+                binding.folded_value,
                 &state.next_local_id,
                 locals,
             );
@@ -1749,7 +1848,11 @@ fn collectBodyScopeDebugInfo(
                 .live_range = binding.live_range,
                 .runtime_kind = binding.runtime_kind,
                 .runtime_name = binding.runtime_name,
+                .runtime_location_kind = binding.runtime_location_kind,
+                .runtime_location_root = binding.runtime_location_root,
+                .runtime_location_slot = binding.runtime_location_slot,
                 .editable = binding.editable,
+                .folded_value = binding.folded_value,
             });
             state.next_local_id += 1;
         }
@@ -1758,6 +1861,13 @@ fn collectBodyScopeDebugInfo(
     for (body.statements) |statement_id| {
         switch (ast_file.statement(statement_id).*) {
             .VariableDecl => |decl| {
+                const folded_value = if (decl.value) |expr_id|
+                    if (const_eval.values[expr_id.index()]) |value|
+                        try formatConstDebugValue(allocator, value)
+                    else
+                        null
+                else
+                    null;
                 try appendPatternDebugLocals(
                     allocator,
                     ast_file,
@@ -1769,12 +1879,13 @@ fn collectBodyScopeDebugInfo(
                     decl.storage_class,
                     decl.range,
                     .{ .start = decl.range.start, .end = body.range.end },
-                    switch (decl.storage_class) {
-                        .storage => "storage_field",
-                        .memory => "memory_field",
-                        .tstore => "tstore_field",
-                        .none => "ssa",
-                    },
+                    debugRuntimeKindForStorageClass(
+                        decl.storage_class,
+                        switch (ast_file.pattern(decl.pattern).*) {
+                            .Name => |name| global_slots.get(name.name),
+                            else => null,
+                        },
+                    ),
                     switch (decl.storage_class) {
                         .none => null,
                         else => switch (ast_file.pattern(decl.pattern).*) {
@@ -1782,7 +1893,39 @@ fn collectBodyScopeDebugInfo(
                             else => null,
                         },
                     },
-                    decl.storage_class != .none,
+                    debugRuntimeLocationKindForStorageClass(
+                        decl.storage_class,
+                        switch (ast_file.pattern(decl.pattern).*) {
+                            .Name => |name| global_slots.get(name.name),
+                            else => null,
+                        },
+                    ),
+                    debugRuntimeLocationRootForStorageClass(
+                        decl.storage_class,
+                        switch (ast_file.pattern(decl.pattern).*) {
+                            .Name => |name| global_slots.get(name.name),
+                            else => null,
+                        },
+                        switch (decl.storage_class) {
+                            .none => null,
+                            else => switch (ast_file.pattern(decl.pattern).*) {
+                                .Name => |name| name.name,
+                                else => null,
+                            },
+                        },
+                    ),
+                    switch (ast_file.pattern(decl.pattern).*) {
+                        .Name => |name| global_slots.get(name.name),
+                        else => null,
+                    },
+                    debugBindingEditable(
+                        decl.storage_class,
+                        switch (ast_file.pattern(decl.pattern).*) {
+                            .Name => |name| global_slots.get(name.name),
+                            else => null,
+                        },
+                    ),
+                    folded_value,
                     &state.next_local_id,
                     locals,
                 );
@@ -1808,26 +1951,28 @@ fn collectBodyScopeDebugInfo(
     for (body.statements) |statement_id| {
         switch (ast_file.statement(statement_id).*) {
             .If => |if_stmt| {
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, if_stmt.then_body, scope_id, "if_then", null, &.{}, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, if_stmt.then_body, scope_id, "if_then", null, &.{}, state, scopes, locals);
                 if (if_stmt.else_body) |else_body| {
-                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, else_body, scope_id, "if_else", null, &.{}, state, scopes, locals);
+                    try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, else_body, scope_id, "if_else", null, &.{}, state, scopes, locals);
                 }
             },
             .While => |while_stmt| {
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, while_stmt.body, scope_id, "while", while_stmt.label, &.{}, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, while_stmt.body, scope_id, "while", while_stmt.label, &.{}, state, scopes, locals);
             },
             .For => |for_stmt| {
                 var bindings = std.ArrayList(ExtraScopeBinding){};
                 defer bindings.deinit(allocator);
-                    try bindings.append(allocator, .{
-                        .pattern_id = for_stmt.item_pattern,
-                        .kind = "for_item",
-                        .decl_range = compiler.source.rangeOf(ast_file.pattern(for_stmt.item_pattern).*),
-                        .live_range = ast_file.body(for_stmt.body).*.range,
-                        .runtime_kind = "ssa",
-                        .runtime_name = null,
-                        .editable = false,
-                    });
+                try bindings.append(allocator, .{
+                    .pattern_id = for_stmt.item_pattern,
+                    .kind = "for_item",
+                    .decl_range = compiler.source.rangeOf(ast_file.pattern(for_stmt.item_pattern).*),
+                    .live_range = ast_file.body(for_stmt.body).*.range,
+                    .runtime_kind = "ssa",
+                    .runtime_name = null,
+                    .runtime_location_kind = null,
+                    .runtime_location_root = null,
+                    .editable = false,
+                });
                 if (for_stmt.index_pattern) |index_pattern| {
                     try bindings.append(allocator, .{
                         .pattern_id = index_pattern,
@@ -1836,21 +1981,23 @@ fn collectBodyScopeDebugInfo(
                         .live_range = ast_file.body(for_stmt.body).*.range,
                         .runtime_kind = "ssa",
                         .runtime_name = null,
+                        .runtime_location_kind = null,
+                        .runtime_location_root = null,
                         .editable = false,
                     });
                 }
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, for_stmt.body, scope_id, "for", for_stmt.label, bindings.items, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, for_stmt.body, scope_id, "for", for_stmt.label, bindings.items, state, scopes, locals);
             },
             .Switch => |switch_stmt| {
                 for (switch_stmt.arms) |arm| {
-                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, arm.body, scope_id, "switch_arm", null, &.{}, state, scopes, locals);
+                    try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, arm.body, scope_id, "switch_arm", null, &.{}, state, scopes, locals);
                 }
                 if (switch_stmt.else_body) |else_body| {
-                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, else_body, scope_id, "switch_else", null, &.{}, state, scopes, locals);
+                    try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, else_body, scope_id, "switch_else", null, &.{}, state, scopes, locals);
                 }
             },
             .Try => |try_stmt| {
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, try_stmt.try_body, scope_id, "try", null, &.{}, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, try_stmt.try_body, scope_id, "try", null, &.{}, state, scopes, locals);
                 if (try_stmt.catch_clause) |catch_clause| {
                     var catch_bindings: [1]ExtraScopeBinding = undefined;
                     const catch_items = if (catch_clause.error_pattern) |pattern_id| blk: {
@@ -1861,18 +2008,20 @@ fn collectBodyScopeDebugInfo(
                             .live_range = ast_file.body(catch_clause.body).*.range,
                             .runtime_kind = "ssa",
                             .runtime_name = null,
+                            .runtime_location_kind = null,
+                            .runtime_location_root = null,
                             .editable = false,
                         };
                         break :blk catch_bindings[0..1];
                     } else &.{};
-                    try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, catch_clause.body, scope_id, "catch", null, catch_items, state, scopes, locals);
+                    try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, catch_clause.body, scope_id, "catch", null, catch_items, state, scopes, locals);
                 }
             },
             .Block => |block_stmt| {
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "block", null, &.{}, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "block", null, &.{}, state, scopes, locals);
             },
             .LabeledBlock => |block_stmt| {
-                try collectBodyScopeDebugInfo(allocator, db, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "labeled_block", block_stmt.label, &.{}, state, scopes, locals);
+                try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, block_stmt.body, scope_id, "labeled_block", block_stmt.label, &.{}, state, scopes, locals);
             },
             else => {},
         }
@@ -1882,6 +2031,8 @@ fn collectBodyScopeDebugInfo(
 fn collectItemDebugScopes(
     allocator: std.mem.Allocator,
     db: *compiler.CompilerDb,
+    const_eval: *const compiler.sema.ConstEvalResult,
+    global_slots: *const DebugGlobalSlots,
     ast_file: *const compiler.ast.AstFile,
     file_id: compiler.FileId,
     item_id: compiler.ItemId,
@@ -1893,12 +2044,12 @@ fn collectItemDebugScopes(
     switch (ast_file.item(item_id).*) {
         .Contract => |contract_item| {
             for (contract_item.members) |member_id| {
-                try collectItemDebugScopes(allocator, db, ast_file, file_id, member_id, contract_item.name, state, scopes, locals);
+                try collectItemDebugScopes(allocator, db, const_eval, global_slots, ast_file, file_id, member_id, contract_item.name, state, scopes, locals);
             }
         },
         .Impl => |impl_item| {
             for (impl_item.methods) |method_id| {
-                try collectItemDebugScopes(allocator, db, ast_file, file_id, method_id, inherited_contract_name, state, scopes, locals);
+                try collectItemDebugScopes(allocator, db, const_eval, global_slots, ast_file, file_id, method_id, inherited_contract_name, state, scopes, locals);
             }
         },
         .Function => |function_item| {
@@ -1914,6 +2065,9 @@ fn collectItemDebugScopes(
                     .live_range = ast_file.body(function_item.body).*.range,
                     .runtime_kind = "ssa",
                     .runtime_name = null,
+                    .runtime_location_kind = null,
+                    .runtime_location_root = null,
+                    .runtime_location_slot = null,
                     .editable = false,
                 });
             }
@@ -1932,13 +2086,15 @@ fn collectItemDebugScopes(
                             .decl_range = field.range,
                             .live_range = ast_file.body(function_item.body).*.range,
                             .runtime_kind = switch (field.storage_class) {
-                                .storage => "storage_field",
-                                .memory => "memory_field",
-                                .tstore => "tstore_field",
                                 .none => "optimized_out",
+                                else => debugRuntimeKindForStorageClass(field.storage_class, global_slots.get(field.name)),
                             },
                             .runtime_name = field.name,
-                            .editable = field.storage_class != .none,
+                            .runtime_location_kind = debugRuntimeLocationKindForStorageClass(field.storage_class, global_slots.get(field.name)),
+                            .runtime_location_root = debugRuntimeLocationRootForStorageClass(field.storage_class, global_slots.get(field.name), field.name),
+                            .runtime_location_slot = global_slots.get(field.name),
+                            .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
+                            .folded_value = null,
                         });
                     }
                 }
@@ -1946,6 +2102,8 @@ fn collectItemDebugScopes(
             try collectBodyScopeDebugInfo(
                 allocator,
                 db,
+                const_eval,
+                global_slots,
                 ast_file,
                 file_id,
                 function_item.name,
@@ -1968,6 +2126,7 @@ fn buildSourceScopeDebugInfo(
     allocator: std.mem.Allocator,
     db: *compiler.CompilerDb,
     root_module_id: compiler.ModuleId,
+    global_slots: *const DebugGlobalSlots,
 ) !DebugSourceScopeBundle {
     var scopes: std.ArrayList(DebugScopeInfo) = .{};
     var locals: std.ArrayList(DebugLocalInfo) = .{};
@@ -1980,8 +2139,9 @@ fn buildSourceScopeDebugInfo(
     for (package.modules.items) |module_id| {
         const module = db.sources.module(module_id);
         const ast_file = try db.astFile(module.file_id);
+        const const_eval = try db.constEval(module_id);
         for (ast_file.root_items) |item_id| {
-            try collectItemDebugScopes(allocator, db, ast_file, module.file_id, item_id, null, &state, &scopes, &locals);
+            try collectItemDebugScopes(allocator, db, const_eval, global_slots, ast_file, module.file_id, item_id, null, &state, &scopes, &locals);
         }
     }
 
@@ -1989,6 +2149,54 @@ fn buildSourceScopeDebugInfo(
         .scopes = try scopes.toOwnedSlice(allocator),
         .locals = try locals.toOwnedSlice(allocator),
     };
+}
+
+fn parseDebugGlobalSlots(allocator: std.mem.Allocator, json_bytes: ?[]const u8) !DebugGlobalSlots {
+    var slots = DebugGlobalSlots.init(allocator);
+    errdefer slots.deinit();
+
+    const input = json_bytes orelse return slots;
+    const trimmed = std.mem.trim(u8, input, " \n\r\t");
+    if (trimmed.len == 0) return slots;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return slots;
+
+    var it = parsed.value.object.iterator();
+    while (it.next()) |entry| {
+        switch (entry.value_ptr.*) {
+            .integer => |value| try slots.put(try allocator.dupe(u8, entry.key_ptr.*), @intCast(value)),
+            else => {},
+        }
+    }
+    return slots;
+}
+
+fn parseDebugGlobalSlotsFromSirText(allocator: std.mem.Allocator, sir_text: []const u8) !DebugGlobalSlots {
+    var slots = DebugGlobalSlots.init(allocator);
+    errdefer deinitDebugGlobalSlots(allocator, &slots);
+
+    const marker = "ora.global_slots = {";
+    const start = std.mem.indexOf(u8, sir_text, marker) orelse return slots;
+    const body_start = start + marker.len;
+    const body_end = std.mem.indexOfScalarPos(u8, sir_text, body_start, '}') orelse return slots;
+    const body = sir_text[body_start..body_end];
+
+    var it = std.mem.splitScalar(u8, body, ',');
+    while (it.next()) |entry_raw| {
+        const entry = std.mem.trim(u8, entry_raw, " \n\r\t");
+        if (entry.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        const name = std.mem.trim(u8, entry[0..eq], " \n\r\t");
+        const rest = std.mem.trim(u8, entry[eq + 1 ..], " \n\r\t");
+        const colon = std.mem.indexOfScalar(u8, rest, ':') orelse continue;
+        const slot_text = std.mem.trim(u8, rest[0..colon], " \n\r\t");
+        const slot = std.fmt.parseInt(u64, slot_text, 10) catch continue;
+        try slots.put(try allocator.dupe(u8, name), slot);
+    }
+
+    return slots;
 }
 
 fn posBeforeOrEqual(line_a: u32, col_a: u32, line_b: u32, col_b: u32) bool {
@@ -2371,14 +2579,6 @@ fn runMlirEmitAdvanced(
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
-    const source_scopes = if (mlir_options.debug_info)
-        try buildSourceScopeDebugInfo(allocator, &compilation.db, compilation.root_module_id)
-    else
-        null;
-    defer if (source_scopes) |bundle| {
-        allocator.free(bundle.scopes);
-        allocator.free(bundle.locals);
-    };
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
@@ -2644,6 +2844,32 @@ fn runMlirEmitAdvanced(
             null;
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        const sir_global_slots_ref: c.MlirStringRef = if (mlir_options.debug_info)
+            c.oraExtractSIRGlobalSlots(ctx, final_module)
+        else
+            .{ .data = null, .length = 0 };
+        defer if (sir_global_slots_ref.data != null) {
+            mlir_c_api.freeStringRef(sir_global_slots_ref);
+        };
+        const sir_global_slots_json: ?[]const u8 = if (sir_global_slots_ref.data != null and sir_global_slots_ref.length > 0)
+            sir_global_slots_ref.data[0..sir_global_slots_ref.length]
+        else
+            null;
+        var debug_global_slots = try parseDebugGlobalSlots(allocator, sir_global_slots_json);
+        if (debug_global_slots.count() == 0 and mlir_options.debug_info) {
+            deinitDebugGlobalSlots(allocator, &debug_global_slots);
+            debug_global_slots = try parseDebugGlobalSlotsFromSirText(allocator, sir_text);
+        }
+        defer deinitDebugGlobalSlots(allocator, &debug_global_slots);
+        const source_scopes = if (mlir_options.debug_info)
+            try buildSourceScopeDebugInfo(allocator, &compilation.db, compilation.root_module_id, &debug_global_slots)
+        else
+            null;
+        defer if (source_scopes) |bundle| {
+            allocator.free(bundle.scopes);
+            allocator.free(bundle.locals);
+        };
+
         if (mlir_options.emit_sir_text) {
             if (mlir_options.output_dir) |output_dir| {
                 std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
@@ -3459,7 +3685,7 @@ fn writeDebugInfoSidecar(
     const trimmed = std.mem.trim(u8, sir_debug_info_json, " \n\r\t");
     if (std.mem.startsWith(u8, trimmed, "{\"version\":1,")) {
         try writer.writeAll("{\"version\":2,");
-        try writer.writeAll(trimmed["{\"version\":1,".len..trimmed.len - 1]);
+        try writer.writeAll(trimmed["{\"version\":1,".len .. trimmed.len - 1]);
     } else if (trimmed.len != 0 and trimmed[trimmed.len - 1] == '}') {
         try writer.writeAll(trimmed[0 .. trimmed.len - 1]);
     } else {
@@ -3526,8 +3752,34 @@ fn writeDebugInfoSidecar(
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.writeAll(",\"location\":");
+                if (local.runtime_location_kind) |runtime_location_kind| {
+                    try writer.writeAll("{\"kind\":");
+                    try writeJsonString(writer, runtime_location_kind);
+                    try writer.writeAll(",\"root\":");
+                    if (local.runtime_location_root) |runtime_location_root| {
+                        try writeJsonString(writer, runtime_location_root);
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                    try writer.writeAll(",\"slot\":");
+                    if (local.runtime_location_slot) |runtime_location_slot| {
+                        try writer.print("{d}", .{runtime_location_slot});
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                    try writer.writeAll("}");
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.print(",\"editable\":{s}", .{if (local.editable) "true" else "false"});
                 try writer.writeAll("}");
+                try writer.writeAll(",\"folded_value\":");
+                if (local.folded_value) |folded_value| {
+                    try writeJsonString(writer, folded_value);
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.writeAll(",\"decl\":");
                 try writeDebugRangeJson(writer, sources, local.file_id, local.decl_range);
                 try writer.writeAll(",\"live\":");
