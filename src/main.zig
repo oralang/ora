@@ -3303,7 +3303,7 @@ fn mergeSourceMaps(
     try writer.writeAll("{\"version\":1,\"sources\":[");
 
     // First pass: collect sources and build entries
-    const MergedEntry = struct { pc: u32, src: u32, line: u32, col: u32, stmt: bool };
+    const MergedEntry = struct { idx: u32, pc: u32, src: u32, line: u32, col: u32, stmt: bool };
     var entries: std.ArrayList(MergedEntry) = .{};
     defer entries.deinit(allocator);
 
@@ -3334,7 +3334,14 @@ fn mergeSourceMaps(
             break :blk idx;
         };
 
-        try entries.append(allocator, .{ .pc = pc, .src = src_idx, .line = loc.line, .col = loc.col, .stmt = false });
+        try entries.append(allocator, .{
+            .idx = loc.idx,
+            .pc = pc,
+            .src = src_idx,
+            .line = loc.line,
+            .col = loc.col,
+            .stmt = false,
+        });
     }
 
     if (missing_idx_count != 0) {
@@ -3361,6 +3368,7 @@ fn mergeSourceMaps(
     std.mem.sort(MergedEntry, entries.items, {}, struct {
         fn lessThan(_: void, a: MergedEntry, b: MergedEntry) bool {
             if (a.pc != b.pc) return a.pc < b.pc;
+            if (a.idx != b.idx) return a.idx < b.idx;
             if (a.src != b.src) return a.src < b.src;
             if (a.line != b.line) return a.line < b.line;
             return a.col < b.col;
@@ -3385,8 +3393,8 @@ fn mergeSourceMaps(
     // Emit entries
     for (entries.items, 0..) |entry, i| {
         if (i > 0) try writer.writeAll(",");
-        try writer.print("{{\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}}}", .{
-            entry.pc, entry.src, entry.line, entry.col, if (entry.stmt) "true" else "false",
+        try writer.print("{{\"idx\":{d},\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}}}", .{
+            entry.idx, entry.pc, entry.src, entry.line, entry.col, if (entry.stmt) "true" else "false",
         });
     }
     try writer.writeAll("]}");

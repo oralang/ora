@@ -8,6 +8,7 @@ Phase 1 of the source map pipeline is already working end to end in the current 
 - Sensei records per-op bytecode PCs and writes a sidecar op-index map
 - Zig merges both streams into `<contract>.sourcemap.json`
 - Statement boundaries are emitted via `stmt: true` on the first entry for each new source line
+- final source-map entries now also preserve the serialized SIR op index as `idx`
 
 Observed working result from the current implementation:
 
@@ -56,6 +57,10 @@ There is now also a first source-level scope/liveness layer in the same sidecar:
 - `.debug.json` also now includes `op_visibility`
   - keyed by serialized SIR op index
   - lists the scope ids and visible local ids for that stop point
+- `.sourcemap.json` now carries the same `idx`
+  - this gives the debugger the critical bridge:
+    - `pc -> idx` from source map
+    - `idx -> visibility/runtime metadata` from debug sidecar
 
 This is still lexical scope/liveness, not exact runtime storage locations, but it is the first debugger-grade answer to “what names are in scope here?” that survives MLIR/SIR optimization.
 
