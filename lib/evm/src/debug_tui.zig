@@ -228,11 +228,12 @@ const App = struct {
         const size = self.terminal.size();
         const total_rows: usize = @intCast(size.rows);
         const total_cols: usize = @intCast(size.cols);
-        const header_rows: usize = 3;
+        const header_rows: usize = 4;
         const footer_rows: usize = 2;
         const content_rows = if (total_rows > header_rows + footer_rows) total_rows - header_rows - footer_rows else 1;
-        const right_width: usize = if (total_cols >= 100) 36 else @min(@as(usize, 30), total_cols / 3);
-        const left_width = if (total_cols > right_width + 1) total_cols - right_width - 1 else total_cols;
+        const right_width: usize = if (total_cols >= 120) 40 else if (total_cols >= 100) 34 else @min(@as(usize, 30), total_cols / 3);
+        const divider_width: usize = if (right_width > 0) 3 else 0;
+        const left_width = if (total_cols > right_width + divider_width) total_cols - right_width - divider_width else total_cols;
 
         try self.terminal.clear();
 
@@ -242,18 +243,58 @@ const App = struct {
 
         const line = self.debugger.currentSourceLine() orelse 0;
         const entry = self.debugger.currentEntry();
-        try writer.print("Ora EVM Debugger  {s}\n", .{self.source_path});
-        try writer.print("status={s} pc={d} idx={?d} opcode={s} depth={d} gas={d} line={d}\n", .{
+        const bindings = try self.debugger.getVisibleBindings(self.allocator);
+        defer self.allocator.free(bindings);
+        const source_name = std.fs.path.basename(self.source_path);
+
+        try writer.writeAll("\x1b[7m");
+        var title = std.ArrayList(u8){};
+        defer title.deinit(self.allocator);
+        const title_writer = title.writer(self.allocator);
+        try title_writer.print(" Ora EVM Debugger | {s} ", .{source_name});
+        try writePadded(writer, title.items, total_cols);
+        try writer.writeAll("\x1b[0m\n");
+
+        var summary = std.ArrayList(u8){};
+        defer summary.deinit(self.allocator);
+        const summary_writer = summary.writer(self.allocator);
+        try summary_writer.print(" status={s}  line={d}  pc={d}  idx={?d}  opcode={s}  depth={d}  gas={d}", .{
             self.status,
+            line,
             self.debugger.getPC(),
             if (entry) |e| e.idx else null,
             self.debugger.getCurrentOpcodeName(),
             self.debugger.getCallDepth(),
             self.debugger.getGasRemaining(),
-            line,
         });
-        try writer.print("bytecode={s} calldata=0x", .{self.bytecode_path});
-        try writeHex(writer, self.calldata);
+        try writePadded(writer, summary.items, total_cols);
+        try writer.writeByte('\n');
+
+        var context = std.ArrayList(u8){};
+        defer context.deinit(self.allocator);
+        const context_writer = context.writer(self.allocator);
+        try context_writer.print(" visible bindings={d}", .{bindings.len});
+        if (line != 0) {
+            if (self.debugger.getSourceLineText(line)) |line_text| {
+                try context_writer.print("  current=`{s}`", .{std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t")});
+            }
+        }
+        try writePadded(writer, context.items, total_cols);
+        try writer.writeByte('\n');
+
+        var source_header = std.ArrayList(u8){};
+        defer source_header.deinit(self.allocator);
+        const source_header_writer = source_header.writer(self.allocator);
+        try source_header_writer.print("Source [{s}]", .{source_name});
+        try renderPaneHeader(writer, left_width, source_header.items);
+        if (right_width > 0) {
+            try writer.writeAll(" | ");
+            var binding_header = std.ArrayList(u8){};
+            defer binding_header.deinit(self.allocator);
+            const binding_header_writer = binding_header.writer(self.allocator);
+            try binding_header_writer.print("Bindings [{d}]", .{bindings.len});
+            try renderPaneHeader(writer, right_width, binding_header.items);
+        }
         try writer.writeByte('\n');
 
         const start_line = self.scroll_line;
@@ -265,10 +306,10 @@ const App = struct {
             try writer.writeAll(left_text);
 
             if (@as(usize, @intCast(row - start_line)) < content_rows) {
-                const right_text = try self.renderBindingRow(self.allocator, @intCast(row - start_line), right_width);
+                const right_text = try self.renderBindingRow(self.allocator, bindings, @intCast(row - start_line), right_width);
                 defer self.allocator.free(right_text);
                 if (right_width > 0) {
-                    try writer.writeByte(' ');
+                    try writer.writeAll(" | ");
                     try writer.writeAll(right_text);
                 }
             }
@@ -279,17 +320,20 @@ const App = struct {
         while (remaining > 0) : (remaining -= 1) {
             try writeSpaces(writer, left_width);
             if (right_width > 0) {
-                try writer.writeByte(' ');
+                try writer.writeAll(" | ");
                 const idx = content_rows - remaining;
-                const right_text = try self.renderBindingRow(self.allocator, idx, right_width);
+                const right_text = try self.renderBindingRow(self.allocator, bindings, idx, right_width);
                 defer self.allocator.free(right_text);
                 try writer.writeAll(right_text);
             }
             try writer.writeByte('\n');
         }
 
-        try writer.print("keys: s step-in  n step-over  o step-out  c continue  j/k scroll  q quit\n", .{});
-        try writer.print("bindings: visible locals, folded values, and rooted runtime values when readable\n", .{});
+        try writer.writeAll("\x1b[7m");
+        try writePadded(writer, " keys: s step-in  n step-over  o step-out  c continue  j/k scroll  q quit ", total_cols);
+        try writer.writeAll("\x1b[0m\n");
+        try writePadded(writer, " visible values show folded constants or concrete rooted runtime values when readable ", total_cols);
+        try writer.writeByte('\n');
 
         try self.terminal.writeAll(buffer.items);
     }
@@ -303,51 +347,59 @@ const App = struct {
     ) ![]u8 {
         const raw_line = self.debugger.getSourceLineText(line_number) orelse "";
         const trimmed = std.mem.trimRight(u8, raw_line, "\r");
-        const prefix = if (line_number == current_line) ">" else " ";
         var row = std.ArrayList(u8){};
         errdefer row.deinit(allocator);
         const writer = row.writer(allocator);
-        if (line_number == current_line) try writer.writeAll("\x1b[7m");
-        try writer.print("{s}{d:>4} | ", .{ prefix, line_number });
         const text_width = if (width > 8) width - 8 else 0;
+        if (line_number == current_line) try writer.writeAll("\x1b[48;5;236m");
+        try writer.print("{d:>4} | ", .{line_number});
         try writeTruncated(writer, trimmed, text_width);
+        const used = @min(trimmed.len, text_width);
+        if (text_width > used) try writeSpaces(writer, text_width - used);
         if (line_number == current_line) try writer.writeAll("\x1b[0m");
         const owned = try row.toOwnedSlice(allocator);
         return owned;
     }
 
-    fn renderBindingRow(self: *App, allocator: std.mem.Allocator, index: usize, width: usize) ![]u8 {
+    fn renderBindingRow(
+        self: *App,
+        allocator: std.mem.Allocator,
+        bindings: []const DebugInfo.VisibleBinding,
+        index: usize,
+        width: usize,
+    ) ![]u8 {
         if (width == 0) return try allocator.dupe(u8, "");
-
-        const bindings = try self.debugger.getVisibleBindings(allocator);
-        defer allocator.free(bindings);
 
         var row = std.ArrayList(u8){};
         errdefer row.deinit(allocator);
         const writer = row.writer(allocator);
 
         if (index == 0) {
-            try writeTruncated(writer, "Bindings", width);
-            return try row.toOwnedSlice(allocator);
-        }
-        if (index - 1 >= bindings.len) {
-            return try allocator.dupe(u8, "");
-        }
-
-        const binding = bindings[index - 1];
-        try writer.print("{s}", .{binding.name});
-        if (binding.folded_value) |folded| {
-            try writer.print("={s}", .{folded});
-        } else if (try self.debugger.getVisibleBindingValueByName(allocator, binding.name)) |value| {
-            try writer.print("={d}", .{value});
+            try writePadded(writer, "name = value / runtime", width);
+        } else if (index - 1 < bindings.len) {
+            const binding = bindings[index - 1];
+            if (binding.folded_value) |folded| {
+                try writer.print("{s} = {s}", .{ binding.name, folded });
+            } else if (try self.debugger.getVisibleBindingValueByName(allocator, binding.name)) |value| {
+                try writer.print("{s} = {d}", .{ binding.name, value });
+            } else {
+                try writer.print("{s} [{s}]", .{ binding.name, binding.runtime_kind });
+            }
+            const owned = try row.toOwnedSlice(allocator);
+            if (owned.len <= width) {
+                defer allocator.free(owned);
+                return try padOwned(allocator, owned, width);
+            }
+            defer allocator.free(owned);
+            return try truncateOwned(allocator, owned, width);
         } else {
-            try writer.print(" [{s}]", .{binding.runtime_kind});
+            if (bindings.len == 0 and index == 1) {
+                try writePadded(writer, "(no visible bindings at this stop)", width);
+            } else {
+                try writeSpaces(writer, width);
+            }
         }
-
-        const owned = try row.toOwnedSlice(allocator);
-        if (owned.len <= width) return owned;
-        defer allocator.free(owned);
-        return try truncateOwned(allocator, owned, width);
+        return try row.toOwnedSlice(allocator);
     }
 };
 
@@ -801,6 +853,27 @@ fn writeTruncated(writer: anytype, text: []const u8, width: usize) !void {
     try writer.writeByte('~');
 }
 
+fn writePadded(writer: anytype, text: []const u8, width: usize) !void {
+    if (text.len >= width) {
+        try writeTruncated(writer, text, width);
+        return;
+    }
+    try writer.writeAll(text);
+    try writeSpaces(writer, width - text.len);
+}
+
+fn renderPaneHeader(writer: anytype, width: usize, title: []const u8) !void {
+    if (width == 0) return;
+    if (title.len >= width) {
+        try writeTruncated(writer, title, width);
+        return;
+    }
+    try writer.writeAll(title);
+    if (width > title.len) {
+        try writeSpaces(writer, width - title.len);
+    }
+}
+
 fn writeSpaces(writer: anytype, count: usize) !void {
     var i: usize = 0;
     while (i < count) : (i += 1) try writer.writeByte(' ');
@@ -811,6 +884,14 @@ fn truncateOwned(allocator: std.mem.Allocator, text: []const u8, width: usize) !
     errdefer out.deinit(allocator);
     const writer = out.writer(allocator);
     try writeTruncated(writer, text, width);
+    return try out.toOwnedSlice(allocator);
+}
+
+fn padOwned(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
+    const writer = out.writer(allocator);
+    try writePadded(writer, text, width);
     return try out.toOwnedSlice(allocator);
 }
 
