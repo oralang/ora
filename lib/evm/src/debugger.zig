@@ -595,21 +595,21 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         fn buildLineIndex(allocator: std.mem.Allocator, text: []const u8) ![]LineSlice {
-            var lines = std.ArrayList(LineSlice).init(allocator);
+            var lines: std.ArrayList(LineSlice) = .{};
             var start: u32 = 0;
 
             for (text, 0..) |c, i| {
                 if (c == '\n') {
-                    try lines.append(.{ .start = start, .end = @intCast(i) });
+                    try lines.append(allocator, .{ .start = start, .end = @intCast(i) });
                     start = @intCast(i + 1);
                 }
             }
             // Last line (no trailing newline)
             if (start <= text.len) {
-                try lines.append(.{ .start = start, .end = @intCast(text.len) });
+                try lines.append(allocator, .{ .start = start, .end = @intCast(text.len) });
             }
 
-            return try lines.toOwnedSlice();
+            return try lines.toOwnedSlice(allocator);
         }
     };
 }

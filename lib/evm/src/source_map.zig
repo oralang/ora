@@ -76,8 +76,9 @@ pub const SourceMap = struct {
     /// Expected format:
     /// {
     ///   "version": 1,
+    ///   "sources": ["main.ora"],
     ///   "entries": [
-    ///     { "pc": 0, "file": "main.ora", "line": 3, "col": 5, "stmt": true },
+    ///     { "pc": 0, "src": 0, "line": 3, "col": 5, "stmt": true },
     ///     ...
     ///   ]
     /// }
@@ -91,10 +92,16 @@ pub const SourceMap = struct {
         const entries = try allocator.alloc(Entry, json_entries.len);
 
         for (json_entries, 0..) |je, i| {
+            const file_path = if (je.file) |file|
+                file
+            else if (je.src) |src_index|
+                if (src_index < parsed.value.sources.len) parsed.value.sources[src_index] else return error.InvalidSourceMap
+            else
+                return error.InvalidSourceMap;
             entries[i] = .{
                 .idx = je.idx,
                 .pc = je.pc,
-                .file = try allocator.dupe(u8, je.file),
+                .file = try allocator.dupe(u8, file_path),
                 .line = je.line,
                 .col = je.col,
                 .is_statement = je.stmt,
@@ -135,13 +142,15 @@ pub const SourceMap = struct {
 
     const JsonSourceMap = struct {
         version: u32 = 1,
+        sources: []const []const u8 = &.{},
         entries: []const JsonEntry = &.{},
     };
 
     const JsonEntry = struct {
         idx: ?u32 = null,
         pc: u32,
-        file: []const u8,
+        file: ?[]const u8 = null,
+        src: ?usize = null,
         line: u32,
         col: u32,
         stmt: bool,

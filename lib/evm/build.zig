@@ -34,6 +34,24 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const debug_probe_exe = b.addExecutable(.{
+        .name = "ora-evm-debug-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/debug_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ora_evm", .module = evm_mod },
+                .{ .name = "voltaire", .module = primitives_mod },
+                .{ .name = "crypto", .module = crypto_mod },
+                .{ .name = "precompiles", .module = precompiles_mod },
+            },
+        }),
+    });
+    debug_probe_exe.step.dependOn(&bootstrap_crypto.step);
+    const run_debug_probe = b.addRunArtifact(debug_probe_exe);
+    if (b.args) |args| run_debug_probe.addArgs(args);
+
     const unit_tests = b.addTest(.{
         .name = "ora-evm-unit-tests",
         .root_module = evm_mod,
@@ -66,4 +84,7 @@ pub fn build(b: *std.Build) void {
 
     const spec_step = b.step("spec", "Run Ora EVM execution spec tests");
     spec_step.dependOn(&run_spec_tests.step);
+
+    const debug_probe_step = b.step("debug-probe", "Run the Ora EVM debugger probe against emitted bytecode");
+    debug_probe_step.dependOn(&run_debug_probe.step);
 }
