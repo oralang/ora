@@ -119,6 +119,21 @@ contract Calculator {
 See [Imports and Modules](./imports) for the full import system, including
 package imports, `ora.toml` configuration, and resolution rules.
 
+## Debugging
+
+Ora includes a source-level EVM debugger. Step through Ora statements, inspect
+bindings and machine state, and see the lowered SIR side-by-side:
+
+```bash
+./zig-out/bin/ora debug contracts/main.ora \
+  --signature 'set(u256)' \
+  --arg 42
+```
+
+Use `s` to step in, `n` to step over, `:print value` to inspect bindings, and
+`:break 12` to set breakpoints. See [Interactive Debugger](./debugger.md) for
+the full guide.
+
 ## Exploring the repo
 
 - `ora-example/` contains runnable samples.

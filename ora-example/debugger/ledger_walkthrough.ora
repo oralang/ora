@@ -1,0 +1,48 @@
+comptime const std = @import("std");
+
+contract LedgerWalkthrough {
+    storage var owner: address;
+    storage var total: u256;
+    storage var fee_bps: u256;
+    storage var last_amount: u256;
+    storage var processed: u256;
+
+    pub fn init(initialTotal: u256, feeBps: u256) {
+        owner = std.msg.sender();
+        total = initialTotal;
+        fee_bps = feeBps;
+        last_amount = 0;
+        processed = 0;
+    }
+
+    fn compute_fee(amount: u256) -> u256 {
+        return (amount * fee_bps) / 10_000;
+    }
+
+    pub fn process(amount: u256) -> u256
+        requires(processed < std.constants.U256_MAX)
+        requires(total <= std.constants.U256_MAX - amount)
+    {
+        let fee = compute_fee(amount);
+        let net = amount - fee;
+
+        last_amount = amount;
+        processed += 1;
+
+        if (std.msg.sender() == owner) {
+            total += amount;
+        } else {
+            total += net;
+        }
+
+        return total;
+    }
+
+    pub fn snapshot() -> u256 {
+        return total;
+    }
+
+    pub fn last() -> u256 {
+        return last_amount;
+    }
+}

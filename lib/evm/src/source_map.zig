@@ -3,6 +3,25 @@
 const std = @import("std");
 
 pub const SourceMap = struct {
+    pub const StatementKind = enum {
+        runtime,
+        runtime_guard,
+
+        pub fn fromString(text: []const u8) ?StatementKind {
+            if (std.mem.eql(u8, text, "runtime")) return .runtime;
+            if (std.mem.eql(u8, text, "runtime_guard")) return .runtime_guard;
+            return null;
+        }
+
+        pub fn asString(kind: StatementKind) []const u8 {
+            return switch (kind) {
+                .runtime => "runtime",
+                .runtime_guard => "runtime_guard",
+            };
+        }
+    };
+
+    runtime_start_pc: ?u32 = null,
     entries: []Entry,
     allocator: std.mem.Allocator,
 
@@ -17,9 +36,13 @@ pub const SourceMap = struct {
         line: u32,
         /// 1-based column number in source
         col: u32,
+        /// 1-based line number in emitted textual .sir, when available.
+        sir_line: ?u32 = null,
         /// Whether this PC is the start of a source-level statement.
         /// The debugger stops here during step-over (not on every opcode).
         is_statement: bool,
+        /// Runtime statement classification, when available.
+        kind: ?StatementKind = null,
     };
 
     /// Look up the source location for a given PC.
@@ -72,6 +95,23 @@ pub const SourceMap = struct {
         return if (self.getFirstStatementEntryForLine(file, line)) |entry| entry.pc else null;
     }
 
+    pub fn getStatementKindForLine(self: *const SourceMap, file: []const u8, line: u32) ?StatementKind {
+        for (self.entries) |*entry| {
+            if (entry.line != line) continue;
+            if (!std.mem.eql(u8, entry.file, file)) continue;
+            if (!entry.is_statement) continue;
+            return entry.kind;
+        }
+        return null;
+    }
+
+    pub fn hasAnyEntryForLine(self: *const SourceMap, file: []const u8, line: u32) bool {
+        for (self.entries) |*entry| {
+            if (entry.line == line and std.mem.eql(u8, entry.file, file)) return true;
+        }
+        return false;
+    }
+
     /// Load a source map from JSON.
     /// Expected format:
     /// {
@@ -104,11 +144,14 @@ pub const SourceMap = struct {
                 .file = try allocator.dupe(u8, file_path),
                 .line = je.line,
                 .col = je.col,
+                .sir_line = je.sir_line,
                 .is_statement = je.stmt,
+                .kind = if (je.kind) |kind_text| StatementKind.fromString(kind_text) else null,
             };
         }
 
         return .{
+            .runtime_start_pc = parsed.value.runtime_start_pc,
             .entries = entries,
             .allocator = allocator,
         };
@@ -124,10 +167,13 @@ pub const SourceMap = struct {
                 .file = try allocator.dupe(u8, e.file),
                 .line = e.line,
                 .col = e.col,
+                .sir_line = e.sir_line,
                 .is_statement = e.is_statement,
+                .kind = e.kind,
             };
         }
         return .{
+            .runtime_start_pc = null,
             .entries = owned,
             .allocator = allocator,
         };
@@ -142,6 +188,7 @@ pub const SourceMap = struct {
 
     const JsonSourceMap = struct {
         version: u32 = 1,
+        runtime_start_pc: ?u32 = null,
         sources: []const []const u8 = &.{},
         entries: []const JsonEntry = &.{},
     };
@@ -153,17 +200,19 @@ pub const SourceMap = struct {
         src: ?usize = null,
         line: u32,
         col: u32,
+        sir_line: ?u32 = null,
         stmt: bool,
+        kind: ?[]const u8 = null,
     };
 };
 
 test "SourceMap.getEntry binary search" {
     const allocator = std.testing.allocator;
     const entries = [_]SourceMap.Entry{
-        .{ .idx = 0, .pc = 0, .file = "test.ora", .line = 1, .col = 1, .is_statement = true },
-        .{ .idx = 1, .pc = 5, .file = "test.ora", .line = 2, .col = 1, .is_statement = true },
-        .{ .idx = 2, .pc = 12, .file = "test.ora", .line = 3, .col = 1, .is_statement = true },
-        .{ .idx = 3, .pc = 20, .file = "test.ora", .line = 4, .col = 1, .is_statement = true },
+        .{ .idx = 0, .pc = 0, .file = "test.ora", .line = 1, .col = 1, .sir_line = 10, .is_statement = true, .kind = .runtime },
+        .{ .idx = 1, .pc = 5, .file = "test.ora", .line = 2, .col = 1, .sir_line = 11, .is_statement = true, .kind = .runtime },
+        .{ .idx = 2, .pc = 12, .file = "test.ora", .line = 3, .col = 1, .sir_line = 12, .is_statement = true, .kind = .runtime },
+        .{ .idx = 3, .pc = 20, .file = "test.ora", .line = 4, .col = 1, .sir_line = 13, .is_statement = true, .kind = .runtime },
     };
     var sm = try SourceMap.fromEntries(allocator, &entries);
     defer sm.deinit();
@@ -184,9 +233,9 @@ test "SourceMap.getEntry binary search" {
 test "SourceMap.getFirstPcForLine" {
     const allocator = std.testing.allocator;
     const entries = [_]SourceMap.Entry{
-        .{ .idx = 0, .pc = 0, .file = "test.ora", .line = 1, .col = 1, .is_statement = true },
-        .{ .idx = 1, .pc = 3, .file = "test.ora", .line = 1, .col = 5, .is_statement = false },
-        .{ .idx = 2, .pc = 5, .file = "test.ora", .line = 2, .col = 1, .is_statement = true },
+        .{ .idx = 0, .pc = 0, .file = "test.ora", .line = 1, .col = 1, .sir_line = 4, .is_statement = true, .kind = .runtime },
+        .{ .idx = 1, .pc = 3, .file = "test.ora", .line = 1, .col = 5, .sir_line = 5, .is_statement = false, .kind = null },
+        .{ .idx = 2, .pc = 5, .file = "test.ora", .line = 2, .col = 1, .sir_line = 6, .is_statement = true, .kind = .runtime },
     };
     var sm = try SourceMap.fromEntries(allocator, &entries);
     defer sm.deinit();
@@ -200,8 +249,8 @@ test "SourceMap.loadFromJson" {
     const allocator = std.testing.allocator;
     const json =
         \\{"version":1,"entries":[
-        \\  {"idx":7,"pc":0,"file":"main.ora","line":3,"col":5,"stmt":true},
-        \\  {"idx":8,"pc":6,"file":"main.ora","line":4,"col":5,"stmt":true}
+        \\  {"idx":7,"pc":0,"file":"main.ora","line":3,"col":5,"sir_line":17,"stmt":true,"kind":"runtime_guard"},
+        \\  {"idx":8,"pc":6,"file":"main.ora","line":4,"col":5,"sir_line":18,"stmt":true,"kind":"runtime"}
         \\]}
     ;
     var sm = try SourceMap.loadFromJson(allocator, json);
@@ -211,6 +260,8 @@ test "SourceMap.loadFromJson" {
     try std.testing.expectEqual(@as(u32, 0), sm.entries[0].pc);
     try std.testing.expectEqual(@as(?u32, 7), sm.entries[0].idx);
     try std.testing.expectEqual(@as(u32, 3), sm.entries[0].line);
+    try std.testing.expectEqual(@as(?u32, 17), sm.entries[0].sir_line);
     try std.testing.expect(sm.entries[0].is_statement);
+    try std.testing.expectEqual(SourceMap.StatementKind.runtime_guard, sm.entries[0].kind.?);
     try std.testing.expectEqualStrings("main.ora", sm.entries[0].file);
 }

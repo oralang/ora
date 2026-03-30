@@ -176,6 +176,11 @@ pub fn Evm(comptime config: EvmConfig) type {
 
         /// Clean up resources
         pub fn deinit(self: *Self) void {
+            if (@TypeOf(self.frames) == std.ArrayList(FrameType)) {
+                for (self.frames.items) |*frame| {
+                    frame.deinit();
+                }
+            }
             self.arena.deinit();
         }
 

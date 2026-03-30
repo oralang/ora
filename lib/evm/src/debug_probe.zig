@@ -13,6 +13,7 @@ const ProbeConfig = struct {
     source_map_path: []const u8,
     source_path: []const u8,
     debug_info_path: ?[]const u8 = null,
+    abi_path: ?[]const u8 = null,
     calldata: []u8 = &.{},
     max_statements: usize = 64,
 
@@ -21,6 +22,7 @@ const ProbeConfig = struct {
         allocator.free(self.source_map_path);
         allocator.free(self.source_path);
         if (self.debug_info_path) |path| allocator.free(path);
+        if (self.abi_path) |path| allocator.free(path);
         allocator.free(self.calldata);
     }
 };
@@ -48,7 +50,6 @@ pub fn main() !void {
 
     var debug_info_json: ?[]u8 = null;
     defer if (debug_info_json) |bytes| allocator.free(bytes);
-
     var debug_info: ?DebugInfo = null;
     if (config.debug_info_path) |path| {
         debug_info_json = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
@@ -68,6 +69,11 @@ pub fn main() !void {
 
     const runtime_bytecode = try deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode);
     defer allocator.free(runtime_bytecode);
+    if (source_map.runtime_start_pc) |_| {
+        const runtime_source_map = try rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
+        source_map.deinit();
+        source_map = runtime_source_map;
+    }
 
     try evm.frames.append(evm.arena.allocator(), try Frame.init(
         evm.arena.allocator(),
@@ -104,7 +110,14 @@ pub fn main() !void {
     var stops: usize = 0;
     while (!debugger.isHalted() and stops < config.max_statements) {
         try debugger.stepIn();
-        if (debugger.currentEntry()) |entry| {
+        if (debugger.stop_reason == .step_complete or debugger.stop_reason == .breakpoint_hit) {
+            if (debugger.currentEntry()) |entry| {
+                stops += 1;
+                try printStop(stdout, &debugger, entry, stops);
+            }
+        } else if (debugger.isHalted()) {
+            break;
+        } else if (debugger.currentEntry()) |entry| {
             stops += 1;
             try printStop(stdout, &debugger, entry, stops);
         }
@@ -155,6 +168,43 @@ fn deployRuntimeBytecode(
         return try allocator.dupe(u8, deployment_bytecode);
     }
     return try allocator.dupe(u8, frame.output);
+}
+
+fn rebaseSourceMapForRuntime(
+    allocator: std.mem.Allocator,
+    creation_source_map: *const SourceMap,
+    runtime_bytecode: []const u8,
+) !SourceMap {
+    const runtime_start_pc = creation_source_map.runtime_start_pc orelse {
+        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
+    };
+    if (runtime_bytecode.len == 0) {
+        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
+    }
+
+    var rebased: std.ArrayList(SourceMap.Entry) = .{};
+    defer rebased.deinit(allocator);
+
+    for (creation_source_map.entries) |entry| {
+        if (entry.pc < runtime_start_pc) continue;
+        const rebased_pc = entry.pc - runtime_start_pc;
+        if (rebased_pc >= runtime_bytecode.len) continue;
+        try rebased.append(allocator, .{
+            .idx = entry.idx,
+            .pc = @intCast(rebased_pc),
+            .file = entry.file,
+            .line = entry.line,
+            .col = entry.col,
+            .is_statement = entry.is_statement,
+        });
+    }
+
+    if (rebased.items.len == 0) {
+        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
+    }
+    var runtime_map = try SourceMap.fromEntries(allocator, rebased.items);
+    runtime_map.runtime_start_pc = 0;
+    return runtime_map;
 }
 
 fn printStop(
@@ -229,6 +279,11 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
             if (i >= args.len) return error.InvalidArguments;
             if (config.debug_info_path) |path| allocator.free(path);
             config.debug_info_path = try allocator.dupe(u8, args[i]);
+        } else if (std.mem.eql(u8, arg, "--abi")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            if (config.abi_path) |path| allocator.free(path);
+            config.abi_path = try allocator.dupe(u8, args[i]);
         } else if (std.mem.eql(u8, arg, "--signature")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
@@ -255,7 +310,13 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
 
     if (signature) |sig| {
         allocator.free(config.calldata);
-        config.calldata = try encodeSignatureCallDataAlloc(allocator, sig, raw_args.items);
+        if (config.abi_path) |abi_path| {
+            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            defer allocator.free(abi_bytes);
+            config.calldata = try encodeAbiCallDataAlloc(allocator, abi_bytes, sig, raw_args.items);
+        } else {
+            config.calldata = try encodeSignatureCallDataAlloc(allocator, sig, raw_args.items);
+        }
     }
 
     return config;
@@ -267,11 +328,11 @@ fn printUsage() !void {
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:
-        \\  zig build debug-probe -- <bytecode.hex> <source-map.json> <source.ora> [--debug-info <debug.json>] [--signature <sig> [--arg <value>]...] [--calldata-hex <hex>] [--max-statements <n>]
+        \\  zig build debug-probe -- <bytecode.hex> <source-map.json> <source.ora> [--debug-info <debug.json>] [--abi <abi.json>] [--signature <sig> [--arg <value>]...] [--calldata-hex <hex>] [--max-statements <n>]
         \\
         \\examples:
         \\  zig build debug-probe -- ../artifacts/debugger_selector_probe/comptime_shift_probe.hex ../artifacts/debugger_selector_probe/comptime_shift_probe.sourcemap.json ../ora-example/comptime/comptime_shift_probe.ora --signature test_large_shr() --max-statements 8
-        \\  zig build debug-probe -- ../../artifacts/debugger_commit_probe/arithmetic_test.hex ../../artifacts/debugger_commit_probe/arithmetic_test.sourcemap.json ../../ora-example/arithmetic_test.ora --signature add(u256,u256) --arg 7 --arg 9
+        \\  zig build debug-probe -- ../../artifacts/debugger_abi_probe/bin/arithmetic_test.hex ../../artifacts/debugger_abi_probe/arithmetic_test.sourcemap.json ../../ora-example/arithmetic_test.ora --abi ../../artifacts/debugger_abi_probe/abi/arithmetic_test.abi.json --signature add(u256,u256) --arg 7 --arg 9
         \\
     , .{});
     try stderr.flush();
@@ -318,6 +379,86 @@ fn encodeSignatureCallDataAlloc(
     }
 
     return out;
+}
+
+fn encodeAbiCallDataAlloc(
+    allocator: std.mem.Allocator,
+    abi_json: []const u8,
+    signature: []const u8,
+    arg_values: []const []const u8,
+) ![]u8 {
+    const parsed = try std.json.parseFromSlice(OraAbi, allocator, abi_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const callable = findCallable(&parsed.value, signature) orelse return error.CallableNotFound;
+    const wire = callable.wire orelse return error.MissingSelector;
+    const selector_hex = wire.@"evm-default".selector orelse return error.MissingSelector;
+    const selector = try decodeHexAlloc(allocator, selector_hex);
+    defer allocator.free(selector);
+    if (selector.len != 4) return error.InvalidSelector;
+
+    if (callable.inputs.len != arg_values.len) return error.ArgumentCountMismatch;
+    const out = try allocator.alloc(u8, 4 + callable.inputs.len * 32);
+    errdefer allocator.free(out);
+    @memcpy(out[0..4], selector);
+
+    for (callable.inputs, 0..) |input, i| {
+        const ty = resolveWireType(&parsed.value, input.typeId) orelse return error.UnsupportedArgType;
+        const dest = out[4 + i * 32 .. 4 + (i + 1) * 32];
+        @memset(dest, 0);
+        try encodeAbiWord(allocator, dest, ty, arg_values[i]);
+    }
+
+    return out;
+}
+
+fn findCallable(abi: *const OraAbi, signature: []const u8) ?OraAbi.Callable {
+    for (abi.callables) |callable| {
+        if (std.mem.eql(u8, callable.signature, signature)) return callable;
+        if (signatureEquivalent(callable.signature, signature)) return callable;
+    }
+    return null;
+}
+
+fn signatureEquivalent(abi_signature: []const u8, probe_signature: []const u8) bool {
+    const abi_open = std.mem.indexOfScalar(u8, abi_signature, '(') orelse return false;
+    const probe_open = std.mem.indexOfScalar(u8, probe_signature, '(') orelse return false;
+    const abi_close = std.mem.lastIndexOfScalar(u8, abi_signature, ')') orelse return false;
+    const probe_close = std.mem.lastIndexOfScalar(u8, probe_signature, ')') orelse return false;
+    if (abi_close < abi_open or probe_close < probe_open) return false;
+
+    if (!std.mem.eql(u8, std.mem.trim(u8, abi_signature[0..abi_open], " \t"), std.mem.trim(u8, probe_signature[0..probe_open], " \t"))) {
+        return false;
+    }
+
+    var abi_split = std.mem.splitScalar(u8, abi_signature[abi_open + 1 .. abi_close], ',');
+    var probe_split = std.mem.splitScalar(u8, probe_signature[probe_open + 1 .. probe_close], ',');
+    while (true) {
+        const abi_ty = abi_split.next();
+        const probe_ty = probe_split.next();
+        if (abi_ty == null or probe_ty == null) return abi_ty == null and probe_ty == null;
+        if (!typeAliasEquivalent(std.mem.trim(u8, abi_ty.?, " \t"), std.mem.trim(u8, probe_ty.?, " \t"))) {
+            return false;
+        }
+    }
+}
+
+fn typeAliasEquivalent(abi_ty: []const u8, probe_ty: []const u8) bool {
+    if (std.mem.eql(u8, abi_ty, probe_ty)) return true;
+    if (std.mem.startsWith(u8, abi_ty, "uint") and std.mem.startsWith(u8, probe_ty, "u")) {
+        return std.mem.eql(u8, abi_ty[4..], probe_ty[1..]);
+    }
+    if (std.mem.startsWith(u8, abi_ty, "int") and std.mem.startsWith(u8, probe_ty, "i")) {
+        return std.mem.eql(u8, abi_ty[3..], probe_ty[1..]);
+    }
+    return false;
+}
+
+fn resolveWireType(abi: *const OraAbi, type_id: []const u8) ?[]const u8 {
+    const entry = abi.types.map.get(type_id) orelse return null;
+    return entry.wire.@"evm-default".type;
 }
 
 fn encodeAbiWord(
@@ -406,3 +547,38 @@ fn printHex(writer: anytype, bytes: []const u8) !void {
 fn hexNibble(value: u8) u8 {
     return if (value < 10) '0' + value else 'a' + (value - 10);
 }
+
+const OraAbi = struct {
+    callables: []const Callable = &.{},
+    types: std.json.ArrayHashMap(TypeEntry) = .{},
+
+    const Callable = struct {
+        signature: []const u8,
+        inputs: []const Input = &.{},
+        wire: ?WireProfiles = null,
+    };
+
+    const Input = struct {
+        typeId: []const u8,
+    };
+
+    const WireProfiles = struct {
+        @"evm-default": EvmWire = .{},
+    };
+
+    const EvmWire = struct {
+        selector: ?[]const u8 = null,
+    };
+
+    const TypeEntry = struct {
+        wire: TypeWireProfiles = .{},
+    };
+
+    const TypeWireProfiles = struct {
+        @"evm-default": TypeWire = .{},
+    };
+
+    const TypeWire = struct {
+        type: ?[]const u8 = null,
+    };
+};

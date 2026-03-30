@@ -7,9 +7,9 @@
         .voltaire = .{
             .path = "../../../voltaire",
         },
-        .tui = .{
-            .url = "git+https://github.com/muhammad-fiaz/tui.zig.git#f3c2726b1245c9b849fb516d3198c492a7f9c583",
-            .hash = "tui-0.0.1-TMwxp-tWBgBwZqdkgqHn4c_YDJSUQhha2-OKOFBGYig3",
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#3d37f043a161fd32897ad44a2dddbfaab75faa8a",
+            .hash = "vaxis-0.5.1-BWNV_JJOCQAtdJyLvrYCKbKIhX9q3liQkKMAzujWS4HJ",
         },
     },
     .paths = .{

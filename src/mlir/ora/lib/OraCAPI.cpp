@@ -6834,6 +6834,27 @@ MlirStringRef oraExtractSIRDebugInfo(MlirContext ctx, MlirModule module)
     }
 }
 
+MlirStringRef oraExtractSIRLineMap(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRLineMap(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
 MlirStringRef oraExtractSIRGlobalSlots(MlirContext ctx, MlirModule module)
 {
     try

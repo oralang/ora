@@ -1,0 +1,13 @@
+comptime const std = @import("std");
+
+contract ConstructorValue {
+    storage var value: u256;
+
+    pub fn init(initialValue: u256) {
+        value = initialValue;
+    }
+
+    pub fn get() -> u256 {
+        return value;
+    }
+}

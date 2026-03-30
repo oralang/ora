@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const tui_dep = b.dependency("tui", .{
+    const vaxis_dep = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
     });
@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     const crypto_mod = voltaire_dep.module("crypto");
     const precompiles_mod = voltaire_dep.module("precompiles");
     const blockchain_mod = voltaire_dep.module("blockchain");
-    const tui_mod = tui_dep.module("tui");
+    const vaxis_mod = vaxis_dep.module("vaxis");
 
     const bootstrap_crypto = b.addSystemCommand(&.{
         "cargo",
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "voltaire", .module = primitives_mod },
                 .{ .name = "crypto", .module = crypto_mod },
                 .{ .name = "precompiles", .module = precompiles_mod },
-                .{ .name = "tui", .module = tui_mod },
+                .{ .name = "vaxis", .module = vaxis_mod },
             },
         }),
     });

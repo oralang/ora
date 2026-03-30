@@ -30,6 +30,8 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Safety limit to prevent infinite loops
         max_steps: u64,
         last_statement_line: ?u32,
+        last_statement_sir_line: ?u32,
+        last_error_name: ?[]const u8,
 
         pub const State = enum {
             paused,
@@ -77,6 +79,8 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .steps_executed = 0,
                 .max_steps = 10_000_000,
                 .last_statement_line = null,
+                .last_statement_sir_line = null,
+                .last_error_name = null,
             };
             self.updateLastStatementLine();
             return self;
@@ -85,6 +89,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         pub fn deinit(self: *Self) void {
             self.breakpoints.deinit();
             if (self.debug_info) |*debug_info| debug_info.deinit();
+            self.src_map.deinit();
             self.allocator.free(self.source_lines);
         }
 
@@ -169,6 +174,19 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                     return;
                 }
             }
+        }
+
+        /// Step Opcode: execute exactly one opcode and pause immediately.
+        /// This is useful for inspecting the transient EVM operand stack between
+        /// source-level statement boundaries.
+        pub fn stepOpcode(self: *Self) !void {
+            if (self.isHalted()) return;
+
+            self.steps_executed = 0;
+            try self.executeOneOpcode();
+            if (self.isHalted()) return;
+            self.stop_reason = .step_complete;
+            self.state = .paused;
         }
 
         /// Step Over: execute until the source line changes at the same or lower call depth.
@@ -284,6 +302,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             const info = self.debug_info orelse return null;
             const idx = self.currentOpIndex() orelse return null;
             return info.getVisibilityForIdx(idx);
+        }
+
+        pub fn currentOpMeta(self: *const Self) ?*const DebugInfo.OpMeta {
+            const info = self.debug_info orelse return null;
+            const idx = self.currentOpIndex() orelse return null;
+            return info.getOpMetaForIdx(idx);
         }
 
         pub fn getVisibleLocals(self: *const Self, allocator: std.mem.Allocator) ![]DebugInfo.VisibleLocal {
@@ -457,6 +481,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             return self.last_statement_line;
         }
 
+        pub fn lastStatementSirLine(self: *const Self) ?u32 {
+            return self.last_statement_sir_line;
+        }
+
         /// Get the text of a source line (1-based).
         pub fn getSourceLineText(self: *const Self, line: u32) ?[]const u8 {
             if (line == 0 or line > self.source_lines.len) return null;
@@ -526,12 +554,14 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             if (frame.stopped) {
                 self.state = .halted;
                 self.stop_reason = if (frame.reverted) .execution_reverted else .execution_finished;
+                self.last_error_name = null;
                 return;
             }
 
             self.evm.step() catch |err| {
                 self.state = .halted;
                 self.stop_reason = .execution_error;
+                self.last_error_name = @errorName(err);
                 return err;
             };
 
@@ -543,11 +573,17 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 if (f.stopped) {
                     self.state = .halted;
                     self.stop_reason = if (f.reverted) .execution_reverted else .execution_finished;
+                    self.last_error_name = null;
                 }
             } else {
                 self.state = .halted;
                 self.stop_reason = .execution_finished;
+                self.last_error_name = null;
             }
+        }
+
+        pub fn lastErrorName(self: *const Self) ?[]const u8 {
+            return self.last_error_name;
         }
 
         fn isAtStatementBoundary(self: *const Self) bool {
@@ -560,6 +596,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             const entry = self.currentEntry() orelse return;
             if (!entry.is_statement) return;
             self.last_statement_line = entry.line;
+            self.last_statement_sir_line = entry.sir_line;
         }
 
         fn currentStatementKey(self: *const Self) ?StatementKey {

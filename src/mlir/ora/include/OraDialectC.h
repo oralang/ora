@@ -1690,7 +1690,8 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
 
     /// Extract source locations from SIR MLIR ops as a JSON array.
     /// Each entry: {"idx":<op_index>,"file":"<path>","line":<n>,"col":<n>}
-    /// Op indices match the sequential order of emitSIRText() output.
+    /// Op indices follow the serialized backend-execution order used by
+    /// bytecode/source-map generation, not raw textual .sir line order.
     /// Returns null string ref on failure.
     /// The caller must free the returned string using oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRLocations(
@@ -1699,10 +1700,18 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
 
     /// Extract debugger-oriented sidecar metadata from SIR MLIR ops.
     /// Returns a JSON object with per-op entries keyed by the same op indices
-    /// used by the SIR text emitter and source-map extraction.
+    /// used by source-map extraction and bytecode/source-map generation.
     /// Returns null string ref on failure.
     /// The caller must free the returned string using oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDebugInfo(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract a JSON array mapping backend op indices to emitted SIR text lines.
+    /// Each entry: {"idx":<op_index>,"line":<sir_line>}
+    /// Returns null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRLineMap(
         MlirContext ctx,
         MlirModule module);
 

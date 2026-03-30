@@ -57,6 +57,18 @@ pub const DebugInfo = struct {
         visible_local_ids: []const u32 = &.{},
     };
 
+    pub const OpMeta = struct {
+        idx: u32,
+        op: []const u8,
+        function: []const u8,
+        block: []const u8,
+        result_names: []const []const u8 = &.{},
+        is_terminator: bool = false,
+        is_synthetic: bool = false,
+        synthetic_index: ?u32 = null,
+        synthetic_count: ?u32 = null,
+    };
+
     pub const VisibleLocal = struct {
         local: *const Local,
         scope: ?*const SourceScope,
@@ -99,6 +111,13 @@ pub const DebugInfo = struct {
 
     pub fn getVisibilityForIdx(self: *const DebugInfo, idx: u32) ?*const OpVisibility {
         for (self.parsed.value.op_visibility) |*op| {
+            if (op.idx == idx) return op;
+        }
+        return null;
+    }
+
+    pub fn getOpMetaForIdx(self: *const DebugInfo, idx: u32) ?*const OpMeta {
+        for (self.parsed.value.ops) |*op| {
             if (op.idx == idx) return op;
         }
         return null;
@@ -192,6 +211,7 @@ pub const DebugInfo = struct {
 
     const JsonDebugInfo = struct {
         version: u32 = 1,
+        ops: []const OpMeta = &.{},
         source_scopes: []const SourceScope = &.{},
         op_visibility: []const OpVisibility = &.{},
     };

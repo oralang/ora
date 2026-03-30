@@ -1,10 +1,9 @@
 import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
-// This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
-
 const sidebars: SidebarsConfig = {
   tutorialSidebar: [
     'intro',
+    'getting-started',
     {
       type: 'category',
       label: 'The Ora Little Book',
@@ -62,16 +61,12 @@ const sidebars: SidebarsConfig = {
         },
       ],
     },
-    'getting-started',
-    'language-basics',
-    'imports',
-    'examples',
-    'code-formatter',
-    'standard-library',
     {
       type: 'category',
-      label: 'Language Features',
+      label: 'Language Reference',
       items: [
+        'language-basics',
+        'imports',
         'switch',
         'struct-types',
         'generics',
@@ -83,7 +78,17 @@ const sidebars: SidebarsConfig = {
         'memory-regions',
         'error-unions',
         'refinement-types',
+        'inline-functions',
         'logs-and-events',
+        'standard-library',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Tools',
+      items: [
+        'code-formatter',
+        'debugger',
       ],
     },
     {
@@ -95,6 +100,9 @@ const sidebars: SidebarsConfig = {
         'specifications/mlir',
         'specifications/sensei-ir',
         'specifications/api',
+        'specs/type-system',
+        'specs/abi',
+        'specs/bitfield',
       ],
     },
     {
@@ -140,22 +148,7 @@ const sidebars: SidebarsConfig = {
         },
       ],
     },
-    {
-      type: 'category',
-      label: 'Optimization',
-      items: [
-        'inline-functions',
-      ],
-    },
-    {
-      type: 'category',
-      label: 'Specs',
-      items: [
-        'specs/type-system',
-        'specs/abi',
-        'specs/bitfield',
-      ],
-    },
+    'examples',
     'roadmap-to-asuka',
   ],
 };

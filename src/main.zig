@@ -80,6 +80,7 @@ const OptimizationLevel = enum {
 const CommandKind = enum {
     Build,
     Emit,
+    Debug,
     Fmt,
 };
 
@@ -87,7 +88,33 @@ const Subcommand = enum {
     None,
     Build,
     Emit,
+    Debug,
     Fmt,
+};
+
+const DebugCliOptions = struct {
+    filtered_args: std.ArrayList([]const u8),
+    init_signature: ?[]const u8 = null,
+    init_arg_values: std.ArrayList([]const u8),
+    init_calldata_hex: ?[]const u8 = null,
+    signature: ?[]const u8 = null,
+    arg_values: std.ArrayList([]const u8),
+    calldata_hex: ?[]const u8 = null,
+    verify_requested: bool = false,
+
+    fn init() DebugCliOptions {
+        return .{
+            .filtered_args = .{},
+            .init_arg_values = .{},
+            .arg_values = .{},
+        };
+    }
+
+    fn deinit(self: *DebugCliOptions, allocator: std.mem.Allocator) void {
+        self.filtered_args.deinit(allocator);
+        self.init_arg_values.deinit(allocator);
+        self.arg_values.deinit(allocator);
+    }
 };
 
 const InitTemplates = struct {
@@ -142,6 +169,61 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_sir_text or
         parsed.emit_bytecode or
         parsed.emit_cfg;
+}
+
+fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) !DebugCliOptions {
+    var opts = DebugCliOptions.init();
+    errdefer opts.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--init-signature")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.init_signature = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--init-arg")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            try opts.init_arg_values.append(allocator, args[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--init-calldata-hex")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.init_calldata_hex = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--signature")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.signature = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--arg")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            try opts.arg_values.append(allocator, args[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--calldata-hex")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.calldata_hex = args[i + 1];
+            i += 2;
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--verify") or std.mem.startsWith(u8, arg, "--verify=")) {
+            opts.verify_requested = true;
+        }
+
+        try opts.filtered_args.append(allocator, arg);
+        i += 1;
+    }
+
+    return opts;
 }
 
 fn initProjectLayout(target_dir: []const u8) !void {
@@ -238,15 +320,32 @@ pub fn main() !void {
         .Build
     else if (args.len >= 2 and std.mem.eql(u8, args[1], "emit"))
         .Emit
+    else if (args.len >= 2 and std.mem.eql(u8, args[1], "debug"))
+        .Debug
     else
         .None;
 
     const args_to_parse = switch (subcommand) {
-        .Fmt, .Build, .Emit => args[2..],
+        .Fmt, .Build, .Emit, .Debug => args[2..],
         .None => args[1..],
     };
 
-    var parsed = cli_args.parseArgs(args_to_parse) catch {
+    var debug_cli: ?DebugCliOptions = null;
+    defer if (debug_cli) |*opts| opts.deinit(allocator);
+
+    var parse_args: std.ArrayList([]const u8) = .{};
+    defer parse_args.deinit(allocator);
+    if (subcommand == .Debug) {
+        debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch {
+            try printUsage();
+            return;
+        };
+        try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
+    } else {
+        for (args_to_parse) |arg| try parse_args.append(allocator, arg);
+    }
+
+    var parsed = cli_args.parseArgs(parse_args.items) catch {
         try printUsage();
         return;
     };
@@ -326,6 +425,7 @@ pub fn main() !void {
         .Fmt => .Fmt,
         .Build => .Build,
         .Emit => .Emit,
+        .Debug => .Debug,
         .None => if (emit_flags_requested) .Emit else .Build,
     };
     if (command_kind == .Build and emit_flags_requested) {
@@ -335,6 +435,11 @@ pub fn main() !void {
 
     if (command_kind == .Build and !verify_z3) {
         std.debug.print("error: build mode requires SMT verification; '--no-verify' is not supported.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (command_kind == .Debug and parsed.input_file == null) {
+        std.debug.print("error: debug requires an input file.\n", .{});
         std.process.exit(2);
     }
 
@@ -390,6 +495,48 @@ pub fn main() !void {
         .persist_sir_mlir = false,
         .metrics = &metrics,
     };
+
+    if (command_kind == .Debug) {
+        const debug_options = debug_cli.?;
+        const file_path = parsed.input_file.?;
+        const resolver = try discoverResolverOptionsForFile(allocator, file_path);
+        defer if (resolver.include_roots) |include_roots| {
+            freeResolvedIncludeRoots(allocator, include_roots);
+        };
+
+        var debug_mlir_options = mlir_options;
+        debug_mlir_options.emit_mlir = false;
+        debug_mlir_options.emit_mlir_sir = true;
+        debug_mlir_options.emit_sir_text = true;
+        debug_mlir_options.emit_bytecode = true;
+        debug_mlir_options.debug_info = true;
+        if (!debug_options.verify_requested) {
+            debug_mlir_options.verify_z3 = false;
+            debug_mlir_options.emit_smt_report = false;
+        }
+
+        const artifact_root = try runDebugArtifacts(
+            allocator,
+            file_path,
+            parsed.output_dir,
+            debug_mlir_options,
+            resolver.options,
+        );
+        defer allocator.free(artifact_root);
+
+        try launchDebuggerTui(
+            allocator,
+            file_path,
+            artifact_root,
+            debug_options.init_signature,
+            debug_options.init_arg_values.items,
+            debug_options.init_calldata_hex,
+            debug_options.signature,
+            debug_options.arg_values.items,
+            debug_options.calldata_hex,
+        );
+        return;
+    }
 
     if (command_kind == .Build) {
         var matched_include_roots: ?[]const []const u8 = null;
@@ -701,6 +848,315 @@ fn runBuildArtifacts(
     defer allocator.free(sir_mlir_file);
     try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
     build_succeeded = true;
+}
+
+fn runDebugArtifacts(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    base_options: MlirOptions,
+    resolver_options: import_graph.ResolverOptions,
+) ![]u8 {
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    const stem = std.fs.path.stem(file_path);
+    const default_root = try std.fmt.allocPrint(allocator, "artifacts/{s}", .{stem});
+    defer allocator.free(default_root);
+    const artifact_root = output_dir orelse default_root;
+
+    var artifact_root_exists = true;
+    std.fs.cwd().access(artifact_root, .{}) catch |err| switch (err) {
+        error.FileNotFound => artifact_root_exists = false,
+        else => return err,
+    };
+    if (artifact_root_exists) {
+        try std.fs.cwd().deleteTree(artifact_root);
+    }
+    try std.fs.cwd().makePath(artifact_root);
+
+    const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
+    defer allocator.free(abi_dir);
+    try std.fs.cwd().makePath(abi_dir);
+
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
+
+    var debug_mlir_options = base_options;
+    debug_mlir_options.output_dir = artifact_root;
+    try runMlirEmitAdvanced(allocator, file_path, debug_mlir_options, resolver_options, debug_mlir_options.debug_enabled);
+
+    try stdout.print("Debugger artifacts saved to {s}\n", .{artifact_root});
+    try stdout.flush();
+
+    return try allocator.dupe(u8, artifact_root);
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn absolutePathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
+    return try std.fs.cwd().realpathAlloc(allocator, path);
+}
+
+fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
+    const exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
+    defer allocator.free(exe_dir);
+
+    const from_exe = try std.fs.path.resolve(allocator, &[_][]const u8{ exe_dir, "..", ".." });
+    errdefer allocator.free(from_exe);
+    const probe = try std.fs.path.join(allocator, &[_][]const u8{ from_exe, "lib", "evm", "build.zig" });
+    defer allocator.free(probe);
+    if (pathExists(probe)) return from_exe;
+
+    allocator.free(from_exe);
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    errdefer allocator.free(cwd);
+    const cwd_probe = try std.fs.path.join(allocator, &[_][]const u8{ cwd, "lib", "evm", "build.zig" });
+    defer allocator.free(cwd_probe);
+    if (pathExists(cwd_probe)) return cwd;
+
+    return error.OraRepoRootNotFound;
+}
+
+fn launchDebuggerTui(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    artifact_root: []const u8,
+    init_signature: ?[]const u8,
+    init_arg_values: []const []const u8,
+    init_calldata_hex: ?[]const u8,
+    signature: ?[]const u8,
+    arg_values: []const []const u8,
+    calldata_hex: ?[]const u8,
+) !void {
+    const repo_root = try findOraRepoRoot(allocator);
+    defer allocator.free(repo_root);
+
+    const evm_dir = try std.fs.path.join(allocator, &[_][]const u8{ repo_root, "lib", "evm" });
+    defer allocator.free(evm_dir);
+
+    const debugger_bin = try std.fs.path.join(allocator, &[_][]const u8{ evm_dir, "zig-out", "bin", "ora-evm-debug-tui" });
+    defer allocator.free(debugger_bin);
+
+    if (!pathExists(debugger_bin)) {
+        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
+        build_child.cwd = evm_dir;
+        build_child.stdin_behavior = .Inherit;
+        build_child.stdout_behavior = .Inherit;
+        build_child.stderr_behavior = .Inherit;
+        try build_child.spawn();
+        const build_term = try build_child.wait();
+        switch (build_term) {
+            .Exited => |code| if (code != 0) return error.DebuggerBuildFailed,
+            else => return error.DebuggerBuildFailed,
+        }
+    }
+
+    const stem = std.fs.path.stem(file_path);
+    const hex_path_rel = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ artifact_root, stem });
+    defer allocator.free(hex_path_rel);
+    const srcmap_path_rel = try std.fmt.allocPrint(allocator, "{s}/{s}.sourcemap.json", .{ artifact_root, stem });
+    defer allocator.free(srcmap_path_rel);
+    const debug_path_rel = try std.fmt.allocPrint(allocator, "{s}/{s}.debug.json", .{ artifact_root, stem });
+    defer allocator.free(debug_path_rel);
+    const abi_path_rel = try std.fmt.allocPrint(allocator, "{s}/abi/{s}.abi.json", .{ artifact_root, stem });
+    defer allocator.free(abi_path_rel);
+
+    const source_abs = try absolutePathAlloc(allocator, file_path);
+    defer allocator.free(source_abs);
+    const hex_abs = try absolutePathAlloc(allocator, hex_path_rel);
+    defer allocator.free(hex_abs);
+    const srcmap_abs = try absolutePathAlloc(allocator, srcmap_path_rel);
+    defer allocator.free(srcmap_abs);
+    const debug_abs = try absolutePathAlloc(allocator, debug_path_rel);
+    defer allocator.free(debug_abs);
+    const abi_abs = try absolutePathAlloc(allocator, abi_path_rel);
+    defer allocator.free(abi_abs);
+
+    const deploy_hex_abs = try prepareDebuggerDeployHex(
+        allocator,
+        artifact_root,
+        stem,
+        hex_abs,
+        if (pathExists(abi_abs)) abi_abs else null,
+        init_signature,
+        init_arg_values,
+        init_calldata_hex,
+    );
+    defer allocator.free(deploy_hex_abs);
+
+    var argv: std.ArrayList([]const u8) = .{};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ debugger_bin, deploy_hex_abs, srcmap_abs, source_abs });
+    try argv.appendSlice(allocator, &.{ "--debug-info", debug_abs });
+    if (pathExists(abi_abs)) {
+        try argv.appendSlice(allocator, &.{ "--abi", abi_abs });
+    }
+    if (signature) |sig| {
+        try argv.appendSlice(allocator, &.{ "--signature", sig });
+        for (arg_values) |arg| {
+            try argv.appendSlice(allocator, &.{ "--arg", arg });
+        }
+    } else if (calldata_hex) |hex| {
+        try argv.appendSlice(allocator, &.{ "--calldata-hex", hex });
+    }
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
+        else => std.process.exit(1),
+    }
+}
+
+fn prepareDebuggerDeployHex(
+    allocator: std.mem.Allocator,
+    artifact_root: []const u8,
+    stem: []const u8,
+    base_hex_abs: []const u8,
+    abi_abs_opt: ?[]const u8,
+    init_signature: ?[]const u8,
+    init_arg_values: []const []const u8,
+    init_calldata_hex: ?[]const u8,
+) ![]u8 {
+    if (init_signature == null and init_calldata_hex == null) {
+        return try allocator.dupe(u8, base_hex_abs);
+    }
+
+    const base_hex_text = try std.fs.cwd().readFileAlloc(allocator, base_hex_abs, 16 * 1024 * 1024);
+    defer allocator.free(base_hex_text);
+    const base_bytes = try decodeHexAllocLocal(allocator, base_hex_text);
+    defer allocator.free(base_bytes);
+
+    const init_bytes = if (init_signature) |sig| blk: {
+        if (abi_abs_opt) |abi_abs| {
+            const abi_json = try std.fs.cwd().readFileAlloc(allocator, abi_abs, 16 * 1024 * 1024);
+            defer allocator.free(abi_json);
+            break :blk try encodeConstructorArgsAllocLocal(allocator, abi_json, sig, init_arg_values);
+        }
+        break :blk try encodeConstructorArgsAllocLocal(allocator, null, sig, init_arg_values);
+    } else blk: {
+        break :blk try decodeHexAllocLocal(allocator, init_calldata_hex.?);
+    };
+    defer allocator.free(init_bytes);
+
+    const combined = try allocator.alloc(u8, base_bytes.len + init_bytes.len);
+    defer allocator.free(combined);
+    @memcpy(combined[0..base_bytes.len], base_bytes);
+    @memcpy(combined[base_bytes.len..], init_bytes);
+
+    const deploy_hex_name = try std.fmt.allocPrint(allocator, "{s}.deploy.hex", .{stem});
+    defer allocator.free(deploy_hex_name);
+    const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
+    defer allocator.free(deploy_hex_path_rel);
+
+    const deploy_hex_file = if (std.fs.path.isAbsolute(deploy_hex_path_rel))
+        try std.fs.createFileAbsolute(deploy_hex_path_rel, .{})
+    else
+        try std.fs.cwd().createFile(deploy_hex_path_rel, .{});
+    defer deploy_hex_file.close();
+
+    var writer_buffer: [4096]u8 = undefined;
+    var writer = deploy_hex_file.writer(&writer_buffer);
+    const out = &writer.interface;
+    for (combined) |byte| {
+        try out.print("{X:0>2}", .{byte});
+    }
+    try out.flush();
+
+    return try absolutePathAlloc(allocator, deploy_hex_path_rel);
+}
+
+fn decodeHexAllocLocal(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const hex = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
+    if (hex.len % 2 != 0) return error.InvalidHex;
+
+    const out = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(out);
+    _ = try std.fmt.hexToBytes(out, hex);
+    return out;
+}
+
+fn encodeConstructorArgsAllocLocal(
+    allocator: std.mem.Allocator,
+    abi_json_opt: ?[]const u8,
+    signature: []const u8,
+    arg_values: []const []const u8,
+) ![]u8 {
+    _ = abi_json_opt;
+    const open = std.mem.indexOfScalar(u8, signature, '(') orelse return error.InvalidSignature;
+    const close = std.mem.lastIndexOfScalar(u8, signature, ')') orelse return error.InvalidSignature;
+    if (close < open) return error.InvalidSignature;
+
+    const type_list = signature[open + 1 .. close];
+    var count: usize = 0;
+    if (std.mem.trim(u8, type_list, " \t").len > 0) {
+        var split_count = std.mem.splitScalar(u8, type_list, ',');
+        while (split_count.next()) |_| count += 1;
+    }
+    if (count != arg_values.len) return error.ArgumentCountMismatch;
+
+    const out = try allocator.alloc(u8, count * 32);
+    errdefer allocator.free(out);
+
+    var arg_index: usize = 0;
+    if (count > 0) {
+        var split = std.mem.splitScalar(u8, type_list, ',');
+        while (split.next()) |raw_type| : (arg_index += 1) {
+            const type_name = std.mem.trim(u8, raw_type, " \t");
+            try encodeAbiWordLocal(switchAbiTypeLocal(type_name), arg_values[arg_index], out[arg_index * 32 ..][0..32]);
+        }
+    }
+
+    return out;
+}
+
+fn switchAbiTypeLocal(type_name: []const u8) []const u8 {
+    if (std.mem.eql(u8, type_name, "u256")) return "uint256";
+    if (std.mem.eql(u8, type_name, "bool")) return "bool";
+    if (std.mem.eql(u8, type_name, "address")) return "address";
+    return type_name;
+}
+
+fn encodeAbiWordLocal(type_name: []const u8, value_text: []const u8, out_word: []u8) !void {
+    if (out_word.len != 32) return error.InvalidAbiType;
+    @memset(out_word, 0);
+
+    if (std.mem.eql(u8, type_name, "bool")) {
+        const is_true = std.mem.eql(u8, value_text, "true") or std.mem.eql(u8, value_text, "1");
+        const is_false = std.mem.eql(u8, value_text, "false") or std.mem.eql(u8, value_text, "0");
+        if (!is_true and !is_false) return error.InvalidBoolean;
+        out_word[31] = if (is_true) 1 else 0;
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "address")) {
+        const text = if (std.mem.startsWith(u8, value_text, "0x")) value_text[2..] else value_text;
+        if (text.len > 40) return error.InvalidAddress;
+        if (text.len % 2 != 0) return error.InvalidAddress;
+        var buf: [20]u8 = [_]u8{0} ** 20;
+        const start = 20 - text.len / 2;
+        _ = try std.fmt.hexToBytes(buf[start..], text);
+        @memcpy(out_word[12..32], &buf);
+        return;
+    }
+
+    const value = try std.fmt.parseUnsigned(u256, value_text, 0);
+    var tmp = value;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        out_word[31 - i] = @truncate(tmp & 0xff);
+        tmp >>= 8;
+    }
 }
 
 fn freeResolvedIncludeRoots(allocator: std.mem.Allocator, include_roots: []const []const u8) void {
@@ -1062,6 +1518,7 @@ fn printUsage() !void {
     try stdout.print("       ora build [options]\n", .{});
     try stdout.print("       ora build [options] <file.ora>\n", .{});
     try stdout.print("       ora emit [emit-options] <file.ora>\n", .{});
+    try stdout.print("       ora debug [debug-options] <file.ora>\n", .{});
     try stdout.print("       ora fmt [fmt-options] <file.ora|dir>\n", .{});
     try stdout.print("       ora init [path]\n", .{});
     try stdout.print("       ora -v | --version\n", .{});
@@ -1071,6 +1528,7 @@ fn printUsage() !void {
     try stdout.print("                           Outputs: bytecode, ABI, Ora/SIR MLIR, SIR text, SMT report\n", .{});
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
     try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
+    try stdout.print("  debug                  - Compile debugger artifacts and launch the Ora EVM debugger\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
     try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
     try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
@@ -1114,6 +1572,13 @@ fn printUsage() !void {
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
+    try stdout.print("\nDebugger Launch Options:\n", .{});
+    try stdout.print("  --signature <sig>      - Contract function signature, e.g. 'add(u256,u256)'\n", .{});
+    try stdout.print("  --arg <value>          - Repeated function arguments for --signature\n", .{});
+    try stdout.print("  --calldata-hex <hex>   - Raw calldata (alternative to --signature/--arg)\n", .{});
+    try stdout.print("  --init-signature <sig> - Constructor/init signature, e.g. 'init(u256)'\n", .{});
+    try stdout.print("  --init-arg <value>     - Repeated constructor/init arguments\n", .{});
+    try stdout.print("  --init-calldata-hex <hex> - Raw constructor/init calldata\n", .{});
     try stdout.flush();
 }
 
@@ -1551,6 +2016,14 @@ const DebugSourceScopeBundle = struct {
     scopes: []const DebugScopeInfo,
     locals: []const DebugLocalInfo,
 };
+
+fn deinitDebugSourceScopeBundle(allocator: std.mem.Allocator, bundle: *const DebugSourceScopeBundle) void {
+    for (bundle.locals) |local| {
+        if (local.folded_value) |folded_value| allocator.free(folded_value);
+    }
+    allocator.free(bundle.scopes);
+    allocator.free(bundle.locals);
+}
 
 const ScopeBuildState = struct {
     next_scope_id: u32 = 0,
@@ -2219,6 +2692,190 @@ fn posInRange(
     return posBeforeOrEqual(start.line, start.column, line, col) and posStrictlyBefore(line, col, end.line, end.column);
 }
 
+const ExecutableStatementKind = enum {
+    runtime,
+    runtime_guard,
+};
+
+const ExecutableLineSet = std.AutoHashMap(u32, ExecutableStatementKind);
+const ExecutableLineMap = std.StringHashMap(ExecutableLineSet);
+
+fn executableStatementKindName(kind: ExecutableStatementKind) []const u8 {
+    return switch (kind) {
+        .runtime => "runtime",
+        .runtime_guard => "runtime_guard",
+    };
+}
+
+fn deinitExecutableLineMap(allocator: std.mem.Allocator, line_map: *ExecutableLineMap) void {
+    var it = line_map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        entry.value_ptr.deinit();
+    }
+    line_map.deinit();
+}
+
+fn putExecutableLine(
+    allocator: std.mem.Allocator,
+    line_map: *ExecutableLineMap,
+    file_path: []const u8,
+    line: u32,
+    kind: ExecutableStatementKind,
+) !void {
+    const gop = try line_map.getOrPut(file_path);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = try allocator.dupe(u8, file_path);
+        gop.value_ptr.* = ExecutableLineSet.init(allocator);
+    }
+    const existing = gop.value_ptr.get(line);
+    if (existing == .runtime_guard or kind == .runtime_guard) {
+        try gop.value_ptr.put(line, .runtime_guard);
+    } else {
+        try gop.value_ptr.put(line, .runtime);
+    }
+}
+
+fn executableStatementKindForLine(line_map: *const ExecutableLineMap, file_path: []const u8, line: u32) ?ExecutableStatementKind {
+    const file_lines = line_map.get(file_path) orelse return null;
+    return file_lines.get(line);
+}
+
+fn addExecutableRangeStart(
+    allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
+    line_map: *ExecutableLineMap,
+    file_id: compiler.FileId,
+    range: compiler.TextRange,
+    kind: ExecutableStatementKind,
+) !void {
+    const pos = lineColumnForOffset(sources, file_id, range.start);
+    try putExecutableLine(allocator, line_map, sources.file(file_id).path, pos.line, kind);
+}
+
+fn collectExecutableStmtLines(
+    allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    statement_id: compiler.ast.StmtId,
+    line_map: *ExecutableLineMap,
+) anyerror!void {
+    const stmt = ast_file.statement(statement_id).*;
+    switch (stmt) {
+        .VariableDecl => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Return => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Expr => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Assign => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .If => |node| {
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.then_body, line_map);
+            if (node.else_body) |else_body| {
+                try collectExecutableBodyLines(allocator, sources, ast_file, file_id, else_body, line_map);
+            }
+        },
+        .While => |node| {
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map);
+        },
+        .For => |node| {
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map);
+        },
+        .Switch => |node| {
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            for (node.arms) |arm| {
+                try collectExecutableBodyLines(allocator, sources, ast_file, file_id, arm.body, line_map);
+            }
+            if (node.else_body) |else_body| {
+                try collectExecutableBodyLines(allocator, sources, ast_file, file_id, else_body, line_map);
+            }
+        },
+        .Try => |node| {
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.try_body, line_map);
+            if (node.catch_clause) |catch_clause| {
+                try collectExecutableBodyLines(allocator, sources, ast_file, file_id, catch_clause.body, line_map);
+            }
+        },
+        .Break => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Continue => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Assert => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime_guard),
+        .Log => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Lock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Unlock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Block => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
+        .LabeledBlock => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
+        .Assume, .Havoc, .Error => {},
+    }
+}
+
+fn collectExecutableBodyLines(
+    allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    body_id: compiler.ast.BodyId,
+    line_map: *ExecutableLineMap,
+) anyerror!void {
+    const body = ast_file.body(body_id).*;
+    for (body.statements) |statement_id| {
+        try collectExecutableStmtLines(allocator, sources, ast_file, file_id, statement_id, line_map);
+    }
+}
+
+fn collectExecutableItemLines(
+    allocator: std.mem.Allocator,
+    sources: *const compiler.source.SourceStore,
+    ast_file: *const compiler.ast.AstFile,
+    file_id: compiler.FileId,
+    item_id: compiler.ItemId,
+    line_map: *ExecutableLineMap,
+) anyerror!void {
+    switch (ast_file.item(item_id).*) {
+        .Contract => |contract_item| {
+            for (contract_item.members) |member_id| {
+                try collectExecutableItemLines(allocator, sources, ast_file, file_id, member_id, line_map);
+            }
+        },
+        .Impl => |impl_item| {
+            for (impl_item.methods) |method_id| {
+                try collectExecutableItemLines(allocator, sources, ast_file, file_id, method_id, line_map);
+            }
+        },
+        .Function => |function_item| {
+            if (function_item.is_comptime or function_item.is_ghost) return;
+            for (function_item.clauses) |clause| {
+                if (clause.kind != .guard) continue;
+                try addExecutableRangeStart(allocator, sources, line_map, file_id, clause.range, .runtime_guard);
+            }
+            try collectExecutableBodyLines(allocator, sources, ast_file, file_id, function_item.body, line_map);
+        },
+        else => {},
+    }
+}
+
+fn buildExecutableLineMap(
+    allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    root_module_id: compiler.ModuleId,
+) !ExecutableLineMap {
+    var line_map = ExecutableLineMap.init(allocator);
+    errdefer deinitExecutableLineMap(allocator, &line_map);
+
+    const root_module = db.sources.module(root_module_id);
+    const package = db.sources.package(root_module.package_id);
+    for (package.modules.items) |module_id| {
+        const module = db.sources.module(module_id);
+        const ast_file = try db.astFile(module.file_id);
+        for (ast_file.root_items) |item_id| {
+            try collectExecutableItemLines(allocator, &db.sources, ast_file, module.file_id, item_id, &line_map);
+        }
+    }
+
+    return line_map;
+}
+
 fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
     switch (ty) {
         .unknown => try writer.writeAll("unknown"),
@@ -2843,6 +3500,15 @@ fn runMlirEmitAdvanced(
         else
             null;
 
+        const sir_line_map_ref = c.oraExtractSIRLineMap(ctx, final_module);
+        defer if (sir_line_map_ref.data != null) {
+            mlir_c_api.freeStringRef(sir_line_map_ref);
+        };
+        const sir_line_map: ?[]const u8 = if (sir_line_map_ref.data != null and sir_line_map_ref.length > 0)
+            sir_line_map_ref.data[0..sir_line_map_ref.length]
+        else
+            null;
+
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
         const sir_global_slots_ref: c.MlirStringRef = if (mlir_options.debug_info)
             c.oraExtractSIRGlobalSlots(ctx, final_module)
@@ -2866,8 +3532,7 @@ fn runMlirEmitAdvanced(
         else
             null;
         defer if (source_scopes) |bundle| {
-            allocator.free(bundle.scopes);
-            allocator.free(bundle.locals);
+            deinitDebugSourceScopeBundle(allocator, &bundle);
         };
 
         if (mlir_options.emit_sir_text) {
@@ -2891,7 +3556,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
             m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_debug_info, source_scopes, stdout);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout);
             m.end();
         }
     }
@@ -3303,11 +3968,14 @@ fn resolveSenseiSirPath(allocator: std.mem.Allocator) ![]const u8 {
 
 fn emitBytecodeFromSirText(
     allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    root_module_id: compiler.ModuleId,
     sources: *const compiler.source.SourceStore,
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
     sir_locations_json: ?[]const u8,
+    sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
     source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
@@ -3460,7 +4128,7 @@ fn emitBytecodeFromSirText(
     // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
     // into final .sourcemap.json
     if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, sir_locations_json.?, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
         try writeDebugInfoSidecar(allocator, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
@@ -3469,12 +4137,15 @@ fn emitBytecodeFromSirText(
 
 fn mergeSourceMaps(
     allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    root_module_id: compiler.ModuleId,
     sir_locations_json: []const u8,
+    sir_line_map_json: ?[]const u8,
     sensei_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
 ) !void {
-    // Read Sensei's source map: {"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
+    // Read Sensei's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
     const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
         try stdout.print("Warning: could not read Sensei source map: {}\n", .{err});
         return;
@@ -3482,7 +4153,10 @@ fn mergeSourceMaps(
     defer allocator.free(sensei_json);
 
     // Parse Sensei ops into a map: op_idx → pc
-    const SenseiMap = struct { ops: []const struct { idx: u32, pc: u32 } = &.{} };
+    const SenseiMap = struct {
+        runtime_start_pc: ?u32 = null,
+        ops: []const struct { idx: u32, pc: u32 } = &.{},
+    };
     const sensei_parsed = std.json.parseFromSlice(SenseiMap, allocator, sensei_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
@@ -3514,6 +4188,25 @@ fn mergeSourceMaps(
     };
     defer sir_locs.deinit();
 
+    var idx_to_sir_line = std.AutoHashMap(u32, u32).init(allocator);
+    defer idx_to_sir_line.deinit();
+    if (sir_line_map_json) |json| {
+        const SirLineEntry = struct { idx: u32, line: u32 };
+        const sir_lines = std.json.parseFromSlice([]const SirLineEntry, allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            try stdout.print("Warning: could not parse SIR line map: {}\n", .{err});
+            return;
+        };
+        defer sir_lines.deinit();
+        for (sir_lines.value) |line_entry| {
+            try idx_to_sir_line.put(line_entry.idx, line_entry.line);
+        }
+    }
+
+    var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
+    defer deinitExecutableLineMap(allocator, &executable_lines);
+
     // Merge: for each SIR location entry, look up its PC from Sensei
     // Collect unique source files
     var sources: std.ArrayList([]const u8) = .{};
@@ -3526,10 +4219,19 @@ fn mergeSourceMaps(
     defer out.deinit(allocator);
     const writer = out.writer(allocator);
 
-    try writer.writeAll("{\"version\":1,\"sources\":[");
+    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{sensei_parsed.value.runtime_start_pc orelse 0});
 
     // First pass: collect sources and build entries
-    const MergedEntry = struct { idx: u32, pc: u32, src: u32, line: u32, col: u32, stmt: bool };
+    const MergedEntry = struct {
+        idx: u32,
+        pc: u32,
+        src: u32,
+        line: u32,
+        col: u32,
+        sir_line: ?u32,
+        stmt: bool,
+        kind: ?ExecutableStatementKind = null,
+    };
     var entries: std.ArrayList(MergedEntry) = .{};
     defer entries.deinit(allocator);
 
@@ -3566,7 +4268,9 @@ fn mergeSourceMaps(
             .src = src_idx,
             .line = loc.line,
             .col = loc.col,
+            .sir_line = idx_to_sir_line.get(loc.idx),
             .stmt = false,
+            .kind = null,
         });
     }
 
@@ -3604,7 +4308,10 @@ fn mergeSourceMaps(
     var prev_line: ?u32 = null;
     var prev_src: ?u32 = null;
     for (entries.items) |*entry| {
-        entry.stmt = (prev_line == null) or (entry.line != prev_line.?) or (entry.src != prev_src.?);
+        const file_path = sources.items[entry.src];
+        const line_kind = executableStatementKindForLine(&executable_lines, file_path, entry.line);
+        entry.kind = line_kind;
+        entry.stmt = line_kind != null and ((prev_line == null) or (entry.line != prev_line.?) or (entry.src != prev_src.?));
         prev_line = entry.line;
         prev_src = entry.src;
     }
@@ -3619,9 +4326,17 @@ fn mergeSourceMaps(
     // Emit entries
     for (entries.items, 0..) |entry, i| {
         if (i > 0) try writer.writeAll(",");
-        try writer.print("{{\"idx\":{d},\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}}}", .{
+        try writer.print("{{\"idx\":{d},\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}", .{
             entry.idx, entry.pc, entry.src, entry.line, entry.col, if (entry.stmt) "true" else "false",
         });
+        if (entry.sir_line) |sir_line| {
+            try writer.print(",\"sir_line\":{d}", .{sir_line});
+        }
+        if (entry.kind) |kind| {
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, executableStatementKindName(kind));
+        }
+        try writer.writeAll("}");
     }
     try writer.writeAll("]}");
 

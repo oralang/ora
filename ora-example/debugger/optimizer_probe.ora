@@ -1,0 +1,66 @@
+comptime const std = @import("std");
+
+comptime const FIXED_FEE: u256 = 2 + 3 + 5;
+comptime const EVEN_TOKEN_BOOST: u256 = 2 * 3 * 5;
+comptime const ODD_TOKEN_BOOST: u256 = EVEN_TOKEN_BOOST + 1;
+
+contract OptimizerProbe {
+    storage var owner: address;
+    storage var total: u256;
+    storage var last_recipient: address;
+    storage var last_token_id: u256;
+    storage var last_credit: u256;
+    storage var runs: u256;
+
+    pub fn init(seedTotal: u256) {
+        owner = std.msg.sender();
+        total = seedTotal;
+        last_recipient = std.msg.sender();
+        last_token_id = 0;
+        last_credit = 0;
+        runs = 0;
+    }
+
+    fn normalize(amount: u256) -> u256
+        requires(amount > FIXED_FEE)
+    {
+        let foldedFloor = FIXED_FEE + 1;
+        return amount - foldedFloor + 1;
+    }
+
+    fn rewardBoost(tokenId: u256) -> u256 {
+        if (tokenId % 2 == 0) {
+            return EVEN_TOKEN_BOOST;
+        }
+
+        return ODD_TOKEN_BOOST;
+    }
+
+    pub fn simulate(recipient: address, tokenId: u256, amount: u256) -> u256
+        requires(amount > FIXED_FEE)
+        requires(total <= std.constants.U256_MAX - amount)
+        requires(runs < std.constants.U256_MAX)
+    {
+        let normalized = normalize(amount);
+        let boost = rewardBoost(tokenId);
+
+        if (std.msg.sender() == owner) {
+            let credited = normalized + boost;
+            total = total + credited;
+            last_credit = credited;
+        } else {
+            total = total + normalized;
+            last_credit = normalized;
+        }
+
+        last_recipient = recipient;
+        last_token_id = tokenId;
+        runs = runs + 1;
+
+        return last_credit;
+    }
+
+    pub fn snapshot() -> (u256, u256, u256) {
+        return (total, last_credit, runs);
+    }
+}

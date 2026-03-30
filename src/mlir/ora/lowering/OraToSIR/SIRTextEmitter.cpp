@@ -12,11 +12,14 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include <unordered_set>
+#include <unordered_map>
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Casting.h"
 #include <cstdio>
+#include <functional>
 
 using namespace mlir;
 
@@ -510,6 +513,169 @@ namespace
         }
         return {};
     }
+
+    static SmallVector<func::FuncOp, 8> collectSortedFuncs(ModuleOp module)
+    {
+        SmallVector<func::FuncOp, 8> funcs;
+        for (func::FuncOp func : module.getOps<func::FuncOp>())
+            funcs.push_back(func);
+
+        llvm::stable_sort(funcs, [&](func::FuncOp a, func::FuncOp b) {
+            auto rank = [](func::FuncOp f) -> int {
+                if (f.getName() == "init")
+                    return 0;
+                if (f.getName() == "main")
+                    return 2;
+                return 1;
+            };
+            int ra = rank(a);
+            int rb = rank(b);
+            if (ra != rb)
+                return ra < rb;
+            return false;
+        });
+
+        return funcs;
+    }
+
+    static SmallVector<Block *, 16> collectOrderedBlocks(func::FuncOp func, NameTable &names)
+    {
+        bool first = true;
+        unsigned bbId = 0;
+        SmallVector<Block *, 16> blocks;
+        for (Block &block : func.getBlocks())
+        {
+            std::string blockName;
+            if (!block.empty())
+            {
+                if (auto attr = block.back().getAttrOfType<StringAttr>("sir.block_name"))
+                    blockName = attr.getValue().str();
+            }
+
+            if (blockName.empty())
+            {
+                if (first)
+                {
+                    blockName = "entry";
+                    first = false;
+                }
+                else
+                {
+                    blockName = "bb" + std::to_string(bbId++);
+                }
+            }
+
+            blockName = names.allocateName(blockName);
+            names.blockNames[&block] = blockName;
+            blocks.push_back(&block);
+        }
+
+        bool hasOrder = false;
+        llvm::SmallVector<std::pair<int64_t, Block *>, 16> ordered;
+        ordered.reserve(blocks.size());
+        for (size_t i = 0; i < blocks.size(); ++i)
+        {
+            Block *block = blocks[i];
+            int64_t order = static_cast<int64_t>(i);
+            if (!block->empty())
+            {
+                if (auto attr = block->back().getAttrOfType<IntegerAttr>("sir.block_order"))
+                {
+                    order = attr.getInt();
+                    hasOrder = true;
+                }
+            }
+            ordered.push_back({order, block});
+        }
+        if (hasOrder)
+        {
+            llvm::stable_sort(ordered, [](const auto &a, const auto &b) { return a.first < b.first; });
+            blocks.clear();
+            for (auto &pair : ordered)
+                blocks.push_back(pair.second);
+        }
+
+        return blocks;
+    }
+
+    static void preassignNamesForFunc(func::FuncOp func, NameTable &names)
+    {
+        for (Block &block : func.getBlocks())
+        {
+            for (BlockArgument arg : block.getArguments())
+                names.nameFor(arg);
+
+            for (Operation &op : block)
+            {
+                if (auto cst = dyn_cast<sir::ConstOp>(op))
+                {
+                    if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                    {
+                        std::string key = formatConstKey(intAttr.getValue());
+                        auto it = names.constNames.find(key);
+                        if (it != names.constNames.end())
+                        {
+                            Value defVal = it->second;
+                            if (auto defOp = defVal.getDefiningOp())
+                            {
+                                if (defOp->getBlock() == &block && defOp->isBeforeInBlock(&op))
+                                {
+                                    names.valueNames[cst.getResult()] = names.nameFor(defVal);
+                                    continue;
+                                }
+                            }
+                        }
+                        names.nameFor(cst.getResult());
+                        names.constNames[key] = cst.getResult();
+                        continue;
+                    }
+                }
+
+                if (auto bitcast = dyn_cast<sir::BitcastOp>(op))
+                {
+                    if (bitcast->getNumOperands() == 1 && bitcast->getNumResults() == 1)
+                    {
+                        names.valueNames[bitcast.getResult()] = names.nameFor(bitcast.getOperand());
+                        continue;
+                    }
+                }
+
+                for (Value res : op.getResults())
+                    names.nameFor(res);
+            }
+        }
+    }
+
+    struct OpLineKey
+    {
+        Operation *op;
+        uint32_t syntheticIndex;
+
+        bool operator==(const OpLineKey &other) const
+        {
+            return op == other.op && syntheticIndex == other.syntheticIndex;
+        }
+    };
+
+    struct OpLineKeyHash
+    {
+        std::size_t operator()(const OpLineKey &key) const
+        {
+            std::size_t h1 = std::hash<void *>{}(key.op);
+            std::size_t h2 = std::hash<uint32_t>{}(key.syntheticIndex);
+            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
+    static bool isBlankSirLine(StringRef line)
+    {
+        for (char c : line)
+        {
+            if (c != ' ' && c != '\t' && c != '\r')
+                return false;
+        }
+        return true;
+    }
 }
 
 namespace mlir
@@ -521,138 +687,15 @@ namespace mlir
             std::string out;
             llvm::raw_string_ostream os(out);
 
-            SmallVector<func::FuncOp, 8> funcs;
-            for (func::FuncOp func : module.getOps<func::FuncOp>())
-                funcs.push_back(func);
-
-            llvm::stable_sort(funcs, [&](func::FuncOp a, func::FuncOp b) {
-                auto rank = [](func::FuncOp f) -> int {
-                    if (f.getName() == "init")
-                        return 0;
-                    if (f.getName() == "main")
-                        return 2;
-                    return 1;
-                };
-                int ra = rank(a);
-                int rb = rank(b);
-                if (ra != rb)
-                    return ra < rb;
-                return false;
-            });
+            SmallVector<func::FuncOp, 8> funcs = collectSortedFuncs(module);
 
             for (size_t funcIndex = 0; funcIndex < funcs.size(); ++funcIndex)
             {
                 func::FuncOp func = funcs[funcIndex];
                 NameTable names;
 
-                // Assign block names in order. First block is "entry" unless overridden.
-                bool first = true;
-                unsigned bbId = 0;
-                SmallVector<Block *, 16> blocks;
-                for (Block &block : func.getBlocks())
-                {
-                    std::string blockName;
-                    if (!block.empty())
-                    {
-                        if (auto attr = block.back().getAttrOfType<StringAttr>("sir.block_name"))
-                            blockName = attr.getValue().str();
-                    }
-
-                    if (blockName.empty())
-                    {
-                        if (first)
-                        {
-                            blockName = "entry";
-                            first = false;
-                        }
-                        else
-                        {
-                            blockName = "bb" + std::to_string(bbId++);
-                        }
-                    }
-                    // Route through allocateName for collision detection.
-                    blockName = names.allocateName(blockName);
-                    names.blockNames[&block] = blockName;
-                    blocks.push_back(&block);
-                }
-
-                // If block order attributes are present, sort accordingly (used by dispatcher).
-                bool hasOrder = false;
-                llvm::SmallVector<std::pair<int64_t, Block *>, 16> ordered;
-                ordered.reserve(blocks.size());
-                for (size_t i = 0; i < blocks.size(); ++i)
-                {
-                    Block *block = blocks[i];
-                    int64_t order = static_cast<int64_t>(i);
-                    if (!block->empty())
-                    {
-                        if (auto attr = block->back().getAttrOfType<IntegerAttr>("sir.block_order"))
-                        {
-                            order = attr.getInt();
-                            hasOrder = true;
-                        }
-                    }
-                    ordered.push_back({order, block});
-                }
-                if (hasOrder)
-                {
-                    llvm::stable_sort(ordered, [](const auto &a, const auto &b) { return a.first < b.first; });
-                    blocks.clear();
-                    for (auto &pair : ordered)
-                        blocks.push_back(pair.second);
-                }
-
-                // Pre-assign names for all values (block args, op results).
-                // Also perform const dedup and bitcast aliasing so that
-                // block output headers use the final names.
-                for (Block &block : func.getBlocks())
-                {
-                    for (BlockArgument arg : block.getArguments())
-                    {
-                        names.nameFor(arg);
-                    }
-                    for (Operation &op : block)
-                    {
-                        // Const dedup: alias duplicate consts to the first definition.
-                        if (auto cst = dyn_cast<sir::ConstOp>(op))
-                        {
-                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
-                            {
-                                std::string key = formatConstKey(intAttr.getValue());
-                                auto it = names.constNames.find(key);
-                                if (it != names.constNames.end())
-                                {
-                                    Value defVal = it->second;
-                                    if (auto defOp = defVal.getDefiningOp())
-                                    {
-                                        if (defOp->getBlock() == &block && defOp->isBeforeInBlock(&op))
-                                        {
-                                            names.valueNames[cst.getResult()] = names.nameFor(defVal);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                // First occurrence in this block — assign name and register.
-                                names.nameFor(cst.getResult());
-                                names.constNames[key] = cst.getResult();
-                                continue;
-                            }
-                        }
-                        // Bitcast aliasing: alias result to operand.
-                        if (auto bitcast = dyn_cast<sir::BitcastOp>(op))
-                        {
-                            if (bitcast->getNumOperands() == 1 && bitcast->getNumResults() == 1)
-                            {
-                                names.valueNames[bitcast.getResult()] = names.nameFor(bitcast.getOperand());
-                                continue;
-                            }
-                        }
-                        for (Value res : op.getResults())
-                        {
-                            names.nameFor(res);
-                        }
-                    }
-                }
+                SmallVector<Block *, 16> blocks = collectOrderedBlocks(func, names);
+                preassignNamesForFunc(func, names);
 
                 os << "fn " << sanitizeGlobalName(func.getName()) << ":\n";
                 for (Block *blockPtr : blocks)
@@ -677,9 +720,13 @@ namespace mlir
                     {
                         if (op.hasTrait<OpTrait::IsTerminator>())
                             continue;
-                        os << "        ";
-                        emitOperation(os, names, op);
-                        os << "\n";
+                        std::string opText;
+                        llvm::raw_string_ostream opOs(opText);
+                        emitOperation(opOs, names, op);
+                        opOs.flush();
+                        if (opText.empty())
+                            continue;
+                        os << "        " << opText << "\n";
                     }
 
                     os << "        ";
@@ -749,38 +796,24 @@ namespace mlir
         template <typename CallbackT>
         static void visitSerializedSIROps(ModuleOp module, CallbackT callback)
         {
+            uint32_t opIndex = 0;
+            std::unordered_map<std::string, func::FuncOp> funcByName;
             SmallVector<func::FuncOp, 8> funcs;
             for (func::FuncOp func : module.getOps<func::FuncOp>())
-                funcs.push_back(func);
-
-            llvm::stable_sort(funcs, [&](func::FuncOp a, func::FuncOp b) {
-                auto rank = [](func::FuncOp f) -> int {
-                    if (f.getName() == "init")
-                        return 0;
-                    if (f.getName() == "main")
-                        return 2;
-                    return 1;
-                };
-                int ra = rank(a);
-                int rb = rank(b);
-                if (ra != rb)
-                    return ra < rb;
-                return false;
-            });
-
-            uint32_t opIndex = 0;
-
-            for (size_t funcIndex = 0; funcIndex < funcs.size(); ++funcIndex)
             {
-                func::FuncOp func = funcs[funcIndex];
+                funcs.push_back(func);
+                funcByName.emplace(func.getName().str(), func);
+            }
 
-                // --- Same block ordering as emitSIRText ---
-                // We need to replicate the NameTable for const dedup/bitcast skip logic
-                NameTable names;
+            std::unordered_map<Operation *, std::unique_ptr<NameTable>> nameTables;
+            auto getNamesForFunc = [&](func::FuncOp func) -> NameTable & {
+                auto it = nameTables.find(func.getOperation());
+                if (it != nameTables.end())
+                    return *it->second;
 
+                auto names = std::make_unique<NameTable>();
                 bool first = true;
                 unsigned bbId = 0;
-                SmallVector<Block *, 16> blocks;
                 for (Block &block : func.getBlocks())
                 {
                     std::string blockName;
@@ -797,44 +830,18 @@ namespace mlir
                             first = false;
                         }
                         else
-                            blockName = "bb" + std::to_string(bbId++);
-                    }
-                    blockName = names.allocateName(blockName);
-                    names.blockNames[&block] = blockName;
-                    blocks.push_back(&block);
-                }
-
-                // Block ordering by sir.block_order attribute
-                bool hasOrder = false;
-                llvm::SmallVector<std::pair<int64_t, Block *>, 16> ordered;
-                ordered.reserve(blocks.size());
-                for (size_t i = 0; i < blocks.size(); ++i)
-                {
-                    Block *block = blocks[i];
-                    int64_t order = static_cast<int64_t>(i);
-                    if (!block->empty())
-                    {
-                        if (auto attr = block->back().getAttrOfType<IntegerAttr>("sir.block_order"))
                         {
-                            order = attr.getInt();
-                            hasOrder = true;
+                            blockName = "bb" + std::to_string(bbId++);
                         }
                     }
-                    ordered.push_back({order, block});
-                }
-                if (hasOrder)
-                {
-                    llvm::stable_sort(ordered, [](const auto &a, const auto &b) { return a.first < b.first; });
-                    blocks.clear();
-                    for (auto &pair : ordered)
-                        blocks.push_back(pair.second);
+                    blockName = names->allocateName(blockName);
+                    names->blockNames[&block] = blockName;
                 }
 
-                // Pre-assign names (same as emitSIRText) to set up const dedup state
                 for (Block &block : func.getBlocks())
                 {
                     for (BlockArgument arg : block.getArguments())
-                        names.nameFor(arg);
+                        names->nameFor(arg);
                     for (Operation &op : block)
                     {
                         if (auto cst = dyn_cast<sir::ConstOp>(op))
@@ -842,21 +849,21 @@ namespace mlir
                             if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
                             {
                                 std::string key = formatConstKey(intAttr.getValue());
-                                auto it = names.constNames.find(key);
-                                if (it != names.constNames.end())
+                                auto itConst = names->constNames.find(key);
+                                if (itConst != names->constNames.end())
                                 {
-                                    Value defVal = it->second;
+                                    Value defVal = itConst->second;
                                     if (auto defOp = defVal.getDefiningOp())
                                     {
                                         if (defOp->getBlock() == &block && defOp->isBeforeInBlock(&op))
                                         {
-                                            names.valueNames[cst.getResult()] = names.nameFor(defVal);
+                                            names->valueNames[cst.getResult()] = names->nameFor(defVal);
                                             continue;
                                         }
                                     }
                                 }
-                                names.nameFor(cst.getResult());
-                                names.constNames[key] = cst.getResult();
+                                names->nameFor(cst.getResult());
+                                names->constNames[key] = cst.getResult();
                                 continue;
                             }
                         }
@@ -864,100 +871,154 @@ namespace mlir
                         {
                             if (bitcast->getNumOperands() == 1 && bitcast->getNumResults() == 1)
                             {
-                                names.valueNames[bitcast.getResult()] = names.nameFor(bitcast.getOperand());
+                                names->valueNames[bitcast.getResult()] = names->nameFor(bitcast.getOperand());
                                 continue;
                             }
                         }
                         for (Value res : op.getResults())
-                            names.nameFor(res);
+                            names->nameFor(res);
                     }
                 }
 
-                // --- Iterate ops, matching emitSIRText's skip/expand logic ---
-                for (Block *blockPtr : blocks)
+                auto *ptr = names.get();
+                nameTables.emplace(func.getOperation(), std::move(names));
+                return *ptr;
+            };
+
+            auto emitSerializedOp = [&](func::FuncOp func, Block &block, NameTable &names, Operation &op) {
+                if (op.hasTrait<OpTrait::IsTerminator>())
+                    return;
+
+                if (auto cst = dyn_cast<sir::ConstOp>(op))
                 {
+                    if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                    {
+                        std::string key = formatConstKey(intAttr.getValue());
+                        auto it = names.constNames.find(key);
+                        if (it != names.constNames.end())
+                        {
+                            Value defVal = it->second;
+                            if (auto defOp = defVal.getDefiningOp())
+                            {
+                                if (defOp->getBlock() == op.getBlock() && defOp->isBeforeInBlock(&op))
+                                    return;
+                            }
+                        }
+                    }
+                }
+
+                if (isa<sir::ConstOp>(op) && op.getNumResults() == 1)
+                {
+                    std::string name = names.nameFor(op.getResult(0));
+                    if (names.emittedDefs.find(name) != names.emittedDefs.end())
+                        return;
+                    names.emittedDefs.insert(name);
+                }
+
+                if (isa<sir::BitcastOp>(op))
+                    return;
+                if (isa<sir::ErrorDeclOp>(op))
+                    return;
+
+                if (isa<sir::SelectOp>(op))
+                {
+                    std::string zeroKey = formatConstKey(APInt(256, 0));
+                    bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
+                    uint32_t expandCount = needsZero ? 6 : 5;
+                    for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
+                    {
+                        callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
+                        opIndex++;
+                    }
+                    return;
+                }
+
+                callback(opIndex, op, func, block, names, false, 0, 1);
+                opIndex++;
+            };
+
+            auto appendSuccessors = [&](Operation &term, SmallVectorImpl<std::pair<func::FuncOp, Block *>> &stack, func::FuncOp func) {
+                if (auto br = dyn_cast<sir::BrOp>(term))
+                {
+                    stack.push_back({func, br.getDest()});
+                    return;
+                }
+                if (auto br = dyn_cast<sir::CondBrOp>(term))
+                {
+                    stack.push_back({func, br.getFalseDest()});
+                    stack.push_back({func, br.getTrueDest()});
+                    return;
+                }
+                if (auto sw = dyn_cast<sir::SwitchOp>(term))
+                {
+                    for (Block *dest : sw.getCaseDests())
+                        stack.push_back({func, dest});
+                    stack.push_back({func, sw.getDefaultDest()});
+                }
+            };
+
+            llvm::DenseSet<Block *> translatedBlocks;
+            auto traverseRoot = [&](func::FuncOp root) {
+                if (!root)
+                    return;
+                SmallVector<std::pair<func::FuncOp, Block *>, 16> stack;
+                stack.push_back({root, &root.front()});
+
+                while (!stack.empty())
+                {
+                    auto item = stack.pop_back_val();
+                    func::FuncOp func = item.first;
+                    Block *blockPtr = item.second;
+                    if (!translatedBlocks.insert(blockPtr).second)
+                        continue;
+
+                    NameTable &names = getNamesForFunc(func);
                     Block &block = *blockPtr;
+                    SmallVector<func::FuncOp, 4> callees;
 
                     for (Operation &op : block)
                     {
                         if (op.hasTrait<OpTrait::IsTerminator>())
                             continue;
-
-                        // Skip: deduped constant (same logic as emitOperation line 283-301)
-                        if (auto cst = dyn_cast<sir::ConstOp>(op))
+                        emitSerializedOp(func, block, names, op);
+                        if (auto icall = dyn_cast<sir::ICallOp>(op))
                         {
-                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
-                            {
-                                std::string key = formatConstKey(intAttr.getValue());
-                                auto it = names.constNames.find(key);
-                                if (it != names.constNames.end())
-                                {
-                                    Value defVal = it->second;
-                                    if (auto defOp = defVal.getDefiningOp())
-                                    {
-                                        if (defOp->getBlock() == op.getBlock() && defOp->isBeforeInBlock(&op))
-                                            continue; // skipped — not in SIR text
-                                    }
-                                }
-                            }
+                            auto it = funcByName.find(icall.getCalleeAttr().getValue().str());
+                            if (it != funcByName.end())
+                                callees.push_back(it->second);
                         }
-
-                        // Skip: already-emitted constant (line 303-310)
-                        if (isa<sir::ConstOp>(op) && op.getNumResults() == 1)
-                        {
-                            std::string name = names.nameFor(op.getResult(0));
-                            if (names.emittedDefs.find(name) != names.emittedDefs.end())
-                                continue; // skipped
-                            names.emittedDefs.insert(name);
-                        }
-
-                        // Skip: bitcast (line 312-323)
-                        if (isa<sir::BitcastOp>(op))
-                            continue;
-
-                        // Skip: ErrorDeclOp (line 324-325)
-                        if (isa<sir::ErrorDeclOp>(op))
-                            continue;
-
-                        // Expand: SelectOp → 5 or 6 SIR ops (line 329-357)
-                        if (isa<sir::SelectOp>(op))
-                        {
-                            // SelectOp emits: maybe const 0x0, sub, and, not, and, or
-                            // Check if zero const needs to be emitted
-                            std::string zeroKey = formatConstKey(APInt(256, 0));
-                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                            uint32_t expandCount = needsZero ? 6 : 5;
-                            for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
-                            {
-                                callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
-                                opIndex++;
-                            }
-                            continue;
-                        }
-
-                        // Normal op: 1 SIR text line
-                        callback(opIndex, op, func, block, names, false, 0, 1);
-                        opIndex++;
                     }
 
-                    // Terminator: always 1 SIR text line
                     if (!block.empty())
                     {
                         Operation &term = block.back();
                         callback(opIndex, term, func, block, names, false, 0, 1);
                         opIndex++;
+
+                        for (func::FuncOp callee : callees)
+                            stack.push_back({callee, &callee.front()});
+                        appendSuccessors(term, stack, func);
                     }
                 }
-            }
+            };
+
+            auto initIt = funcByName.find("init");
+            if (initIt != funcByName.end())
+                traverseRoot(initIt->second);
+            auto mainIt = funcByName.find("main");
+            if (mainIt != funcByName.end())
+                traverseRoot(mainIt->second);
         }
 
         std::string extractSIRLocations(ModuleOp module)
         {
             // Extract source locations from SIR MLIR ops as JSON.
-            // CRITICAL: The op indexing must exactly match what emitSIRText()
-            // produces, because Sensei parses the text sequentially. Skipped ops
-            // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too.
-            // Expanded ops (SelectOp → 5-6 SIR ops) must produce matching indices.
+            // CRITICAL: The op indexing must exactly match the serialized backend
+            // execution order used by Sensei source-map emission. Skipped ops
+            // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too,
+            // and expanded ops (SelectOp -> 5-6 SIR ops) must produce matching
+            // synthetic indices. The separate line map ties these backend indices
+            // back to textual .sir lines.
 
             std::string out;
             llvm::raw_string_ostream os(out);
@@ -1021,6 +1082,127 @@ namespace mlir
             });
 
             os << "]}";
+            os.flush();
+            return out;
+        }
+
+        std::string extractSIRLineMap(ModuleOp module)
+        {
+            std::unordered_map<OpLineKey, uint32_t, OpLineKeyHash> textLineByOp;
+            SmallVector<func::FuncOp, 8> funcs = collectSortedFuncs(module);
+            uint32_t currentLine = 1;
+
+            for (size_t funcIndex = 0; funcIndex < funcs.size(); ++funcIndex)
+            {
+                func::FuncOp func = funcs[funcIndex];
+                NameTable names;
+                SmallVector<Block *, 16> blocks = collectOrderedBlocks(func, names);
+                preassignNamesForFunc(func, names);
+
+                currentLine += 1; // fn header
+                for (Block *blockPtr : blocks)
+                {
+                    Block &block = *blockPtr;
+                    currentLine += 1; // block header
+
+                    for (Operation &op : block)
+                    {
+                        if (op.hasTrait<OpTrait::IsTerminator>())
+                            continue;
+
+                        if (auto cst = dyn_cast<sir::ConstOp>(op))
+                        {
+                            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+                            {
+                                std::string key = formatConstKey(intAttr.getValue());
+                                auto it = names.constNames.find(key);
+                                if (it != names.constNames.end())
+                                {
+                                    Value defVal = it->second;
+                                    if (auto defOp = defVal.getDefiningOp())
+                                    {
+                                        if (defOp->getBlock() == op.getBlock() && defOp->isBeforeInBlock(&op))
+                                            continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (isa<sir::ConstOp>(op) && op.getNumResults() == 1)
+                        {
+                            std::string name = names.nameFor(op.getResult(0));
+                            if (names.emittedDefs.find(name) != names.emittedDefs.end())
+                                continue;
+                            names.emittedDefs.insert(name);
+                        }
+
+                        if (isa<sir::BitcastOp>(op))
+                            continue;
+                        if (isa<sir::ErrorDeclOp>(op))
+                            continue;
+
+                        if (isa<sir::SelectOp>(op))
+                        {
+                            std::string zeroKey = formatConstKey(APInt(256, 0));
+                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
+                            uint32_t expandCount = needsZero ? 6 : 5;
+                            for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
+                            {
+                                textLineByOp[{&op, expandIdx}] = currentLine;
+                                currentLine += 1;
+                            }
+                            continue;
+                        }
+
+                        textLineByOp[{&op, 0}] = currentLine;
+                        currentLine += 1;
+                    }
+
+                    if (Operation *term = block.getTerminator())
+                        textLineByOp[{term, 0}] = currentLine;
+                    currentLine += 1; // terminator
+                    currentLine += 1; // closing brace
+                }
+
+                if (funcIndex + 1 < funcs.size())
+                    currentLine += 1; // blank line between functions
+            }
+
+            const std::string sirText = emitSIRText(module);
+            std::vector<StringRef> sirLines;
+            sirLines.reserve(static_cast<size_t>(std::count(sirText.begin(), sirText.end(), '\n')) + 1);
+            size_t lineStart = 0;
+            for (size_t i = 0; i < sirText.size(); ++i)
+            {
+                if (sirText[i] != '\n')
+                    continue;
+                sirLines.emplace_back(sirText.data() + lineStart, i - lineStart);
+                lineStart = i + 1;
+            }
+            if (lineStart <= sirText.size())
+                sirLines.emplace_back(sirText.data() + lineStart, sirText.size() - lineStart);
+
+            std::string out;
+            llvm::raw_string_ostream os(out);
+            os << "[";
+            bool firstEntry = true;
+
+            visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp, Block &, NameTable &, bool synthetic, uint32_t syntheticIndex, uint32_t) {
+                auto it = textLineByOp.find({&op, synthetic ? syntheticIndex : 0});
+                if (it == textLineByOp.end())
+                    return;
+                uint32_t line = it->second;
+                while (line >= 1 and line <= sirLines.size() and isBlankSirLine(sirLines[line - 1]))
+                    line += 1;
+                if (line < 1 or line > sirLines.size())
+                    line = it->second;
+                if (!firstEntry)
+                    os << ",";
+                os << "{\"idx\":" << opIndex << ",\"line\":" << line << "}";
+                firstEntry = false;
+            });
+
+            os << "]";
             os.flush();
             return out;
         }
