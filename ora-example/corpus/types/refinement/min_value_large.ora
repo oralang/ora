@@ -7,7 +7,7 @@ contract MinValueLarge {
 
     pub fn stake(amount: MinValue<u256, 100>) {
         let sender: address = std.msg.sender();
-        totalStaked = totalStaked + amount;
+        totalStaked = totalStaked +% amount;
     }
 
     pub fn setMinStake(val: MinValue<u256, 100>) {
@@ -23,7 +23,7 @@ contract MinValueLarge {
     }
 
     pub fn doubleStake(amount: MinValue<u256, 100>) -> u256 {
-        return amount * 2;
+        return amount *% 2;
     }
 
     pub fn getTotalStaked() -> u256 {

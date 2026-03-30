@@ -888,6 +888,7 @@ const FunctionLowerer = struct {
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
+    pub const annotateCarriedLocalResults = FunctionCore.annotateCarriedLocalResults;
     pub const emitOverflowAssert = FunctionCore.emitOverflowAssert;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;

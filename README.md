@@ -144,6 +144,13 @@ Emit intermediate representations:
 ./zig-out/bin/ora emit --emit-smt-report file.ora         # SMT verification report
 ```
 
+Launch the interactive debugger:
+```bash
+./zig-out/bin/ora debug ora-example/arithmetic_test.ora --signature 'add(u256,u256)' --arg 7 --arg 9
+```
+
+See [`DEBUGGER.md`](DEBUGGER.md) for the debugger workflow, commands, sessions, and current limits.
+
 ### Build artifacts
 
 `ora build` writes to `artifacts/<name>/`:

@@ -26,7 +26,7 @@ fn expectOraToSirConverts(path: []const u8) !void {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
 fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
@@ -1271,7 +1271,7 @@ test "compiler converts extern trait calls through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1309,7 +1309,7 @@ test "compiler converts payload-bearing extern trait errors through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1345,7 +1345,7 @@ test "compiler converts call-kind extern traits with bool and address returns th
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1386,7 +1386,7 @@ test "compiler converts extern trait calls with narrow integer returns through S
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1423,7 +1423,7 @@ test "compiler converts extern trait calls with dynamic bytes and string returns
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1461,7 +1461,7 @@ test "compiler converts extern trait calls with static struct returns through SI
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -1493,7 +1493,7 @@ test "compiler converts extern trait calls with tuple returns through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -3137,7 +3137,7 @@ test "compiler lowers guard clauses to runtime revert through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -11446,7 +11446,7 @@ test "compiler does not emit invalid ora.conditional_return inside deferred scf 
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
@@ -12806,7 +12806,7 @@ test "compiler preserves error selectors through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -12831,7 +12831,7 @@ test "compiler lowers payload error return constructors through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -12932,7 +12932,7 @@ test "compiler lowers payload-bearing narrow success error unions through OraToS
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -12961,7 +12961,7 @@ test "compiler carries payload-bearing narrow error unions across function calls
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -12991,7 +12991,7 @@ test "compiler lowers try on payload-bearing narrow error unions through OraToSI
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -13014,7 +13014,7 @@ test "compiler lowers bare assert to runtime revert through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -13038,7 +13038,7 @@ test "compiler lowers message assert to runtime revert payload through OraToSIR"
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -13064,7 +13064,7 @@ test "dispatcher translates public zero-payload error unions to ABI reverts" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13093,7 +13093,7 @@ test "dispatcher translates public payload error unions to ABI reverts" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13129,7 +13129,7 @@ test "dispatcher translates public tuple-success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13167,7 +13167,7 @@ test "dispatcher translates public struct-success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13200,7 +13200,7 @@ test "dispatcher translates public bytes-success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13233,7 +13233,7 @@ test "dispatcher translates public string-success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13266,7 +13266,7 @@ test "dispatcher translates public dynamic array success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13299,7 +13299,7 @@ test "dispatcher translates public dynamic tuple success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13338,7 +13338,7 @@ test "dispatcher translates public dynamic struct success error unions" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13373,7 +13373,7 @@ test "dispatcher translates payload-bearing extern trait errors to ABI reverts" 
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
     try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -13497,7 +13497,7 @@ test "compiler converts contract storage through explicit slot metadata" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
@@ -13532,7 +13532,7 @@ test "compiler converts narrowed carried locals in nested scf ifs" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
 test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
@@ -13579,7 +13579,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         defer compilation.deinit();
 
         const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module));
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
         const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
         defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);

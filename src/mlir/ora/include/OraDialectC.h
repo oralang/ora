@@ -1662,7 +1662,8 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraConvertToSIR(
         MlirContext ctx,
-        MlirModule module);
+        MlirModule module,
+        bool debugInfo);
 
     //===----------------------------------------------------------------------===//
     // SIR Text Legalizer / Emitter
@@ -1684,6 +1685,41 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     /// Returns null string ref on failure
     /// The caller must free the returned string using oraStringRefFree
     MLIR_CAPI_EXPORTED MlirStringRef oraEmitSIRText(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract source locations from SIR MLIR ops as a JSON array.
+    /// Each entry: {"idx":<op_index>,"file":"<path>","line":<n>,"col":<n>}
+    /// Op indices follow the serialized backend-execution order used by
+    /// bytecode/source-map generation, not raw textual .sir line order.
+    /// Returns null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRLocations(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract debugger-oriented sidecar metadata from SIR MLIR ops.
+    /// Returns a JSON object with per-op entries keyed by the same op indices
+    /// used by source-map extraction and bytecode/source-map generation.
+    /// Returns null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDebugInfo(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract a JSON array mapping backend op indices to emitted SIR text lines.
+    /// Each entry: {"idx":<op_index>,"line":<sir_line>}
+    /// Returns null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRLineMap(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract SIR module global slot assignments as a JSON object.
+    /// Example: {"counter":0,"balances":1}
+    /// Returns null string ref on failure or when no slot metadata is present.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRGlobalSlots(
         MlirContext ctx,
         MlirModule module);
 

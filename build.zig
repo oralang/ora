@@ -217,6 +217,19 @@ pub fn build(b: *std.Build) void {
     const lsp_build_step = b.step("ora-lsp", "Build the Ora LSP server");
     lsp_build_step.dependOn(&lsp_exe.step);
 
+    const evm_debug_tui_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build",
+        "debug-tui",
+        "--",
+    });
+    evm_debug_tui_cmd.setCwd(b.path("lib/evm"));
+    if (b.args) |args| {
+        evm_debug_tui_cmd.addArgs(args);
+    }
+    const evm_debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI");
+    evm_debug_tui_step.dependOn(&evm_debug_tui_cmd.step);
+
     // Sensei SIR CLI integration (vendored Rust tool)
     const sensei_root = "vendor/sensei/senseic";
     const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});

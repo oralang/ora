@@ -1,0 +1,35 @@
+comptime const std = @import("std");
+
+contract StateWalkthrough {
+    storage var total: u256 = 0;
+    storage var last_input: u256 = 0;
+    storage var steps: u256 = 0;
+
+    pub fn init() {
+        total = 0;
+        last_input = 0;
+        steps = 0;
+    }
+
+    fn apply_fee(amount: u256) -> u256
+        requires(amount > 0)
+    {
+        return amount - 1;
+    }
+
+    pub fn process(amount: u256) -> u256
+        requires(amount > 0)
+        requires(total <= std.constants.U256_MAX - amount)
+        requires(steps < std.constants.U256_MAX)
+    {
+        let net = apply_fee(amount);
+        total = total + net;
+        last_input = amount;
+        steps = steps + 1;
+        return total;
+    }
+
+    pub fn snapshot() -> (u256, u256, u256) {
+        return (total, last_input, steps);
+    }
+}

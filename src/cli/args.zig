@@ -36,6 +36,7 @@ pub const CliOptions = struct {
     mlir_crash_reproducer: ?[]const u8 = null,
     mlir_print_op_on_diagnostic: bool = false,
     debug: bool = false,
+    debug_info: bool = false,
     mlir_opt_level: ?[]const u8 = null,
     // fmt options
     fmt: bool = false,
@@ -206,6 +207,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;
             i += 1;
+        } else if (std.mem.eql(u8, arg, "--debug-info")) {
+            opts.debug_info = true;
+            i += 1;
         } else if (std.mem.eql(u8, arg, "-O0") or std.mem.eql(u8, arg, "-Onone")) {
             opts.mlir_opt_level = "none";
             i += 1;
@@ -276,4 +280,11 @@ test "parse verify mode and toggles" {
 test "parse invalid verify mode fails" {
     const args = [_][]const u8{"--verify=turbo"};
     try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
+}
+
+test "parse debug-info flag" {
+    const args = [_][]const u8{ "--debug-info", "input.ora" };
+    const parsed = try parseArgs(args[0..]);
+    try std.testing.expect(parsed.debug_info);
+    try std.testing.expectEqualStrings("input.ora", parsed.input_file.?);
 }

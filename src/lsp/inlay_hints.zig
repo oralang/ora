@@ -122,6 +122,29 @@ fn collectHintsFromStmt(
             if (decl.value) |value| {
                 try collectHintsFromExpr(hints, allocator, file, value, sources, file_id, range, maybe_index);
             }
+            if (decl.type_expr == null) {
+                if (decl.value) |value| {
+                    if (inferExprType(file, value, maybe_index)) |type_str| {
+                        const pat = file.pattern(decl.pattern).*;
+                        const name_range = switch (pat) {
+                            .Name => |n| n.range,
+                            else => null,
+                        };
+                        if (name_range) |nr| {
+                            const pos = textRangeToPosition(sources, file_id, nr.end);
+                            if (positionInRange(pos, range)) {
+                                try hints.append(allocator, .{
+                                    .position = pos,
+                                    .label = try std.fmt.allocPrint(allocator, ": {s}", .{type_str}),
+                                    .kind = .type_hint,
+                                    .padding_left = false,
+                                    .padding_right = false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         },
         .Assign => |assign| {
             try collectHintsFromExpr(hints, allocator, file, assign.value, sources, file_id, range, maybe_index);
@@ -312,6 +335,38 @@ fn textRangeToPosition(sources: *const compiler.source.SourceStore, file_id: com
         .line = if (lc.line > 0) lc.line - 1 else 0,
         .character = if (lc.column > 0) lc.column - 1 else 0,
     };
+}
+
+fn inferExprType(
+    file: *const compiler.ast.AstFile,
+    expr_id: compiler.ast.ExprId,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ?[]const u8 {
+    const expr = file.expression(expr_id).*;
+    return switch (expr) {
+        .IntegerLiteral => "u256",
+        .BoolLiteral => "bool",
+        .AddressLiteral => "address",
+        .StringLiteral => "string",
+        .BytesLiteral => "bytes",
+        .Call => |call| {
+            const callee_name = resolveCalleeName(file, call.callee) orelse return null;
+            const idx = maybe_index orelse return null;
+            const func_sym = findFunctionSymbol(idx.symbols, callee_name) orelse return null;
+            const detail = func_sym.detail orelse return null;
+            return extractReturnType(detail);
+        },
+        .Tuple => "(tuple)",
+        else => null,
+    };
+}
+
+/// Given a detail string like `(x: u256, y: u256) -> bool`, return `bool`.
+fn extractReturnType(detail: []const u8) ?[]const u8 {
+    const arrow = std.mem.indexOf(u8, detail, " -> ") orelse return null;
+    const ret = detail[arrow + 4 ..];
+    if (std.mem.indexOfScalar(u8, ret, '\n')) |nl| return ret[0..nl];
+    return ret;
 }
 
 fn positionInRange(pos: frontend.Position, range: frontend.Range) bool {

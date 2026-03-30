@@ -6622,16 +6622,23 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
 // Ora to SIR Conversion
 //===----------------------------------------------------------------------===//
 
-bool oraConvertToSIR(MlirContext ctx, MlirModule module)
+bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
+        const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
+        if (debugInfo && !hadDebugInfoAttr)
+        {
+            moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
+        }
 
         // Register both Ora and SIR dialects
         if (!oraDialectRegister(ctx))
         {
+            if (debugInfo && !hadDebugInfoAttr)
+                moduleOp->removeAttr("ora.debug_info");
             return false;
         }
 
@@ -6673,7 +6680,7 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         {
             pm.addPass(createOraToSIRPass());
         }
-        const bool enable_post_sir_passes = true;
+        const bool enable_post_sir_passes = !debugInfo;
         if (enable_post_sir_passes)
         {
             // Add optimization pass (for SIR-specific optimizations like constant folding)
@@ -6688,6 +6695,8 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module)
         ORA_DEBUG_PREFIX("OraCAPI", "Running OraToSIR pass...");
 
         LogicalResult result = pm.run(moduleOp);
+        if (debugInfo && !hadDebugInfoAttr)
+            moduleOp->removeAttr("ora.debug_info");
 
         if (failed(result))
         {
@@ -6769,6 +6778,112 @@ MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
         (void)ctx;
         ModuleOp moduleOp = unwrap(module);
         std::string out = mlir::ora::emitSIRText(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRLocations(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRLocations(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRDebugInfo(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRDebugInfo(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRLineMap(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        std::string out = mlir::ora::extractSIRLineMap(moduleOp);
+        if (out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRGlobalSlots(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+        auto slotsAttr = moduleOp->getAttrOfType<DictionaryAttr>("ora.global_slots");
+        if (!slotsAttr || slotsAttr.empty())
+            return oraStringRefCreate(nullptr, 0);
+
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        os << "{";
+        bool first = true;
+        for (auto namedAttr : slotsAttr)
+        {
+            auto slotAttr = dyn_cast<IntegerAttr>(namedAttr.getValue());
+            if (!slotAttr)
+                continue;
+            if (!first)
+                os << ",";
+            first = false;
+            os << "\"";
+            os.write_escaped(namedAttr.getName().strref());
+            os << "\":" << slotAttr.getInt();
+        }
+        os << "}";
+        os.flush();
+
         if (out.empty())
             return oraStringRefCreate(nullptr, 0);
         char *buf = static_cast<char *>(std::malloc(out.size()));
