@@ -17,6 +17,16 @@ fn renderHirTextForSource(source_text: []const u8) ![]u8 {
     return hir_result.renderText(testing.allocator);
 }
 
+fn renderOraMlirForSource(source_text: []const u8) ![]u8 {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    return try testing.allocator.dupe(u8, module_text_ref.data[0..module_text_ref.length]);
+}
+
 fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {
     return compiler.compilePackage(testing.allocator, root_path);
 }
@@ -448,6 +458,33 @@ test "compiler diagnostic release matrix stays readable" {
         .typecheck,
         "cannot write storage slot 'balance' after external call because it was written before the call",
     );
+}
+
+test "old ghost storage expressions are not const-folded away" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\contract Mini {
+        \\    ghost storage var transactionCount: u256 = 0;
+        \\
+        \\    pub fn deposit()
+        \\        requires transactionCount < std.constants.U256_MAX
+        \\        ensures transactionCount == old(transactionCount) + 1
+        \\    {
+        \\        transactionCount = transactionCount + 1;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.old") != null);
+
+    var summary = try verifyTextWithoutDegradation(source_text, "deposit");
+    defer summary.deinit(testing.allocator);
+    try testing.expect(summary.success);
+    try testing.expectEqual(@as(usize, 0), summary.errors_len);
+    try testing.expectEqual(false, summary.degraded);
 }
 
 test "compiler syntax parses statement-level bodies" {

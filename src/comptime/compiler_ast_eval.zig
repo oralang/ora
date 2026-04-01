@@ -372,7 +372,10 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Group => |group| try self.evalExprImpl(group.expr, use_cache),
-            .Old => |old| try self.evalExprImpl(old.expr, use_cache),
+            // old(...) is a verification-time pre-state operator, not a comptime
+            // expression. Folding it here can erase the pre-state reference and
+            // incorrectly collapse postconditions like old(x) + 1 to constants.
+            .Old => null,
             .Quantified => |quantified| blk: {
                 if (quantified.condition) |condition| _ = try self.evalExprImpl(condition, use_cache);
                 _ = try self.evalExprImpl(quantified.body, use_cache);
