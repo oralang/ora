@@ -359,6 +359,16 @@ jobs:
           zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
+      - name: Run release artifact smoke
+        shell: bash
+        run: |
+          echo "📦 Running release artifact smoke checks..."
+          ./scripts/release_artifact_smoke.sh || {
+            echo "❌ Release artifact smoke checks failed"
+            exit 1
+          }
+          echo "✅ Release artifact smoke checks completed"
+
       - name: Setup Python
         shell: bash
         run: |
