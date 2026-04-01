@@ -13807,6 +13807,8 @@ test "SMT release matrix probes match between sequential and parallel verificati
         .{ .path = "ora-example/smt/guards/exact_proven.ora", .function_name = "provenExactDivisionReturn" },
         .{ .path = "ora-example/smt/verification/function_contracts_basic.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/function_contracts_old.ora", .function_name = "incrementAndReturn" },
+        .{ .path = "ora-example/smt/verification/ghost_variables.ora", .function_name = "deposit" },
+        .{ .path = "ora-example/smt/verification/ghost_combined.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/loop_invariants.ora", .function_name = "sumToN" },
         .{ .path = "ora-example/smt/summaries/callee_state_effects.ora", .function_name = "doIncrement" },
         .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
