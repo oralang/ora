@@ -177,37 +177,44 @@ contract KitchenSink {
         }
 
         let elapsed: u256 = currentTime - lastTime;
-        let reward: u256 = (userBalance * REWARD_RATE * elapsed) / (10000 * 86400);
+        let scaledRate: struct { value: u256, overflow: bool } = @mulWithOverflow(userBalance, REWARD_RATE);
+        if (scaledRate.overflow) {
+            return std.constants.U256_MAX;
+        }
+        let accrued: struct { value: u256, overflow: bool } = @mulWithOverflow(scaledRate.value, elapsed);
+        if (accrued.overflow) {
+            return std.constants.U256_MAX;
+        }
+        let reward: u256 = accrued.value / (10000 * 86400);
         return reward;
     }
 
     // --- Core operations ---
 
-    pub fn deposit(amount: MinValue<u256, 1>) -> !bool | VaultPaused | ZeroAmount
+    pub fn deposit(amount: MinValue<u256, 1>) -> !bool | ZeroAmount
         requires(amount > 0)
         requires(totalDeposits <= std.constants.U256_MAX - amount)
         requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
         requires(specTotalBalance <= std.constants.U256_MAX - amount)
         requires(specDepositCount <= std.constants.U256_MAX - amount)
+        guard !flags.paused
+        guard flags.allowDeposits
         ensures(totalDeposits == old(totalDeposits) + amount)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) + amount)
         ensures(specTotalBalance == old(specTotalBalance) + amount)
     {
-        let f: VaultFlags = flags;
-        if (f.paused) {
-            return VaultPaused;
-        }
-        if (!f.allowDeposits) {
-            return VaultPaused;
-        }
-
         let sender: NonZeroAddress = std.msg.sender();
 
         // Accrue pending rewards
         let pendingReward: u256 = calculateReward(sender);
         let snap: RewardSnapshot = rewards[sender];
+        let accumulatedReward: struct { value: u256, overflow: bool } = @addWithOverflow(snap.accumulated, pendingReward);
+        var nextAccumulated: u256 = accumulatedReward.value;
+        if (accumulatedReward.overflow) {
+            nextAccumulated = std.constants.U256_MAX;
+        }
         let newSnap: RewardSnapshot = RewardSnapshot {
-            accumulated: snap.accumulated + pendingReward,
+            accumulated: nextAccumulated,
             lastUpdate: std.block.timestamp,
         };
         rewards[sender] = newSnap;
@@ -236,19 +243,18 @@ contract KitchenSink {
         return true;
     }
 
-    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | VaultPaused | InsufficientBalance
+    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
         requires(amount > 0)
         requires(balances[std.msg.sender()] >= amount)
+        requires(totalDeposits >= amount)
+        requires(specTotalBalance >= amount)
         requires(specWithdrawCount <= std.constants.U256_MAX - amount)
+        guard !flags.paused
+        guard flags.allowWithdrawals
         ensures(totalDeposits == old(totalDeposits) - amount)
         ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
         ensures(specTotalBalance == old(specTotalBalance) - amount)
     {
-        let f: VaultFlags = flags;
-        if (f.paused || !f.allowWithdrawals) {
-            return VaultPaused;
-        }
-
         let sender: NonZeroAddress = std.msg.sender();
         @lock(reentrancyGuard);
 
@@ -274,6 +280,7 @@ contract KitchenSink {
         requires(amount > 0)
         requires(entryPrice > 0)
         requires(nextPositionId < std.constants.U256_MAX)
+        requires(totalPositions < std.constants.U256_MAX)
     {
         if (amount == 0) {
             return ZeroAmount;
@@ -310,6 +317,8 @@ contract KitchenSink {
     }
 
     pub fn closePosition(positionId: u256) -> !bool | PositionNotFound | Unauthorized
+        requires(totalPositions > 0)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - positions[positionId].amount)
     {
         let state: u8 = positionStates[positionId];
         if (state != 0) {
@@ -338,7 +347,11 @@ contract KitchenSink {
         let newReward: u256 = calculateReward(sender);
 
         let snap: RewardSnapshot = rewards[sender];
-        let totalReward: u256 = snap.accumulated + newReward;
+        let totalRewardChecked: struct { value: u256, overflow: bool } = @addWithOverflow(snap.accumulated, newReward);
+        var totalReward: u256 = totalRewardChecked.value;
+        if (totalRewardChecked.overflow) {
+            totalReward = std.constants.U256_MAX;
+        }
 
         let newSnap: RewardSnapshot = RewardSnapshot {
             accumulated: 0,
@@ -434,7 +447,12 @@ contract KitchenSink {
         var criticalCount: u256 = 0;
         var i: u256 = 0;
 
-        while (i < count) {
+        while (i < count)
+            invariant count <= 4
+            invariant i <= count
+            invariant criticalCount <= i
+            invariant criticalCount <= count
+        {
             let deposit_val: u256 = recentDeposits[i];
             if (deposit_val > MAX_DEPOSIT) {
                 criticalCount += 1;

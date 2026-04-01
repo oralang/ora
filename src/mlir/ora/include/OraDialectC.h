@@ -36,6 +36,14 @@ extern "C"
         MlirStringRef filename,
         unsigned line,
         unsigned column);
+    MLIR_CAPI_EXPORTED MlirLocation oraLocationStmtTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t stmtId);
+    MLIR_CAPI_EXPORTED MlirLocation oraLocationOriginStmtTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t stmtId);
     MLIR_CAPI_EXPORTED bool oraLocationIsNull(MlirLocation loc);
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraLocationPrintToString(MlirLocation loc);

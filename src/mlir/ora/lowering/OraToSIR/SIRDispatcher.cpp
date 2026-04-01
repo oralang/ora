@@ -29,6 +29,93 @@ namespace mlir
     {
         namespace
         {
+            static std::optional<uint32_t> extractTaggedStmtId(Location loc, StringRef prefix)
+            {
+                if (loc == nullptr)
+                    return std::nullopt;
+                if (auto nameLoc = dyn_cast<NameLoc>(loc))
+                {
+                    StringRef name = nameLoc.getName().getValue();
+                    if (name.starts_with(prefix))
+                    {
+                        uint32_t stmtId = 0;
+                        if (!name.drop_front(prefix.size()).getAsInteger(10, stmtId))
+                            return stmtId;
+                    }
+                    return extractTaggedStmtId(nameLoc.getChildLoc(), prefix);
+                }
+                if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+                {
+                    if (auto callee = extractTaggedStmtId(callSite.getCallee(), prefix))
+                        return callee;
+                    return extractTaggedStmtId(callSite.getCaller(), prefix);
+                }
+                if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+                {
+                    for (Location child : fusedLoc.getLocations())
+                    {
+                        if (auto stmtId = extractTaggedStmtId(child, prefix))
+                            return stmtId;
+                    }
+                }
+                return std::nullopt;
+            }
+
+            static Location stripProvenanceTags(Location loc)
+            {
+                if (loc == nullptr)
+                    return loc;
+                if (auto nameLoc = dyn_cast<NameLoc>(loc))
+                {
+                    StringRef name = nameLoc.getName().getValue();
+                    if (name.starts_with("ora.stmt.") || name.starts_with("ora.origin_stmt.") || name.starts_with("ora.synthetic."))
+                        return stripProvenanceTags(nameLoc.getChildLoc());
+                    Location child = stripProvenanceTags(nameLoc.getChildLoc());
+                    return NameLoc::get(nameLoc.getName(), child);
+                }
+                if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+                {
+                    Location callee = stripProvenanceTags(callSite.getCallee());
+                    Location caller = stripProvenanceTags(callSite.getCaller());
+                    return CallSiteLoc::get(callee, caller);
+                }
+                if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+                {
+                    SmallVector<Location, 4> children;
+                    for (Location child : fusedLoc.getLocations())
+                        children.push_back(stripProvenanceTags(child));
+                    return FusedLoc::get(loc.getContext(), children, fusedLoc.getMetadata());
+                }
+                return loc;
+            }
+
+            static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
+            {
+                MLIRContext *ctx = loc.getContext();
+                Location base = stripProvenanceTags(loc);
+                if (auto originStmt = extractTaggedStmtId(loc, "ora.origin_stmt."))
+                {
+                    std::string originTag = "ora.origin_stmt." + std::to_string(*originStmt);
+                    base = NameLoc::get(StringAttr::get(ctx, originTag), base);
+                }
+                std::string syntheticTag = "ora.synthetic." + syntheticKind.str();
+                return NameLoc::get(StringAttr::get(ctx, syntheticTag), base);
+            }
+
+            static Location findFunctionProvenanceLoc(func::FuncOp func)
+            {
+                for (Block &block : func.getBlocks())
+                {
+                    for (Operation &op : block.getOperations())
+                    {
+                        Location opLoc = op.getLoc();
+                        if (extractTaggedStmtId(opLoc, "ora.origin_stmt.") || extractTaggedStmtId(opLoc, "ora.stmt."))
+                            return opLoc;
+                    }
+                }
+                return func.getLoc();
+            }
+
             enum class AbiBase
             {
                 Uint,
@@ -324,6 +411,7 @@ namespace mlir
             struct PubFuncInfo
             {
                 func::FuncOp func;
+                Location provenanceLoc;
                 uint32_t selector = 0;
                 unsigned argCount = 0;
                 unsigned retCount = 0;
@@ -336,6 +424,11 @@ namespace mlir
                 std::string abiReturnLayout;
                 int64_t minHeadBytes = 0;
                 SmallVector<Type, 8> inputTypes;
+
+                PubFuncInfo(func::FuncOp func, Location provenanceLoc)
+                    : func(func), provenanceLoc(provenanceLoc)
+                {
+                }
             };
 
             struct ErrorInfo
@@ -550,8 +643,7 @@ namespace mlir
                             }
                         }
 
-                        PubFuncInfo info;
-                        info.func = func;
+                        PubFuncInfo info(func, findFunctionProvenanceLoc(func));
                         info.selector = sel;
                         info.argCount = func.getFunctionType().getNumInputs();
                         info.retCount = func.getFunctionType().getNumResults();
@@ -744,7 +836,10 @@ namespace mlir
 
                     // Build init(): run user init (if any), then copy runtime into memory and return it.
                     auto initType = builder.getFunctionType({}, {});
-                    auto initFunc = func::FuncOp::create(loc, "init", initType);
+                    Location initLoc = userInit
+                                           ? makeSyntheticOriginOnlyLoc(userInit.getLoc(), "constructor_decode")
+                                           : makeSyntheticOriginOnlyLoc(loc, "constructor_decode");
+                    auto initFunc = func::FuncOp::create(initLoc, "init", initType);
                     initFunc.setPrivate();
                     Block *initEntry = initFunc.addEntryBlock();
                     Block *initRevert = nullptr;
@@ -839,32 +934,32 @@ namespace mlir
                                 headSlots += slots;
                             }
                         }
-                        Value codeSize = builder.create<sir::CodeSizeOp>(loc, u256Type);
-                        Value initEnd = builder.create<sir::InitEndOffsetOp>(loc, u256Type);
-                        Value codeTooShort = builder.create<sir::LtOp>(loc, u256Type, codeSize, initEnd);
-                        Value dataLen = builder.create<sir::SubOp>(loc, u256Type, codeSize, initEnd);
+                        Value codeSize = builder.create<sir::CodeSizeOp>(initLoc, u256Type);
+                        Value initEnd = builder.create<sir::InitEndOffsetOp>(initLoc, u256Type);
+                        Value codeTooShort = builder.create<sir::LtOp>(initLoc, u256Type, codeSize, initEnd);
+                        Value dataLen = builder.create<sir::SubOp>(initLoc, u256Type, codeSize, initEnd);
 
                         int64_t minHeadBytes = 32 * headSlots;
                         if (minHeadBytes > 0)
                         {
-                            Value minSizeVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, minHeadBytes));
-                            Value dataTooShort = builder.create<sir::LtOp>(loc, u256Type, dataLen, minSizeVal);
-                            Value anyTooShort = builder.create<sir::OrOp>(loc, u256Type, codeTooShort, dataTooShort);
-                            Value valid_args = builder.create<sir::IsZeroOp>(loc, u256Type, anyTooShort);
+                            Value minSizeVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, minHeadBytes));
+                            Value dataTooShort = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, minSizeVal);
+                            Value anyTooShort = builder.create<sir::OrOp>(initLoc, u256Type, codeTooShort, dataTooShort);
+                            Value valid_args = builder.create<sir::IsZeroOp>(initLoc, u256Type, anyTooShort);
                             initDecode = initFunc.addBlock();
-                            builder.create<sir::CondBrOp>(loc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitRevert());
+                            builder.create<sir::CondBrOp>(initLoc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitRevert());
                             builder.setInsertionPointToEnd(initDecode);
                         }
                         else
                         {
-                            Value valid_args = builder.create<sir::IsZeroOp>(loc, u256Type, codeTooShort);
+                            Value valid_args = builder.create<sir::IsZeroOp>(initLoc, u256Type, codeTooShort);
                             initDecode = initFunc.addBlock();
-                            builder.create<sir::CondBrOp>(loc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitRevert());
+                            builder.create<sir::CondBrOp>(initLoc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitRevert());
                             builder.setInsertionPointToEnd(initDecode);
                         }
 
-                        Value dataBuf = builder.create<sir::MallocOp>(loc, ptrType, dataLen);
-                        builder.create<sir::CodeCopyOp>(loc, dataBuf, initEnd, dataLen);
+                        Value dataBuf = builder.create<sir::MallocOp>(initLoc, ptrType, dataLen);
+                        builder.create<sir::CodeCopyOp>(initLoc, dataBuf, initEnd, dataLen);
 
                         SmallVector<int64_t, 8> headOffsets;
                         int64_t headSlot = 0;
@@ -886,9 +981,9 @@ namespace mlir
                         for (unsigned idx = 0; idx < argCount; ++idx)
                         {
                             int64_t offs = headOffsets[idx];
-                            Value offc = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, offs));
-                            Value headPtr = builder.create<sir::AddPtrOp>(loc, ptrType, dataBuf, offc);
-                            Value head = builder.create<sir::LoadOp>(loc, u256Type, headPtr);
+                            Value offc = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, offs));
+                            Value headPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
+                            Value head = builder.create<sir::LoadOp>(initLoc, u256Type, headPtr);
                             AbiType abi = initAbiParams.empty() ? AbiType{} : initAbiParams[idx];
                             Value argVal = head;
 
@@ -896,47 +991,47 @@ namespace mlir
                             {
                                 int64_t elemCount = abi.dims.front();
                                 int64_t totalBytes = elemCount * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, totalBytes));
-                                Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
-                                Value src = builder.create<sir::AddPtrOp>(loc, ptrType, dataBuf, offc);
-                                builder.create<sir::MCopyOp>(loc, buf, src, totalVal);
+                                Value totalVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, totalVal);
+                                Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
+                                builder.create<sir::MCopyOp>(initLoc, buf, src, totalVal);
                                 argVal = buf;
                             }
                             else if (!initAbiParams.empty() && abi.isDynamic())
                             {
                                 if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
                                 {
-                                    Value c32_dyn = getConst(builder, loc, u256Type, i64Type, 32, constCache, builder.getInsertionBlock(), "word_size");
+                                    Value c32_dyn = getConst(builder, initLoc, u256Type, i64Type, 32, constCache, builder.getInsertionBlock(), "word_size");
                                     Value absOff = head;
-                                    Value absPtr = builder.create<sir::AddPtrOp>(loc, ptrType, dataBuf, absOff);
-                                    Value len = builder.create<sir::LoadOp>(loc, u256Type, absPtr);
+                                    Value absPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, absOff);
+                                    Value len = builder.create<sir::LoadOp>(initLoc, u256Type, absPtr);
 
                                     Value total = nullptr;
                                     if (abi.baseIsDynamic())
                                     {
-                                        Value c31 = getConst(builder, loc, u256Type, i64Type, 31, constCache, builder.getInsertionBlock(), "pad_31");
-                                        Value c5 = getConst(builder, loc, u256Type, i64Type, 5, constCache, builder.getInsertionBlock(), "shift_5");
-                                        Value lenPlus = builder.create<sir::AddOp>(loc, u256Type, len, c31);
-                                        Value shifted = builder.create<sir::ShrOp>(loc, u256Type, c5, lenPlus);
-                                        Value padded = builder.create<sir::ShlOp>(loc, u256Type, c5, shifted);
-                                        total = builder.create<sir::AddOp>(loc, u256Type, padded, c32_dyn);
+                                        Value c31 = getConst(builder, initLoc, u256Type, i64Type, 31, constCache, builder.getInsertionBlock(), "pad_31");
+                                        Value c5 = getConst(builder, initLoc, u256Type, i64Type, 5, constCache, builder.getInsertionBlock(), "shift_5");
+                                        Value lenPlus = builder.create<sir::AddOp>(initLoc, u256Type, len, c31);
+                                        Value shifted = builder.create<sir::ShrOp>(initLoc, u256Type, c5, lenPlus);
+                                        Value padded = builder.create<sir::ShlOp>(initLoc, u256Type, c5, shifted);
+                                        total = builder.create<sir::AddOp>(initLoc, u256Type, padded, c32_dyn);
                                     }
                                     else
                                     {
-                                        Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, len, c32_dyn);
-                                        total = builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32_dyn);
+                                        Value lenBytes = builder.create<sir::MulOp>(initLoc, u256Type, len, c32_dyn);
+                                        total = builder.create<sir::AddOp>(initLoc, u256Type, lenBytes, c32_dyn);
                                     }
 
-                                    Value end = builder.create<sir::AddOp>(loc, u256Type, absOff, total);
-                                    Value tooShortDyn = builder.create<sir::LtOp>(loc, u256Type, dataLen, end);
-                                    Value valid_dyn = builder.create<sir::IsZeroOp>(loc, u256Type, tooShortDyn);
+                                    Value end = builder.create<sir::AddOp>(initLoc, u256Type, absOff, total);
+                                    Value tooShortDyn = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, end);
+                                    Value valid_dyn = builder.create<sir::IsZeroOp>(initLoc, u256Type, tooShortDyn);
                                     Block *dynBody = initFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(loc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, getInitRevert());
+                                    builder.create<sir::CondBrOp>(initLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, getInitRevert());
                                     builder.setInsertionPointToEnd(dynBody);
 
-                                    Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, total);
-                                    Value src = builder.create<sir::AddPtrOp>(loc, ptrType, dataBuf, absOff);
-                                    builder.create<sir::MCopyOp>(loc, buf, src, total);
+                                    Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, total);
+                                    Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, absOff);
+                                    builder.create<sir::MCopyOp>(initLoc, buf, src, total);
                                     argVal = buf;
                                 }
                                 else
@@ -952,88 +1047,89 @@ namespace mlir
                                 if (auto ptrTy = dyn_cast<sir::PtrType>(userInitType.getInputs()[idx]))
                                 {
                                     if (!isa<sir::PtrType>(argVal.getType()))
-                                        argVal = builder.create<sir::BitcastOp>(loc, ptrType, argVal);
-                                    argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
+                                        argVal = builder.create<sir::BitcastOp>(initLoc, ptrType, argVal);
+                                    argVal = builder.create<sir::BitcastOp>(initLoc, u256Type, argVal);
                                 }
                             }
                             // sir.icall requires all args to be !sir.u256.
                             if (isa<sir::PtrType>(argVal.getType()))
-                                argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
+                                argVal = builder.create<sir::BitcastOp>(initLoc, u256Type, argVal);
 
                             args.push_back(argVal);
                         }
 
-                        builder.create<sir::ICallOp>(loc,
+                        builder.create<sir::ICallOp>(initLoc,
                                                      TypeRange{},
                                                      SymbolRefAttr::get(ctx, userInit.getName()),
                                                      args);
                     }
 
-                    Value runtimeStart = builder.create<sir::RuntimeStartOffsetOp>(loc, u256Type);
-                    Value runtimeLen = builder.create<sir::RuntimeLengthOp>(loc, u256Type);
-                    Value initBuf = builder.create<sir::MallocOp>(loc, ptrType, runtimeLen);
-                    builder.create<sir::CodeCopyOp>(loc, initBuf, runtimeStart, runtimeLen);
-                    builder.create<sir::ReturnOp>(loc, initBuf, runtimeLen);
+                    Value runtimeStart = builder.create<sir::RuntimeStartOffsetOp>(initLoc, u256Type);
+                    Value runtimeLen = builder.create<sir::RuntimeLengthOp>(initLoc, u256Type);
+                    Value initBuf = builder.create<sir::MallocOp>(initLoc, ptrType, runtimeLen);
+                    builder.create<sir::CodeCopyOp>(initLoc, initBuf, runtimeStart, runtimeLen);
+                    builder.create<sir::ReturnOp>(initLoc, initBuf, runtimeLen);
 
                     // Revert block for constructor argument checks.
                     if (initRevert)
                     {
                         builder.setInsertionPointToEnd(initRevert);
-                        Value c0_revert = getConst(builder, loc, u256Type, i64Type, 0, constCache, initRevert, "zero");
-                        Value p0b = builder.create<sir::BitcastOp>(loc, ptrType, c0_revert);
-                        builder.create<sir::RevertOp>(loc, p0b, c0_revert);
+                        Value c0_revert = getConst(builder, initLoc, u256Type, i64Type, 0, constCache, initRevert, "zero");
+                        Value p0b = builder.create<sir::BitcastOp>(initLoc, ptrType, c0_revert);
+                        builder.create<sir::RevertOp>(initLoc, p0b, c0_revert);
                     }
                     module.push_back(initFunc);
 
                     // Build dispatcher: func main() -> ()
                     auto mainType = builder.getFunctionType({}, {});
-                    auto mainFunc = func::FuncOp::create(loc, "main", mainType);
+                    Location dispatcherMainLoc = makeSyntheticOriginOnlyLoc(module.getLoc(), "dispatcher_main");
+                    auto mainFunc = func::FuncOp::create(dispatcherMainLoc, "main", mainType);
                     Block *entry = mainFunc.addEntryBlock();
                     Block *loadSelector = mainFunc.addBlock();
                     Block *revertError = mainFunc.addBlock();
 
                     // entry: callvalue check (non-payable by default) + const prelude
                     builder.setInsertionPointToEnd(entry);
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 0, constCache, entry, "zero"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 4, constCache, entry, "selector_offset"));
-                    Value c32_entry = getConst(builder, loc, u256Type, i64Type, 32, constCache, entry, "word_size");
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 35, constCache, entry, "min_cdsize_1arg"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 36, constCache, entry, "arg1_offset"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 67, constCache, entry, "min_cdsize_2args"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 68, constCache, entry, "arg2_offset"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
-                    static_cast<void>(getConst(builder, loc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 0, constCache, entry, "zero"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 4, constCache, entry, "selector_offset"));
+                    Value c32_entry = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 32, constCache, entry, "word_size");
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 35, constCache, entry, "min_cdsize_1arg"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 36, constCache, entry, "arg1_offset"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 67, constCache, entry, "min_cdsize_2args"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 68, constCache, entry, "arg2_offset"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
+                    static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
                     // Initialize runtime malloc free-pointer slot (memory[0x20]).
                     // Without this, malloc may start at address 0 and clobber scratch state.
-                    Value freePtrSlot = builder.create<sir::BitcastOp>(loc, ptrType, c32_entry);
-                    Value heapBase = builder.create<sir::CodeSizeOp>(loc, u256Type);
+                    Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
+                    Value heapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
                     Value initialFreePtr = heapBase;
                     if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
                     {
                         Value reservedBytes = builder.create<sir::ConstOp>(
-                            loc,
+                            dispatcherMainLoc,
                             u256Type,
                             IntegerAttr::get(i64Type, debugNamedMemoryBytes));
-                        initialFreePtr = builder.create<sir::AddOp>(loc, u256Type, heapBase, reservedBytes);
+                        initialFreePtr = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, heapBase, reservedBytes);
                     }
-                    builder.create<sir::StoreOp>(loc, freePtrSlot, initialFreePtr);
+                    builder.create<sir::StoreOp>(dispatcherMainLoc, freePtrSlot, initialFreePtr);
 
-                    Value cv = builder.create<sir::CallValueOp>(loc, u256Type);
+                    Value cv = builder.create<sir::CallValueOp>(dispatcherMainLoc, u256Type);
                     setResultName(cv.getDefiningOp(), "cv");
-                    Value cv_zero = builder.create<sir::IsZeroOp>(loc, u256Type, cv);
+                    Value cv_zero = builder.create<sir::IsZeroOp>(dispatcherMainLoc, u256Type, cv);
                     setResultName(cv_zero.getDefiningOp(), "cv_nonzero");
-                    builder.create<sir::CondBrOp>(loc, cv_zero, ValueRange{}, ValueRange{}, loadSelector, revertError);
+                    builder.create<sir::CondBrOp>(dispatcherMainLoc, cv_zero, ValueRange{}, ValueRange{}, loadSelector, revertError);
                     setBlockName(entry, "main_entry");
                     setBlockOrder(entry, 0);
 
                     // load_selector: selector + switch
                     builder.setInsertionPointToEnd(loadSelector);
-                    Value c0_ls = getConst(builder, loc, u256Type, i64Type, 0, constCache, loadSelector, "zero");
-                    Value c224_ls = getConst(builder, loc, u256Type, i64Type, 224, constCache, loadSelector, "selector_shift");
-                    Value word = builder.create<sir::CallDataLoadOp>(loc, u256Type, c0_ls);
+                    Value c0_ls = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 0, constCache, loadSelector, "zero");
+                    Value c224_ls = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, loadSelector, "selector_shift");
+                    Value word = builder.create<sir::CallDataLoadOp>(dispatcherMainLoc, u256Type, c0_ls);
                     setResultName(word.getDefiningOp(), "selector_word");
-                    Value selector = builder.create<sir::ShrOp>(loc, u256Type, c224_ls, word);
+                    Value selector = builder.create<sir::ShrOp>(dispatcherMainLoc, u256Type, c224_ls, word);
                     setResultName(selector.getDefiningOp(), "selector");
 
                     SmallVector<Block *, 8> caseBlocks;
@@ -1046,7 +1142,7 @@ namespace mlir
                     }
 
                     auto caseAttr = builder.getI64ArrayAttr(caseValues);
-                    auto sw = builder.create<sir::SwitchOp>(loc, selector, caseAttr, revertError, caseBlocks);
+                    auto sw = builder.create<sir::SwitchOp>(dispatcherMainLoc, selector, caseAttr, revertError, caseBlocks);
                     sw->setAttr("sir.selector_switch", builder.getUnitAttr());
                     setBlockName(loadSelector, "load_selector");
                     setBlockOrder(loadSelector, 1);
@@ -1055,6 +1151,10 @@ namespace mlir
                     for (size_t i = 0; i < pubFuncs.size(); ++i)
                     {
                         auto &info = pubFuncs[i];
+                        Location caseLoc = makeSyntheticOriginOnlyLoc(info.provenanceLoc, "dispatcher_case");
+                        Location caseDecodeLoc = makeSyntheticOriginOnlyLoc(info.provenanceLoc, "dispatcher_decode");
+                        Location caseReturnLoc = makeSyntheticOriginOnlyLoc(info.provenanceLoc, "dispatcher_return");
+                        Location caseErrorLoc = makeSyntheticOriginOnlyLoc(info.provenanceLoc, "dispatcher_error");
                         Block *caseCheck = caseBlocks[i];
                         Block *caseBody = caseCheck;
                         builder.setInsertionPointToEnd(caseCheck);
@@ -1062,18 +1162,18 @@ namespace mlir
                         int64_t minSize = info.minHeadBytes > 0 ? info.minHeadBytes : (4 + 32 * static_cast<int64_t>(info.argCount));
                         if (minSize > 4)
                         {
-                            Value cdsize_case = builder.create<sir::CallDataSizeOp>(loc, u256Type);
+                            Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
                             setResultName(cdsize_case.getDefiningOp(), ("cdsize_" + info.func.getName()).str());
                             int64_t minMinus = minSize - 1;
                             StringRef minName = (minMinus == 35   ? StringRef("min_cdsize_1arg")
                                                  : minMinus == 67 ? StringRef("min_cdsize_2args")
                                                  : minMinus == 99 ? StringRef("min_cdsize_3args")
                                                                   : StringRef());
-                            Value minSizeVal = getConst(builder, loc, u256Type, i64Type, minMinus, constCache, caseCheck, minName);
-                            Value valid_args = builder.create<sir::LtOp>(loc, u256Type, minSizeVal, cdsize_case);
+                            Value minSizeVal = getConst(builder, caseDecodeLoc, u256Type, i64Type, minMinus, constCache, caseCheck, minName);
+                            Value valid_args = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, minSizeVal, cdsize_case);
                             setResultName(valid_args.getDefiningOp(), ("valid_" + info.func.getName()).str());
                             caseBody = mainFunc.addBlock();
-                            builder.create<sir::CondBrOp>(loc, valid_args, ValueRange{}, ValueRange{}, caseBody, revertError);
+                            builder.create<sir::CondBrOp>(caseDecodeLoc, valid_args, ValueRange{}, ValueRange{}, caseBody, revertError);
                             builder.setInsertionPointToEnd(caseBody);
                         }
 
@@ -1102,9 +1202,9 @@ namespace mlir
                                               : offs == 68 ? StringRef("arg2_offset")
                                                            : StringRef();
                             Value offc = offName.empty()
-                                             ? builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, offs))
-                                             : getConst(builder, loc, u256Type, i64Type, offs, constCache, caseBody, offName);
-                            Value head = builder.create<sir::CallDataLoadOp>(loc, u256Type, offc);
+                                             ? builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, offs))
+                                             : getConst(builder, caseDecodeLoc, u256Type, i64Type, offs, constCache, caseBody, offName);
+                            Value head = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, offc);
                             StringRef argPrefix = idx == 0 ? "a_" : (idx == 1 ? "b_" : (idx == 2 ? "n_" : "arg_"));
                             setResultName(head.getDefiningOp(), (argPrefix + info.func.getName()).str());
 
@@ -1115,9 +1215,9 @@ namespace mlir
                             {
                                 int64_t elemCount = abi.dims.front();
                                 int64_t totalBytes = elemCount * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, totalBytes));
-                                Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
-                                builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
+                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
                             }
                             else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
@@ -1142,47 +1242,47 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                Value totalVal = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, words * 32));
-                                Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, totalVal);
-                                builder.create<sir::CallDataCopyOp>(loc, buf, offc, totalVal);
+                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
                             }
                             else if (!info.abiParams.empty() && abi.isDynamic())
                             {
                                 if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
                                 {
-                                    Value c4_dyn = getConst(builder, loc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
-                                    Value c32_dyn = getConst(builder, loc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                                    Value absOff = builder.create<sir::AddOp>(loc, u256Type, head, c4_dyn);
-                                    Value len = builder.create<sir::CallDataLoadOp>(loc, u256Type, absOff);
+                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
+                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
+                                    Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
 
                                     Value total = nullptr;
                                     if (abi.baseIsDynamic())
                                     {
-                                        Value c31 = getConst(builder, loc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
-                                        Value c5 = getConst(builder, loc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
-                                        Value lenPlus = builder.create<sir::AddOp>(loc, u256Type, len, c31);
-                                        Value shifted = builder.create<sir::ShrOp>(loc, u256Type, c5, lenPlus);
-                                        Value padded = builder.create<sir::ShlOp>(loc, u256Type, c5, shifted);
-                                        total = builder.create<sir::AddOp>(loc, u256Type, padded, c32_dyn);
+                                        Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
+                                        Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
+                                        Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, len, c31);
+                                        Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
+                                        Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
+                                        total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, c32_dyn);
                                     }
                                     else
                                     {
-                                        Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, len, c32_dyn);
-                                        total = builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32_dyn);
+                                        Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, c32_dyn);
+                                        total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
                                     }
 
-                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(loc, u256Type);
-                                    Value end = builder.create<sir::AddOp>(loc, u256Type, absOff, total);
+                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value end = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, total);
                                     // Check cdsize >= end (i.e., !(cdsize < end))
-                                    Value tooShort = builder.create<sir::LtOp>(loc, u256Type, cdsize_case, end);
-                                    Value valid_dyn = builder.create<sir::IsZeroOp>(loc, u256Type, tooShort);
+                                    Value tooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, end);
+                                    Value valid_dyn = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tooShort);
                                     Block *dynBody = mainFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(loc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
                                     builder.setInsertionPointToEnd(dynBody);
 
-                                    Value buf = builder.create<sir::SAllocAnyOp>(loc, ptrType, total);
-                                    builder.create<sir::CallDataCopyOp>(loc, buf, absOff, total);
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
                                     argVal = buf;
                                 }
                                 else
@@ -1199,14 +1299,14 @@ namespace mlir
                                 {
                                     if (!isa<sir::PtrType>(argVal.getType()))
                                     {
-                                        argVal = builder.create<sir::BitcastOp>(loc, ptrType, argVal);
+                                        argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, ptrType, argVal);
                                     }
-                                    argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
+                                    argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
                                 }
                             }
                             // sir.icall requires all args to be !sir.u256.
                             if (isa<sir::PtrType>(argVal.getType()))
-                                argVal = builder.create<sir::BitcastOp>(loc, u256Type, argVal);
+                                argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
                             args.push_back(argVal);
                         }
 
@@ -1215,7 +1315,7 @@ namespace mlir
                             resultTypes.push_back(u256Type);
 
                         auto call = builder.create<sir::ICallOp>(
-                            loc,
+                            caseLoc,
                             resultTypes,
                             SymbolRefAttr::get(ctx, info.func.getName()),
                             args);
@@ -1238,33 +1338,33 @@ namespace mlir
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
                             (void)len;
-                            Value ptr = builder.create<sir::BitcastOp>(loc, ptrType, ptr_u);
-                            Value tag = builder.create<sir::LoadOp>(loc, u256Type, ptr);
-                            Value c32_union = getConst(builder, loc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                            Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, c32_union);
-                            Value payload = builder.create<sir::LoadOp>(loc, u256Type, payloadPtr);
-                            Value one = getConst(builder, loc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                            Value maskedTag = builder.create<sir::AndOp>(loc, u256Type, tag, one);
-                            Value isError = builder.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                            Value ptr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, ptr_u);
+                            Value tag = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, ptr);
+                            Value c32_union = getConst(builder, caseErrorLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value payloadPtr = builder.create<sir::AddPtrOp>(caseErrorLoc, ptrType, ptr, c32_union);
+                            Value payload = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadPtr);
+                            Value one = getConst(builder, caseErrorLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                            Value maskedTag = builder.create<sir::AndOp>(caseErrorLoc, u256Type, tag, one);
+                            Value isError = builder.create<sir::EqOp>(caseErrorLoc, u256Type, maskedTag, one);
 
                             Block *successBlock = mainFunc.addBlock();
                             Block *errorDispatchBlock = mainFunc.addBlock();
-                            builder.create<sir::CondBrOp>(loc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
+                            builder.create<sir::CondBrOp>(caseErrorLoc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
 
                             builder.setInsertionPointToEnd(successBlock);
                             Value retPtr = nullptr;
                             Value size = nullptr;
                             if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
                             {
-                                size = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                                size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                                 setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                                builder.create<sir::StoreOp>(loc, retPtr, payload);
+                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, payload);
                             }
                             else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
                             {
-                                size = getConst(builder, loc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
-                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                size = getConst(builder, caseReturnLoc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
                             }
                             else if (!info.abiReturnLayout.empty())
                             {
@@ -1275,24 +1375,24 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
-                                size = computeAbiEncodedSize(builder, loc, ctx, retPtr, layout);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
+                                size = computeAbiEncodedSize(builder, caseReturnLoc, ctx, retPtr, layout);
                             }
                             else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
                             {
-                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
-                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
-                                Value padded = computePaddedBytes(builder, loc, ctx, length);
-                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                size = builder.create<sir::AddOp>(loc, u256Type, padded, wordSize);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
+                                Value padded = computePaddedBytes(builder, caseReturnLoc, ctx, length);
+                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, padded, wordSize);
                             }
                             else if (info.abiReturn.supportsDynamicArray())
                             {
-                                retPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
-                                Value length = builder.create<sir::LoadOp>(loc, u256Type, retPtr);
-                                Value wordSize = getConst(builder, loc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, wordSize);
-                                size = builder.create<sir::AddOp>(loc, u256Type, lenBytes, wordSize);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
+                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
+                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
+                                Value lenBytes = builder.create<sir::MulOp>(caseReturnLoc, u256Type, length, wordSize);
+                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, lenBytes, wordSize);
                             }
                             else
                             {
@@ -1300,7 +1400,7 @@ namespace mlir
                                 signalPassFailure();
                                 return;
                             }
-                            builder.create<sir::ReturnOp>(loc, retPtr, size);
+                            builder.create<sir::ReturnOp>(caseReturnLoc, retPtr, size);
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
                             Block *nextErrorBlock = revertError;
@@ -1309,75 +1409,75 @@ namespace mlir
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);
 
-                                Value errId = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
+                                Value errId = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
                                 Value compareValue = payload;
                                 if (errInfo.paramCount != 0)
                                 {
-                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
-                                    compareValue = builder.create<sir::LoadOp>(loc, u256Type, payloadAggPtr);
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, payload);
+                                    compareValue = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadAggPtr);
                                 }
-                                Value matches = builder.create<sir::EqOp>(loc, u256Type, compareValue, errId);
+                                Value matches = builder.create<sir::EqOp>(caseErrorLoc, u256Type, compareValue, errId);
                                 Block *emitBlock = mainFunc.addBlock();
-                                builder.create<sir::CondBrOp>(loc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
+                                builder.create<sir::CondBrOp>(caseErrorLoc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
 
                                 builder.setInsertionPointToEnd(emitBlock);
                                 if (errInfo.paramCount == 0)
                                 {
-                                    Value size4 = getConst(builder, loc, u256Type, i64Type, 4, constCache, emitBlock);
-                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size4);
-                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
-                                    builder.create<sir::RevertOp>(loc, revertPtr, size4);
+                                    Value size4 = getConst(builder, caseErrorLoc, u256Type, i64Type, 4, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, size4);
+                                    builder.create<sir::StoreOp>(caseErrorLoc, revertPtr, getShiftedSelectorConst(builder, caseErrorLoc, ctx, errInfo.selector));
+                                    builder.create<sir::RevertOp>(caseErrorLoc, revertPtr, size4);
                                 }
                                 else
                                 {
                                     const int64_t totalBytes = 4 + static_cast<int64_t>(errInfo.paramCount) * 32;
-                                    Value revertSize = getConst(builder, loc, u256Type, i64Type, totalBytes, constCache, emitBlock);
-                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, revertSize);
-                                    builder.create<sir::StoreOp>(loc, revertPtr, getShiftedSelectorConst(builder, loc, ctx, errInfo.selector));
+                                    Value revertSize = getConst(builder, caseErrorLoc, u256Type, i64Type, totalBytes, constCache, emitBlock);
+                                    Value revertPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, revertSize);
+                                    builder.create<sir::StoreOp>(caseErrorLoc, revertPtr, getShiftedSelectorConst(builder, caseErrorLoc, ctx, errInfo.selector));
 
-                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(loc, ptrType, payload);
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, payload);
                                     for (uint64_t index = 0; index < errInfo.paramCount; ++index)
                                     {
-                                        Value srcOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>((index + 1) * 32), constCache, emitBlock);
-                                        Value srcPtr = builder.create<sir::AddPtrOp>(loc, ptrType, payloadAggPtr, srcOffset);
-                                        Value fieldWord = builder.create<sir::LoadOp>(loc, u256Type, srcPtr);
+                                        Value srcOffset = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>((index + 1) * 32), constCache, emitBlock);
+                                        Value srcPtr = builder.create<sir::AddPtrOp>(caseErrorLoc, ptrType, payloadAggPtr, srcOffset);
+                                        Value fieldWord = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, srcPtr);
 
-                                        Value dstOffset = getConst(builder, loc, u256Type, i64Type, static_cast<int64_t>(4 + index * 32), constCache, emitBlock);
-                                        Value dstPtr = builder.create<sir::AddPtrOp>(loc, ptrType, revertPtr, dstOffset);
-                                        builder.create<sir::StoreOp>(loc, dstPtr, fieldWord);
+                                        Value dstOffset = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>(4 + index * 32), constCache, emitBlock);
+                                        Value dstPtr = builder.create<sir::AddPtrOp>(caseErrorLoc, ptrType, revertPtr, dstOffset);
+                                        builder.create<sir::StoreOp>(caseErrorLoc, dstPtr, fieldWord);
                                     }
 
-                                    builder.create<sir::RevertOp>(loc, revertPtr, revertSize);
+                                    builder.create<sir::RevertOp>(caseErrorLoc, revertPtr, revertSize);
                                 }
 
                                 nextErrorBlock = compareBlock;
                             }
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
-                            builder.create<sir::BrOp>(loc, ValueRange{}, nextErrorBlock);
+                            builder.create<sir::BrOp>(caseErrorLoc, ValueRange{}, nextErrorBlock);
                         }
                         else if (info.retCount == 2)
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
-                            Value ptr = builder.create<sir::BitcastOp>(loc, ptrType, ptr_u);
-                            builder.create<sir::ReturnOp>(loc, ptr, len);
+                            Value ptr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, ptr_u);
+                            builder.create<sir::ReturnOp>(caseReturnLoc, ptr, len);
                         }
                         else if (info.retCount == 1)
                         {
                             Value val = call.getResult(0);
-                            Value c32_ret = getConst(builder, loc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value c32_ret = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
                             Value size = c32_ret;
-                            Value ptr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                            Value ptr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                             setResultName(ptr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                            builder.create<sir::StoreOp>(loc, ptr, val);
-                            builder.create<sir::ReturnOp>(loc, ptr, size);
+                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, val);
+                            builder.create<sir::ReturnOp>(caseReturnLoc, ptr, size);
                         }
                         else
                         {
-                            Value z = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
-                            Value pz = builder.create<sir::BitcastOp>(loc, ptrType, z);
-                            builder.create<sir::ReturnOp>(loc, pz, z);
+                            Value z = builder.create<sir::ConstOp>(caseReturnLoc, u256Type, IntegerAttr::get(i64Type, 0));
+                            Value pz = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, z);
+                            builder.create<sir::ReturnOp>(caseReturnLoc, pz, z);
                         }
 
                         setBlockName(caseCheck, (info.func.getName() + "_").str());
@@ -1391,9 +1491,9 @@ namespace mlir
 
                     // Revert helper block (placed last).
                     builder.setInsertionPointToEnd(revertError);
-                    Value c0_revert_main = getConst(builder, loc, u256Type, i64Type, 0, constCache, revertError, "zero");
-                    Value p0b_main = builder.create<sir::BitcastOp>(loc, ptrType, c0_revert_main);
-                    builder.create<sir::RevertOp>(loc, p0b_main, c0_revert_main);
+                    Value c0_revert_main = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 0, constCache, revertError, "zero");
+                    Value p0b_main = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c0_revert_main);
+                    builder.create<sir::RevertOp>(dispatcherMainLoc, p0b_main, c0_revert_main);
                     setBlockName(revertError, "revert_error");
                     setBlockOrder(revertError, 2);
                     module.push_back(mainFunc);

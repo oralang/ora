@@ -58,6 +58,15 @@ pub fn locationFromRange(ctx: mlir.MlirContext, sources: *const source.SourceSto
     return mlir.oraLocationFileLineColGet(ctx, strRef(file.path), line_column.line, line_column.column);
 }
 
+pub fn locationFromRangeWithStmt(ctx: mlir.MlirContext, sources: *const source.SourceStore, file_id: source.FileId, range: source.TextRange, stmt_id: ?ast.StmtId) mlir.MlirLocation {
+    const base = locationFromRange(ctx, sources, file_id, range);
+    if (stmt_id) |id| {
+        const tagged_origin = mlir.oraLocationOriginStmtTaggedGet(ctx, base, @intCast(id.index()));
+        return mlir.oraLocationStmtTaggedGet(ctx, tagged_origin, @intCast(id.index()));
+    }
+    return base;
+}
+
 pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     const trimmed = std.mem.trim(u8, name, " \t\n\r");
     if (std.mem.eql(u8, trimmed, "bool")) return boolType(ctx);

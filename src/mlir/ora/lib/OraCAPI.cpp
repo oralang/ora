@@ -142,6 +142,38 @@ extern "C"
         return MlirLocation{loc.getAsOpaquePointer()};
     }
 
+    MlirLocation oraLocationStmtTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t stmtId)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::Location childLoc = unwrap(child);
+        if (childLoc == nullptr)
+        {
+            childLoc = mlir::UnknownLoc::get(context);
+        }
+        std::string tag = "ora.stmt." + std::to_string(stmtId);
+        mlir::Location loc = mlir::NameLoc::get(mlir::StringAttr::get(context, tag), childLoc);
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
+    MlirLocation oraLocationOriginStmtTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t stmtId)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::Location childLoc = unwrap(child);
+        if (childLoc == nullptr)
+        {
+            childLoc = mlir::UnknownLoc::get(context);
+        }
+        std::string tag = "ora.origin_stmt." + std::to_string(stmtId);
+        mlir::Location loc = mlir::NameLoc::get(mlir::StringAttr::get(context, tag), childLoc);
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
     bool oraLocationIsNull(MlirLocation loc)
     {
         return loc.ptr == nullptr;

@@ -7,6 +7,17 @@ const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const syntax = @import("../syntax/mod.zig");
 
+fn compilerPhaseDebugEnabled() bool {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
+    defer std.heap.page_allocator.free(value);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
+}
+
+fn compilerPhaseLog(comptime fmt: []const u8, args: anytype) void {
+    if (!compilerPhaseDebugEnabled()) return;
+    std.debug.print("compiler-phase: " ++ fmt ++ "\n", args);
+}
+
 const TypeCheckCache = struct {
     entries: std.AutoHashMap(u64, *sema.TypeCheckResult),
     in_progress: std.AutoHashMap(u64, void),
@@ -194,16 +205,21 @@ pub const CompilerDb = struct {
             defer inputs.deinit(self.allocator);
             for (package.modules.items) |module_id| {
                 const module = self.sources.module(module_id);
+                compilerPhaseLog("module-graph input {s} ast begin", .{module.name});
+                const ast_file = try self.astFile(module.file_id);
+                compilerPhaseLog("module-graph input {s} ast done root-items={d}", .{ module.name, ast_file.root_items.len });
                 try inputs.append(self.allocator, .{
                     .module_id = module.id,
                     .file_id = module.file_id,
                     .path = module.name,
                     .file_path = self.sources.file(module.file_id).path,
-                    .ast_file = try self.astFile(module.file_id),
+                    .ast_file = ast_file,
                 });
             }
+            compilerPhaseLog("module-graph build begin inputs={d}", .{inputs.items.len});
             const result = try self.allocator.create(sema.ModuleGraphResult);
             result.* = try sema.buildModuleGraph(self.allocator, package_id, inputs.items);
+            compilerPhaseLog("module-graph build done", .{});
             slot.* = result;
         }
         return slot.*.?;
@@ -374,14 +390,23 @@ pub const CompilerDb = struct {
         const slot = &self.hir_slots.items[module_id.index()];
         if (slot.* == null) {
             const module = self.sources.module(module_id);
+            compilerPhaseLog("lower-to-hir {s} begin", .{module.name});
             const ast_file = try self.astFile(module.file_id);
+            compilerPhaseLog("lower-to-hir {s} ast", .{module.name});
             const item_index = try self.itemIndex(module_id);
+            compilerPhaseLog("lower-to-hir {s} item-index", .{module.name});
             const resolution = try self.resolveNames(module_id);
+            compilerPhaseLog("lower-to-hir {s} resolve", .{module.name});
             const typecheck = try self.moduleTypeCheck(module_id);
+            compilerPhaseLog("lower-to-hir {s} typecheck", .{module.name});
             _ = try self.moduleVerificationFacts(module_id);
+            compilerPhaseLog("lower-to-hir {s} verification-facts", .{module.name});
+            const const_eval = try self.constEval(module_id);
+            compilerPhaseLog("lower-to-hir {s} consteval", .{module.name});
             const result = try self.allocator.create(hir.LoweringResult);
             errdefer self.allocator.destroy(result);
-            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, try self.constEval(module_id), typecheck);
+            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck);
+            compilerPhaseLog("lower-to-hir {s} done", .{module.name});
             slot.* = result;
         }
         return slot.*.?;
@@ -390,8 +415,10 @@ pub const CompilerDb = struct {
     fn syntaxResult(self: *CompilerDb, file_id: source.FileId) !*syntax.ParseResult {
         const slot = &self.syntax_slots.items[file_id.index()];
         if (slot.* == null) {
+            compilerPhaseLog("syntax file={d} begin", .{file_id.index()});
             const result = try self.allocator.create(syntax.ParseResult);
             result.* = try syntax.parse(self.allocator, file_id, self.sources.sourceText(file_id));
+            compilerPhaseLog("syntax file={d} done", .{file_id.index()});
             slot.* = result;
         }
         return slot.*.?;
@@ -400,8 +427,10 @@ pub const CompilerDb = struct {
     fn astResult(self: *CompilerDb, file_id: source.FileId) !*ast.LowerResult {
         const slot = &self.ast_slots.items[file_id.index()];
         if (slot.* == null) {
+            compilerPhaseLog("ast-lower file={d} begin", .{file_id.index()});
             const result = try self.allocator.create(ast.LowerResult);
             result.* = try ast.lower(self.allocator, try self.syntaxTree(file_id));
+            compilerPhaseLog("ast-lower file={d} done", .{file_id.index()});
             slot.* = result;
         }
         return slot.*.?;

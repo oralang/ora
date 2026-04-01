@@ -112,6 +112,18 @@ pub const Solver = struct {
         c.Z3_solver_set_params(self.context.ctx, self.solver, params);
         try self.context.checkNoError();
     }
+
+    pub fn setRandomSeed(self: *Solver, seed: u32) !void {
+        self.context.clearLastError();
+        const params = c.Z3_mk_params(self.context.ctx) orelse return error.SolverInitFailed;
+        c.Z3_params_inc_ref(self.context.ctx, params);
+        defer c.Z3_params_dec_ref(self.context.ctx, params);
+
+        const sym = c.Z3_mk_string_symbol(self.context.ctx, "random_seed");
+        c.Z3_params_set_uint(self.context.ctx, params, sym, seed);
+        c.Z3_solver_set_params(self.context.ctx, self.solver, params);
+        try self.context.checkNoError();
+    }
 };
 
 const testing = std.testing;
@@ -134,6 +146,17 @@ test "setTimeoutMs configures solver without Z3 error" {
     defer solver.deinit();
 
     try solver.setTimeoutMs(50);
+    try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
+}
+
+test "setRandomSeed configures solver without Z3 error" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    try solver.setRandomSeed(7);
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
 }
 

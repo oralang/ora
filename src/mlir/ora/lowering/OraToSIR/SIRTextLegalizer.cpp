@@ -27,6 +27,79 @@ namespace mlir
 
         namespace
         {
+            static std::optional<uint32_t> extractTaggedStmtId(Location loc, StringRef prefix)
+            {
+                if (loc == nullptr)
+                    return std::nullopt;
+                if (auto nameLoc = dyn_cast<NameLoc>(loc))
+                {
+                    StringRef name = nameLoc.getName().getValue();
+                    if (name.starts_with(prefix))
+                    {
+                        uint32_t stmtId = 0;
+                        if (!name.drop_front(prefix.size()).getAsInteger(10, stmtId))
+                            return stmtId;
+                    }
+                    return extractTaggedStmtId(nameLoc.getChildLoc(), prefix);
+                }
+                if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+                {
+                    if (auto callee = extractTaggedStmtId(callSite.getCallee(), prefix))
+                        return callee;
+                    return extractTaggedStmtId(callSite.getCaller(), prefix);
+                }
+                if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+                {
+                    for (Location child : fusedLoc.getLocations())
+                    {
+                        if (auto stmtId = extractTaggedStmtId(child, prefix))
+                            return stmtId;
+                    }
+                }
+                return std::nullopt;
+            }
+
+            static Location stripProvenanceTags(Location loc)
+            {
+                if (loc == nullptr)
+                    return loc;
+                if (auto nameLoc = dyn_cast<NameLoc>(loc))
+                {
+                    StringRef name = nameLoc.getName().getValue();
+                    if (name.starts_with("ora.stmt.") || name.starts_with("ora.origin_stmt.") || name.starts_with("ora.synthetic."))
+                        return stripProvenanceTags(nameLoc.getChildLoc());
+                    Location child = stripProvenanceTags(nameLoc.getChildLoc());
+                    return NameLoc::get(nameLoc.getName(), child);
+                }
+                if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+                {
+                    Location callee = stripProvenanceTags(callSite.getCallee());
+                    Location caller = stripProvenanceTags(callSite.getCaller());
+                    return CallSiteLoc::get(callee, caller);
+                }
+                if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+                {
+                    SmallVector<Location, 4> children;
+                    for (Location child : fusedLoc.getLocations())
+                        children.push_back(stripProvenanceTags(child));
+                    return FusedLoc::get(loc.getContext(), children, fusedLoc.getMetadata());
+                }
+                return loc;
+            }
+
+            static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
+            {
+                MLIRContext *ctx = loc.getContext();
+                Location base = stripProvenanceTags(loc);
+                if (auto originStmt = extractTaggedStmtId(loc, "ora.origin_stmt."))
+                {
+                    std::string originTag = "ora.origin_stmt." + std::to_string(*originStmt);
+                    base = NameLoc::get(StringAttr::get(ctx, originTag), base);
+                }
+                std::string syntheticTag = "ora.synthetic." + syntheticKind.str();
+                return NameLoc::get(StringAttr::get(ctx, syntheticTag), base);
+            }
+
             struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
             {
                 // Insert trampoline blocks for cond_br with non-uniform operands.
@@ -68,13 +141,13 @@ namespace mlir
                     {
                         OpBuilder tb(br.getContext());
                         tb.setInsertionPointToEnd(trampTrue);
-                        tb.create<sir::BrOp>(br.getLoc(), br.getTrueOperands(), br.getTrueDest());
+                        tb.create<sir::BrOp>(makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_true"), br.getTrueOperands(), br.getTrueDest());
                     }
                     // trampoline_false: br ^false_dest(false_operands)
                     {
                         OpBuilder fb(br.getContext());
                         fb.setInsertionPointToEnd(trampFalse);
-                        fb.create<sir::BrOp>(br.getLoc(), br.getFalseOperands(), br.getFalseDest());
+                        fb.create<sir::BrOp>(makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_false"), br.getFalseOperands(), br.getFalseDest());
                     }
 
                     // Replace cond_br with: cond_br %c, ^trampTrue, ^trampFalse (no operands)

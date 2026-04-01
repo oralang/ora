@@ -29,6 +29,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         steps_executed: u64,
         /// Safety limit to prevent infinite loops
         max_steps: u64,
+        last_statement_id: ?u32,
         last_statement_line: ?u32,
         last_statement_sir_line: ?u32,
         last_error_name: ?[]const u8,
@@ -56,6 +57,9 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
         const StatementKey = struct {
             depth: usize,
+            stmt_id: ?u32,
+            execution_region_id: ?u32,
+            statement_run_index: ?u32,
             stmt_pc: u32,
         };
 
@@ -78,6 +82,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .allocator = allocator,
                 .steps_executed = 0,
                 .max_steps = 10_000_000,
+                .last_statement_id = null,
                 .last_statement_line = null,
                 .last_statement_sir_line = null,
                 .last_error_name = null,
@@ -481,6 +486,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             return self.last_statement_line;
         }
 
+        pub fn lastStatementId(self: *const Self) ?u32 {
+            return self.last_statement_id;
+        }
+
         pub fn lastStatementSirLine(self: *const Self) ?u32 {
             return self.last_statement_sir_line;
         }
@@ -595,6 +604,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         fn updateLastStatementLine(self: *Self) void {
             const entry = self.currentEntry() orelse return;
             if (!entry.is_statement) return;
+            self.last_statement_id = entry.statement_id;
             self.last_statement_line = entry.line;
             self.last_statement_sir_line = entry.sir_line;
         }
@@ -603,8 +613,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             const frame = self.evm.getCurrentFrame() orelse return null;
             const entry = self.src_map.getEntry(frame.pc) orelse return null;
             if (!entry.is_statement) return null;
+            if (self.shouldIgnoreStatementBoundary(entry)) return null;
             return .{
                 .depth = self.getCallDepth(),
+                .stmt_id = entry.statement_id,
+                .execution_region_id = entry.execution_region_id,
+                .statement_run_index = entry.statement_run_index,
                 .stmt_pc = entry.pc,
             };
         }
@@ -612,7 +626,37 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         fn currentStatementKeyChanged(self: *const Self, start: ?StatementKey) bool {
             const current = self.currentStatementKey() orelse return false;
             if (start == null) return true;
-            return current.depth != start.?.depth or current.stmt_pc != start.?.stmt_pc;
+            if (current.depth != start.?.depth) return true;
+            if (current.execution_region_id != null and start.?.execution_region_id != null) {
+                if (current.execution_region_id.? != start.?.execution_region_id.?) return true;
+                if (current.statement_run_index != start.?.statement_run_index) return true;
+                return false;
+            }
+            if (current.stmt_id != null and start.?.stmt_id != null) {
+                return current.stmt_id.? != start.?.stmt_id.?;
+            }
+            return current.stmt_pc != start.?.stmt_pc;
+        }
+
+        fn shouldIgnoreStatementBoundary(self: *const Self, entry: *const SourceMap.Entry) bool {
+            const stmt_id = entry.statement_id orelse return false;
+            const idx = entry.idx orelse return false;
+            const debug_info = self.debug_info orelse return false;
+            const op_meta = debug_info.getOpMetaForIdx(idx) orelse return false;
+            if (!(std.mem.eql(u8, op_meta.op, "invalid") or std.mem.eql(u8, op_meta.op, "sir.invalid"))) {
+                return false;
+            }
+
+            for (self.src_map.entries) |candidate| {
+                if (candidate.statement_id != stmt_id) continue;
+                if (candidate.idx == null or candidate.idx == idx) continue;
+                const candidate_meta = debug_info.getOpMetaForIdx(candidate.idx.?) orelse continue;
+                if (std.mem.eql(u8, candidate_meta.op, "invalid") or std.mem.eql(u8, candidate_meta.op, "sir.invalid")) {
+                    continue;
+                }
+                return true;
+            }
+            return false;
         }
 
         fn bindingHasWritableRuntimeHome(self: *const Self, binding: DebugInfo.VisibleBinding) bool {

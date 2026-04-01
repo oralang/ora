@@ -278,6 +278,9 @@ const Checkpoint = struct {
 };
 
 const MappingWindow = struct {
+    statement_id: ?u32 = null,
+    execution_region_id: ?u32 = null,
+    statement_run_index: ?u32 = null,
     ora_line: u32,
     sir_start: u32,
     sir_end: u32,
@@ -294,6 +297,8 @@ const WriteEffectKind = enum {
     storage,
     tstore,
 };
+
+const lock_prefix: u256 = (@as(u256, 1) << 255);
 
 const Ui = struct {
     allocator: std.mem.Allocator,
@@ -498,34 +503,33 @@ const Ui = struct {
             self.command_status = "quit";
             return true;
         }
+        if (std.mem.eql(u8, raw, "h") or std.mem.eql(u8, raw, "help")) {
+            try self.describeHelp();
+            return false;
+        }
         if (std.mem.eql(u8, raw, "c") or std.mem.eql(u8, raw, "continue")) {
             self.runStep(.continue_, true);
-            self.command_status = "continue";
             return false;
         }
         if (std.mem.eql(u8, raw, "r") or std.mem.eql(u8, raw, "run") or std.mem.eql(u8, raw, "rerun")) {
             try self.rerunToHistory(0);
-            self.command_status = "run";
+            try self.updateCommandStatusForCurrentStop("run");
             return false;
         }
-        if (std.mem.eql(u8, raw, "s") or std.mem.eql(u8, raw, "step") or std.mem.eql(u8, raw, "si")) {
+        if (std.mem.eql(u8, raw, "s") or std.mem.eql(u8, raw, "step") or std.mem.eql(u8, raw, "si") or std.mem.eql(u8, raw, "in")) {
             self.runStep(.in, true);
-            self.command_status = "step";
             return false;
         }
         if (std.mem.eql(u8, raw, "x") or std.mem.eql(u8, raw, "op") or std.mem.eql(u8, raw, "opcode")) {
             self.runStep(.opcode, true);
-            self.command_status = "opcode";
             return false;
         }
         if (std.mem.eql(u8, raw, "n") or std.mem.eql(u8, raw, "next") or std.mem.eql(u8, raw, "so")) {
             self.runStep(.over, true);
-            self.command_status = "next";
             return false;
         }
         if (std.mem.eql(u8, raw, "o") or std.mem.eql(u8, raw, "out") or std.mem.eql(u8, raw, "finish")) {
             self.runStep(.out, true);
-            self.command_status = "out";
             return false;
         }
         if (std.mem.eql(u8, raw, "p") or std.mem.eql(u8, raw, "prev") or std.mem.eql(u8, raw, "previous")) {
@@ -541,6 +545,38 @@ const Ui = struct {
             self.focus_line = line;
             self.centerOnCurrentLine();
             self.command_status = "line";
+            return false;
+        }
+        if (std.mem.startsWith(u8, raw, "line-info ")) {
+            const rest = std.mem.trim(u8, raw["line-info ".len..], " \t");
+            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
+                self.command_status = "invalid line";
+                return false;
+            };
+            try self.describeLineInfo(line);
+            return false;
+        }
+        if (std.mem.startsWith(u8, raw, "why-line ")) {
+            const rest = std.mem.trim(u8, raw["why-line ".len..], " \t");
+            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
+                self.command_status = "invalid line";
+                return false;
+            };
+            try self.describeLineInfo(line);
+            return false;
+        }
+        if (std.mem.eql(u8, raw, "where") or std.mem.eql(u8, raw, "why-here")) {
+            try self.describeCurrentStop();
+            return false;
+        }
+        if (std.mem.eql(u8, raw, "origin") or std.mem.eql(u8, raw, "origin-line")) {
+            const origin_line = self.currentOriginLine() orelse {
+                self.command_status = "no distinct origin line";
+                return false;
+            };
+            self.focus_line = origin_line;
+            self.centerOnCurrentLine();
+            try self.setCommandStatusFmt("origin line {d}", .{origin_line});
             return false;
         }
         if (std.mem.startsWith(u8, raw, "sirline ")) {
@@ -708,6 +744,24 @@ const Ui = struct {
         return false;
     }
 
+    fn describeHelp(self: *Ui) !void {
+        self.clearCommandLog();
+        try self.appendLogLine("help: exec   s/:in  x/:op  n next  o out  c cont  p prev");
+        try self.appendLogLine("help: print  :print <binding>  gas  stack[i]  mem <off> <words>");
+        try self.appendLogLine("help: print  :print slot <hex>  storage  tstore  calldata");
+        try self.appendLogLine("help: set    :set <binding> = <v>  gas = <v>  mem <off> = <v>");
+        try self.appendLogLine("help: set    :set slot <hex> = <v>");
+        try self.appendLogLine("help: break  :break <line>  :delete <line>  :info break");
+        try self.appendLogLine("help: lines  :line-info <line>  :why-line <line>  :origin");
+        try self.appendLogLine("help: replay :checkpoint  :checkpoints  :restart <id>  :run");
+        try self.appendLogLine("help: sess   :write-session <path>  :load-session <path>");
+        try self.appendLogLine("help: nav    j/k Ora  J/K SIR  = sync  :sirline <n>  :sirfollow");
+        try self.appendLogLine("help: tabs   1..5 tabs  [/] cycle  q quit");
+        try self.appendLogLine("help: marks  . direct  ~ synthetic  + mixed  ! guard");
+        try self.appendLogLine("help: marks  - removed  * break  ^ origin  >|< sir-range");
+        self.command_status = "help";
+    }
+
     fn handlePrintCommand(self: *Ui, target: []const u8) !void {
         if (std.mem.eql(u8, target, "gas")) {
             const gas_remaining = self.session.debugger.getGasRemaining();
@@ -746,18 +800,35 @@ const Ui = struct {
             return;
         };
         const binding_label = self.bindingLabel(&binding);
+        const resolved_value = try self.resolvedBindingValue(&binding);
+        const availability = self.bindingAvailability(&binding, resolved_value);
         if (binding.folded_value) |folded| {
-            try self.setCommandStatusFmt("{s} [{s}] = {s} [folded]", .{ binding.name, binding_label, folded });
+            try self.setCommandStatusFmt("{s} [{s}] = {s} [derived: folded]", .{ binding.name, binding_label, folded });
             return;
         }
-        if (try self.resolvedBindingValue(&binding)) |value| {
+        if (resolved_value) |value| {
             switch (value) {
-                .numeric => |numeric| try self.setCommandStatusFmt("{s} [{s}] = {d}", .{ binding.name, binding_label, numeric }),
-                .text => |text| try self.setCommandStatusFmt("{s} [{s}] = {s}", .{ binding.name, binding_label, text }),
+                .numeric => |numeric| if (availability == .derived)
+                    try self.setCommandStatusFmt("{s} [{s}] = {d} [derived]", .{ binding.name, binding_label, numeric })
+                else
+                    try self.setCommandStatusFmt("{s} [{s}] = {d}", .{ binding.name, binding_label, numeric }),
+                .text => |text| if (availability == .derived)
+                    try self.setCommandStatusFmt("{s} [{s}] = {s} [derived]", .{ binding.name, binding_label, text })
+                else
+                    try self.setCommandStatusFmt("{s} [{s}] = {s}", .{ binding.name, binding_label, text }),
             }
             return;
         }
-        try self.setCommandStatusFmt("{s} [{s}]", .{ binding.name, binding_label });
+        switch (availability) {
+            .optimized_away => try self.setCommandStatusFmt("{s} [{s}] = optimized away", .{ binding.name, binding_label }),
+            .out_of_scope => try self.setCommandStatusFmt("{s} [{s}] = out of scope", .{ binding.name, binding_label }),
+            .not_initialized => try self.setCommandStatusFmt("{s} [{s}] = not initialized", .{ binding.name, binding_label }),
+            .unavailable => if (std.mem.eql(u8, binding.runtime_kind, "ssa"))
+                try self.setCommandStatusFmt("{s} [{s}] = unavailable [not materialized]", .{ binding.name, binding_label })
+            else
+                try self.setCommandStatusFmt("{s} [{s}] = unavailable", .{ binding.name, binding_label }),
+            else => try self.setCommandStatusFmt("{s} [{s}]", .{ binding.name, binding_label }),
+        }
     }
 
     fn handlePrintMemoryCommand(self: *Ui, rest: []const u8) !void {
@@ -1012,7 +1083,11 @@ const Ui = struct {
             return;
         }
         try self.breakpoints.append(self.allocator, line);
-        try self.setCommandStatusFmt("breakpoint set on line {d}", .{line});
+        if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line)) |prov| {
+            try self.setCommandStatusFmt("breakpoint set on line {d} [{s}]", .{ line, prov.label() });
+        } else {
+            try self.setCommandStatusFmt("breakpoint set on line {d}", .{line});
+        }
     }
 
     fn handleBreakpointDelete(self: *Ui, rest: []const u8) !void {
@@ -1052,6 +1127,119 @@ const Ui = struct {
         return "no executable statement on that line";
     }
 
+    fn describeLineInfo(self: *Ui, line: u32) !void {
+        const src_map = &self.session.debugger.src_map;
+        const file = self.seed.source_path;
+        if (self.isRemovedSourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: removed source line; {s}", .{
+                line,
+                self.removedLineExplanation(line),
+            });
+            return;
+        }
+        if (self.isStructuralSourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: structural source line; syntax only, no standalone runtime stop", .{line});
+            return;
+        }
+        if (!src_map.hasAnyEntryForLine(file, line)) {
+            self.command_status = "no runtime mapping on that line";
+            return;
+        }
+
+        const kind = src_map.getStatementKindForLine(file, line);
+        const provenance = src_map.getLineProvenance(file, line);
+        var stmt_id: ?u32 = null;
+        var origin_stmt_id: ?u32 = null;
+        var function_name: ?[]const u8 = null;
+        for (src_map.entries) |entry| {
+            if (entry.line != line) continue;
+            if (!std.mem.eql(u8, entry.file, file)) continue;
+            if (!entry.is_statement) continue;
+            if (stmt_id == null and entry.statement_id != null) stmt_id = entry.statement_id;
+            if (origin_stmt_id == null and entry.origin_statement_id != null) origin_stmt_id = entry.origin_statement_id;
+            if (function_name == null and entry.function != null) function_name = entry.function;
+        }
+
+        const kind_label = self.statementKindExplanation(kind);
+        const prov_label = self.lineProvenanceExplanation(provenance);
+
+        if (stmt_id) |stmt|
+            if (origin_stmt_id) |origin|
+                if (function_name) |function|
+                    try self.setCommandStatusFmt("line {d}: {s}; {s}; stmt={d}; origin={d}; fn={s}", .{
+                        line, kind_label, prov_label, stmt, origin, function,
+                    })
+                else
+                    try self.setCommandStatusFmt("line {d}: {s}; {s}; stmt={d}; origin={d}", .{
+                        line, kind_label, prov_label, stmt, origin,
+                    })
+            else if (function_name) |function|
+                try self.setCommandStatusFmt("line {d}: {s}; {s}; stmt={d}; fn={s}", .{
+                    line, kind_label, prov_label, stmt, function,
+                })
+            else
+                try self.setCommandStatusFmt("line {d}: {s}; {s}; stmt={d}", .{
+                    line, kind_label, prov_label, stmt,
+                })
+        else if (origin_stmt_id) |origin|
+            if (function_name) |function|
+                try self.setCommandStatusFmt("line {d}: {s}; {s}; origin={d}; fn={s}", .{
+                    line, kind_label, prov_label, origin, function,
+                })
+            else
+                try self.setCommandStatusFmt("line {d}: {s}; {s}; origin={d}", .{
+                    line, kind_label, prov_label, origin,
+                })
+        else if (function_name) |function|
+            try self.setCommandStatusFmt("line {d}: {s}; {s}; fn={s}", .{
+                line, kind_label, prov_label, function,
+            })
+        else
+            try self.setCommandStatusFmt("line {d}: {s}; {s}", .{
+                line, kind_label, prov_label,
+            });
+    }
+
+    fn describeCurrentStop(self: *Ui) !void {
+        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const entry = self.session.debugger.currentEntry() orelse {
+            self.command_status = "no active stop";
+            return;
+        };
+        const prov = self.currentProvenanceLabel();
+        const kind = self.statementKindExplanation(self.statementKindForLine(current_line));
+        const origin_line = self.currentOriginLine();
+
+        if (origin_line) |origin|
+            if (origin != current_line)
+                if (entry.statement_id) |stmt|
+                    if (entry.execution_region_id) |region|
+                        if (entry.statement_run_index) |run|
+                            try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}", .{
+                                prov, kind, stmt, current_line, origin, region, run,
+                            })
+                        else
+                            try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}", .{
+                                prov, kind, stmt, current_line, origin, region,
+                            })
+                    else
+                        try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}", .{
+                            prov, kind, stmt, current_line, origin,
+                        })
+                else if (entry.origin_statement_id) |origin_stmt|
+                    try self.setCommandStatusFmt("here: {s}; {s}; line={d}; origin line={d}; origin stmt={d}", .{
+                        prov, kind, current_line, origin, origin_stmt,
+                    })
+                else
+                    try self.setCommandStatusFmt("here: {s}; {s}; line={d}; origin line={d}", .{
+                        prov, kind, current_line, origin,
+                    })
+            else
+                try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line })
+        else
+            try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line });
+    }
+
     fn describeBreakpoints(self: *Ui) !void {
         if (self.breakpoints.items.len == 0) {
             self.command_status = "no breakpoints";
@@ -1061,10 +1249,17 @@ const Ui = struct {
         var writer = self.command_status_storage.writer(self.allocator);
         try writer.writeAll("breakpoints:");
         for (self.breakpoints.items, 0..) |line, i| {
+            const prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
             if (i == 0) {
-                try writer.print(" {d}", .{line});
+                if (prov) |p|
+                    try writer.print(" {d}[{s}]", .{ line, p.label() })
+                else
+                    try writer.print(" {d}", .{line});
             } else {
-                try writer.print(", {d}", .{line});
+                if (prov) |p|
+                    try writer.print(", {d}[{s}]", .{ line, p.label() })
+                else
+                    try writer.print(", {d}", .{line});
             }
         }
         self.command_status = self.command_status_storage.items;
@@ -1185,6 +1380,7 @@ const Ui = struct {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
             self.syncFocusFromDebugger();
+            self.updateCommandStatusForCurrentStop(stepModeName(mode)) catch {};
             return;
         }
         self.previous_snapshot = self.captureSnapshot();
@@ -1192,27 +1388,37 @@ const Ui = struct {
         switch (mode) {
             .in => self.session.debugger.stepIn() catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.command_status = self.status;
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
                 return;
             },
             .opcode => self.session.debugger.stepOpcode() catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.command_status = self.status;
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
                 return;
             },
             .over => self.session.debugger.stepOver() catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.command_status = self.status;
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
                 return;
             },
             .out => self.session.debugger.stepOut() catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.command_status = self.status;
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
                 return;
             },
             .continue_ => self.session.debugger.continue_() catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.command_status = self.status;
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
                 return;
             },
         }
@@ -1220,6 +1426,7 @@ const Ui = struct {
         self.status = @tagName(self.session.debugger.stop_reason);
         if (!self.shouldPreserveFocusOnTerminalStop()) self.syncFocusFromDebugger();
         self.centerOnCurrentLine();
+        self.updateCommandStatusForCurrentStop(stepModeName(mode)) catch {};
     }
 
     fn stepBack(self: *Ui) void {
@@ -1257,27 +1464,55 @@ const Ui = struct {
             return;
         }
 
+        var initial_function: ?[]const u8 = null;
         if (self.session.debugger.currentEntry()) |entry| {
+            initial_function = entry.function;
             if (entry.is_statement) {
-                self.status = "ready";
-                self.syncFocusFromDebugger();
-                self.centerOnCurrentLine();
-                return;
+                if (self.shouldAcceptInitialStop(entry, initial_function)) {
+                    self.status = "ready";
+                    self.syncFocusFromDebugger();
+                    self.alignInitialSourceView();
+                    return;
+                }
             }
         }
 
         var attempts: usize = 0;
-        while (!self.session.debugger.isHalted() and attempts < 64) : (attempts += 1) {
+        while (!self.session.debugger.isHalted() and attempts < 256) : (attempts += 1) {
             try self.session.debugger.stepIn();
             self.status = @tagName(self.session.debugger.stop_reason);
             if (self.session.debugger.currentEntry()) |entry| {
-                if (entry.is_statement) break;
+                if (initial_function == null) initial_function = entry.function;
+                if (entry.is_statement and self.shouldAcceptInitialStop(entry, initial_function)) break;
             }
         }
 
         if (self.session.debugger.isHalted()) self.status = @tagName(self.session.debugger.stop_reason);
         self.syncFocusFromDebugger();
-        self.centerOnCurrentLine();
+        self.alignInitialSourceView();
+    }
+
+    fn shouldAcceptInitialStop(self: *const Ui, entry: *const SourceMap.Entry, initial_function: ?[]const u8) bool {
+        if (!entry.is_statement) return false;
+        const function_name = initial_function orelse entry.function orelse return true;
+        if (entry.function) |entry_function| {
+            if (!std.mem.eql(u8, entry_function, function_name)) return true;
+        }
+
+        if (!entry.is_synthetic and !entry.is_hoisted) return true;
+        return !self.hasPreferredInitialStatementLater(function_name, entry.pc);
+    }
+
+    fn hasPreferredInitialStatementLater(self: *const Ui, function_name: []const u8, after_pc: u32) bool {
+        for (self.session.debugger.src_map.entries) |entry| {
+            if (!entry.is_statement) continue;
+            if (entry.pc <= after_pc) continue;
+            const entry_function = entry.function orelse continue;
+            if (!std.mem.eql(u8, entry_function, function_name)) continue;
+            if (entry.is_synthetic or entry.is_hoisted) continue;
+            return true;
+        }
+        return false;
     }
 
     fn syncFocusFromDebugger(self: *Ui) void {
@@ -1308,6 +1543,32 @@ const Ui = struct {
         if (self.sir_follow) self.centerSirOnCurrentMapping();
     }
 
+    fn alignInitialSourceView(self: *Ui) void {
+        const function_start_line = self.currentFunctionDeclarationLine();
+        if (function_start_line) |line| {
+            self.scroll_line = if (line > 0) line else 1;
+        } else {
+            self.centerOnCurrentLine();
+            return;
+        }
+        if (self.sir_follow) self.centerSirOnCurrentMapping();
+    }
+
+    fn currentFunctionDeclarationLine(self: *Ui) ?u32 {
+        const entry = self.session.debugger.currentEntry() orelse return null;
+        const function_name = entry.function orelse return null;
+        const scopes = self.session.debugger.getVisibleScopes(self.allocator) catch return null;
+        defer if (scopes.len > 0) self.allocator.free(scopes);
+
+        for (scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            if (!std.mem.eql(u8, scope.function, function_name)) continue;
+            const range = scope.range orelse continue;
+            return range.start.line;
+        }
+        return null;
+    }
+
     fn currentSirLine(self: *const Ui) ?u32 {
         if (self.session.debugger.currentEntry()) |entry| {
             if (entry.sir_line) |sir_line| return sir_line;
@@ -1319,6 +1580,9 @@ const Ui = struct {
         const file = self.seed.source_path;
         const ora_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse return null;
         const entry = self.session.debugger.currentEntry() orelse return null;
+        const statement_id = entry.statement_id orelse self.session.debugger.lastStatementId();
+        const execution_region_id = entry.execution_region_id;
+        const statement_run_index = entry.statement_run_index;
 
         var found = false;
         var sir_start: u32 = 0;
@@ -1330,7 +1594,11 @@ const Ui = struct {
 
         for (self.session.debugger.src_map.entries) |map_entry| {
             if (!std.mem.eql(u8, map_entry.file, file)) continue;
-            if (map_entry.line != ora_line) continue;
+            if (statement_id) |stmt_id| {
+                if (map_entry.statement_id != stmt_id) continue;
+            } else {
+                if (map_entry.line != ora_line) continue;
+            }
 
             if (!found) {
                 sir_start = map_entry.sir_line orelse 0;
@@ -1356,6 +1624,9 @@ const Ui = struct {
 
         if (!found) {
             return .{
+                .statement_id = statement_id,
+                .execution_region_id = execution_region_id,
+                .statement_run_index = statement_run_index,
                 .ora_line = ora_line,
                 .sir_start = entry.sir_line orelse 0,
                 .sir_end = entry.sir_line orelse 0,
@@ -1367,6 +1638,9 @@ const Ui = struct {
         }
 
         return .{
+            .statement_id = statement_id,
+            .execution_region_id = execution_region_id,
+            .statement_run_index = statement_run_index,
             .ora_line = ora_line,
             .sir_start = sir_start,
             .sir_end = sir_end,
@@ -1591,9 +1865,27 @@ const Ui = struct {
             });
             const sir_title = if (mapping) |m|
                 if (m.idx_start != null and m.idx_end != null)
-                    self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.? }) catch " SIR Text "
+                    if (m.statement_id) |stmt_id|
+                        if (m.execution_region_id) |region_id|
+                            if (m.statement_run_index) |run_index|
+                                self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, stmt_id, region_id, run_index }) catch " SIR Text "
+                            else
+                                self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, stmt_id, region_id }) catch " SIR Text "
+                        else
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, stmt_id }) catch " SIR Text "
+                    else
+                        self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.? }) catch " SIR Text "
                 else
-                    self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
+                    if (m.statement_id) |stmt_id|
+                        if (m.execution_region_id) |region_id|
+                            if (m.statement_run_index) |run_index|
+                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id, run_index }) catch " SIR Text "
+                            else
+                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id }) catch " SIR Text "
+                        else
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, stmt_id }) catch " SIR Text "
+                    else
+                        self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
             else if (current_idx) |idx|
                 self.scratchFmt(" SIR Text  line {d}  idx {d} ", .{ current_sir_line, idx }) catch " SIR Text "
             else
@@ -1627,15 +1919,30 @@ const Ui = struct {
         Ui.drawPanelTitle(win, right_x + 2, content_y + bindings_h, " Machine ");
         self.drawMachinePane(machine_outer);
 
+        const bottom_state_w: u16 = @max(28, @as(u16, @intCast((@as(u32, win.width) * 58) / 100)));
+        const bottom_trace_w: u16 = win.width - bottom_state_w;
+
         const state_outer = win.child(.{
             .x_off = 0,
             .y_off = @intCast(content_y + top_h),
-            .width = win.width,
+            .width = bottom_state_w,
             .height = bottom_h,
             .border = .{ .where = .all, .glyphs = .{ .custom = ascii_border_glyphs }, .style = style_border() },
         });
         Ui.drawPanelTitle(win, 2, content_y + top_h, " State ");
         self.drawEvmPane(state_outer);
+
+        if (bottom_trace_w >= 24) {
+            const trace_outer = win.child(.{
+                .x_off = bottom_state_w,
+                .y_off = @intCast(content_y + top_h),
+                .width = bottom_trace_w,
+                .height = bottom_h,
+                .border = .{ .where = .all, .glyphs = .{ .custom = ascii_border_glyphs }, .style = style_border() },
+            });
+            Ui.drawPanelTitle(win, bottom_state_w + 2, content_y + top_h, " Trace ");
+            self.drawTracePane(trace_outer);
+        }
     }
 
     fn drawPanelTitle(win: Window, x: u16, y: u16, title: []const u8) void {
@@ -1647,6 +1954,7 @@ const Ui = struct {
         const line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const sir_line = if (mapping) |m| m.sir_start else self.currentSirLine() orelse 0;
+        const origin_line = self.currentOriginLine();
         const entry = self.session.debugger.currentEntry();
         const frame = self.session.evm.getCurrentFrame();
         const opcode = if (frame != null) self.session.debugger.getCurrentOpcodeName() else "no-frame";
@@ -1671,15 +1979,57 @@ const Ui = struct {
         meta.fill(.{ .char = .{ .grapheme = " " }, .style = style_header_meta() });
 
         const status_text = if (frame == null)
-            self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
-                self.status,
-                line,
-                sir_line,
-                if (self.session.debugger.isSuccess()) "success" else "reverted",
-            }) catch "status"
+            if (mapping) |m|
+                if (m.statement_id) |stmt_id|
+                    if (m.execution_region_id) |region_id|
+                        if (m.statement_run_index) |run_index|
+                            self.scratchFmt(" {s}  |  stmt {d}  |  region {d}.{d}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
+                                self.status, stmt_id, region_id, run_index, line, sir_line, if (self.session.debugger.isSuccess()) "success" else "reverted",
+                            }) catch "status"
+                        else
+                            self.scratchFmt(" {s}  |  stmt {d}  |  region {d}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
+                                self.status, stmt_id, region_id, line, sir_line, if (self.session.debugger.isSuccess()) "success" else "reverted",
+                            }) catch "status"
+                    else
+                        self.scratchFmt(" {s}  |  stmt {d}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
+                            self.status,
+                            stmt_id,
+                            line,
+                            sir_line,
+                            if (self.session.debugger.isSuccess()) "success" else "reverted",
+                        }) catch "status"
+                else
+                    self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
+                        self.status,
+                        line,
+                        sir_line,
+                        if (self.session.debugger.isSuccess()) "success" else "reverted",
+                    }) catch "status"
+            else
+                self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  no active frame  |  result {s}", .{
+                    self.status,
+                    line,
+                    sir_line,
+                    if (self.session.debugger.isSuccess()) "success" else "reverted",
+                }) catch "status"
         else if (self.session.debugger.lastErrorName()) |err_name|
             if (entry) |e| blk: {
                 if (e.idx) |idx| {
+                    if (mapping) |m| {
+                        if (m.statement_id) |stmt_id| {
+                            break :blk self.scratchFmt(" error {s}  |  stmt {d}  |  ora {d}  |  sir {d}  |  pc {d} idx {d}  |  {s}  |  depth {d}  |  gas {d}", .{
+                                err_name,
+                                stmt_id,
+                                line,
+                                sir_line,
+                                self.session.debugger.getPC(),
+                                idx,
+                                opcode,
+                                self.session.debugger.getCallDepth(),
+                                gas_remaining,
+                            }) catch "status";
+                        }
+                    }
                     break :blk self.scratchFmt(" error {s}  |  ora {d}  |  sir {d}  |  pc {d} idx {d}  |  {s}  |  depth {d}  |  gas {d}", .{
                         err_name,
                         line,
@@ -1712,6 +2062,23 @@ const Ui = struct {
                 }) catch "status"
         else if (entry) |e| blk: {
             if (e.idx) |idx| {
+                if (mapping) |m| {
+                    if (m.statement_id) |stmt_id| {
+                        break :blk self.scratchFmt(" {s}  |  stmt {d}  |  ora {d}  |  sir {d}  |  pc {d} idx {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
+                            self.status,
+                            stmt_id,
+                            line,
+                            sir_line,
+                            self.session.debugger.getPC(),
+                            idx,
+                            opcode,
+                            self.session.debugger.getCallDepth(),
+                            gas_remaining,
+                            gas_spent_step,
+                            gas_spent_total,
+                        }) catch "status";
+                    }
+                }
                 break :blk self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  pc {d} idx {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
                     self.status,
                     line,
@@ -1758,25 +2125,51 @@ const Ui = struct {
         } else "";
         const current_text = if (mapping) |m|
             if (m.idx_start != null and m.idx_end != null)
-                self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  idx {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.idx_start.?,
-                    m.idx_end.?,
-                    m.pc_start,
-                    m.pc_end,
-                    current_source,
-                }) catch "map"
+                if (m.statement_id) |stmt_id|
+                    if (origin_line) |origin|
+                        if (origin != m.ora_line)
+                            self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  (origin {d})  ->  sir {d}..{d}  ->  idx {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                                stmt_id, m.ora_line, origin, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, current_source,
+                            }) catch "map"
+                        else
+                            self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  idx {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                                stmt_id, m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, current_source,
+                            }) catch "map"
+                    else
+                        self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  idx {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                            stmt_id, m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, current_source,
+                        }) catch "map"
+                else
+                    self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  idx {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.idx_start.?,
+                        m.idx_end.?,
+                        m.pc_start,
+                        m.pc_end,
+                        current_source,
+                    }) catch "map"
             else
-                self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.pc_start,
-                    m.pc_end,
-                    current_source,
-                }) catch "map"
+                if (m.statement_id) |stmt_id|
+                    self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                        stmt_id,
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                        current_source,
+                    }) catch "map"
+                else
+                    self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                        current_source,
+                    }) catch "map"
         else if (entry) |e|
             if (e.idx) |idx|
                 self.scratchFmt(" map  |  ora {d}  ->  sir {d}  ->  idx {d}  ->  pc {d}  |  {s}", .{
@@ -1814,7 +2207,7 @@ const Ui = struct {
 
         const help = win.child(.{ .y_off = @intCast(win.height - 1), .height = 1 });
         help.fill(.{ .char = .{ .grapheme = " " }, .style = style_header_title() });
-        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . runtime  ! guard  * break  >|< sir-range ", style_header_title())});
+        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
     }
 
     fn clearCommandLog(self: *Ui) void {
@@ -1824,6 +2217,15 @@ const Ui = struct {
 
     fn appendCommandLog(self: *Ui, command: []const u8, result: []const u8) !void {
         const line = try std.fmt.allocPrint(self.allocator, ":{s} => {s}", .{ command, result });
+        try self.appendLogEntry(line);
+    }
+
+    fn appendLogLine(self: *Ui, line: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, line);
+        try self.appendLogEntry(owned);
+    }
+
+    fn appendLogEntry(self: *Ui, line: []u8) !void {
         if (self.command_log.items.len >= 6) {
             const oldest = self.command_log.orderedRemove(0);
             self.allocator.free(oldest);
@@ -1858,30 +2260,85 @@ const Ui = struct {
     fn drawSourcePane(self: *Ui, win: Window) void {
         const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
         const mapping = self.currentMappingWindow();
+        const origin_line = self.currentOriginLine();
         const summary = if (mapping) |m|
             if (m.idx_start != null and m.idx_end != null)
-                self.scratchFmt(" runtime {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
-                    self.statementKindLabel(current_line),
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.idx_start.?,
-                    m.idx_end.?,
-                    m.pc_start,
-                    m.pc_end,
-                }) catch "runtime mapping"
+                if (m.statement_id) |stmt_id|
+                    if (m.execution_region_id) |region_id|
+                        if (m.statement_run_index) |run_index|
+                            if (origin_line) |origin|
+                                if (origin != m.ora_line)
+                                    self.scratchFmt(" runtime {s}/{s} | stmt {d} | origin {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                                        self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line), stmt_id, origin, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end,
+                                    }) catch "runtime mapping"
+                                else
+                                    self.scratchFmt(" runtime {s}/{s} | stmt {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                                        self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line), stmt_id, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end,
+                                    }) catch "runtime mapping"
+                            else
+                                self.scratchFmt(" runtime {s}/{s} | stmt {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                                    self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line), stmt_id, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end,
+                                }) catch "runtime mapping"
+                        else
+                            self.scratchFmt(" runtime {s}/{s} | stmt {d} | region {d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                                self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line), stmt_id, region_id, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end,
+                            }) catch "runtime mapping"
+                    else
+                        self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                            self.statementKindLabel(current_line),
+                            self.lineProvenanceLabel(current_line),
+                            stmt_id,
+                            self.currentProvenanceLabel(),
+                            m.ora_line,
+                            m.sir_start,
+                            m.sir_end,
+                            m.idx_start.?,
+                            m.idx_end.?,
+                            m.pc_start,
+                            m.pc_end,
+                        }) catch "runtime mapping"
+                else
+                    self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d}", .{
+                        self.statementKindLabel(current_line),
+                        self.lineProvenanceLabel(current_line),
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.idx_start.?,
+                        m.idx_end.?,
+                        m.pc_start,
+                        m.pc_end,
+                    }) catch "runtime mapping"
             else
-                self.scratchFmt(" runtime {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
-                    self.statementKindLabel(current_line),
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.pc_start,
-                    m.pc_end,
-                }) catch "runtime mapping"
+                if (m.statement_id) |stmt_id|
+                    self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                        self.statementKindLabel(current_line),
+                        self.lineProvenanceLabel(current_line),
+                        stmt_id,
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                    }) catch "runtime mapping"
+                else
+                    self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                        self.statementKindLabel(current_line),
+                        self.lineProvenanceLabel(current_line),
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                    }) catch "runtime mapping"
         else
-            self.scratchFmt(" runtime {s} | ora {d}", .{
+            self.scratchFmt(" runtime {s}/{s} | {s} | ora {d}", .{
                 self.statementKindLabel(current_line),
+                self.lineProvenanceLabel(current_line),
+                self.currentProvenanceLabel(),
                 current_line,
             }) catch "runtime mapping";
         drawSegments(win, 1, 0, &.{seg(summary, style_muted())});
@@ -1890,18 +2347,30 @@ const Ui = struct {
         const content_h: u16 = if (win.height > 1) win.height - 1 else win.height;
         if (content_h == 0) return;
         const content = win.child(.{ .y_off = content_y, .height = content_h });
+        const gutter_width: u16 = 9;
+        const source_content = if (content.width > gutter_width)
+            content.child(.{ .x_off = gutter_width, .width = content.width - gutter_width })
+        else
+            content;
+        self.drawSourceText(source_content, current_line);
+        self.drawSourceGutter(content, current_line);
+    }
 
-        self.source_view.scroll_view.scroll.y = if (self.scroll_line > 0) self.scroll_line - 1 else 0;
-        self.source_view.highlighted_style = .{
-            .bg = Color.rgbFromUint(0x303A45),
-            .fg = Color.rgbFromUint(0xF5F7FA),
-        };
-        self.source_view.draw(content, self.source_buffer, .{
-            .highlighted_line = @intCast(current_line),
-            .draw_line_numbers = true,
-            .indentation = 4,
-        });
-        self.drawSourceGutterMarkers(content, current_line);
+    fn drawSourceText(self: *Ui, win: Window, current_line: u32) void {
+        var visible_row: u16 = 0;
+        while (visible_row < win.height) : (visible_row += 1) {
+            const line = self.scroll_line + visible_row;
+            if (line > self.session.debugger.totalSourceLines()) break;
+            const line_text = self.session.debugger.getSourceLineText(line) orelse continue;
+            const text = std.mem.trimRight(u8, line_text, "\r");
+            const style = if (line == current_line)
+                Style{ .bg = Color.rgbFromUint(0x303A45), .fg = Color.rgbFromUint(0xF5F7FA) }
+            else if (self.isRemovedSourceLine(line))
+                style_dead()
+            else
+                style_text();
+            drawSegments(win, 0, visible_row, &.{seg(text, style)});
+        }
     }
 
     fn drawSirPane(self: *Ui, win: Window) void {
@@ -1911,28 +2380,77 @@ const Ui = struct {
         }
         const mapping = self.currentMappingWindow();
         const current_sir_line = if (mapping) |m| if (m.sir_start != 0) m.sir_start else self.currentSirLine() orelse 0 else self.currentSirLine() orelse 0;
+        const origin_line = self.currentOriginLine();
         const effect = self.currentWriteEffectKind();
         const summary = if (mapping) |m|
             if (m.idx_start != null and m.idx_end != null)
-                self.scratchFmt(" lowered region | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.idx_start.?,
-                    m.idx_end.?,
-                    m.pc_start,
-                    m.pc_end,
-                    self.writeEffectLabel(effect),
-                }) catch "lowered region"
+                if (m.statement_id) |stmt_id|
+                    if (m.execution_region_id) |region_id|
+                        if (m.statement_run_index) |run_index|
+                            if (origin_line) |origin|
+                                if (origin != m.ora_line)
+                                    self.scratchFmt(" lowered region | stmt {d} | origin {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                                        stmt_id, origin, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, self.writeEffectLabel(effect),
+                                    }) catch "lowered region"
+                                else
+                                    self.scratchFmt(" lowered region | stmt {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                                        stmt_id, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, self.writeEffectLabel(effect),
+                                    }) catch "lowered region"
+                            else
+                                self.scratchFmt(" lowered region | stmt {d} | region {d}.{d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                                    stmt_id, region_id, run_index, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, self.writeEffectLabel(effect),
+                                }) catch "lowered region"
+                        else
+                            self.scratchFmt(" lowered region | stmt {d} | region {d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                                stmt_id, region_id, self.currentProvenanceLabel(), m.ora_line, m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, m.pc_start, m.pc_end, self.writeEffectLabel(effect),
+                            }) catch "lowered region"
+                    else
+                        self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                            stmt_id,
+                            self.currentProvenanceLabel(),
+                            m.ora_line,
+                            m.sir_start,
+                            m.sir_end,
+                            m.idx_start.?,
+                            m.idx_end.?,
+                            m.pc_start,
+                            m.pc_end,
+                            self.writeEffectLabel(effect),
+                        }) catch "lowered region"
+                else
+                    self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | idx {d}..{d} | pc {d}..{d} | effect {s}", .{
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.idx_start.?,
+                        m.idx_end.?,
+                        m.pc_start,
+                        m.pc_end,
+                        self.writeEffectLabel(effect),
+                    }) catch "lowered region"
             else
-                self.scratchFmt(" lowered region | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
-                    m.ora_line,
-                    m.sir_start,
-                    m.sir_end,
-                    m.pc_start,
-                    m.pc_end,
-                    self.writeEffectLabel(effect),
-                }) catch "lowered region"
+                if (m.statement_id) |stmt_id|
+                    self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                        stmt_id,
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                        self.writeEffectLabel(effect),
+                    }) catch "lowered region"
+                else
+                    self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                        self.currentProvenanceLabel(),
+                        m.ora_line,
+                        m.sir_start,
+                        m.sir_end,
+                        m.pc_start,
+                        m.pc_end,
+                        self.writeEffectLabel(effect),
+                    }) catch "lowered region"
         else if (self.session.debugger.currentOpMeta()) |meta|
             self.scratchFmt(" lowered op | {s} [{s}:{s}] | effect {s}", .{
                 meta.op,
@@ -1960,11 +2478,98 @@ const Ui = struct {
     }
 
     fn statementKindLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isRemovedSourceLine(line)) return "removed";
         const kind = self.statementKindForLine(line) orelse return "none";
         return switch (kind) {
             .runtime => "stmt",
             .runtime_guard => "guard",
         };
+    }
+
+    fn statementKindExplanation(self: *Ui, kind: ?ora_evm.SourceMap.StatementKind) []const u8 {
+        _ = self;
+        return switch (kind orelse return "non-executable source line") {
+            .runtime => "runtime statement",
+            .runtime_guard => "runtime guard check",
+        };
+    }
+
+    fn lineProvenanceLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isRemovedSourceLine(line)) return "removed";
+        const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line) orelse return "none";
+        return provenance.label();
+    }
+
+    fn lineProvenanceExplanation(self: *Ui, provenance: ?ora_evm.SourceMap.LineProvenance) []const u8 {
+        _ = self;
+        return switch (provenance orelse return "no runtime coverage") {
+            .direct => "direct coverage: executes as written",
+            .synthetic => "synthetic coverage: reached through compiler-generated lowering",
+            .mixed => "mixed coverage: has both direct runtime ops and synthetic lowered ops",
+        };
+    }
+
+    fn removedLineExplanation(self: *Ui, line: u32) []const u8 {
+        _ = self;
+        _ = line;
+        return "removed from runtime: source declaration has no SIR or bytecode coverage";
+    }
+
+    fn isRemovedSourceLine(self: *Ui, line: u32) bool {
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
+        const info = self.session.debugger.debug_info orelse return false;
+        if (!self.lineInAnyFunctionScope(info, line)) return false;
+        if (!self.isMeaningfulRemovedSourceText(line)) return false;
+
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line < range.start.line or line > range.end.line) continue;
+            for (scope.locals) |local| {
+                const decl = local.decl orelse continue;
+                if (decl.start.line != line) continue;
+                if (local.folded_value != null) return true;
+                if (std.mem.eql(u8, local.runtime.kind, "ssa")) return true;
+            }
+        }
+        return true;
+    }
+
+    fn lineInAnyFunctionScope(self: *Ui, info: DebugInfo, line: u32) bool {
+        _ = self;
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line >= range.start.line and line <= range.end.line) return true;
+        }
+        return false;
+    }
+
+    fn isMeaningfulRemovedSourceText(self: *Ui, line: u32) bool {
+        const raw = self.session.debugger.getSourceLineText(line) orelse return false;
+        const text = std.mem.trim(u8, std.mem.trimRight(u8, raw, "\r"), " \t");
+        if (text.len == 0) return false;
+        if (std.mem.eql(u8, text, "{")) return false;
+        if (std.mem.eql(u8, text, "}")) return false;
+        if (std.mem.eql(u8, text, "} else {")) return false;
+        if (std.mem.startsWith(u8, text, "else")) return false;
+        if (std.mem.startsWith(u8, text, "if ")) return true;
+        if (std.mem.startsWith(u8, text, "const ")) return true;
+        if (std.mem.startsWith(u8, text, "let ")) return true;
+        if (std.mem.startsWith(u8, text, "return ")) return true;
+        if (std.mem.indexOfScalar(u8, text, '=') != null) return true;
+        return false;
+    }
+
+    fn isStructuralSourceLine(self: *Ui, line: u32) bool {
+        const raw = self.session.debugger.getSourceLineText(line) orelse return false;
+        const text = std.mem.trim(u8, std.mem.trimRight(u8, raw, "\r"), " \t");
+        if (text.len == 0) return false;
+        if (std.mem.eql(u8, text, "{")) return true;
+        if (std.mem.eql(u8, text, "}")) return true;
+        if (std.mem.eql(u8, text, "} else {")) return true;
+        if (std.mem.startsWith(u8, text, "else")) return true;
+        return false;
     }
 
     fn currentWriteEffectKind(self: *Ui) WriteEffectKind {
@@ -2001,6 +2606,200 @@ const Ui = struct {
         };
     }
 
+    fn currentProvenanceLabel(self: *Ui) []const u8 {
+        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const line_prov = self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line);
+        if (self.session.debugger.currentOpMeta()) |meta| {
+            switch (line_prov orelse .direct) {
+                .direct => return "direct",
+                .mixed => {
+                    if (meta.is_hoisted and meta.is_duplicated) return "mixed hoisted duplicated";
+                    if (meta.is_hoisted) return "mixed hoisted";
+                    if (meta.is_duplicated) return "mixed duplicated";
+                    return "mixed";
+                },
+                .synthetic => {
+                    if (meta.is_hoisted and meta.is_duplicated) return "synthetic hoisted duplicated";
+                    if (meta.is_hoisted) return "synthetic hoisted";
+                    if (meta.is_duplicated) return "synthetic duplicated";
+                    return "synthetic";
+                },
+            }
+        }
+        const entry = self.session.debugger.currentEntry() orelse return "direct";
+        switch (line_prov orelse .direct) {
+            .direct => return "direct",
+            .mixed => {
+                if (entry.is_hoisted and entry.is_duplicated) return "mixed hoisted duplicated";
+                if (entry.is_hoisted) return "mixed hoisted";
+                if (entry.is_duplicated) return "mixed duplicated";
+                return "mixed";
+            },
+            .synthetic => {
+                if (entry.is_synthetic) {
+                    if (entry.is_hoisted and entry.is_duplicated) return "synthetic hoisted duplicated";
+                    if (entry.is_hoisted) return "synthetic hoisted";
+                    if (entry.is_duplicated) return "synthetic duplicated";
+                    return "synthetic";
+                }
+                if (entry.is_hoisted and entry.is_duplicated) return "synthetic hoisted duplicated";
+                if (entry.is_hoisted) return "synthetic hoisted";
+                if (entry.is_duplicated) return "synthetic duplicated";
+                return "synthetic";
+            },
+        }
+    }
+
+    fn currentOriginLine(self: *Ui) ?u32 {
+        const entry = self.session.debugger.currentEntry() orelse return null;
+        const origin_stmt_id = entry.origin_statement_id orelse return null;
+        return self.session.debugger.src_map.getFirstLineForStatementId(self.config.source_path, origin_stmt_id) orelse
+            self.session.debugger.src_map.getFirstLineForOriginStatementId(self.config.source_path, origin_stmt_id);
+    }
+
+    fn updateCommandStatusForCurrentStop(self: *Ui, action: []const u8) !void {
+        const entry = self.session.debugger.currentEntry();
+        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const origin_line = self.currentOriginLine();
+
+        if (self.session.debugger.lastErrorName()) |err_name| {
+            try self.setCommandStatusFmt("{s} => error {s}", .{ action, err_name });
+            return;
+        }
+
+        if (entry) |e| {
+            const stmt_id = e.statement_id;
+            const origin_stmt_id = e.origin_statement_id;
+            const region_id = e.execution_region_id;
+            const run_index = e.statement_run_index;
+            const prov = self.currentProvenanceLabel();
+
+            if (origin_line) |origin|
+                if (origin != current_line) {
+                    if (stmt_id) |stmt|
+                        if (region_id) |region|
+                            if (run_index) |run|
+                                try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}, origin line {d}, region {d}.{d}", .{
+                                    action, prov, stmt, current_line, origin, region, run,
+                                })
+                            else
+                                try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}, origin line {d}, region {d}", .{
+                                    action, prov, stmt, current_line, origin, region,
+                                })
+                        else
+                            try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}, origin line {d}", .{
+                                action, prov, stmt, current_line, origin,
+                            })
+                    else if (origin_stmt_id) |origin_stmt|
+                        if (region_id) |region|
+                            if (run_index) |run|
+                                try self.setCommandStatusFmt("{s} => {s} region from stmt {d}, line {d}, origin line {d}, region {d}.{d}", .{
+                                    action, prov, origin_stmt, current_line, origin, region, run,
+                                })
+                            else
+                                try self.setCommandStatusFmt("{s} => {s} region from stmt {d}, line {d}, origin line {d}, region {d}", .{
+                                    action, prov, origin_stmt, current_line, origin, region,
+                                })
+                        else
+                            try self.setCommandStatusFmt("{s} => {s} region from stmt {d}, line {d}, origin line {d}", .{
+                                action, prov, origin_stmt, current_line, origin,
+                            })
+                    else
+                        try self.setCommandStatusFmt("{s} => {s} line {d}, origin line {d}", .{
+                            action, prov, current_line, origin,
+                        });
+                    return;
+                };
+
+            if (stmt_id) |stmt|
+                if (region_id) |region|
+                    if (run_index) |run|
+                        try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}, region {d}.{d}", .{
+                            action, prov, stmt, current_line, region, run,
+                        })
+                    else
+                        try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}, region {d}", .{
+                            action, prov, stmt, current_line, region,
+                        })
+                else
+                    try self.setCommandStatusFmt("{s} => {s} stmt {d} at line {d}", .{
+                        action, prov, stmt, current_line,
+                    })
+            else if (origin_stmt_id) |origin_stmt|
+                if (region_id) |region|
+                    if (run_index) |run|
+                        try self.setCommandStatusFmt("{s} => {s} origin stmt {d} at line {d}, region {d}.{d}", .{
+                            action, prov, origin_stmt, current_line, region, run,
+                        })
+                    else
+                        try self.setCommandStatusFmt("{s} => {s} origin stmt {d} at line {d}, region {d}", .{
+                            action, prov, origin_stmt, current_line, region,
+                        })
+                else
+                    try self.setCommandStatusFmt("{s} => {s} origin stmt {d} at line {d}", .{
+                        action, prov, origin_stmt, current_line,
+                    })
+            else
+                try self.setCommandStatusFmt("{s} => {s} line {d}", .{
+                    action, prov, current_line,
+                });
+            return;
+        }
+
+        if (self.session.debugger.isHalted()) {
+            try self.setCommandStatusFmt("{s} => {s}", .{ action, self.status });
+            return;
+        }
+        try self.setCommandStatusFmt("{s} => line {d}", .{ action, current_line });
+    }
+
+    fn updateExecutionErrorStatus(self: *Ui, action: []const u8) !void {
+        const err_name = self.session.debugger.lastErrorName() orelse "execution_error";
+        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const source_text = if (current_line != 0) self.session.debugger.getSourceLineText(current_line) else null;
+        const opcode_name = self.session.debugger.getCurrentOpcodeName();
+
+        if (std.mem.eql(u8, err_name, "InvalidOpcode")) {
+            if (source_text) |line_text| {
+                const trimmed = std.mem.trim(u8, line_text, " \t");
+                try self.setCommandStatusFmt(
+                    "{s} => trap {s} at line {d}: {s} [likely failed checked arithmetic, failed guard, or invalid input]",
+                    .{ action, opcode_name, current_line, trimmed },
+                );
+                return;
+            }
+            try self.setCommandStatusFmt(
+                "{s} => trap {s} at line {d} [likely failed checked arithmetic, failed guard, or invalid input]",
+                .{ action, opcode_name, current_line },
+            );
+            return;
+        }
+
+        if (source_text) |line_text| {
+            const trimmed = std.mem.trim(u8, line_text, " \t");
+            try self.setCommandStatusFmt("{s} => error {s} at line {d}: {s}", .{
+                action,
+                err_name,
+                current_line,
+                trimmed,
+            });
+            return;
+        }
+
+        try self.setCommandStatusFmt("{s} => error {s}", .{ action, err_name });
+    }
+
+    fn commandActionLabel(self: *const Ui) []const u8 {
+        if (self.step_history.items.len == 0) return "ready";
+        return switch (self.step_history.items[self.step_history.items.len - 1]) {
+            .in => "step-in",
+            .opcode => "opcode",
+            .over => "next",
+            .out => "step-out",
+            .continue_ => "continue",
+        };
+    }
+
     fn drawBindingsPane(self: *Ui, root: Window) void {
         const bindings = self.session.debugger.getVisibleBindings(self.allocator) catch &.{};
         defer if (bindings.len > 0) self.allocator.free(bindings);
@@ -2022,11 +2821,12 @@ const Ui = struct {
             const binding_label = self.bindingLabel(&binding);
             const current_value = self.numericBindingValue(&binding) catch null;
             const resolved_value = self.resolvedBindingValue(&binding) catch null;
+            const availability = self.bindingAvailability(&binding, resolved_value);
             const previous_value = self.previousBindingValue(binding.name);
             const changed = current_value != previous_value;
             const marker = if (changed) "*" else " ";
             const row_text = if (binding.folded_value) |folded|
-                self.scratchFmt("{s} {s} [{s}] = {s} [folded]", .{ marker, binding.name, binding_label, folded }) catch binding.name
+                self.scratchFmt("{s} {s} [{s}] = {s} [derived: folded]", .{ marker, binding.name, binding_label, folded }) catch binding.name
             else if (changed)
                 if (previous_value) |prev|
                     if (current_value) |value|
@@ -2039,12 +2839,29 @@ const Ui = struct {
                     self.scratchFmt("{s} {s} [{s}]", .{ marker, binding.name, binding_label }) catch binding.name
             else if (resolved_value) |value|
                 switch (value) {
-                    .numeric => |numeric| self.scratchFmt("{s} {s} [{s}] = {d}", .{ marker, binding.name, binding_label, numeric }) catch binding.name,
-                    .text => |text| self.scratchFmt("{s} {s} [{s}] = {s}", .{ marker, binding.name, binding_label, text }) catch binding.name,
+                    .numeric => |numeric| if (availability == .derived)
+                        self.scratchFmt("{s} {s} [{s}] = {d} [derived]", .{ marker, binding.name, binding_label, numeric }) catch binding.name
+                    else
+                        self.scratchFmt("{s} {s} [{s}] = {d}", .{ marker, binding.name, binding_label, numeric }) catch binding.name,
+                    .text => |text| if (availability == .derived)
+                        self.scratchFmt("{s} {s} [{s}] = {s} [derived]", .{ marker, binding.name, binding_label, text }) catch binding.name
+                    else
+                        self.scratchFmt("{s} {s} [{s}] = {s}", .{ marker, binding.name, binding_label, text }) catch binding.name,
                 }
+            else if (availability == .optimized_away)
+                self.scratchFmt("{s} {s} [{s}] = optimized away", .{ marker, binding.name, binding_label }) catch binding.name
+            else if (availability == .out_of_scope)
+                self.scratchFmt("{s} {s} [{s}] = out of scope", .{ marker, binding.name, binding_label }) catch binding.name
+            else if (availability == .not_initialized)
+                self.scratchFmt("{s} {s} [{s}] = not initialized", .{ marker, binding.name, binding_label }) catch binding.name
+            else if (availability == .unavailable)
+                if (std.mem.eql(u8, binding.runtime_kind, "ssa"))
+                    self.scratchFmt("{s} {s} [{s}] = unavailable [not materialized]", .{ marker, binding.name, binding_label }) catch binding.name
+                else
+                    self.scratchFmt("{s} {s} [{s}] = unavailable", .{ marker, binding.name, binding_label }) catch binding.name
             else
                 self.scratchFmt("{s} {s} [{s}]", .{ marker, binding.name, binding_label }) catch binding.name;
-            drawSegments(root, 1, @intCast(4 + i), &.{seg(row_text, if (changed) style_changed() else style_text())});
+            drawSegments(root, 1, @intCast(4 + i), &.{seg(row_text, self.bindingAvailabilityStyle(availability, changed))});
         }
     }
 
@@ -2089,6 +2906,61 @@ const Ui = struct {
         drawSegments(win, 1, row, &.{seg(self.scratchFmt("effect={s}", .{
             self.writeEffectLabel(self.currentWriteEffectKind()),
         }) catch "effect", style_muted())});
+        row += 1;
+        const current_entry = self.session.debugger.currentEntry();
+        const mapping = self.currentMappingWindow();
+        const provenance_line = if (current_entry) |entry|
+            if (mapping) |m|
+                if (entry.statement_id) |stmt_id|
+                    if (entry.origin_statement_id) |origin_stmt_id|
+                        if (m.execution_region_id) |region_id|
+                            if (m.statement_run_index) |run_index|
+                                self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}", .{
+                                    self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index,
+                                }) catch "prov"
+                            else
+                                self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}", .{
+                                    self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id,
+                                }) catch "prov"
+                        else
+                            self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
+                                self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
+                            }) catch "prov"
+                    else
+                        self.scratchFmt("provenance={s}  stmt={d}", .{
+                            self.currentProvenanceLabel(), stmt_id,
+                        }) catch "prov"
+                else if (entry.origin_statement_id) |origin_stmt_id|
+                    self.scratchFmt("provenance={s}  origin={d}", .{
+                        self.currentProvenanceLabel(), origin_stmt_id,
+                    }) catch "prov"
+                else
+                    self.scratchFmt("provenance={s}", .{
+                        self.currentProvenanceLabel(),
+                    }) catch "prov"
+            else
+                if (entry.statement_id) |stmt_id|
+                    if (entry.origin_statement_id) |origin_stmt_id|
+                        self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
+                            self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
+                        }) catch "prov"
+                    else
+                        self.scratchFmt("provenance={s}  stmt={d}", .{
+                            self.currentProvenanceLabel(), stmt_id,
+                        }) catch "prov"
+                else if (entry.origin_statement_id) |origin_stmt_id|
+                    self.scratchFmt("provenance={s}  origin={d}", .{
+                        self.currentProvenanceLabel(), origin_stmt_id,
+                    }) catch "prov"
+                else
+                    self.scratchFmt("provenance={s}", .{
+                        self.currentProvenanceLabel(),
+                    }) catch "prov"
+        else
+            self.scratchFmt("provenance={s}", .{
+                self.currentProvenanceLabel(),
+            }) catch "prov";
+        drawSegments(win, 1, row, &.{seg(provenance_line, style_muted())});
         row += 1;
         drawSegments(win, 1, row, &.{seg(self.scratchFmt("state={s}  stop={s}", .{
             if (self.session.debugger.isHalted()) "halted" else "running",
@@ -2143,6 +3015,116 @@ const Ui = struct {
             .storage => self.drawStorageTab(body, false),
             .tstore => self.drawStorageTab(body, true),
             .calldata => self.drawCalldataTab(body),
+        }
+    }
+
+    fn drawTracePane(self: *Ui, root: Window) void {
+        var row: u16 = 0;
+        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const origin_line = self.currentOriginLine();
+        const entry = self.session.debugger.currentEntry();
+        const prov = self.currentProvenanceLabel();
+
+        if (entry) |e| {
+            const stmt_id = e.statement_id;
+            const origin_stmt_id = e.origin_statement_id;
+            const region_id = e.execution_region_id;
+            const run_index = e.statement_run_index;
+
+            const top_line = if (origin_line) |origin|
+                if (origin != current_line)
+                    if (stmt_id) |stmt|
+                        if (region_id) |region|
+                            if (run_index) |run|
+                                self.scratchFmt("{s} => {s} stmt {d} at line {d}, origin line {d}, region {d}.{d}", .{
+                                    self.commandActionLabel(), prov, stmt, current_line, origin, region, run,
+                                }) catch "trace"
+                            else
+                                self.scratchFmt("{s} => {s} stmt {d} at line {d}, origin line {d}, region {d}", .{
+                                    self.commandActionLabel(), prov, stmt, current_line, origin, region,
+                                }) catch "trace"
+                        else
+                            self.scratchFmt("{s} => {s} stmt {d} at line {d}, origin line {d}", .{
+                                self.commandActionLabel(), prov, stmt, current_line, origin,
+                            }) catch "trace"
+                    else if (origin_stmt_id) |origin_stmt|
+                        self.scratchFmt("{s} => {s} region from stmt {d}, line {d}, origin line {d}", .{
+                            self.commandActionLabel(), prov, origin_stmt, current_line, origin,
+                        }) catch "trace"
+                    else
+                        self.scratchFmt("{s} => {s} line {d}, origin line {d}", .{
+                            self.commandActionLabel(), prov, current_line, origin,
+                        }) catch "trace"
+                else
+                    self.scratchFmt("{s} => {s} at line {d}", .{ self.commandActionLabel(), prov, current_line }) catch "trace"
+            else
+                self.scratchFmt("{s} => {s} at line {d}", .{ self.commandActionLabel(), prov, current_line }) catch "trace";
+            drawSegments(root, 1, row, &.{seg(top_line, style_emphasis())});
+            row += 1;
+
+            if (row < root.height) {
+                const meta_line = if (stmt_id) |stmt|
+                    if (origin_stmt_id) |origin_stmt|
+                        if (region_id) |region|
+                            if (run_index) |run|
+                                self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  kind={s}/{s}", .{
+                                    stmt, origin_stmt, region, run, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                }) catch "meta"
+                            else
+                                self.scratchFmt("stmt={d}  origin={d}  region={d}  kind={s}/{s}", .{
+                                    stmt, origin_stmt, region, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                }) catch "meta"
+                        else
+                            self.scratchFmt("stmt={d}  origin={d}  kind={s}/{s}", .{
+                                stmt, origin_stmt, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                            }) catch "meta"
+                    else
+                        self.scratchFmt("stmt={d}  kind={s}/{s}", .{
+                            stmt, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                        }) catch "meta"
+                else if (origin_stmt_id) |origin_stmt|
+                    self.scratchFmt("origin={d}  kind={s}/{s}", .{
+                        origin_stmt, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                    }) catch "meta"
+                    else
+                        self.scratchFmt("kind={s}/{s}", .{
+                            self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                        }) catch "meta";
+                drawSegments(root, 1, row, &.{seg(meta_line, style_muted())});
+                row += 1;
+            }
+
+            if (row < root.height) {
+                const explain_line = if (self.isRemovedSourceLine(current_line))
+                    self.removedLineExplanation(current_line)
+                else
+                    self.scratchFmt("{s}; {s}", .{
+                        self.statementKindExplanation(self.statementKindForLine(current_line)),
+                        self.lineProvenanceExplanation(self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line)),
+                    }) catch "explain";
+                drawSegments(root, 1, row, &.{seg(explain_line, style_footer_note())});
+                row += 2;
+            }
+        } else {
+            drawSegments(root, 1, row, &.{seg(self.command_status, style_emphasis())});
+            row += 2;
+        }
+
+        if (row < root.height) {
+            drawSegments(root, 1, row, &.{seg("recent", style_muted())});
+            row += 1;
+        }
+
+        const remaining_height: usize = if (root.height > row) root.height - row else 0;
+        if (remaining_height == 0) return;
+        const visible = @min(remaining_height, self.command_log.items.len);
+        const start = self.command_log.items.len - visible;
+        var i: usize = start;
+        while (i < self.command_log.items.len and row < root.height) : ({
+            i += 1;
+            row += 1;
+        }) {
+            drawSegments(root, 1, row, &.{seg(self.command_log.items[i], style_footer_note())});
         }
     }
 
@@ -2232,18 +3214,29 @@ const Ui = struct {
                 if (!std.mem.eql(u8, entry.key_ptr.address[0..], frame.address.bytes[0..])) continue;
                 if (row >= win.height) break;
                 const changed = self.storageSlotChanged(true, entry.key_ptr.slot, entry.value_ptr.*);
-                const line = self.scratchFmt("slot {s}", .{
-                    self.scratchFullU256(entry.key_ptr.slot),
-                }) catch "slot";
-                drawSegments(win, 1, row, &.{seg(line, if (changed) style_changed() else style_muted())});
-                row += 1;
-                if (row >= win.height) break;
-                const value_line = self.scratchFmt("  value {s}", .{
+                const line = self.scratchFmt("{s}  value {s}", .{
+                    self.describeTransientSlot(entry.key_ptr.slot) catch "slot",
                     self.scratchShortU256(entry.value_ptr.*),
-                }) catch "value";
-                drawSegments(win, 1, row, &.{seg(value_line, if (changed) style_changed() else style_text())});
+                }) catch "slot";
+                drawSegments(win, 1, row, &.{seg(line, if (changed) style_changed() else style_text())});
                 row += 1;
                 count += 1;
+            }
+            if (count == 0) {
+                var any_it = self.session.evm.storage.transient.iterator();
+                while (any_it.next()) |entry| {
+                    if (row >= win.height) break;
+                    const line = self.scratchFmt("{s}  value {s}", .{
+                        self.describeTransientSlotWithAddress(entry.key_ptr.address, entry.key_ptr.slot) catch "slot",
+                        self.scratchShortU256(entry.value_ptr.*),
+                    }) catch "slot";
+                    drawSegments(win, 1, row, &.{seg(line, style_text())});
+                    row += 1;
+                    count += 1;
+                }
+                if (count > 0) {
+                    drawSegments(win, 1, 0, &.{seg("transient storage view | showing all tx transient slots", style_muted())});
+                }
             }
         } else {
             var it = self.session.evm.storage.storage.iterator();
@@ -2269,6 +3262,76 @@ const Ui = struct {
         if (count == 0) {
             drawSegments(win, 1, 2, &.{seg(if (transient) "no transient slots for current contract" else "no storage slots for current contract", style_hint())});
         }
+    }
+
+    fn describeTransientSlot(self: *Ui, slot: u256) ![]const u8 {
+        if (!isLockSlot(slot)) {
+            return self.scratchFmt("slot {s}", .{self.scratchFullU256(slot)});
+        }
+
+        const base_slot = slot - lock_prefix;
+        if (self.lookupRuntimeRootName(base_slot)) |root_name| {
+            return self.scratchFmt("lock({s})  slot {s}", .{
+                root_name,
+                self.scratchFullU256(slot),
+            });
+        }
+        return self.scratchFmt("lock(slot {s})", .{self.scratchFullU256(base_slot)});
+    }
+
+    fn describeTransientSlotWithAddress(self: *Ui, address_bytes: [20]u8, slot: u256) ![]const u8 {
+        if (isLockSlot(slot)) {
+            const base_slot = slot - lock_prefix;
+            if (self.lookupRuntimeRootName(base_slot)) |root_name| {
+                return self.scratchFmt("lock({s})  addr 0x{s}  slot {s}", .{
+                    root_name,
+                    self.scratchShortAddressBytes(address_bytes),
+                    self.scratchFullU256(slot),
+                });
+            }
+            return self.scratchFmt("lock(slot {s})  addr 0x{s}", .{
+                self.scratchFullU256(base_slot),
+                self.scratchShortAddressBytes(address_bytes),
+            });
+        }
+        return self.scratchFmt("slot {s}  addr 0x{s}", .{
+            self.scratchFullU256(slot),
+            self.scratchShortAddressBytes(address_bytes),
+        });
+    }
+
+    fn scratchShortAddressBytes(self: *Ui, bytes: [20]u8) []const u8 {
+        var raw: [40]u8 = undefined;
+        _ = std.fmt.bufPrint(&raw, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+            bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+            bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
+        }) catch return "????????";
+        return self.scratchFmt("{s}..{s}", .{ raw[0..8], raw[36..40] }) catch "????????";
+    }
+
+    fn lookupRuntimeRootName(self: *Ui, slot: u256) ?[]const u8 {
+        const current_idx = if (self.session.debugger.currentEntry()) |entry| entry.idx else return null;
+        const bindings = self.session.debugger.getVisibleBindings(self.allocator) catch return null;
+        defer self.allocator.free(bindings);
+        _ = current_idx;
+
+        for (bindings) |binding| {
+            const location_slot = binding.runtime_location_slot orelse continue;
+            const location_kind = binding.runtime_location_kind orelse continue;
+            if (location_slot != slot) continue;
+            if (std.mem.eql(u8, location_kind, "storage_root") or
+                std.mem.eql(u8, location_kind, "tstore_root"))
+            {
+                return binding.runtime_location_root orelse binding.name;
+            }
+        }
+        return null;
+    }
+
+    fn isLockSlot(slot: u256) bool {
+        return (slot & lock_prefix) != 0;
     }
 
     fn storageSlotChanged(self: *Ui, transient: bool, slot: u256, value: u256) bool {
@@ -2382,6 +3445,15 @@ const Ui = struct {
         text: []const u8,
     };
 
+    const BindingAvailability = enum {
+        live,
+        derived,
+        not_initialized,
+        out_of_scope,
+        optimized_away,
+        unavailable,
+    };
+
     fn numericBindingValue(self: *Ui, binding: *const DebugInfo.VisibleBinding) !?u256 {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
@@ -2390,7 +3462,49 @@ const Ui = struct {
         if (try self.numericBindingValue(binding)) |value| {
             return .{ .numeric = value };
         }
-        return self.resolveAbiParamValue(binding);
+        if (self.resolveAbiParamValue(binding)) |value| return value;
+        return self.resolveIntrinsicLocalValue(binding);
+    }
+
+    fn bindingAvailability(
+        self: *Ui,
+        binding: *const DebugInfo.VisibleBinding,
+        resolved_value: ?ResolvedBindingValue,
+    ) BindingAvailability {
+        if (self.bindingBeforeDeclaration(binding)) return .not_initialized;
+        if (self.bindingPastLiveRange(binding)) return .out_of_scope;
+        if (binding.folded_value != null) return .derived;
+        if (std.mem.eql(u8, binding.runtime_kind, "optimized_out")) return .optimized_away;
+        if (resolved_value != null) {
+            if (std.mem.eql(u8, binding.runtime_kind, "ssa")) return .derived;
+            return .live;
+        }
+        return .unavailable;
+    }
+
+    fn bindingAvailabilityStyle(self: *Ui, availability: BindingAvailability, changed: bool) Style {
+        _ = self;
+        if (changed) return style_changed();
+        return switch (availability) {
+            .live => style_text(),
+            .derived => style_hint(),
+            .not_initialized => style_hint(),
+            .out_of_scope => style_dead(),
+            .optimized_away => style_dead(),
+            .unavailable => style_muted(),
+        };
+    }
+
+    fn bindingBeforeDeclaration(self: *Ui, binding: *const DebugInfo.VisibleBinding) bool {
+        const current_line = self.session.debugger.currentSourceLine() orelse return false;
+        const decl = binding.decl orelse return false;
+        return current_line < decl.start.line;
+    }
+
+    fn bindingPastLiveRange(self: *Ui, binding: *const DebugInfo.VisibleBinding) bool {
+        const current_line = self.session.debugger.currentSourceLine() orelse return false;
+        const live = binding.live orelse return false;
+        return current_line > live.end.line;
     }
 
     fn resolveAbiParamValue(self: *Ui, binding: *const DebugInfo.VisibleBinding) ?ResolvedBindingValue {
@@ -2411,6 +3525,38 @@ const Ui = struct {
         const end = start + 32;
         if (frame.calldata.len < end) return null;
         return self.decodeAbiWordValue(wire_type, frame.calldata[start..end]);
+    }
+
+    fn resolveIntrinsicLocalValue(self: *Ui, binding: *const DebugInfo.VisibleBinding) ?ResolvedBindingValue {
+        if (!std.mem.eql(u8, binding.kind, "local")) return null;
+        if (!std.mem.eql(u8, binding.runtime_kind, "ssa")) return null;
+
+        const decl = binding.decl orelse return null;
+        const decl_text = self.session.debugger.getSourceLineText(decl.start.line) orelse return null;
+        const frame = self.session.evm.getCurrentFrame() orelse return null;
+
+        if (std.mem.indexOf(u8, decl_text, "std.msg.sender()") != null or
+            std.mem.indexOf(u8, decl_text, "msg.sender()") != null)
+        {
+            const start = self.render_scratch.items.len;
+            self.render_scratch.writer(self.allocator).print("0x{x}", .{frame.caller.bytes}) catch return null;
+            return .{ .text = self.render_scratch.items[start..] };
+        }
+
+        if (std.mem.indexOf(u8, decl_text, "std.msg.value()") != null or
+            std.mem.indexOf(u8, decl_text, "msg.value()") != null)
+        {
+            return .{ .numeric = frame.value };
+        }
+
+        if (std.mem.indexOf(u8, decl_text, "std.block.timestamp()") != null or
+            std.mem.indexOf(u8, decl_text, "std.block.timestamp") != null or
+            std.mem.indexOf(u8, decl_text, "block.timestamp") != null)
+        {
+            return .{ .numeric = self.session.evm.block_context.block_timestamp };
+        }
+
+        return null;
     }
 
     fn decodeAbiWordValue(self: *Ui, wire_type: []const u8, word: []const u8) ?ResolvedBindingValue {
@@ -2483,23 +3629,38 @@ const Ui = struct {
         const tail = @min(self.breakpoints.items.len, 4);
         var i = self.breakpoints.items.len - tail;
         while (i < self.breakpoints.items.len) : (i += 1) {
-            try self.render_scratch.writer(self.allocator).print("  L{d}", .{self.breakpoints.items[i]});
+            if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, self.breakpoints.items[i])) |prov|
+                try self.render_scratch.writer(self.allocator).print("  L{d}[{s}]", .{ self.breakpoints.items[i], prov.label() })
+            else
+                try self.render_scratch.writer(self.allocator).print("  L{d}", .{self.breakpoints.items[i]});
         }
         return self.render_scratch.items[start..];
     }
 
-    fn drawSourceGutterMarkers(self: *Ui, win: Window, current_line: u32) void {
+    fn drawSourceGutter(self: *Ui, win: Window, current_line: u32) void {
+        const origin_line = self.currentOriginLine();
         var visible_row: u16 = 0;
         while (visible_row < win.height) : (visible_row += 1) {
             const line = self.scroll_line + visible_row;
             if (line > self.session.debugger.totalSourceLines()) break;
             const has_break = self.hasBreakpointLine(line);
             const is_current = line == current_line;
+            const is_origin = if (origin_line) |origin| origin == line and origin != current_line else false;
             const kind = self.statementKindForLine(line);
+            const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line);
+            const removed = self.isRemovedSourceLine(line);
             const marker = if (has_break and is_current)
                 ">"
             else if (has_break)
                 "*"
+            else if (is_origin)
+                "^"
+            else if (removed)
+                "-"
+            else if (provenance == .mixed)
+                "+"
+            else if (provenance == .synthetic)
+                "~"
             else if (kind == .runtime_guard)
                 "!"
             else if (kind != null)
@@ -2508,13 +3669,22 @@ const Ui = struct {
                 " ";
             const style = if (has_break)
                 style_changed()
+            else if (is_origin)
+                style_emphasis()
+            else if (removed)
+                style_dead()
+            else if (provenance == .mixed)
+                style_changed()
+            else if (provenance == .synthetic)
+                style_guard()
             else if (kind == .runtime_guard)
                 style_guard()
             else if (kind != null)
                 style_muted()
             else
                 style_muted();
-            drawSegments(win, 0, visible_row, &.{seg(marker, style)});
+            const line_cell = self.scratchFmt("{s}{d:>6} |", .{ marker, line }) catch marker;
+            drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});
         }
     }
 
@@ -2745,6 +3915,10 @@ fn style_hint() Style {
 
 fn style_muted() Style {
     return .{ .fg = Color.rgbFromUint(0xC0C7CF), .dim = true };
+}
+
+fn style_dead() Style {
+    return .{ .fg = Color.rgbFromUint(0x8B929A), .dim = true, .italic = true };
 }
 
 fn style_tab_active() Style {
@@ -3036,7 +4210,16 @@ fn rebaseSourceMapForRuntime(
             .file = entry.file,
             .line = entry.line,
             .col = entry.col,
+            .statement_id = entry.statement_id,
+            .origin_statement_id = entry.origin_statement_id,
+            .execution_region_id = entry.execution_region_id,
+            .statement_run_index = entry.statement_run_index,
             .sir_line = entry.sir_line,
+            .is_synthetic = entry.is_synthetic,
+            .synthetic_index = entry.synthetic_index,
+            .synthetic_count = entry.synthetic_count,
+            .is_hoisted = entry.is_hoisted,
+            .is_duplicated = entry.is_duplicated,
             .is_statement = entry.is_statement,
             .kind = entry.kind,
         });

@@ -805,6 +805,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerStmt(self: *FunctionLowerer, statement_id: ast.StmtId, locals: *LocalEnv) anyerror!bool {
+            const previous_statement_id = self.parent.current_statement_id;
+            self.parent.current_statement_id = statement_id;
+            defer self.parent.current_statement_id = previous_statement_id;
             switch (self.parent.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
                     const value = if (decl.value) |expr_id|

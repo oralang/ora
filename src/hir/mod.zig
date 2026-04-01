@@ -197,6 +197,7 @@ const Lowerer = struct {
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
+    current_statement_id: ?ast.StmtId = null,
 
     const ModuleLowering = module_lowering.mixin(Lowerer, ContractLowerer, FunctionLowerer, HirSymbolKind);
     pub const lowerItem = ModuleLowering.lowerItem;
@@ -229,7 +230,7 @@ const Lowerer = struct {
     pub const bitfieldFieldSign = ModuleLowering.bitfieldFieldSign;
 
     pub fn location(self: *const Lowerer, range: source.TextRange) mlir.MlirLocation {
-        return support.locationFromRange(self.context, self.sources, self.file.file_id, range);
+        return support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
