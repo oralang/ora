@@ -5,6 +5,17 @@ const db = @import("../db/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 
+fn compilerPhaseDebugEnabled() bool {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
+    defer std.heap.page_allocator.free(value);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
+}
+
+fn compilerPhaseLog(comptime fmt: []const u8, args: anytype) void {
+    if (!compilerPhaseDebugEnabled()) return;
+    std.debug.print("compiler-phase: " ++ fmt ++ "\n", args);
+}
+
 pub const Compilation = struct {
     db: db.CompilerDb,
     package_id: source.PackageId,
@@ -24,8 +35,12 @@ pub fn compilePackageWithResolverOptions(
     root_path: []const u8,
     resolver_options: import_graph.ResolverOptions,
 ) !Compilation {
+    compilerPhaseLog("load-package begin root={s}", .{root_path});
     var compilation = try loadPackageSources(allocator, root_path, resolver_options);
+    compilerPhaseLog("load-package done modules={d}", .{compilation.db.sources.modules.items.len});
+    compilerPhaseLog("module-graph begin", .{});
     const module_graph = try compilation.db.moduleGraph(compilation.package_id);
+    compilerPhaseLog("module-graph done has-cycles={any}", .{module_graph.has_cycles});
     if (module_graph.has_cycles) {
         const package_name = compilation.db.sources.package(compilation.package_id).name;
         std.log.warn("Compiler package '{s}' contains import cycles; cross-module queries may be incomplete.", .{package_name});
@@ -34,15 +49,25 @@ pub fn compilePackageWithResolverOptions(
     const package = compilation.db.sources.package(compilation.package_id);
     for (package.modules.items) |module_id| {
         const module = compilation.db.sources.module(module_id);
+        compilerPhaseLog("module {s} begin", .{module.name});
         _ = try compilation.db.syntaxTree(module.file_id);
+        compilerPhaseLog("module {s} syntax", .{module.name});
         _ = try compilation.db.astFile(module.file_id);
+        compilerPhaseLog("module {s} ast", .{module.name});
         _ = try compilation.db.itemIndex(module_id);
+        compilerPhaseLog("module {s} item-index", .{module.name});
         _ = try compilation.db.resolveNames(module_id);
+        compilerPhaseLog("module {s} resolve", .{module.name});
         _ = try compilation.db.moduleTypeCheck(module_id);
+        compilerPhaseLog("module {s} typecheck", .{module.name});
         _ = try compilation.db.constEval(module_id);
+        compilerPhaseLog("module {s} consteval", .{module.name});
         _ = try compilation.db.moduleVerificationFacts(module_id);
+        compilerPhaseLog("module {s} verification-facts", .{module.name});
     }
+    compilerPhaseLog("root lower-to-hir begin", .{});
     _ = try compilation.db.lowerToHir(compilation.root_module_id);
+    compilerPhaseLog("root lower-to-hir done", .{});
     return compilation;
 }
 

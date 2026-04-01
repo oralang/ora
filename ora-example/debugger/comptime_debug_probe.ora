@@ -1,0 +1,56 @@
+comptime const std = @import("std");
+
+comptime const BONUS_ENABLED: bool = true;
+comptime const FIXED_FEE: u256 = 2 * 3 * 5;
+comptime const FIXED_BOOST: u256 = FIXED_FEE + 7;
+
+contract ComptimeDebugProbe {
+    storage var owner: address;
+    storage var last_sender: address;
+    storage var last_result: u256;
+    storage var runs: u256;
+
+    pub fn init() {
+        owner = std.msg.sender();
+        last_sender = std.msg.sender();
+        last_result = 0;
+        runs = 0;
+    }
+
+    pub fn probe(amount: u256) -> u256
+        requires(amount > FIXED_FEE)
+        requires(amount <= std.constants.U256_MAX - 7)
+        requires(runs < std.constants.U256_MAX)
+    {
+        let sender: address = std.msg.sender();
+        const removedUnused: u256 = 777;
+
+        const foldedFee: u256 = FIXED_FEE;
+        const foldedMask: u256 = 255;
+        let base = amount - foldedFee;
+        let net = base;
+
+        if (BONUS_ENABLED) {
+            const foldedBoost: u256 = FIXED_BOOST;
+            net = net + foldedBoost;
+        } else {
+            const removedPathMarker: u256 = 999;
+            net = net + removedPathMarker;
+            net = net + foldedMask;
+        }
+
+        if (sender == owner) {
+            last_result = net;
+        } else {
+            last_result = base;
+        }
+
+        last_sender = sender;
+        runs = runs + 1;
+        return last_result;
+    }
+
+    pub fn snapshot() -> (u256, u256) {
+        return (last_result, runs);
+    }
+}

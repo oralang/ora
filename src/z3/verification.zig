@@ -72,6 +72,8 @@ pub const VerificationPass = struct {
     debug_z3: bool,
     trace_smt: bool,
     trace_smtlib: bool,
+    phase_debug: bool,
+    random_seed: u32,
     timeout_ms: ?u32,
     parallel: bool,
     max_workers: usize,
@@ -124,10 +126,23 @@ pub const VerificationPass = struct {
             break :blk parseBoolEnv(val);
         } else false;
 
+        const phase_debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PHASE_DEBUG") catch null;
+        const phase_debug = if (phase_debug_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else false;
+
         const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
         var timeout_ms: ?u32 = 60_000;
         if (timeout_env) |val| {
             timeout_ms = std.fmt.parseInt(u32, val, 10) catch null;
+            allocator.free(val);
+        }
+
+        const seed_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_SEED") catch null;
+        var random_seed: u32 = 0;
+        if (seed_env) |val| {
+            random_seed = std.fmt.parseInt(u32, val, 10) catch random_seed;
             allocator.free(val);
         }
 
@@ -170,6 +185,7 @@ pub const VerificationPass = struct {
 
         encoder.setVerifyCalls(verify_calls);
         encoder.setVerifyState(verify_state);
+        try solver.setRandomSeed(random_seed);
 
         if (timeout_ms) |ms| {
             try solver.setTimeoutMs(ms);
@@ -183,6 +199,8 @@ pub const VerificationPass = struct {
             .debug_z3 = debug_z3,
             .trace_smt = trace_smt,
             .trace_smtlib = trace_smtlib,
+            .phase_debug = phase_debug,
+            .random_seed = random_seed,
             .timeout_ms = timeout_ms,
             .parallel = parallel,
             .max_workers = max_workers,
@@ -1899,16 +1917,25 @@ pub const VerificationPass = struct {
         }
     }
 
+    fn phaseLog(self: *const VerificationPass, comptime fmt: []const u8, args: anytype) void {
+        if (!self.phase_debug) return;
+        std.debug.print("smt-phase: " ++ fmt ++ "\n", args);
+    }
+
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         if (self.parallel) {
+            self.phaseLog("runVerificationPass -> parallel", .{});
             return try self.runVerificationPassParallel(mlir_module);
         }
 
         self.encoder.clearDegradation();
+        self.phaseLog("extract-annotations begin", .{});
         self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
             return try self.annotationExtractionFailureResult(err);
         };
+        self.phaseLog("extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("extract-annotations degraded reason={s}", .{self.encoder.degradationReason() orelse "unknown"});
             return try self.degradedVerificationResult();
         }
         var result = errors.VerificationResult.init(self.allocator);
@@ -1941,6 +1968,22 @@ pub const VerificationPass = struct {
             }
             try entry.value_ptr.append(ann);
         }
+        stableSortAnnotations(global_contract_invariants.items);
+
+        {
+            var sort_it = by_function.iterator();
+            while (sort_it.next()) |entry| {
+                stableSortAnnotations(entry.value_ptr.items);
+            }
+        }
+        stableSortAnnotations(global_contract_invariants.items);
+
+        {
+            var sort_it = by_function.iterator();
+            while (sort_it.next()) |entry| {
+                stableSortAnnotations(entry.value_ptr.items);
+            }
+        }
 
         if (global_contract_invariants.items.len > 0) {
             var fn_it = self.encoder.function_ops.iterator();
@@ -1958,11 +2001,13 @@ pub const VerificationPass = struct {
             }
         }
 
-        var it = by_function.iterator();
-        while (it.next()) |entry| {
-            const fn_name = entry.key_ptr.*;
-            const annotations = entry.value_ptr.items;
+        var function_names = try collectSortedFunctionNames(self.allocator, &by_function);
+        defer function_names.deinit(self.allocator);
+
+        for (function_names.items) |fn_name| {
+            const annotations = by_function.get(fn_name).?.items;
             if (annotations.len == 0 and global_contract_invariants.items.len == 0) continue;
+            self.phaseLog("function {s} begin annotations={d} global_invariants={d}", .{ fn_name, annotations.len, global_contract_invariants.items.len });
             var timer = try std.time.Timer.start();
 
             var assumption_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
@@ -2069,11 +2114,9 @@ pub const VerificationPass = struct {
                 defer self.solver.pop();
                 try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann, &relevant_symbols);
                 for (ann.path_constraints) |cst| {
-                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 for (ann.extra_constraints) |cst| {
-                    if (!astUsesOnlyRelevantSymbols(self, cst, &relevant_symbols)) continue;
                     try self.solver.assertChecked(cst);
                 }
                 if (ann.kind == .LoopInvariant) {
@@ -2522,6 +2565,7 @@ pub const VerificationPass = struct {
 
                 try previous_guards.append(ann);
             }
+            self.phaseLog("function {s} done", .{fn_name});
         }
 
         if (self.verify_stats) {
@@ -2536,12 +2580,16 @@ pub const VerificationPass = struct {
 
     pub fn runVerificationPassPreparedSequential(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         self.encoder.clearDegradation();
+        self.phaseLog("prepared-sequential extract-annotations begin", .{});
         self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
             return try self.annotationExtractionFailureResult(err);
         };
+        self.phaseLog("prepared-sequential extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("prepared-sequential degraded after extract", .{});
             return try self.degradedVerificationResult();
         }
+        self.phaseLog("prepared-sequential build-queries begin", .{});
         var queries = try self.buildPreparedQueries();
         defer {
             for (queries.items) |*query| {
@@ -2549,7 +2597,9 @@ pub const VerificationPass = struct {
             }
             queries.deinit();
         }
+        self.phaseLog("prepared-sequential build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("prepared-sequential degraded after build-queries", .{});
             return try self.degradedVerificationResult();
         }
 
@@ -2635,12 +2685,16 @@ pub const VerificationPass = struct {
 
     fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         self.encoder.clearDegradation();
+        self.phaseLog("parallel extract-annotations begin", .{});
         self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
             return try self.annotationExtractionFailureResult(err);
         };
+        self.phaseLog("parallel extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("parallel degraded after extract", .{});
             return try self.degradedVerificationResult();
         }
+        self.phaseLog("parallel build-queries begin", .{});
         var queries = try self.buildPreparedQueries();
         defer {
             for (queries.items) |*query| {
@@ -2648,7 +2702,9 @@ pub const VerificationPass = struct {
             }
             queries.deinit();
         }
+        self.phaseLog("parallel build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("parallel degraded after build-queries", .{});
             return try self.degradedVerificationResult();
         }
 
@@ -3092,16 +3148,20 @@ pub const VerificationPass = struct {
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
         if (self.encoded_annotations.items.len == 0) {
+            self.phaseLog("report extract-annotations begin", .{});
             self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
                 var result = try self.annotationExtractionFailureResult(err);
                 defer result.deinit();
                 return try self.buildVerificationFailureSmtReport(source_file, &result);
             };
+            self.phaseLog("report extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         }
         if (self.encoder.isDegraded()) {
+            self.phaseLog("report degraded before query build", .{});
             return try self.buildDegradedSmtReport(source_file, verification_result);
         }
 
+        self.phaseLog("report build-queries begin", .{});
         var queries = try self.buildPreparedQueries();
         defer {
             for (queries.items) |*query| {
@@ -3109,7 +3169,9 @@ pub const VerificationPass = struct {
             }
             queries.deinit();
         }
+        self.phaseLog("report build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            self.phaseLog("report degraded after query build", .{});
             return try self.buildDegradedSmtReport(source_file, verification_result);
         }
 
@@ -3244,6 +3306,8 @@ pub const VerificationPass = struct {
                 },
             }
         }
+
+        self.phaseLog("report summarize begin", .{});
 
         if (verification_result) |vr| {
             summary.verification_success = inferReportVerificationSuccess(summary, verification_result, self.encoder.isDegraded());
@@ -3407,6 +3471,7 @@ pub const VerificationPass = struct {
         try writer.print("- verify_calls: `{any}`\n", .{self.verify_calls});
         try writer.print("- verify_state: `{any}`\n", .{self.verify_state});
         try writer.print("- parallel: `{any}`\n", .{self.parallel});
+        try writer.print("- random_seed: `{d}`\n", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print("- timeout_ms: `{d}`\n", .{timeout});
         } else {
@@ -3453,10 +3518,7 @@ pub const VerificationPass = struct {
                     try writer.print("- Location: `{s}:{d}:{d}`\n", .{ err.file, err.line, err.column });
                     if (err.counterexample) |ce| {
                         try writer.writeAll("- Counterexample:\n");
-                        var it = ce.variables.iterator();
-                        while (it.next()) |entry| {
-                            try writer.print("  - `{s} = {s}`\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-                        }
+                        try writeCounterexampleMarkdown(writer, self.allocator, ce);
                     }
                     try writer.writeAll("\n");
                 }
@@ -3465,13 +3527,10 @@ pub const VerificationPass = struct {
                     try writer.print("### Diagnostic {d}\n", .{idx + 1});
                     try writer.print("- Guard ID: `{s}`\n", .{diag.guard_id});
                     try writer.print("- Function: `{s}`\n", .{diag.function_name});
-                    var it = diag.counterexample.variables.iterator();
                     if (diag.counterexample.variables.count() > 0) {
                         try writer.writeAll("- Counterexample:\n");
                     }
-                    while (it.next()) |entry| {
-                        try writer.print("  - `{s} = {s}`\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-                    }
+                    try writeCounterexampleMarkdown(writer, self.allocator, diag.counterexample);
                     try writer.writeAll("\n");
                 }
             }
@@ -3535,6 +3594,7 @@ pub const VerificationPass = struct {
         try writer.writeAll(if (self.verify_calls) ",\"verify_calls\":true" else ",\"verify_calls\":false");
         try writer.writeAll(if (self.verify_state) ",\"verify_state\":true" else ",\"verify_state\":false");
         try writer.writeAll(if (self.parallel) ",\"parallel\":true" else ",\"parallel\":false");
+        try writer.print(",\"random_seed\":{d}", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print(",\"timeout_ms\":{d}", .{timeout});
         } else {
@@ -3637,7 +3697,7 @@ pub const VerificationPass = struct {
                 }
                 try writer.writeAll(",\"counterexample\":");
                 if (err.counterexample) |ce| {
-                    try writeCounterexampleJson(writer, ce);
+                    try writeCounterexampleJson(writer, self.allocator, ce);
                 } else {
                     try writer.writeAll("null");
                 }
@@ -3694,7 +3754,7 @@ pub const VerificationPass = struct {
                     try writer.writeAll("null");
                 }
                 try writer.writeAll(",\"counterexample\":");
-                try writeCounterexampleJson(writer, diag.counterexample);
+                try writeCounterexampleJson(writer, self.allocator, diag.counterexample);
                 try writer.writeByte('}');
             }
         }
@@ -3784,6 +3844,7 @@ pub const VerificationPass = struct {
 
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
         var queries = ManagedArrayList(PreparedQuery).init(self.allocator);
+        self.phaseLog("buildPreparedQueries start annotations={d}", .{self.encoded_annotations.items.len});
 
         var by_function = std.StringHashMap(ManagedArrayList(EncodedAnnotation)).init(self.allocator);
         defer {
@@ -3825,11 +3886,13 @@ pub const VerificationPass = struct {
             }
         }
 
-        var it = by_function.iterator();
-        while (it.next()) |entry| {
-            const fn_name = entry.key_ptr.*;
-            const annotations = entry.value_ptr.items;
+        var function_names = try collectSortedFunctionNames(self.allocator, &by_function);
+        defer function_names.deinit(self.allocator);
+
+        for (function_names.items) |fn_name| {
+            const annotations = by_function.get(fn_name).?.items;
             if (annotations.len == 0 and global_contract_invariants.items.len == 0) continue;
+            self.phaseLog("buildPreparedQueries function {s} annotations={d}", .{ fn_name, annotations.len });
 
             var assumption_annotations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
             defer assumption_annotations.deinit();
@@ -3896,8 +3959,8 @@ pub const VerificationPass = struct {
                 defer obligation_constraints.deinit();
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
                 try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann, &relevant_symbols);
-                try addRelevantConstraintSlice(self, &obligation_constraints, ann.path_constraints, &relevant_symbols);
-                try addRelevantConstraintSlice(self, &obligation_constraints, ann.extra_constraints, &relevant_symbols);
+                try addConstraintSlice(&obligation_constraints, ann.path_constraints);
+                try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
                 if (ann.kind == .LoopInvariant) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
                 }
@@ -4102,8 +4165,10 @@ pub const VerificationPass = struct {
 
                 try previous_guards.append(ann);
             }
+            self.phaseLog("buildPreparedQueries function {s} done queries_so_far={d}", .{ fn_name, queries.items.len });
         }
 
+        self.phaseLog("buildPreparedQueries done total_queries={d}", .{queries.items.len});
         return queries;
     }
 
@@ -4147,7 +4212,7 @@ pub const VerificationPass = struct {
     fn degradedVerificationResult(self: *VerificationPass) !errors.VerificationResult {
         var result = errors.VerificationResult.init(self.allocator);
         const reason = self.encoder.degradationReason() orelse "unknown SMT encoding degradation";
-        try self.addUnknownVerificationError(
+        try self.addDegradedVerificationError(
             &result,
             try std.fmt.allocPrint(
                 self.allocator,
@@ -4169,7 +4234,7 @@ pub const VerificationPass = struct {
         column: u32,
     ) !void {
         const reason = self.encoder.degradationReason() orelse "unknown SMT encoding degradation";
-        try self.addUnknownVerificationError(
+        try self.addDegradedVerificationError(
             result,
             try std.fmt.allocPrint(
                 self.allocator,
@@ -4180,6 +4245,25 @@ pub const VerificationPass = struct {
             line,
             column,
         );
+    }
+
+    fn addDegradedVerificationError(
+        self: *VerificationPass,
+        result: *errors.VerificationResult,
+        message: []const u8,
+        file: []const u8,
+        line: u32,
+        column: u32,
+    ) !void {
+        try result.addError(.{
+            .error_type = .EncodingDegraded,
+            .message = message,
+            .file = try self.allocator.dupe(u8, file),
+            .line = line,
+            .column = column,
+            .counterexample = null,
+            .allocator = self.allocator,
+        });
     }
 
     fn addUnknownVerificationError(
@@ -4442,6 +4526,69 @@ fn annotationLocationPrecedes(lhs: EncodedAnnotation, rhs: EncodedAnnotation) bo
     if (lhs.line < rhs.line) return true;
     if (lhs.line > rhs.line) return false;
     return lhs.column <= rhs.column;
+}
+
+fn annotationKindSortKey(kind: AnnotationKind) u8 {
+    return switch (kind) {
+        .Requires => 0,
+        .Assume => 1,
+        .PathAssume => 2,
+        .Guard => 3,
+        .RefinementGuard => 4,
+        .Ensures => 5,
+        .LoopInvariant => 6,
+        .ContractInvariant => 7,
+    };
+}
+
+fn lessThanEncodedAnnotation(_: void, lhs: EncodedAnnotation, rhs: EncodedAnnotation) bool {
+    const fn_order = std.mem.order(u8, lhs.function_name, rhs.function_name);
+    if (fn_order != .eq) return fn_order == .lt;
+
+    const file_order = std.mem.order(u8, lhs.file, rhs.file);
+    if (file_order != .eq) return file_order == .lt;
+
+    if (lhs.line != rhs.line) return lhs.line < rhs.line;
+    if (lhs.column != rhs.column) return lhs.column < rhs.column;
+
+    const lhs_kind = annotationKindSortKey(lhs.kind);
+    const rhs_kind = annotationKindSortKey(rhs.kind);
+    if (lhs_kind != rhs_kind) return lhs_kind < rhs_kind;
+
+    const lhs_guard = lhs.guard_id orelse "";
+    const rhs_guard = rhs.guard_id orelse "";
+    const guard_order = std.mem.order(u8, lhs_guard, rhs_guard);
+    if (guard_order != .eq) return guard_order == .lt;
+
+    const lhs_loop = lhs.loop_owner orelse 0;
+    const rhs_loop = rhs.loop_owner orelse 0;
+    if (lhs_loop != rhs_loop) return lhs_loop < rhs_loop;
+
+    return false;
+}
+
+fn stableSortAnnotations(items: []EncodedAnnotation) void {
+    std.mem.sort(EncodedAnnotation, items, {}, lessThanEncodedAnnotation);
+}
+
+fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
+}
+
+fn collectSortedFunctionNames(
+    allocator: std.mem.Allocator,
+    by_function: *const std.StringHashMap(ManagedArrayList(EncodedAnnotation)),
+) !std.ArrayList([]const u8) {
+    var names = std.ArrayList([]const u8){};
+    errdefer names.deinit(allocator);
+
+    var it = by_function.iterator();
+    while (it.next()) |entry| {
+        try names.append(allocator, entry.key_ptr.*);
+    }
+
+    std.mem.sort([]const u8, names.items, {}, lessThanString);
+    return names;
 }
 
 fn pathAssumeAppliesToAnnotation(
@@ -5005,17 +5152,44 @@ fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
 }
 
-fn writeCounterexampleJson(writer: anytype, ce: errors.Counterexample) !void {
-    var ce_copy = ce;
+fn collectSortedStringKeys(
+    allocator: std.mem.Allocator,
+    map: anytype,
+) !std.ArrayList([]const u8) {
+    var keys = std.ArrayList([]const u8){};
+    errdefer keys.deinit(allocator);
+
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        try keys.append(allocator, entry.key_ptr.*);
+    }
+
+    std.mem.sort([]const u8, keys.items, {}, lessThanString);
+    return keys;
+}
+
+fn writeCounterexampleMarkdown(writer: anytype, allocator: std.mem.Allocator, ce: errors.Counterexample) !void {
+    var keys = try collectSortedStringKeys(allocator, ce.variables);
+    defer keys.deinit(allocator);
+
+    for (keys.items) |key| {
+        const value = ce.variables.get(key).?;
+        try writer.print("  - `{s} = {s}`\n", .{ key, value });
+    }
+}
+
+fn writeCounterexampleJson(writer: anytype, allocator: std.mem.Allocator, ce: errors.Counterexample) !void {
+    var keys = try collectSortedStringKeys(allocator, ce.variables);
+    defer keys.deinit(allocator);
+
     try writer.writeByte('{');
     var first = true;
-    var it = ce_copy.variables.iterator();
-    while (it.next()) |entry| {
+    for (keys.items) |key| {
         if (!first) try writer.writeByte(',');
         first = false;
-        try writeJsonStringEscaped(writer, entry.key_ptr.*);
+        try writeJsonStringEscaped(writer, key);
         try writer.writeByte(':');
-        try writeJsonStringEscaped(writer, entry.value_ptr.*);
+        try writeJsonStringEscaped(writer, ce.variables.get(key).?);
     }
     try writer.writeByte('}');
 }
@@ -5099,6 +5273,8 @@ fn collectFunctionNames(allocator: std.mem.Allocator, mlir_module: mlir.MlirModu
         const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
         try collectFunctionNamesInRegion(allocator, region, &names, &seen);
     }
+
+    std.mem.sort([]const u8, names.items, {}, lessThanString);
 
     return names;
 }
@@ -8057,7 +8233,7 @@ test "degraded SMT encoding fails closed" {
 
     try testing.expect(!result.success);
     try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "SMT encoding degraded"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "test degradation"));
 }
@@ -8076,7 +8252,7 @@ test "mid-proof SMT degradation fails closed" {
 
     try testing.expect(!result.success);
     try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
     try testing.expectEqualStrings("/tmp/test.ora", result.errors.items[0].file);
     try testing.expectEqual(@as(u32, 9), result.errors.items[0].line);
     try testing.expectEqual(@as(u32, 4), result.errors.items[0].column);

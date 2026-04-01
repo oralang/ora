@@ -526,6 +526,34 @@ pub const Encoder = struct {
         try names.append(self.allocator, name);
     }
 
+    fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
+        return std.mem.order(u8, lhs, rhs) == .lt;
+    }
+
+    fn lessThanU64(_: void, lhs: u64, rhs: u64) bool {
+        return lhs < rhs;
+    }
+
+    fn sortStateNames(names: [][]const u8) void {
+        std.mem.sort([]const u8, names, {}, lessThanString);
+    }
+
+    fn collectSortedMemKeys(
+        self: *Encoder,
+        map: *const std.AutoHashMap(u64, void),
+    ) !std.ArrayList(u64) {
+        var keys = std.ArrayList(u64){};
+        errdefer keys.deinit(self.allocator);
+
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            try keys.append(self.allocator, entry.key_ptr.*);
+        }
+
+        std.mem.sort(u64, keys.items, {}, lessThanU64);
+        return keys;
+    }
+
     fn mergeStateSnapshotsIf(
         self: *Encoder,
         condition: z3.Z3_ast,
@@ -544,6 +572,7 @@ pub const Encoder = struct {
         while (then_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
         var else_g_it = else_state.global_map.iterator();
         while (else_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        sortStateNames(global_names.items);
 
         for (global_names.items) |name| {
             const base_opt = base.global_map.get(name);
@@ -572,10 +601,10 @@ pub const Encoder = struct {
         while (then_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
         var else_m_it = else_state.memref_map.iterator();
         while (else_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        var sorted_mem_keys = try self.collectSortedMemKeys(&mem_keys);
+        defer sorted_mem_keys.deinit(self.allocator);
 
-        var key_it = mem_keys.iterator();
-        while (key_it.next()) |entry| {
-            const key = entry.key_ptr.*;
+        for (sorted_mem_keys.items) |key| {
             const base_opt = base.memref_map.get(key);
             const then_opt = then_state.memref_map.get(key);
             const else_opt = else_state.memref_map.get(key);
@@ -623,6 +652,7 @@ pub const Encoder = struct {
         while (then_w_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
         var else_w_it = else_state.written_global_slots.iterator();
         while (else_w_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
+        sortStateNames(written_names.items);
         for (written_names.items) |name| {
             try self.putOwnedStringVoid(&self.written_global_slots, name);
         }
@@ -645,6 +675,7 @@ pub const Encoder = struct {
             var branch_it = branch_state.global_map.iterator();
             while (branch_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
         }
+        sortStateNames(global_names.items);
 
         for (global_names.items) |name| {
             const base_opt = base.global_map.get(name);
@@ -680,10 +711,10 @@ pub const Encoder = struct {
             var branch_it = branch_state.memref_map.iterator();
             while (branch_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
         }
+        var sorted_mem_keys = try self.collectSortedMemKeys(&mem_keys);
+        defer sorted_mem_keys.deinit(self.allocator);
 
-        var key_it = mem_keys.iterator();
-        while (key_it.next()) |entry| {
-            const key = entry.key_ptr.*;
+        for (sorted_mem_keys.items) |key| {
             const base_opt = base.memref_map.get(key);
             var fallback_value = if (base_opt) |base_state|
                 base_state.value
@@ -730,6 +761,7 @@ pub const Encoder = struct {
             var written_it = branch_state.written_global_slots.iterator();
             while (written_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
         }
+        sortStateNames(written_names.items);
         for (written_names.items) |name| {
             try self.putOwnedStringVoid(&self.written_global_slots, name);
         }
@@ -759,6 +791,7 @@ pub const Encoder = struct {
         while (try_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
         var catch_g_it = catch_state.global_map.iterator();
         while (catch_g_it.next()) |entry| try self.appendUniqueStateName(&global_names, entry.key_ptr.*);
+        sortStateNames(global_names.items);
 
         for (global_names.items) |name| {
             const base_opt = base.global_map.get(name);
@@ -799,10 +832,10 @@ pub const Encoder = struct {
         while (try_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
         var catch_m_it = catch_state.memref_map.iterator();
         while (catch_m_it.next()) |entry| try mem_keys.put(entry.key_ptr.*, {});
+        var sorted_mem_keys = try self.collectSortedMemKeys(&mem_keys);
+        defer sorted_mem_keys.deinit(self.allocator);
 
-        var mem_key_it = mem_keys.iterator();
-        while (mem_key_it.next()) |entry| {
-            const key = entry.key_ptr.*;
+        for (sorted_mem_keys.items) |key| {
             const base_opt = base.memref_map.get(key);
             const try_opt = try_state.memref_map.get(key);
             const catch_opt = catch_state.memref_map.get(key);
@@ -2127,14 +2160,18 @@ pub const Encoder = struct {
             return bound;
         }
 
+        const cacheable = self.valueIsCacheable(mlir_value);
+
         // check cache first
-        if (mode == .Current) {
-            if (self.value_map.get(value_id)) |cached| {
-                return cached;
-            }
-        } else {
-            if (self.value_map_old.get(value_id)) |cached| {
-                return cached;
+        if (cacheable) {
+            if (mode == .Current) {
+                if (self.value_map.get(value_id)) |cached| {
+                    return cached;
+                }
+            } else {
+                if (self.value_map_old.get(value_id)) |cached| {
+                    return cached;
+                }
             }
         }
 
@@ -2146,10 +2183,12 @@ pub const Encoder = struct {
                     return error.UnsupportedOperation;
                 };
                 const encoded = try self.encodeOperationResultWithMode(defining_op, result_index, mode);
-                if (mode == .Current) {
-                    try self.value_map.put(value_id, encoded);
-                } else {
-                    try self.value_map_old.put(value_id, encoded);
+                if (cacheable) {
+                    if (mode == .Current) {
+                        try self.value_map.put(value_id, encoded);
+                    } else {
+                        try self.value_map_old.put(value_id, encoded);
+                    }
                 }
                 return encoded;
             }
@@ -2167,6 +2206,24 @@ pub const Encoder = struct {
         // For block arguments, keep a single symbol shared across modes.
         try self.value_map.put(value_id, encoded);
         return encoded;
+    }
+
+    fn valueIsCacheable(self: *Encoder, mlir_value: mlir.MlirValue) bool {
+        _ = self;
+        if (!mlir.oraValueIsAOpResult(mlir_value)) return true;
+        const defining_op = mlir.oraOpResultGetOwner(mlir_value);
+        if (mlir.oraOperationIsNull(defining_op)) return true;
+        const op_name_ref = mlir.oraOperationGetName(defining_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        // These value-producing ops emit semantic side constraints while being
+        // encoded. Reusing a cached AST without replaying those constraints can
+        // make later verification queries unsound.
+        return !std.mem.eql(u8, op_name, "ora.struct_instantiate");
     }
 
     fn getResultIndex(_: *Encoder, op: mlir.MlirOperation, value: mlir.MlirValue) ?u32 {

@@ -718,7 +718,23 @@ fn moveArtifactFile(
     defer allocator.free(src_path);
     const dst_path = try std.fs.path.join(allocator, &[_][]const u8{ target_dir, file_name });
     defer allocator.free(dst_path);
-    try std.fs.cwd().rename(src_path, dst_path);
+    try std.fs.cwd().makePath(target_dir);
+    std.fs.cwd().rename(src_path, dst_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.fs.cwd().access(dst_path, .{}) catch |dst_err| switch (dst_err) {
+                error.FileNotFound => {
+                    std.fs.cwd().access(src_path, .{}) catch |src_err| switch (src_err) {
+                        error.FileNotFound => return error.FileNotFound,
+                        else => return src_err,
+                    };
+                    try std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{});
+                    try std.fs.cwd().deleteFile(src_path);
+                },
+                else => return dst_err,
+            };
+        },
+        else => return err,
+    };
 }
 
 fn moveArtifactFileIfExists(
@@ -1797,10 +1813,22 @@ fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diag
 }
 
 fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.VerificationError) !void {
-    try stdout.print("\n❌ Verification failed with {d} error{s}:\n", .{
-        errors.len,
-        if (errors.len != 1) @as([]const u8, "s") else "",
-    });
+    var degraded_count: usize = 0;
+    for (errors) |err| {
+        if (err.error_type == .EncodingDegraded) degraded_count += 1;
+    }
+
+    if (degraded_count == errors.len and errors.len > 0) {
+        try stdout.print("\n❌ Verification aborted with {d} SMT encoding degradation error{s}:\n", .{
+            errors.len,
+            if (errors.len != 1) @as([]const u8, "s") else "",
+        });
+    } else {
+        try stdout.print("\n❌ Verification failed with {d} error{s}:\n", .{
+            errors.len,
+            if (errors.len != 1) @as([]const u8, "s") else "",
+        });
+    }
     try stdout.print("{s}\n", .{"=" ** 70});
 
     for (errors, 0..) |err, idx| {
@@ -2697,8 +2725,15 @@ const ExecutableStatementKind = enum {
     runtime_guard,
 };
 
-const ExecutableLineSet = std.AutoHashMap(u32, ExecutableStatementKind);
-const ExecutableLineMap = std.StringHashMap(ExecutableLineSet);
+const ExecutableStatementStart = struct {
+    line: u32,
+    col: u32,
+    stmt_id: ?u32,
+    kind: ExecutableStatementKind,
+};
+
+const ExecutableStartList = std.ArrayList(ExecutableStatementStart);
+const ExecutableLineMap = std.StringHashMap(ExecutableStartList);
 
 fn executableStatementKindName(kind: ExecutableStatementKind) []const u8 {
     return switch (kind) {
@@ -2711,34 +2746,101 @@ fn deinitExecutableLineMap(allocator: std.mem.Allocator, line_map: *ExecutableLi
     var it = line_map.iterator();
     while (it.next()) |entry| {
         allocator.free(entry.key_ptr.*);
-        entry.value_ptr.deinit();
+        entry.value_ptr.deinit(allocator);
     }
     line_map.deinit();
 }
 
-fn putExecutableLine(
+fn putExecutableStatementStart(
     allocator: std.mem.Allocator,
     line_map: *ExecutableLineMap,
     file_path: []const u8,
     line: u32,
+    col: u32,
+    stmt_id: ?u32,
     kind: ExecutableStatementKind,
 ) !void {
     const gop = try line_map.getOrPut(file_path);
     if (!gop.found_existing) {
         gop.key_ptr.* = try allocator.dupe(u8, file_path);
-        gop.value_ptr.* = ExecutableLineSet.init(allocator);
+        gop.value_ptr.* = .{};
     }
-    const existing = gop.value_ptr.get(line);
-    if (existing == .runtime_guard or kind == .runtime_guard) {
-        try gop.value_ptr.put(line, .runtime_guard);
-    } else {
-        try gop.value_ptr.put(line, .runtime);
+
+    for (gop.value_ptr.items) |*entry| {
+        if (entry.line == line and entry.col == col and entry.stmt_id == stmt_id) {
+            if (entry.kind == .runtime_guard or kind == .runtime_guard) {
+                entry.kind = .runtime_guard;
+            } else {
+                entry.kind = .runtime;
+            }
+            return;
+        }
     }
+
+    try gop.value_ptr.append(allocator, .{
+        .line = line,
+        .col = col,
+        .stmt_id = stmt_id,
+        .kind = kind,
+    });
 }
 
-fn executableStatementKindForLine(line_map: *const ExecutableLineMap, file_path: []const u8, line: u32) ?ExecutableStatementKind {
-    const file_lines = line_map.get(file_path) orelse return null;
-    return file_lines.get(line);
+const ExecutableStatementMeta = struct {
+    stmt_id: ?u32,
+    kind: ExecutableStatementKind,
+};
+
+fn executableStatementMetaForPosition(
+    line_map: *const ExecutableLineMap,
+    file_path: []const u8,
+    line: u32,
+    col: u32,
+) ?ExecutableStatementMeta {
+    const file_entries = line_map.get(file_path) orelse return null;
+    var best: ?ExecutableStatementMeta = null;
+    var best_col: u32 = 0;
+    for (file_entries.items) |entry| {
+        if (entry.line != line) continue;
+        if (entry.col > col) continue;
+        if (best == null or entry.col >= best_col) {
+            best = .{
+                .stmt_id = entry.stmt_id,
+                .kind = entry.kind,
+            };
+            best_col = entry.col;
+        }
+    }
+    return best;
+}
+
+fn suppressHoistedDuplicateStmtMarkers(entries: anytype) void {
+    var i: usize = 0;
+    while (i < entries.len) : (i += 1) {
+        if (!entries[i].stmt) continue;
+
+        const src = entries[i].src;
+        const line = entries[i].line;
+        var saw_lower_line = false;
+        var suppress = false;
+
+        var j: usize = i + 1;
+        while (j < entries.len) : (j += 1) {
+            if (!entries[j].stmt) continue;
+            if (entries[j].src != src) continue;
+
+            if (entries[j].line < line) {
+                saw_lower_line = true;
+                continue;
+            }
+
+            if (entries[j].line == line and saw_lower_line) {
+                suppress = true;
+                break;
+            }
+        }
+
+        if (suppress) entries[i].stmt = false;
+    }
 }
 
 fn addExecutableRangeStart(
@@ -2746,11 +2848,20 @@ fn addExecutableRangeStart(
     sources: *const compiler.source.SourceStore,
     line_map: *ExecutableLineMap,
     file_id: compiler.FileId,
+    statement_id: ?compiler.ast.StmtId,
     range: compiler.TextRange,
     kind: ExecutableStatementKind,
 ) !void {
     const pos = lineColumnForOffset(sources, file_id, range.start);
-    try putExecutableLine(allocator, line_map, sources.file(file_id).path, pos.line, kind);
+    try putExecutableStatementStart(
+        allocator,
+        line_map,
+        sources.file(file_id).path,
+        pos.line,
+        pos.column,
+        if (statement_id) |id| @intCast(id.index()) else null,
+        kind,
+    );
 }
 
 fn collectExecutableStmtLines(
@@ -2763,27 +2874,27 @@ fn collectExecutableStmtLines(
 ) anyerror!void {
     const stmt = ast_file.statement(statement_id).*;
     switch (stmt) {
-        .VariableDecl => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Return => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Expr => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Assign => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .VariableDecl => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Return => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Expr => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Assign => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .If => |node| {
-            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime);
             try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.then_body, line_map);
             if (node.else_body) |else_body| {
                 try collectExecutableBodyLines(allocator, sources, ast_file, file_id, else_body, line_map);
             }
         },
         .While => |node| {
-            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime);
             try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map);
         },
         .For => |node| {
-            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime);
             try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map);
         },
         .Switch => |node| {
-            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime);
             for (node.arms) |arm| {
                 try collectExecutableBodyLines(allocator, sources, ast_file, file_id, arm.body, line_map);
             }
@@ -2792,18 +2903,18 @@ fn collectExecutableStmtLines(
             }
         },
         .Try => |node| {
-            try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime);
+            try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime);
             try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.try_body, line_map);
             if (node.catch_clause) |catch_clause| {
                 try collectExecutableBodyLines(allocator, sources, ast_file, file_id, catch_clause.body, line_map);
             }
         },
-        .Break => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Continue => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Assert => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime_guard),
-        .Log => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Lock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
-        .Unlock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, node.range, .runtime),
+        .Break => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Continue => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Assert => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime_guard),
+        .Log => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Lock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .Unlock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .Block => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
         .LabeledBlock => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
         .Assume, .Havoc, .Error => {},
@@ -2847,7 +2958,7 @@ fn collectExecutableItemLines(
             if (function_item.is_comptime or function_item.is_ghost) return;
             for (function_item.clauses) |clause| {
                 if (clause.kind != .guard) continue;
-                try addExecutableRangeStart(allocator, sources, line_map, file_id, clause.range, .runtime_guard);
+                try addExecutableRangeStart(allocator, sources, line_map, file_id, null, clause.range, .runtime_guard);
             }
             try collectExecutableBodyLines(allocator, sources, ast_file, file_id, function_item.body, line_map);
         },
@@ -3306,7 +3417,7 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
 
-    if (mlir_options.canonicalize and !mlir_options.debug_info and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
         m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
@@ -4128,10 +4239,10 @@ fn emitBytecodeFromSirText(
     // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
     // into final .sourcemap.json
     if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
-        try writeDebugInfoSidecar(allocator, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
+        try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
     }
 }
 
@@ -4141,6 +4252,7 @@ fn mergeSourceMaps(
     root_module_id: compiler.ModuleId,
     sir_locations_json: []const u8,
     sir_line_map_json: ?[]const u8,
+    sir_debug_info_json: ?[]const u8,
     sensei_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
@@ -4204,6 +4316,63 @@ fn mergeSourceMaps(
         }
     }
 
+    const OpProvenance = struct {
+        op: ?[]const u8 = null,
+        function: ?[]const u8 = null,
+        statement_id: ?u32 = null,
+        origin_statement_id: ?u32 = null,
+        execution_region_id: ?u32 = null,
+        statement_run_index: ?u32 = null,
+        is_hoisted: ?bool = null,
+        is_duplicated: ?bool = null,
+        is_synthetic: bool = false,
+        synthetic_index: ?u32 = null,
+        synthetic_count: ?u32 = null,
+    };
+    var idx_to_provenance = std.AutoHashMap(u32, OpProvenance).init(allocator);
+    defer idx_to_provenance.deinit();
+    if (sir_debug_info_json) |json| {
+        const DebugOp = struct {
+            idx: u32,
+            op: ?[]const u8 = null,
+            function: ?[]const u8 = null,
+            statement_id: ?u32 = null,
+            origin_statement_id: ?u32 = null,
+            execution_region_id: ?u32 = null,
+            statement_run_index: ?u32 = null,
+            is_hoisted: ?bool = null,
+            is_duplicated: ?bool = null,
+            is_synthetic: bool = false,
+            synthetic_index: ?u32 = null,
+            synthetic_count: ?u32 = null,
+        };
+        const DebugInfoParse = struct {
+            ops: []const DebugOp = &.{},
+        };
+        const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            try stdout.print("Warning: could not parse SIR debug info for source-map provenance: {}\n", .{err});
+            return;
+        };
+        defer parsed_debug.deinit();
+        for (parsed_debug.value.ops) |op| {
+            try idx_to_provenance.put(op.idx, .{
+                .op = op.op,
+                .function = op.function,
+                .statement_id = op.statement_id,
+                .origin_statement_id = op.origin_statement_id,
+                .execution_region_id = op.execution_region_id,
+                .statement_run_index = op.statement_run_index,
+                .is_hoisted = op.is_hoisted,
+                .is_duplicated = op.is_duplicated,
+                .is_synthetic = op.is_synthetic,
+                .synthetic_index = op.synthetic_index,
+                .synthetic_count = op.synthetic_count,
+            });
+        }
+    }
+
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
 
@@ -4228,7 +4397,17 @@ fn mergeSourceMaps(
         src: u32,
         line: u32,
         col: u32,
+        stmt_id: ?u32,
+        origin_stmt_id: ?u32,
+        execution_region_id: ?u32,
+        statement_run_index: ?u32,
+        function_name: ?[]const u8,
         sir_line: ?u32,
+        is_synthetic: bool = false,
+        synthetic_index: ?u32 = null,
+        synthetic_count: ?u32 = null,
+        is_hoisted: bool = false,
+        is_duplicated: bool = false,
         stmt: bool,
         kind: ?ExecutableStatementKind = null,
     };
@@ -4268,7 +4447,17 @@ fn mergeSourceMaps(
             .src = src_idx,
             .line = loc.line,
             .col = loc.col,
+            .stmt_id = null,
+            .origin_stmt_id = null,
+            .execution_region_id = if (idx_to_provenance.get(loc.idx)) |p| p.execution_region_id else null,
+            .statement_run_index = if (idx_to_provenance.get(loc.idx)) |p| p.statement_run_index else null,
+            .function_name = if (idx_to_provenance.get(loc.idx)) |p| p.function else null,
             .sir_line = idx_to_sir_line.get(loc.idx),
+            .is_synthetic = if (idx_to_provenance.get(loc.idx)) |p| p.is_synthetic else false,
+            .synthetic_index = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_index else null,
+            .synthetic_count = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_count else null,
+            .is_hoisted = false,
+            .is_duplicated = false,
             .stmt = false,
             .kind = null,
         });
@@ -4305,15 +4494,108 @@ fn mergeSourceMaps(
         }
     }.lessThan);
 
+    var prev_stmt_id: ?u32 = null;
     var prev_line: ?u32 = null;
+    var prev_col: ?u32 = null;
     var prev_src: ?u32 = null;
     for (entries.items) |*entry| {
         const file_path = sources.items[entry.src];
-        const line_kind = executableStatementKindForLine(&executable_lines, file_path, entry.line);
-        entry.kind = line_kind;
-        entry.stmt = line_kind != null and ((prev_line == null) or (entry.line != prev_line.?) or (entry.src != prev_src.?));
+        const stmt_meta = executableStatementMetaForPosition(&executable_lines, file_path, entry.line, entry.col);
+        const provenance = idx_to_provenance.get(entry.idx);
+        entry.stmt_id = if (provenance) |p| p.statement_id else if (stmt_meta) |meta| meta.stmt_id else null;
+        entry.origin_stmt_id = if (provenance) |p| p.origin_statement_id orelse entry.stmt_id else entry.stmt_id;
+        entry.kind = if (stmt_meta) |meta| meta.kind else null;
+        entry.is_hoisted = if (provenance) |p| p.is_hoisted orelse false else false;
+        entry.is_duplicated = if (provenance) |p| p.is_duplicated orelse false else false;
+        entry.stmt = if (stmt_meta) |meta|
+            if (meta.stmt_id) |stmt_id|
+                (prev_stmt_id == null) or (stmt_id != prev_stmt_id.?) or (entry.src != prev_src.?)
+            else
+                (prev_line == null) or (entry.line != prev_line.?) or (entry.col != prev_col.?) or (entry.src != prev_src.?)
+        else
+            false;
+        prev_stmt_id = entry.stmt_id;
         prev_line = entry.line;
+        prev_col = entry.col;
         prev_src = entry.src;
+    }
+
+    var stmt_has_non_invalid = std.AutoHashMap(u32, bool).init(allocator);
+    defer stmt_has_non_invalid.deinit();
+    for (entries.items) |entry| {
+        const stmt_id = entry.stmt_id orelse continue;
+        const provenance = idx_to_provenance.get(entry.idx) orelse continue;
+        const op_name = provenance.op orelse continue;
+        if (std.mem.eql(u8, op_name, "invalid") or std.mem.eql(u8, op_name, "sir.invalid")) continue;
+        try stmt_has_non_invalid.put(stmt_id, true);
+    }
+
+    for (entries.items) |*entry| {
+        const stmt_id = entry.stmt_id orelse continue;
+        const provenance = idx_to_provenance.get(entry.idx) orelse continue;
+        const op_name = provenance.op orelse continue;
+        if (!(std.mem.eql(u8, op_name, "invalid") or std.mem.eql(u8, op_name, "sir.invalid"))) continue;
+        if (stmt_has_non_invalid.get(stmt_id) orelse false) {
+            entry.stmt = false;
+        }
+    }
+
+    const StmtAnchor = struct {
+        stmt_entry_index: usize,
+        stmt_is_invalid: bool,
+        first_non_invalid_index: ?usize,
+    };
+    suppressHoistedDuplicateStmtMarkers(entries.items);
+
+    var stmt_anchors = std.AutoHashMap(u32, StmtAnchor).init(allocator);
+    defer stmt_anchors.deinit();
+    for (entries.items, 0..) |entry, entry_index| {
+        const stmt_id = entry.stmt_id orelse continue;
+        const provenance = idx_to_provenance.get(entry.idx);
+        const is_invalid_op = if (provenance) |p|
+            if (p.op) |op_name|
+                std.mem.eql(u8, op_name, "invalid") or std.mem.eql(u8, op_name, "sir.invalid")
+            else
+                false
+        else
+            false;
+        var anchor = stmt_anchors.get(stmt_id) orelse StmtAnchor{
+            .stmt_entry_index = std.math.maxInt(usize),
+            .stmt_is_invalid = false,
+            .first_non_invalid_index = null,
+        };
+        if (entry.stmt and anchor.stmt_entry_index == std.math.maxInt(usize)) {
+            anchor.stmt_entry_index = entry_index;
+            anchor.stmt_is_invalid = is_invalid_op;
+        }
+        if (!is_invalid_op and anchor.first_non_invalid_index == null) {
+            anchor.first_non_invalid_index = entry_index;
+        }
+        try stmt_anchors.put(stmt_id, anchor);
+    }
+    var stmt_anchor_it = stmt_anchors.iterator();
+    while (stmt_anchor_it.next()) |it| {
+        const anchor = it.value_ptr.*;
+        if (anchor.stmt_entry_index == std.math.maxInt(usize)) continue;
+        if (!anchor.stmt_is_invalid) continue;
+        const replacement_index = anchor.first_non_invalid_index orelse continue;
+        entries.items[anchor.stmt_entry_index].stmt = false;
+        entries.items[replacement_index].stmt = true;
+    }
+
+    var stmt_marker_counts = std.AutoHashMap(u32, u32).init(allocator);
+    defer stmt_marker_counts.deinit();
+    for (entries.items) |entry| {
+        if (!entry.stmt) continue;
+        const stmt_id = entry.stmt_id orelse continue;
+        const existing = stmt_marker_counts.get(stmt_id) orelse 0;
+        try stmt_marker_counts.put(stmt_id, existing + 1);
+    }
+    for (entries.items) |*entry| {
+        if (entry.stmt_id) |stmt_id| {
+            const count = stmt_marker_counts.get(stmt_id) orelse 0;
+            if (!entry.is_duplicated) entry.is_duplicated = count > 1;
+        }
     }
 
     // Emit sources array
@@ -4329,8 +4611,39 @@ fn mergeSourceMaps(
         try writer.print("{{\"idx\":{d},\"pc\":{d},\"src\":{d},\"line\":{d},\"col\":{d},\"stmt\":{s}", .{
             entry.idx, entry.pc, entry.src, entry.line, entry.col, if (entry.stmt) "true" else "false",
         });
+        if (entry.stmt_id) |stmt_id| {
+            try writer.print(",\"statement_id\":{d}", .{stmt_id});
+        }
+        if (entry.origin_stmt_id) |origin_stmt_id| {
+            try writer.print(",\"origin_statement_id\":{d}", .{origin_stmt_id});
+        }
+        if (entry.execution_region_id) |execution_region_id| {
+            try writer.print(",\"execution_region_id\":{d}", .{execution_region_id});
+        }
+        if (entry.statement_run_index) |statement_run_index| {
+            try writer.print(",\"statement_run_index\":{d}", .{statement_run_index});
+        }
+        if (entry.function_name) |function_name| {
+            try writer.writeAll(",\"function\":");
+            try writeJsonString(writer, function_name);
+        }
         if (entry.sir_line) |sir_line| {
             try writer.print(",\"sir_line\":{d}", .{sir_line});
+        }
+        if (entry.is_synthetic) {
+            try writer.writeAll(",\"is_synthetic\":true");
+            if (entry.synthetic_index) |synthetic_index| {
+                try writer.print(",\"synthetic_index\":{d}", .{synthetic_index});
+            }
+            if (entry.synthetic_count) |synthetic_count| {
+                try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
+            }
+        }
+        if (entry.is_hoisted) {
+            try writer.writeAll(",\"is_hoisted\":true");
+        }
+        if (entry.is_duplicated) {
+            try writer.writeAll(",\"is_duplicated\":true");
         }
         if (entry.kind) |kind| {
             try writer.writeAll(",\"kind\":");
@@ -4359,20 +4672,37 @@ fn mergeSourceMaps(
 
 fn writeDebugInfoSidecar(
     allocator: std.mem.Allocator,
+    db: *compiler.CompilerDb,
+    root_module_id: compiler.ModuleId,
     sources: *const compiler.source.SourceStore,
     sir_debug_info_json: []const u8,
     source_scopes: ?DebugSourceScopeBundle,
     bytecode_output_path: []const u8,
     stdout: anytype,
 ) !void {
-    const VisibilityOp = struct {
+    const DebugOp = struct {
         idx: u32,
+        op: []const u8,
+        function: []const u8,
+        block: []const u8,
         file: ?[]const u8 = null,
         line: ?u32 = null,
         col: ?u32 = null,
+        result_names: []const []const u8 = &.{},
+        is_terminator: bool = false,
+        is_synthetic: bool = false,
+        synthetic_index: ?u32 = null,
+        synthetic_count: ?u32 = null,
+        statement_id: ?u32 = null,
+        origin_statement_id: ?u32 = null,
+        execution_region_id: ?u32 = null,
+        statement_run_index: ?u32 = null,
+        is_hoisted: ?bool = null,
+        is_duplicated: ?bool = null,
     };
-    const VisibilityParse = struct {
-        ops: []const VisibilityOp = &.{},
+    const DebugInfoParse = struct {
+        version: u32 = 1,
+        ops: []const DebugOp = &.{},
     };
 
     const basename = std.fs.path.stem(bytecode_output_path);
@@ -4389,23 +4719,120 @@ fn writeDebugInfoSidecar(
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(allocator);
     const writer = out.writer(allocator);
-    const parsed_visibility = std.json.parseFromSlice(VisibilityParse, allocator, sir_debug_info_json, .{
+    const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, sir_debug_info_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
         try stdout.print("Warning: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
         return;
     };
-    defer parsed_visibility.deinit();
+    defer parsed_debug.deinit();
 
-    const trimmed = std.mem.trim(u8, sir_debug_info_json, " \n\r\t");
-    if (std.mem.startsWith(u8, trimmed, "{\"version\":1,")) {
-        try writer.writeAll("{\"version\":2,");
-        try writer.writeAll(trimmed["{\"version\":1,".len .. trimmed.len - 1]);
-    } else if (trimmed.len != 0 and trimmed[trimmed.len - 1] == '}') {
-        try writer.writeAll(trimmed[0 .. trimmed.len - 1]);
-    } else {
-        try writer.writeAll(trimmed);
+    var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
+    defer deinitExecutableLineMap(allocator, &executable_lines);
+
+    const EnrichedOp = struct {
+        idx: u32,
+        op: []const u8,
+        function: []const u8,
+        block: []const u8,
+        file: ?[]const u8 = null,
+        line: ?u32 = null,
+        col: ?u32 = null,
+        result_names: []const []const u8 = &.{},
+        is_terminator: bool = false,
+        is_synthetic: bool = false,
+        synthetic_index: ?u32 = null,
+        synthetic_count: ?u32 = null,
+        statement_id: ?u32 = null,
+        origin_statement_id: ?u32 = null,
+        execution_region_id: ?u32 = null,
+        statement_run_index: ?u32 = null,
+        kind: ?ExecutableStatementKind = null,
+        is_hoisted: bool = false,
+        is_duplicated: bool = false,
+    };
+    var enriched_ops = try allocator.alloc(EnrichedOp, parsed_debug.value.ops.len);
+    defer allocator.free(enriched_ops);
+
+    for (parsed_debug.value.ops, 0..) |op, i| {
+        const stmt_meta = if (op.file != null and op.line != null and op.col != null)
+            executableStatementMetaForPosition(&executable_lines, op.file.?, op.line.?, op.col.?)
+        else
+            null;
+        enriched_ops[i] = .{
+            .idx = op.idx,
+            .op = op.op,
+            .function = op.function,
+            .block = op.block,
+            .file = op.file,
+            .line = op.line,
+            .col = op.col,
+            .result_names = op.result_names,
+            .is_terminator = op.is_terminator,
+            .is_synthetic = op.is_synthetic,
+            .synthetic_index = op.synthetic_index,
+            .synthetic_count = op.synthetic_count,
+            .statement_id = op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
+            .origin_statement_id = op.origin_statement_id orelse op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
+            .execution_region_id = op.execution_region_id,
+            .statement_run_index = op.statement_run_index,
+            .kind = if (stmt_meta) |meta| meta.kind else null,
+            .is_hoisted = op.is_hoisted orelse false,
+            .is_duplicated = op.is_duplicated orelse false,
+        };
     }
+
+    try writer.print("{{\"version\":{d},\"ops\":[", .{if (parsed_debug.value.version < 2) @as(u32, 2) else parsed_debug.value.version});
+    for (enriched_ops, 0..) |op, i| {
+        if (i != 0) try writer.writeAll(",");
+        try writer.print("{{\"idx\":{d},\"op\":", .{op.idx});
+        try writeJsonString(writer, op.op);
+        try writer.writeAll(",\"function\":");
+        try writeJsonString(writer, op.function);
+        try writer.writeAll(",\"block\":");
+        try writeJsonString(writer, op.block);
+        try writer.writeAll(",\"file\":");
+        if (op.file) |file| {
+            try writeJsonString(writer, file);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"line\":");
+        if (op.line) |line| try writer.print("{d}", .{line}) else try writer.writeAll("null");
+        try writer.writeAll(",\"col\":");
+        if (op.col) |col| try writer.print("{d}", .{col}) else try writer.writeAll("null");
+        try writer.writeAll(",\"result_names\":[");
+        for (op.result_names, 0..) |name, name_index| {
+            if (name_index != 0) try writer.writeAll(",");
+            try writeJsonString(writer, name);
+        }
+        try writer.print("],\"is_terminator\":{s},\"is_synthetic\":{s}", .{
+            if (op.is_terminator) "true" else "false",
+            if (op.is_synthetic) "true" else "false",
+        });
+        try writer.writeAll(",\"statement_id\":");
+        if (op.statement_id) |statement_id| try writer.print("{d}", .{statement_id}) else try writer.writeAll("null");
+        try writer.writeAll(",\"origin_statement_id\":");
+        if (op.origin_statement_id) |origin_statement_id| try writer.print("{d}", .{origin_statement_id}) else try writer.writeAll("null");
+        try writer.writeAll(",\"execution_region_id\":");
+        if (op.execution_region_id) |execution_region_id| try writer.print("{d}", .{execution_region_id}) else try writer.writeAll("null");
+        try writer.writeAll(",\"statement_run_index\":");
+        if (op.statement_run_index) |statement_run_index| try writer.print("{d}", .{statement_run_index}) else try writer.writeAll("null");
+        if (op.synthetic_index) |synthetic_index| {
+            try writer.print(",\"synthetic_index\":{d}", .{synthetic_index});
+        }
+        if (op.synthetic_count) |synthetic_count| {
+            try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
+        }
+        if (op.kind) |kind| {
+            try writer.writeAll(",\"kind\":");
+            try writeJsonString(writer, executableStatementKindName(kind));
+        }
+        if (op.is_hoisted) try writer.writeAll(",\"is_hoisted\":true");
+        if (op.is_duplicated) try writer.writeAll(",\"is_duplicated\":true");
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
 
     try writer.writeAll(",\"source_scopes\":[");
     if (source_scopes) |scope_info| {
@@ -4507,7 +4934,7 @@ fn writeDebugInfoSidecar(
     try writer.writeAll("],\"op_visibility\":[");
     if (source_scopes) |scope_info| {
         var first_visibility = true;
-        for (parsed_visibility.value.ops) |op| {
+        for (parsed_debug.value.ops) |op| {
             const file = op.file orelse continue;
             const line = op.line orelse continue;
             const col = op.col orelse continue;

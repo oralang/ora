@@ -29,6 +29,20 @@ fn expectOraToSirConverts(path: []const u8) !void {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
+fn expectOraToSirConvertsClean(path: []const u8) !void {
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
     const forbidden = [_][]const u8{
         "ora.global",
@@ -259,6 +273,33 @@ fn countDiagnosticMessages(diags: *const compiler.diagnostics.DiagnosticList, ne
     return count;
 }
 
+const DiagnosticProbePhase = enum {
+    syntax,
+    resolution,
+    typecheck,
+};
+
+fn expectDiagnosticProbeContains(source_text: []const u8, phase: DiagnosticProbePhase, needle: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    switch (phase) {
+        .syntax => {
+            const file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+            const diags = try compilation.db.syntaxDiagnostics(file_id);
+            try testing.expect(diagnosticMessagesContain(diags, needle));
+        },
+        .resolution => {
+            const diags = try compilation.db.resolutionDiagnostics(compilation.root_module_id);
+            try testing.expect(diagnosticMessagesContain(diags, needle));
+        },
+        .typecheck => {
+            const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+            try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, needle));
+        },
+    }
+}
+
 fn containsEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region) bool {
     for (items) |item| {
         if (item.region == region and std.mem.eql(u8, item.name, needle)) return true;
@@ -339,6 +380,74 @@ test "compiler syntax preserves source and syntax pointers resolve" {
 
     const body = firstChildNodeOfKind(function.?, .Body);
     try testing.expect(body != null);
+}
+
+test "compiler diagnostic release matrix stays readable" {
+    try expectDiagnosticProbeContains(
+        \\trait Plain {
+        \\    fn ping(self) -> bool;
+        \\}
+        \\
+        \\extern trait ERC20 {
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\
+        \\    pub fn badMissingGas(user: address) -> u256 {
+        \\        return external<ERC20>(token).balanceOf(user);
+        \\    }
+        \\}
+    ,
+        .syntax,
+        "expected ', gas: ...' in external proxy",
+    );
+
+    try expectDiagnosticProbeContains(
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return Nonexistent(7);
+        \\}
+    ,
+        .resolution,
+        "undefined name 'Nonexistent'",
+    );
+
+    try expectDiagnosticProbeContains(
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return Failure(1, 2, 3);
+        \\}
+    ,
+        .typecheck,
+        "expected 1 arguments, found 3",
+    );
+
+    try expectDiagnosticProbeContains(
+        \\extern trait ERC20 {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var token: address;
+        \\    storage var balance: u256;
+        \\
+        \\    pub fn bad(to: address) {
+        \\        balance = 1;
+        \\        let call_result = external<ERC20>(token, gas: 50000).transfer(to, balance);
+        \\        _ = call_result;
+        \\        balance = 2;
+        \\    }
+        \\}
+    ,
+        .typecheck,
+        "cannot write storage slot 'balance' after external call because it was written before the call",
+    );
 }
 
 test "compiler syntax parses statement-level bodies" {
@@ -13589,6 +13698,25 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     }
 }
 
+test "Ora to SIR release matrix stays clean" {
+    const example_paths = [_][]const u8{
+        "ora-example/apps/erc20_bitfield_comptime_generics.ora",
+        "ora-example/corpus/patterns/multi_asset.ora",
+        "ora-example/corpus/patterns/kitchen_sink.ora",
+        "ora-example/debugger/comptime_debug_probe.ora",
+        "ora-example/debugger/optimizer_probe.ora",
+        "ora-example/errors/try_catch.ora",
+        "ora-example/locks/lock_runtime_scalar_guard.ora",
+        "ora-example/refinements/guards_showcase.ora",
+        "ora-example/smt/soundness/open_stream_add_unknown.ora",
+        "ora-example/vault/05_locks.ora",
+    };
+
+    for (example_paths) |path| {
+        try expectOraToSirConvertsClean(path);
+    }
+}
+
 test "complex SMT app probes do not degrade verification encoding" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
@@ -13637,6 +13765,98 @@ test "complex SMT app probes match between sequential and parallel verification"
     }
 }
 
+test "SMT release matrix probes match between sequential and parallel verification" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8 }{
+        .{ .path = "ora-example/smt/guards/exact_proven.ora", .function_name = "provenExactDivisionReturn" },
+        .{ .path = "ora-example/smt/verification/function_contracts_basic.ora", .function_name = "deposit" },
+        .{ .path = "ora-example/smt/verification/function_contracts_old.ora", .function_name = "incrementAndReturn" },
+        .{ .path = "ora-example/smt/verification/loop_invariants.ora", .function_name = "sumToN" },
+        .{ .path = "ora-example/smt/summaries/callee_state_effects.ora", .function_name = "doIncrement" },
+        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
+        .{ .path = "ora-example/comptime/generics/generic_struct_multi_type_params.ora", .function_name = "value_plus_one" },
+        .{ .path = "ora-example/comptime/generics/generic_fn_control_flow_clone.ora", .function_name = "rem_u256" },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expect(!seq_result.degraded);
+        try testing.expect(!par_result.degraded);
+        try testing.expect(seq_result.success);
+        try testing.expect(par_result.success);
+        try testing.expectEqual(@as(usize, 0), seq_result.errors_len);
+        try testing.expectEqual(@as(usize, 0), par_result.errors_len);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
+test "SMT expected-failure probes match between sequential and parallel verification" {
+    const probes = [_]struct {
+        path: []const u8,
+        function_name: []const u8,
+        expected_error_kinds: []const u8,
+    }{
+        .{
+            .path = "ora-example/smt/verification/ora_assert_obligation_fail.ora",
+            .function_name = "alwaysFails",
+            .expected_error_kinds = "InvariantViolation",
+        },
+        .{
+            .path = "ora-example/smt/fail-closed/fail_degraded_must_not_succeed.ora",
+            .function_name = "incrementLock",
+            .expected_error_kinds = "PostconditionViolation",
+        },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expect(!seq_result.degraded);
+        try testing.expect(!par_result.degraded);
+        try testing.expect(!seq_result.success);
+        try testing.expect(!par_result.success);
+        try testing.expectEqualStrings(probe.expected_error_kinds, seq_result.error_kinds);
+        try testing.expectEqualStrings(probe.expected_error_kinds, par_result.error_kinds);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
+test "SMT degradation probes fail closed in sequential and parallel verification" {
+    const probes = [_]struct {
+        path: []const u8,
+        function_name: []const u8,
+    }{
+        .{
+            .path = "ora-example/smt/fail-closed/fail_loop_result_degraded.ora",
+            .function_name = "run",
+        },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expect(seq_result.degraded);
+        try testing.expect(par_result.degraded);
+        try testing.expect(!seq_result.success);
+        try testing.expect(!par_result.success);
+        try testing.expectEqualStrings("EncodingDegraded", seq_result.error_kinds);
+        try testing.expectEqualStrings("EncodingDegraded", par_result.error_kinds);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
 test "open_stream_add_unknown verifies without degradation" {
     var result = try verifyExampleWithoutDegradation(
         "ora-example/smt/soundness/open_stream_add_unknown.ora",
@@ -13649,4 +13869,27 @@ test "open_stream_add_unknown verifies without degradation" {
     try testing.expect(!result.degraded);
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
+}
+
+test "generic struct field extract checked add verifies without degradation" {
+    const path = "ora-example/comptime/generics/generic_struct_multi_type_params.ora";
+    const function_name = "value_plus_one";
+
+    var baseline = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+    defer baseline.deinit(testing.allocator);
+
+    try testing.expect(!baseline.degraded);
+    try testing.expect(baseline.success);
+    try testing.expectEqual(@as(usize, 0), baseline.errors_len);
+
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        var rerun = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+        defer rerun.deinit(testing.allocator);
+
+        try expectVerificationProbeEquivalent(&baseline, &rerun);
+        try testing.expect(!rerun.degraded);
+        try testing.expect(rerun.success);
+        try testing.expectEqual(@as(usize, 0), rerun.errors_len);
+    }
 }

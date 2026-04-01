@@ -1,0 +1,27 @@
+// SMT Fail-Closed Test: loop result requires a summary the encoder does not have.
+// EXPECTED: Verification should degrade or fail closed, never silently succeed.
+
+comptime const std = @import("std");
+
+contract LoopResultDegraded {
+    storage var last: u256 = 0;
+
+    pub fn run(n: u256)
+        requires n <= 32
+        ensures last >= old(last)
+    {
+        var acc: u256 = 1;
+        var i: u256 = 0;
+
+        while (i < n) {
+            if ((i % 3) == 0) {
+                acc = (acc * 2) + 1;
+            } else {
+                acc = acc + i;
+            }
+            i = i + 1;
+        }
+
+        last = acc;
+    }
+}

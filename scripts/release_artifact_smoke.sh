@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+OUT_ROOT="${1:-$ROOT_DIR/.release-smoke-artifacts}"
+
+rm -rf "$OUT_ROOT"
+mkdir -p "$OUT_ROOT"
+
+contracts=(
+  "ora-example/debugger/comptime_debug_probe.ora"
+  "ora-example/debugger/constructor_value.ora"
+  "ora-example/corpus/patterns/multi_asset.ora"
+  "ora-example/vault/05_locks.ora"
+  "ora-example/refinements/guards_showcase.ora"
+  "ora-example/errors/try_catch.ora"
+)
+
+check_file() {
+  local path="$1"
+  if [[ ! -s "$path" ]]; then
+    echo "artifact check failed: missing or empty $path" >&2
+    exit 1
+  fi
+}
+
+for contract in "${contracts[@]}"; do
+  stem="$(basename "${contract%.ora}")"
+  out_dir="$OUT_ROOT/$stem"
+  mkdir -p "$out_dir"
+
+  echo "==> $contract"
+  ./zig-out/bin/ora emit --emit-bytecode --emit-sir-text --debug-info -o "$out_dir" "$contract" >/tmp/"$stem".release-smoke.log 2>&1 || {
+    cat /tmp/"$stem".release-smoke.log >&2
+    exit 1
+  }
+
+  hex_path="$out_dir/$stem.hex"
+  sir_path="$out_dir/$stem.sir"
+  sourcemap_path="$out_dir/$stem.sourcemap.json"
+  debug_path="$out_dir/$stem.debug.json"
+
+  check_file "$hex_path"
+  check_file "$sir_path"
+  check_file "$sourcemap_path"
+  check_file "$debug_path"
+
+  rg -q '^0x[0-9a-fA-F]+$' "$hex_path" || {
+    echo "artifact check failed: bytecode is not hex in $hex_path" >&2
+    exit 1
+  }
+
+  rg -q '"entries":\[' "$sourcemap_path" || {
+    echo "artifact check failed: sourcemap missing entries in $sourcemap_path" >&2
+    exit 1
+  }
+  rg -q '"pc":' "$sourcemap_path" || {
+    echo "artifact check failed: sourcemap missing pc fields in $sourcemap_path" >&2
+    exit 1
+  }
+  rg -q '"line":' "$sourcemap_path" || {
+    echo "artifact check failed: sourcemap missing line fields in $sourcemap_path" >&2
+    exit 1
+  }
+
+  rg -q '"ops":\[' "$debug_path" || {
+    echo "artifact check failed: debug info missing ops array in $debug_path" >&2
+    exit 1
+  }
+  rg -q '"statement_id":' "$debug_path" || {
+    echo "artifact check failed: debug info missing statement provenance in $debug_path" >&2
+    exit 1
+  }
+
+  rg -q '^fn ' "$sir_path" || {
+    echo "artifact check failed: SIR text missing function bodies in $sir_path" >&2
+    exit 1
+  }
+done
+
+echo "artifact smoke passed: $OUT_ROOT"

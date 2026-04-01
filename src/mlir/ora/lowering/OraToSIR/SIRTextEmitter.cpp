@@ -20,6 +20,7 @@
 #include "llvm/Support/Casting.h"
 #include <cstdio>
 #include <functional>
+#include <optional>
 
 using namespace mlir;
 
@@ -181,6 +182,124 @@ namespace
         if (name.starts_with("sir."))
             return name.drop_front(4).str();
         return name.str();
+    }
+
+    std::optional<FileLineColLoc> extractFileLineColLoc(Location loc)
+    {
+        if (loc == nullptr)
+            return std::nullopt;
+        if (auto fileLoc = dyn_cast<FileLineColLoc>(loc))
+            return fileLoc;
+        if (auto nameLoc = dyn_cast<NameLoc>(loc))
+            return extractFileLineColLoc(nameLoc.getChildLoc());
+        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+        {
+            if (auto calleeLoc = extractFileLineColLoc(callSite.getCallee()))
+                return calleeLoc;
+            return extractFileLineColLoc(callSite.getCaller());
+        }
+        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+        {
+            for (Location child : fusedLoc.getLocations())
+            {
+                if (auto childLoc = extractFileLineColLoc(child))
+                    return childLoc;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<uint32_t> extractStmtIdFromLoc(Location loc)
+    {
+        if (loc == nullptr)
+            return std::nullopt;
+        if (auto nameLoc = dyn_cast<NameLoc>(loc))
+        {
+            StringRef name = nameLoc.getName().getValue();
+            constexpr StringLiteral prefix("ora.stmt.");
+            if (name.starts_with(prefix))
+            {
+                uint32_t stmtId = 0;
+                if (!name.drop_front(prefix.size()).getAsInteger(10, stmtId))
+                    return stmtId;
+            }
+            return extractStmtIdFromLoc(nameLoc.getChildLoc());
+        }
+        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+        {
+            if (auto calleeStmt = extractStmtIdFromLoc(callSite.getCallee()))
+                return calleeStmt;
+            return extractStmtIdFromLoc(callSite.getCaller());
+        }
+        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+        {
+            for (Location child : fusedLoc.getLocations())
+            {
+                if (auto stmtId = extractStmtIdFromLoc(child))
+                    return stmtId;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<uint32_t> extractOriginStmtIdFromLoc(Location loc)
+    {
+        if (loc == nullptr)
+            return std::nullopt;
+        if (auto nameLoc = dyn_cast<NameLoc>(loc))
+        {
+            StringRef name = nameLoc.getName().getValue();
+            constexpr StringLiteral prefix("ora.origin_stmt.");
+            if (name.starts_with(prefix))
+            {
+                uint32_t stmtId = 0;
+                if (!name.drop_front(prefix.size()).getAsInteger(10, stmtId))
+                    return stmtId;
+            }
+            return extractOriginStmtIdFromLoc(nameLoc.getChildLoc());
+        }
+        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+        {
+            if (auto calleeStmt = extractOriginStmtIdFromLoc(callSite.getCallee()))
+                return calleeStmt;
+            return extractOriginStmtIdFromLoc(callSite.getCaller());
+        }
+        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+        {
+            for (Location child : fusedLoc.getLocations())
+            {
+                if (auto stmtId = extractOriginStmtIdFromLoc(child))
+                    return stmtId;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool hasSyntheticLocTag(Location loc)
+    {
+        if (loc == nullptr)
+            return false;
+        if (auto nameLoc = dyn_cast<NameLoc>(loc))
+        {
+            StringRef name = nameLoc.getName().getValue();
+            constexpr StringLiteral prefix("ora.synthetic.");
+            if (name.starts_with(prefix))
+                return true;
+            return hasSyntheticLocTag(nameLoc.getChildLoc());
+        }
+        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+        {
+            return hasSyntheticLocTag(callSite.getCallee()) || hasSyntheticLocTag(callSite.getCaller());
+        }
+        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+        {
+            for (Location child : fusedLoc.getLocations())
+            {
+                if (hasSyntheticLocTag(child))
+                    return true;
+            }
+        }
+        return false;
     }
 
     template <typename RangeT>
@@ -1026,8 +1145,8 @@ namespace mlir
             bool firstEntry = true;
 
             visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp, Block &, NameTable &, bool, uint32_t, uint32_t) {
-                if (auto fileLoc = dyn_cast<FileLineColLoc>(op.getLoc()))
-                    emitLocEntry(os, opIndex, fileLoc, firstEntry);
+                if (auto fileLoc = extractFileLineColLoc(op.getLoc()))
+                    emitLocEntry(os, opIndex, *fileLoc, firstEntry);
             });
 
             os << "]";
@@ -1037,49 +1156,193 @@ namespace mlir
 
         std::string extractSIRDebugInfo(ModuleOp module)
         {
+            struct DebugRecord
+            {
+                uint32_t idx;
+                std::string op;
+                std::string function;
+                std::string block;
+                std::optional<std::string> file;
+                std::optional<uint32_t> line;
+                std::optional<uint32_t> col;
+                SmallVector<std::string, 4> resultNames;
+                bool isTerminator = false;
+                bool isSynthetic = false;
+                std::optional<uint32_t> syntheticIndex;
+                std::optional<uint32_t> syntheticCount;
+                std::optional<uint32_t> statementId;
+                std::optional<uint32_t> originStatementId;
+                std::optional<uint32_t> executionRegionId;
+                std::optional<uint32_t> statementRunIndex;
+                bool isHoisted = false;
+                bool isDuplicated = false;
+            };
+
+            SmallVector<DebugRecord, 128> records;
+            records.reserve(256);
+
+            visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp func, Block &block, NameTable &names, bool synthetic, uint32_t syntheticIndex, uint32_t syntheticCount) {
+                DebugRecord record;
+                record.idx = opIndex;
+                record.op = op.getName().getStringRef().str();
+                record.function = func.getName().str();
+                record.block = names.blockNames[&block];
+                if (auto fileLoc = extractFileLineColLoc(op.getLoc()))
+                {
+                    record.file = fileLoc->getFilename().str();
+                    record.line = fileLoc->getLine();
+                    record.col = fileLoc->getColumn();
+                }
+                if (auto stmtId = extractStmtIdFromLoc(op.getLoc()))
+                    record.statementId = *stmtId;
+                if (auto originStmtId = extractOriginStmtIdFromLoc(op.getLoc()))
+                    record.originStatementId = *originStmtId;
+                else if (record.statementId)
+                    record.originStatementId = *record.statementId;
+                record.resultNames.reserve(op.getNumResults());
+                for (unsigned i = 0; i < op.getNumResults(); ++i)
+                    record.resultNames.push_back(names.nameFor(op.getResult(i)));
+                record.isTerminator = op.hasTrait<OpTrait::IsTerminator>();
+                record.isSynthetic = synthetic || hasSyntheticLocTag(op.getLoc());
+                if (synthetic)
+                {
+                    record.syntheticIndex = syntheticIndex;
+                    record.syntheticCount = syntheticCount;
+                }
+                records.push_back(std::move(record));
+            });
+
+            auto provenanceStmtFor = [](const DebugRecord &record) -> std::optional<uint32_t> {
+                if (record.statementId)
+                    return record.statementId;
+                return record.originStatementId;
+            };
+
+            std::unordered_map<std::string, uint32_t> prevStmtByFunction;
+            std::unordered_set<std::string> prevStmtKnown;
+            std::unordered_map<std::string, uint32_t> stmtRunCounts;
+            for (const DebugRecord &record : records)
+            {
+                auto provenanceStmt = provenanceStmtFor(record);
+                if (!provenanceStmt)
+                    continue;
+                const std::string &function = record.function;
+                const uint32_t stmtId = *provenanceStmt;
+                auto prevIt = prevStmtByFunction.find(function);
+                if (prevIt == prevStmtByFunction.end() || !prevStmtKnown.count(function) || prevIt->second != stmtId)
+                {
+                    std::string key = function + "#" + std::to_string(stmtId);
+                    stmtRunCounts[key] += 1;
+                    prevStmtByFunction[function] = stmtId;
+                    prevStmtKnown.insert(function);
+                }
+            }
+
+            std::unordered_map<std::string, uint32_t> maxSeenStmtByFunction;
+            prevStmtByFunction.clear();
+            prevStmtKnown.clear();
+            std::unordered_map<std::string, uint32_t> regionCountByFunction;
+            std::unordered_map<std::string, uint32_t> currentRegionByFunction;
+            std::unordered_map<std::string, uint32_t> currentRunByFunction;
+            std::unordered_map<std::string, uint32_t> seenRunsByStmt;
+            for (DebugRecord &record : records)
+            {
+                auto provenanceStmt = provenanceStmtFor(record);
+                if (!provenanceStmt)
+                    continue;
+                const std::string &function = record.function;
+                const uint32_t stmtId = *provenanceStmt;
+                std::string key = function + "#" + std::to_string(stmtId);
+                auto prevIt = prevStmtByFunction.find(function);
+                if (prevIt == prevStmtByFunction.end() || !prevStmtKnown.count(function) || prevIt->second != stmtId)
+                {
+                    regionCountByFunction[function] += 1;
+                    currentRegionByFunction[function] = regionCountByFunction[function];
+                    seenRunsByStmt[key] += 1;
+                    currentRunByFunction[function] = seenRunsByStmt[key];
+                    prevStmtByFunction[function] = stmtId;
+                    prevStmtKnown.insert(function);
+                }
+                record.executionRegionId = currentRegionByFunction[function];
+                auto currentRunIt = currentRunByFunction.find(function);
+                if (currentRunIt != currentRunByFunction.end())
+                    record.statementRunIndex = currentRunIt->second;
+                auto maxIt = maxSeenStmtByFunction.find(function);
+                if (maxIt != maxSeenStmtByFunction.end() && stmtId < maxIt->second)
+                {
+                    record.isHoisted = true;
+                }
+                else
+                {
+                    maxSeenStmtByFunction[function] = stmtId;
+                }
+                auto runIt = stmtRunCounts.find(key);
+                if (runIt != stmtRunCounts.end() && runIt->second > 1)
+                    record.isDuplicated = true;
+            }
+
             std::string out;
             llvm::raw_string_ostream os(out);
             os << "{\"version\":1,\"ops\":[";
             bool firstEntry = true;
 
-            visitSerializedSIROps(module, [&](uint32_t opIndex, Operation &op, func::FuncOp func, Block &block, NameTable &names, bool synthetic, uint32_t syntheticIndex, uint32_t syntheticCount) {
+            for (const DebugRecord &record : records)
+            {
                 if (!firstEntry)
                     os << ",";
 
-                os << "{\"idx\":" << opIndex << ",\"op\":";
-                emitJsonString(os, op.getName().getStringRef());
+                os << "{\"idx\":" << record.idx << ",\"op\":";
+                emitJsonString(os, record.op);
                 os << ",\"function\":";
-                emitJsonString(os, func.getName());
+                emitJsonString(os, record.function);
                 os << ",\"block\":";
-                emitJsonString(os, names.blockNames[&block]);
+                emitJsonString(os, record.block);
                 os << ",\"file\":";
-                if (auto fileLoc = dyn_cast<FileLineColLoc>(op.getLoc()))
+                if (record.file)
                 {
-                    emitJsonString(os, fileLoc.getFilename());
-                    os << ",\"line\":" << fileLoc.getLine()
-                       << ",\"col\":" << fileLoc.getColumn();
+                    emitJsonString(os, *record.file);
+                    os << ",\"line\":" << *record.line
+                       << ",\"col\":" << *record.col;
                 }
                 else
                 {
                     os << "null,\"line\":null,\"col\":null";
                 }
+                os << ",\"statement_id\":";
+                if (record.statementId)
+                    os << *record.statementId;
+                else
+                    os << "null";
+                os << ",\"origin_statement_id\":";
+                if (record.originStatementId)
+                    os << *record.originStatementId;
+                else
+                    os << "null";
+                if (record.executionRegionId)
+                    os << ",\"execution_region_id\":" << *record.executionRegionId;
+                if (record.statementRunIndex)
+                    os << ",\"statement_run_index\":" << *record.statementRunIndex;
                 os << ",\"result_names\":[";
-                for (unsigned i = 0; i < op.getNumResults(); ++i)
+                for (unsigned i = 0; i < record.resultNames.size(); ++i)
                 {
                     if (i != 0)
                         os << ",";
-                    emitJsonString(os, names.nameFor(op.getResult(i)));
+                    emitJsonString(os, record.resultNames[i]);
                 }
-                os << "],\"is_terminator\":" << (op.hasTrait<OpTrait::IsTerminator>() ? "true" : "false")
-                   << ",\"is_synthetic\":" << (synthetic ? "true" : "false");
-                if (synthetic)
+                os << "],\"is_terminator\":" << (record.isTerminator ? "true" : "false")
+                   << ",\"is_synthetic\":" << (record.isSynthetic ? "true" : "false");
+                if (record.syntheticIndex && record.syntheticCount)
                 {
-                    os << ",\"synthetic_index\":" << syntheticIndex
-                       << ",\"synthetic_count\":" << syntheticCount;
+                    os << ",\"synthetic_index\":" << *record.syntheticIndex
+                       << ",\"synthetic_count\":" << *record.syntheticCount;
                 }
+                if (record.isHoisted)
+                    os << ",\"is_hoisted\":true";
+                if (record.isDuplicated)
+                    os << ",\"is_duplicated\":true";
                 os << "}";
                 firstEntry = false;
-            });
+            }
 
             os << "]}";
             os.flush();

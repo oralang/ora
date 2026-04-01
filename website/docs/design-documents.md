@@ -13,6 +13,7 @@ artifacts: they record intent, trade-offs, and open questions.
 ## Current documents
 
 - [Type System (v0.1)](./design-documents/type-system-v0.1)
+- [Optimization-Aware Debugger](./design-documents/optimization-aware-debugger)
 
 ## Contributing
 

@@ -62,11 +62,21 @@ pub const DebugInfo = struct {
         op: []const u8,
         function: []const u8,
         block: []const u8,
+        file: ?[]const u8 = null,
+        line: ?u32 = null,
+        col: ?u32 = null,
         result_names: []const []const u8 = &.{},
         is_terminator: bool = false,
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        statement_id: ?u32 = null,
+        origin_statement_id: ?u32 = null,
+        execution_region_id: ?u32 = null,
+        statement_run_index: ?u32 = null,
+        kind: ?[]const u8 = null,
+        is_hoisted: bool = false,
+        is_duplicated: bool = false,
     };
 
     pub const VisibleLocal = struct {
@@ -92,6 +102,8 @@ pub const DebugInfo = struct {
         function: ?[]const u8 = null,
         contract: ?[]const u8 = null,
         file: ?[]const u8 = null,
+        decl: ?Range = null,
+        live: ?Range = null,
     };
 
     pub fn loadFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !DebugInfo {
@@ -203,6 +215,8 @@ pub const DebugInfo = struct {
                 .function = if (scope) |s| s.function else null,
                 .contract = if (scope) |s| s.contract else null,
                 .file = if (scope) |s| s.file else null,
+                .decl = visible.local.decl,
+                .live = visible.local.live,
             });
         }
 

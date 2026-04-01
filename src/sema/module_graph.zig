@@ -12,7 +12,19 @@ const NamedItem = model.NamedItem;
 const ImplEntry = model.ImplEntry;
 const VisitState = enum(u2) { unvisited, visiting, done };
 
+fn compilerPhaseDebugEnabled() bool {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
+    defer std.heap.page_allocator.free(value);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
+}
+
+fn compilerPhaseLog(comptime fmt: []const u8, args: anytype) void {
+    if (!compilerPhaseDebugEnabled()) return;
+    std.debug.print("compiler-phase: " ++ fmt ++ "\n", args);
+}
+
 pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.PackageId, inputs: []const ModuleGraphInput) !ModuleGraphResult {
+    compilerPhaseLog("build-module-graph begin inputs={d}", .{inputs.len});
     var result = ModuleGraphResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .package_id = package_id,
@@ -25,11 +37,13 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
     const arena = result.arena.allocator();
     var file_paths: std.StringHashMap(source.ModuleId) = .init(arena);
     for (inputs) |input| {
+        compilerPhaseLog("build-module-graph normalize {s}", .{input.file_path});
         try file_paths.put(try normalizeModuleFilePath(arena, input.file_path), input.module_id);
     }
 
     var modules: std.ArrayList(ModuleSummary) = .{};
     for (inputs) |input| {
+        compilerPhaseLog("build-module-graph module {s} scan-imports begin root-items={d}", .{ input.path, input.ast_file.root_items.len });
         var imports: std.ArrayList(ModuleImport) = .{};
         var dependencies: std.ArrayList(source.ModuleId) = .{};
         for (input.ast_file.root_items) |item_id| {
@@ -49,6 +63,7 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
                 });
             }
         }
+        compilerPhaseLog("build-module-graph module {s} scan-imports done deps={d} imports={d}", .{ input.path, dependencies.items.len, imports.items.len });
         try modules.append(arena, .{
             .module_id = input.module_id,
             .file_id = input.file_id,
@@ -58,7 +73,9 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
         });
     }
     result.modules = try modules.toOwnedSlice(arena);
+    compilerPhaseLog("build-module-graph topo begin modules={d}", .{result.modules.len});
     result.topo_order = try buildTopoOrder(arena, result.modules, &result.has_cycles);
+    compilerPhaseLog("build-module-graph topo done order={d} cycles={any}", .{ result.topo_order.len, result.has_cycles });
     return result;
 }
 

@@ -205,8 +205,8 @@ contract ERC20StreamCore {
         stream_deposit[stream_id] = total_amount;
         stream_claimed[stream_id] = 0;
         stream_reclaimed[stream_id] = 0;
-        total_escrowed = total_escrowed + total_amount;
         spec_total_opened = spec_total_opened + total_amount;
+        total_escrowed = total_escrowed + total_amount;
 
         assert(stream_exists[stream_id], "opened stream must exist");
         assert(stream_open[stream_id], "opened stream must be active");

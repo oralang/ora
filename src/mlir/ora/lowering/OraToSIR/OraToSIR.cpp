@@ -2284,6 +2284,68 @@ namespace mlir
         class SimpleOraOptimizationPass : public PassWrapper<SimpleOraOptimizationPass, OperationPass<ModuleOp>>
         {
         public:
+            static bool foldConstantConditionIfs(mlir::func::FuncOp funcOp)
+            {
+                SmallVector<scf::IfOp> ifOps;
+                funcOp.walk([&](scf::IfOp ifOp)
+                            { ifOps.push_back(ifOp); });
+
+                bool changed = false;
+                for (scf::IfOp ifOp : ifOps)
+                {
+                    auto constantOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>();
+                    if (!constantOp)
+                        continue;
+
+                    auto intAttr = llvm::dyn_cast<IntegerAttr>(constantOp.getValue());
+                    auto intType = intAttr ? llvm::dyn_cast<mlir::IntegerType>(intAttr.getType()) : mlir::IntegerType();
+                    if (!intAttr || !intType || intType.getWidth() != 1)
+                        continue;
+
+                    const bool takeThen = intAttr.getValue().getBoolValue();
+                    Region &chosenRegion = takeThen ? ifOp.getThenRegion() : ifOp.getElseRegion();
+
+                    if (chosenRegion.empty())
+                    {
+                        if (ifOp.getNumResults() != 0)
+                            continue;
+                        ifOp.erase();
+                        changed = true;
+                        continue;
+                    }
+
+                    Block &chosenBlock = chosenRegion.front();
+                    auto yieldOp = llvm::dyn_cast<scf::YieldOp>(chosenBlock.getTerminator());
+                    if (!yieldOp)
+                        continue;
+
+                    if (ifOp.getNumResults() != yieldOp.getNumOperands())
+                        continue;
+
+                    IRRewriter rewriter(ifOp.getContext());
+                    rewriter.setInsertionPoint(ifOp);
+
+                    SmallVector<Value> replacementValues;
+                    replacementValues.reserve(yieldOp.getNumOperands());
+                    for (Value operand : yieldOp.getOperands())
+                        replacementValues.push_back(operand);
+
+                    SmallVector<Operation *> toMove;
+                    for (Operation &op : chosenBlock.without_terminator())
+                        toMove.push_back(&op);
+                    for (Operation *op : toMove)
+                        rewriter.moveOpBefore(op, ifOp);
+
+                    if (ifOp.getNumResults() != 0)
+                        rewriter.replaceOp(ifOp, replacementValues);
+                    else
+                        rewriter.eraseOp(ifOp);
+                    changed = true;
+                }
+
+                return changed;
+            }
+
             void runOnOperation() override
             {
                 ModuleOp module = getOperation();
@@ -2362,6 +2424,10 @@ namespace mlir
                         DBG("ERROR: Failed to run passes on function: " << funcOp.getName());
                         signalPassFailure();
                         return;
+                    }
+
+                    while (foldConstantConditionIfs(funcOp))
+                    {
                     }
                     
                     // Print IR after canonicalization
