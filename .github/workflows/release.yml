@@ -145,12 +145,11 @@ jobs:
               echo "## 📦 Download"
               echo ""
               echo "### Compiler"
-              echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
-              echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo "- **Linux (x86_64)**: \`ora-linux-x86_64.tar.gz\`"
+              echo "- **macOS (ARM64)**: \`ora-macos-arm64.tar.gz\`"
               echo ""
               echo "### LSP Server"
-              echo "- **Linux (x86_64)**: \`ora-lsp-linux-x86_64\`"
-              echo "- **macOS (ARM64)**: \`ora-lsp-macos-arm64\`"
+              echo "- Included in the platform archive"
               echo ""
               echo "---"
               echo ""
@@ -189,27 +188,27 @@ jobs:
               echo "## 📦 Download"
               echo ""
               echo "### Compiler"
-              echo "- **Linux (x86_64)**: \`ora-linux-x86_64\`"
-              echo "- **macOS (ARM64)**: \`ora-macos-arm64\`"
+              echo "- **Linux (x86_64)**: \`ora-linux-x86_64.tar.gz\`"
+              echo "- **macOS (ARM64)**: \`ora-macos-arm64.tar.gz\`"
               echo ""
               echo "### LSP Server"
-              echo "- **Linux (x86_64)**: \`ora-lsp-linux-x86_64\`"
-              echo "- **macOS (ARM64)**: \`ora-lsp-macos-arm64\`"
+              echo "- Included in the platform archive"
               echo ""
               echo "## 🔧 Installation"
               echo ""
-              echo "1. Download the binary for your platform"
-              echo "2. Make it executable: \`chmod +x ora-*\`"
-              echo "3. Add to your PATH or run directly"
+              echo "1. Download the archive for your platform"
+              echo "2. Extract it: \`tar -xzf ora-<platform>.tar.gz\`"
+              echo "3. Make the binaries executable: \`chmod +x ora ora-lsp\`"
+              echo "4. Add them to your PATH or run directly"
               echo ""
               echo "## 📖 Usage"
               echo ""
               echo "\`\`\`bash"
               echo "# Compile an Ora source file"
-              echo "./ora-linux-x86_64 my_contract.ora"
+              echo "./ora my_contract.ora"
               echo ""
               echo "# Show help"
-              echo "./ora-linux-x86_64 --help"
+              echo "./ora --help"
               echo "\`\`\`"
               echo ""
               echo "## 🔍 Verification"
@@ -399,21 +398,23 @@ jobs:
         run: |
           echo "📦 Creating binary package..."
           
-          mkdir -p release-package
+          mkdir -p release-package/package
           
-          cp zig-out/bin/ora release-package/ora-${{ matrix.platform }}
-          cp zig-out/bin/ora-lsp release-package/ora-lsp-${{ matrix.platform }}
+          cp zig-out/bin/ora release-package/package/ora
+          cp zig-out/bin/ora-lsp release-package/package/ora-lsp
           
-          cp LICENSE release-package/ 2>/dev/null || echo "LICENSE not found"
-          cp README.md release-package/ 2>/dev/null || echo "README not found"
+          cp LICENSE release-package/package/ 2>/dev/null || echo "LICENSE not found"
+          cp README.md release-package/package/ 2>/dev/null || echo "README not found"
+
+          tar -C release-package/package -czf "release-package/ora-${{ matrix.platform }}.tar.gz" .
           
           ls -la release-package/
-          du -sh release-package/*
+          du -sh release-package/* release-package/package/*
 
       - name: Generate checksums
         run: |
           cd release-package
-          shasum -a 256 "ora-${{ matrix.platform }}" "ora-lsp-${{ matrix.platform }}" > "checksums-${{ matrix.platform }}.txt"
+          shasum -a 256 "ora-${{ matrix.platform }}.tar.gz" > "checksums-${{ matrix.platform }}.txt"
           cat "checksums-${{ matrix.platform }}.txt"
 
       - name: Upload binaries to release
@@ -422,8 +423,7 @@ jobs:
           
           if gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" \
-              "release-package/ora-${{ matrix.platform }}" \
-              "release-package/ora-lsp-${{ matrix.platform }}" \
+              "release-package/ora-${{ matrix.platform }}.tar.gz" \
               --clobber
             echo "✅ Binaries uploaded successfully"
           else
