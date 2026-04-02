@@ -1,6 +1,5 @@
 // Vault -- Tier 6: Traits and impl
-// Trait/impl with bare `self` not yet supported by parser.
-// Simplified to plain contract functions.
+// Simplified to plain contract functions (trait version in corpus/patterns/traits_and_extern_receivers.ora).
 
 error InsufficientBalance(required: u256, available: u256);
 
