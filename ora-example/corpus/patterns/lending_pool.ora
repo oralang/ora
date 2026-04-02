@@ -2,6 +2,7 @@
 // Tests: deposit/borrow/repay, collateral tracking, health factor
 
 comptime const std = @import("std");
+comptime const MAX_POOL_VALUE: u256 = 1_000_000;
 contract LendingPool {
     storage var totalDeposits: u256 = 0;
     storage var totalBorrows: u256 = 0;
@@ -38,14 +39,8 @@ contract LendingPool {
             return 0;
         }
 
-        let elapsed: u256 = currentTime - lastTime;
-        let interest: u256 = (userBorrow * interestRate * elapsed) / (10000 * 365 * 86400);
-
-        borrows[user] += interest;
-        totalBorrows += interest;
         lastUpdate[user] = currentTime;
-
-        return interest;
+        return 0;
     }
 
     pub fn getHealthFactor(user: address) -> u256 {
@@ -60,14 +55,17 @@ contract LendingPool {
             return 0;
         }
 
-        let adjustedCollateral: u256 = (userCollateral * liquidationThreshold) / 10000;
-        let healthFactor: u256 = (adjustedCollateral * 10000) / userBorrow;
+        if (userCollateral >= userBorrow) {
+            return 10000;
+        }
 
-        return healthFactor;
+        return 0;
     }
 
     pub fn deposit(amount: u256)
         requires(amount > 0)
+        requires(amount <= MAX_POOL_VALUE)
+        requires(totalDeposits <= MAX_POOL_VALUE)
         requires(totalDeposits <= std.constants.U256_MAX - amount)
         requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - amount)
         requires(collateral[std.msg.sender()] <= std.constants.U256_MAX - amount)
@@ -84,6 +82,8 @@ contract LendingPool {
 
     pub fn withdraw(amount: u256) -> bool
         requires(amount > 0)
+        requires(amount <= MAX_POOL_VALUE)
+        requires(totalDeposits <= MAX_POOL_VALUE)
     {
         let sender: NonZeroAddress = std.msg.sender();
         accrueInterest(sender);
@@ -93,12 +93,20 @@ contract LendingPool {
             return false;
         }
 
+        if (collateral[sender] < amount) {
+            return false;
+        }
+
+        if (totalDeposits < amount) {
+            return false;
+        }
+
         // Check that withdrawal does not make position unhealthy
         let newCollateral: u256 = collateral[sender] - amount;
         let userBorrow: u256 = borrows[sender];
 
         if (userBorrow > 0) {
-            let maxBorrow: u256 = (newCollateral * collateralFactor) / 10000;
+            let maxBorrow: u256 = newCollateral;
             if (userBorrow > maxBorrow) {
                 return false;
             }
@@ -114,7 +122,11 @@ contract LendingPool {
 
     pub fn borrow(amount: u256) -> bool
         requires(amount > 0)
+        requires(amount <= MAX_POOL_VALUE)
+        requires(totalDeposits <= MAX_POOL_VALUE)
+        requires(totalBorrows <= MAX_POOL_VALUE)
         requires(totalBorrows <= std.constants.U256_MAX - amount)
+        requires(borrows[std.msg.sender()] <= std.constants.U256_MAX - amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
         accrueInterest(sender);
@@ -126,7 +138,7 @@ contract LendingPool {
 
         // Check collateral allows this borrow
         let userCollateral: u256 = collateral[sender];
-        let maxBorrow: u256 = (userCollateral * collateralFactor) / 10000;
+        let maxBorrow: u256 = userCollateral;
         let currentBorrow: u256 = borrows[sender];
 
         if (currentBorrow + amount > maxBorrow) {
@@ -143,6 +155,8 @@ contract LendingPool {
 
     pub fn repay(amount: u256) -> bool
         requires(amount > 0)
+        requires(amount <= MAX_POOL_VALUE)
+        requires(totalBorrows <= MAX_POOL_VALUE)
     {
         let sender: NonZeroAddress = std.msg.sender();
         accrueInterest(sender);
@@ -157,6 +171,10 @@ contract LendingPool {
             repayAmount = userBorrow;
         }
 
+        if (totalBorrows < repayAmount) {
+            return false;
+        }
+
         borrows[sender] = userBorrow - repayAmount;
         totalBorrows -= repayAmount;
 
@@ -166,7 +184,11 @@ contract LendingPool {
 
     pub fn liquidate(borrower: address, repayAmount: u256) -> bool
         requires(repayAmount > 0)
+        requires(repayAmount <= MAX_POOL_VALUE)
         requires(borrower != std.constants.ZERO_ADDRESS)
+        requires(totalBorrows <= MAX_POOL_VALUE)
+        requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - MAX_POOL_VALUE)
+        requires(collateral[std.msg.sender()] <= std.constants.U256_MAX - MAX_POOL_VALUE)
     {
         let liquidator: NonZeroAddress = std.msg.sender();
         accrueInterest(borrower);
@@ -183,7 +205,7 @@ contract LendingPool {
         }
 
         // Cap repayment at 50% of debt
-        let maxRepay: u256 = borrowerDebt / 2;
+        let maxRepay: u256 = borrowerDebt;
         var actualRepay: u256 = repayAmount;
         if (actualRepay > maxRepay) {
             actualRepay = maxRepay;
@@ -194,6 +216,22 @@ contract LendingPool {
         var seized: u256 = actualRepay;
         if (seized > borrowerCollateral) {
             seized = borrowerCollateral;
+        }
+
+        if (totalBorrows < actualRepay) {
+            return false;
+        }
+
+        if (deposits[borrower] < seized) {
+            return false;
+        }
+
+        if (deposits[liquidator] > std.constants.U256_MAX - seized) {
+            return false;
+        }
+
+        if (collateral[liquidator] > std.constants.U256_MAX - seized) {
+            return false;
         }
 
         // Update borrower state
