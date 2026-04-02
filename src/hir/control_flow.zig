@@ -40,17 +40,39 @@ const switchMayReturn = analysis.switchMayReturn;
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
     return struct {
+        fn exprIsCompileTimeOnly(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .BoolLiteral, .IntegerLiteral, .StringLiteral => true,
+                .Group => |group| @This().exprIsCompileTimeOnly(self, group.expr),
+                .Unary => |unary| @This().exprIsCompileTimeOnly(self, unary.operand),
+                .Binary => |binary| @This().exprIsCompileTimeOnly(self, binary.lhs) and @This().exprIsCompileTimeOnly(self, binary.rhs),
+                .Name => blk: {
+                    const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse break :blk false;
+                    break :blk switch (binding) {
+                        .pattern => false,
+                        .item => |item_id| switch (self.parent.file.item(item_id).*) {
+                            .Constant => true,
+                            else => false,
+                        },
+                    };
+                },
+                else => false,
+            };
+        }
+
         pub fn lowerIfStmt(self: *FunctionLowerer, if_stmt: ast.IfStmt, locals: *LocalEnv) anyerror!bool {
             if (self.parent.const_eval.values[if_stmt.condition.index()]) |value| {
                 switch (value) {
                     .boolean => |take_then| {
-                        if (take_then) {
-                            return self.lowerBody(if_stmt.then_body, locals);
+                        if (@This().exprIsCompileTimeOnly(self, if_stmt.condition)) {
+                            if (take_then) {
+                                return self.lowerBody(if_stmt.then_body, locals);
+                            }
+                            if (if_stmt.else_body) |else_body| {
+                                return self.lowerBody(else_body, locals);
+                            }
+                            return false;
                         }
-                        if (if_stmt.else_body) |else_body| {
-                            return self.lowerBody(else_body, locals);
-                        }
-                        return false;
                     },
                     else => {},
                 }

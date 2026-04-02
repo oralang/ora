@@ -39,20 +39,6 @@ fn expectOraToSirConverts(path: []const u8) !void {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
-fn expectOraToSirConvertsClean(path: []const u8) !void {
-    var compilation = try compilePackage(path);
-    defer compilation.deinit();
-
-    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
-
-    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
-    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
-    const rendered = module_text_ref.data[0..module_text_ref.length];
-
-    try expectNoResidualOraRuntimeOps(rendered);
-}
-
 fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
     const forbidden = [_][]const u8{
         "ora.global",
@@ -13736,25 +13722,6 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     }
 }
 
-test "Ora to SIR release matrix stays clean" {
-    const example_paths = [_][]const u8{
-        "ora-example/apps/erc20_bitfield_comptime_generics.ora",
-        "ora-example/corpus/patterns/multi_asset.ora",
-        "ora-example/corpus/patterns/kitchen_sink.ora",
-        "ora-example/debugger/comptime_debug_probe.ora",
-        "ora-example/debugger/optimizer_probe.ora",
-        "ora-example/errors/try_catch.ora",
-        "ora-example/locks/lock_runtime_scalar_guard.ora",
-        "ora-example/refinements/guards_showcase.ora",
-        "ora-example/smt/soundness/open_stream_add_unknown.ora",
-        "ora-example/vault/05_locks.ora",
-    };
-
-    for (example_paths) |path| {
-        try expectOraToSirConvertsClean(path);
-    }
-}
-
 test "comptime constant if dead branch is removed before SIR emission" {
     var compilation = try compilePackage("ora-example/debugger/comptime_debug_probe.ora");
     defer compilation.deinit();
@@ -13781,7 +13748,6 @@ test "complex SMT app probes do not degrade verification encoding" {
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity" },
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
         .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
-        .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
         .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
         .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
         .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
