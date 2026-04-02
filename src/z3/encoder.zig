@@ -8153,9 +8153,7 @@ pub const Encoder = struct {
         if (mlir.oraOperationGetNumOperands(yielded_owner) < 2) return null;
         const add_lhs = mlir.oraOperationGetOperand(yielded_owner, 0);
         const add_rhs = mlir.oraOperationGetOperand(yielded_owner, 1);
-        if (add_lhs.ptr == after_iv.ptr and self.tryGetConstIntValue(add_rhs) == 1) {
-        } else if (add_rhs.ptr == after_iv.ptr and self.tryGetConstIntValue(add_lhs) == 1) {
-        } else {
+        if (add_lhs.ptr == after_iv.ptr and self.tryGetConstIntValue(add_rhs) == 1) {} else if (add_rhs.ptr == after_iv.ptr and self.tryGetConstIntValue(add_lhs) == 1) {} else {
             return null;
         }
 

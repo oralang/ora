@@ -1962,16 +1962,28 @@ test "chained source-metadata struct updates preserve untouched fields exactly" 
     const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
 
     const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
     ), 0);
     const two = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
     ), 0);
     const seven = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
     ), 0);
     const nine = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9),
     ), 0);
 
     const fields = [_]mlir.MlirValue{ one, two };
@@ -2022,16 +2034,28 @@ test "known pure callee chained source-metadata struct updates preserve untouche
     const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
 
     const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
     ), 0);
     const two = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
     ), 0);
     const seven = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
     ), 0);
     const nine = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9),
     ), 0);
     const fields = [_]mlir.MlirValue{ one, two };
     const init_op = mlir.oraStructInitOpCreate(mlir_ctx, loc, &fields, fields.len, struct_ty);
@@ -15851,7 +15875,7 @@ test "known callee nested map write set stays exact" {
         namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writeAllowance"))),
         namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
     };
-    const helper_param_types = [_]mlir.MlirType{i256_ty, i256_ty, i256_ty};
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty, i256_ty };
     const helper_param_locs = [_]mlir.MlirLocation{ loc, loc, loc };
     const helper = mlir.oraFuncFuncOpCreate(
         mlir_ctx,
@@ -16797,13 +16821,22 @@ test "scf.while canonical affine carried-step result encodes exactly" {
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
 
     const zero = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
     ), 0);
     const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
     ), 0);
     const step = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3),
     ), 0);
     const bound = mlir.oraOperationGetResult(mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("affineWhileBound"), i256_ty), 0);
 
@@ -16826,11 +16859,15 @@ test "scf.while canonical affine carried-step result encodes exactly" {
     const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, before_i, bound);
     mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
     mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
-        mlir_ctx, loc, mlir.oraOperationGetResult(cmp_op, 0), &[_]mlir.MlirValue{
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{
             mlir.oraBlockGetArgument(before_block, 0),
             before_i,
             mlir.oraBlockGetArgument(before_block, 2),
-        }, 3,
+        },
+        3,
     ));
 
     const next_sum = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_sum, after_step);
@@ -16838,11 +16875,14 @@ test "scf.while canonical affine carried-step result encodes exactly" {
     mlir.oraBlockAppendOwnedOperation(after_block, next_sum);
     mlir.oraBlockAppendOwnedOperation(after_block, next_i);
     mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
-        mlir_ctx, loc, &[_]mlir.MlirValue{
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{
             mlir.oraOperationGetResult(next_sum, 0),
             mlir.oraOperationGetResult(next_i, 0),
             after_step,
-        }, 3,
+        },
+        3,
     ));
 
     const encoded = try encoder.encodeValue(mlir.oraOperationGetResult(while_op, 0));
@@ -16882,13 +16922,22 @@ test "known pure callee canonical affine carried-step scf.while return encodes e
     const body = mlir.oraFuncOpGetBodyBlock(helper);
 
     const zero = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
     ), 0);
     const one = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
     ), 0);
     const step = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
-        mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3),
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3),
     ), 0);
     const bound = mlir.oraBlockGetArgument(body, 0);
 
@@ -16911,11 +16960,15 @@ test "known pure callee canonical affine carried-step scf.while return encodes e
     const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, before_i, bound);
     mlir.oraBlockAppendOwnedOperation(before_block, cmp_op);
     mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
-        mlir_ctx, loc, mlir.oraOperationGetResult(cmp_op, 0), &[_]mlir.MlirValue{
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cmp_op, 0),
+        &[_]mlir.MlirValue{
             mlir.oraBlockGetArgument(before_block, 0),
             before_i,
             mlir.oraBlockGetArgument(before_block, 2),
-        }, 3,
+        },
+        3,
     ));
 
     const next_sum = mlir.oraArithAddIOpCreate(mlir_ctx, loc, after_sum, after_step);
@@ -16923,11 +16976,14 @@ test "known pure callee canonical affine carried-step scf.while return encodes e
     mlir.oraBlockAppendOwnedOperation(after_block, next_sum);
     mlir.oraBlockAppendOwnedOperation(after_block, next_i);
     mlir.oraBlockAppendOwnedOperation(after_block, mlir.oraScfYieldOpCreate(
-        mlir_ctx, loc, &[_]mlir.MlirValue{
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{
             mlir.oraOperationGetResult(next_sum, 0),
             mlir.oraOperationGetResult(next_i, 0),
             after_step,
-        }, 3,
+        },
+        3,
     ));
     mlir.oraBlockAppendOwnedOperation(body, while_op);
     mlir.oraBlockAppendOwnedOperation(body, mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(while_op, 0)}, 1));
