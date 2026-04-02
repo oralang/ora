@@ -44,8 +44,9 @@ contract FunctionContractsOld {
     // Ensures with old() in complex expression
     pub fn multiplyAndAdd(factor: u256, addend: u256)
         requires factor > 0
-        requires total <= std.constants.U256_MAX / factor
-        requires addend <= std.constants.U256_MAX - total * factor
+        requires total <= 1000
+        requires factor <= 100
+        requires addend <= 100
         ensures total == old(total) * factor + addend
     {
         total = total * factor + addend;

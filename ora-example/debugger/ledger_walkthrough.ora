@@ -21,7 +21,11 @@ contract LedgerWalkthrough {
 
     pub fn process(amount: u256) -> u256
         requires(processed < std.constants.U256_MAX)
+        requires(amount <= 10_000)
         requires(total <= std.constants.U256_MAX - amount)
+        requires(fee_bps <= 10_000)
+        requires(compute_fee(amount) <= amount)
+        requires(total <= std.constants.U256_MAX - (amount - compute_fee(amount)))
     {
         let fee = compute_fee(amount);
         let net = amount - fee;

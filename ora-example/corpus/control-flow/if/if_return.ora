@@ -2,6 +2,8 @@
 // IF RETURN — return inside if branches
 // ==========================================
 
+comptime const std = @import("std");
+
 contract IfReturn {
     // Early return guard
     pub fn guard_check(x: u256) -> u256 {
@@ -35,7 +37,9 @@ contract IfReturn {
     }
 
     // Return in nested if
-    pub fn nested_return(x: u256, y: u256) -> u256 {
+    pub fn nested_return(x: u256, y: u256) -> u256
+        requires(y == 0 or x <= std.constants.U256_MAX - y)
+    {
         if (x > 0) {
             if (y > 0) {
                 return x + y;

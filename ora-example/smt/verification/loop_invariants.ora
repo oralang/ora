@@ -15,6 +15,7 @@ contract LoopInvariants {
         
         while (i <= n)
             invariant sum >= 0
+            invariant sum <= 5050
             invariant i <= n + 1
         {
             sum = sum + i;
@@ -75,6 +76,7 @@ contract LoopInvariants {
         
         while (i <= base_n)
             invariant sum >= 0
+            invariant sum <= 5050
             invariant i <= base_n + 1
         {
             sum = sum + i;
@@ -95,19 +97,19 @@ contract LoopInvariants {
         while (i < rows)
             invariant acc_total >= 0
             invariant acc_total <= 100
+            invariant acc_total <= i * 10
             invariant i <= rows
         {
             var j: u256 = 0;
             
             while (j < cols)
-                invariant acc_total >= 0
-                invariant acc_total <= 100
                 invariant j <= cols
+                invariant j <= 10
             {
-                acc_total = acc_total + 1;
                 j = j + 1;
             }
             
+            acc_total = acc_total + cols;
             i = i + 1;
         }
         

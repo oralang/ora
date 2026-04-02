@@ -19,7 +19,7 @@ contract StateWalkthrough {
 
     pub fn process(amount: u256) -> u256
         requires(amount > 0)
-        requires(total <= std.constants.U256_MAX - amount)
+        requires(total <= std.constants.U256_MAX - apply_fee(amount))
         requires(steps < std.constants.U256_MAX)
     {
         let net = apply_fee(amount);

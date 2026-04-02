@@ -38,7 +38,9 @@ contract OptimizerProbe {
 
     pub fn simulate(recipient: address, tokenId: u256, amount: u256) -> u256
         requires(amount > FIXED_FEE)
-        requires(total <= std.constants.U256_MAX - amount)
+        requires(total <= std.constants.U256_MAX - normalize(amount))
+        requires(normalize(amount) <= std.constants.U256_MAX - rewardBoost(tokenId))
+        requires(total <= std.constants.U256_MAX - (normalize(amount) + rewardBoost(tokenId)))
         requires(runs < std.constants.U256_MAX)
     {
         let normalized = normalize(amount);

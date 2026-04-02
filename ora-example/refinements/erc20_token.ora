@@ -88,8 +88,11 @@ contract ERC20Token {
         to: NonZeroAddress,
         amount: MinValue<u256, 1>
     ) -> !u256 | InsufficientBalance | TransferToZeroAddress | AmountBelowMinimum
+        requires(std.transaction.sender != std.constants.ZERO_ADDRESS)
         requires(to != std.constants.ZERO_ADDRESS)
         requires(amount >= 1)
+        requires(getBalance(std.transaction.sender) >= calculateTotalRequired(amount))
+        requires(getBalance(to) <= std.constants.U256_MAX - calculateTotalRequired(amount))
     {
         // Refined types ensure:
         // - to != 0 (NonZeroAddress)
@@ -140,6 +143,8 @@ contract ERC20Token {
         requires(from != std.constants.ZERO_ADDRESS)
         requires(to != std.constants.ZERO_ADDRESS)
         requires(amount >= 1)
+        requires(getBalance(from) >= calculateTotalRequired(amount))
+        requires(getBalance(to) <= std.constants.U256_MAX - calculateTotalRequired(amount))
     {
         // All parameters are refined types - compile-time and runtime validated
         
