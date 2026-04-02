@@ -1,7 +1,7 @@
 ---
 sidebar_position: 2.5
 title: "Ora Asuka — Feature reference"
-description: "Community-facing, end-to-end reference for Ora's feature set (Asuka pre-release)."
+description: "Community-facing, end-to-end reference for Ora's feature set (Asuka v0.1)."
 ---
 
 # Ora: A New Take on Smart Contracts
@@ -10,7 +10,7 @@ description: "Community-facing, end-to-end reference for Ora's feature set (Asuk
 
 Ora is a smart contract language and compiler for the EVM with two design pillars: **comptime over runtime**—decide as much as possible at compile time (constant folding, refinement discharge, SMT proofs), so runtime is the fallback—and **formal verification and the solver in the normal dev workflow**, the way Foundry put serious testing into the Solidity workflow. FV and Z3 aren’t a separate research step; they’re in the loop: specs next to code, SMT reports in artifacts, counterexamples when a proof fails.
 
-This is the community-facing, end-to-end reference for Ora’s feature set (Asuka pre-release). It’s meant to be readable top-to-bottom and precise enough for technical evaluation.
+This is the community-facing, end-to-end reference for Ora’s feature set (Asuka v0.1). It’s meant to be readable top-to-bottom and precise enough for technical evaluation.
 
 ---
 
@@ -431,19 +431,21 @@ The pipeline is designed for visibility: you can inspect IR and reports at each 
 - Not a Solidity clone.
 - Not “auto-proves everything” without invariants/specs for complex control flow.
 - Not hiding EVM behavior behind abstraction layers.
-- Not promising full stability yet during Asuka: breaking changes are expected while the surface and tooling harden.
+- Not promising full stability yet: breaking changes are possible as the language evolves.
 
 ---
 
-## 18. Status and roadmap (Asuka)
+## 18. Status and roadmap (Asuka v0.1)
 
-Working today:
+Shipped in Asuka v0.1:
 - end-to-end compilation (Ora → SIR → EVM)
 - regions, refinements, specs, Z3 verification, counterexamples
 - checked arithmetic + wrapping + overflow-reporting builtins
 - error unions, logs, switch/ranges, bitfields, formatter, emit/debug artifacts
+- traits with `self` receivers, bounded generics, ghost specs
+- source-level EVM debugger with optimization-aware stepping
 
-In progress:
+Next:
 - stronger diagnostics, deeper verification (loops/quantifiers/interprocedural), parity coverage, tooling stabilization
 
 ---

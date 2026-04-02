@@ -8,7 +8,7 @@ Ora supports splitting code across files using namespace-qualified imports.
 Imported declarations are always accessed through the alias — they are never
 injected into local scope.
 
-> This documents the current Asuka-branch behavior.
+> This documents Asuka v0.1 behavior.
 
 ## Basic usage
 

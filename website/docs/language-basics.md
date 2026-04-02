@@ -6,7 +6,7 @@ sidebar_position: 3
 
 Core language features and syntax in the current implementation.
 
-> Ora is experimental. Current behavior may change without notice.
+> Ora Asuka v0.1. Some behavior may change in future releases.
 
 ## Overview
 

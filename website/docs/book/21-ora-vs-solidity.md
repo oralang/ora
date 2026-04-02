@@ -134,7 +134,7 @@ The compiler enforces region coercion rules at the type level. You can copy from
 
 The region isn't just a codegen hint — it determines what can go wrong with a value. When the compiler knows `balance: u256 @ storage`, it knows this value is part of the reentrancy surface, part of the persistence model, and subject to cross-transaction invariants. When it knows `temp: u256 @ memory`, it knows this value is isolated and safe.
 
-> **Pre-alpha note:** The current compiler allows implicit coercions across regions (calldata → memory → storage) without requiring a guard (`if`, `requires`, or explicit check). This is intentional for pre-alpha — it lets us compile and test more real contract code while the region enforcement rules are finalized. Production Ora will require explicit checks or coercion annotations at region boundaries where safety properties change.
+> **Asuka v0.1 note:** The current compiler allows implicit coercions across regions (calldata → memory → storage) without requiring a guard (`if`, `requires`, or explicit check). Future releases will require explicit checks or coercion annotations at region boundaries where safety properties change.
 
 ---
 

@@ -4,12 +4,12 @@ sidebar_position: 1
 
 # Introduction to Ora
 
-> **Pre-ASUKA Alpha** | **Research-driven** | **Contributors Welcome**
+> **Asuka v0.1** | **Research-driven** | **Contributors Welcome**
 
-Ora is an experimental smart contract language and compiler focused on precise
-semantics, explicit memory regions, and verification-friendly design. The
-compiler is built in Zig and lowers through Ora MLIR to Sensei-IR (SIR) on the
-backend path to EVM bytecode.
+Ora is a smart contract language and compiler focused on precise semantics,
+explicit memory regions, and verification-friendly design. The compiler is
+built in Zig and lowers through Ora MLIR to Sensei-IR (SIR) on the backend
+path to EVM bytecode.
 
 This site has two complementary tracks:
 
@@ -24,11 +24,11 @@ regions, effects, and refinement constraints are surfaced and checked early.
 
 ## Current status
 
-Ora is in **pre-release alpha** on the ASUKA track. The front-end pipeline
-(lexing, parsing, type resolution, and Ora MLIR emission) is active and under
-constant iteration. Backend lowering to Sensei-IR (SIR) and EVM is active.
+Ora has reached **Asuka v0.1** — the first release milestone. The front-end
+pipeline (lexing, parsing, type resolution, and Ora MLIR emission) is stable.
+Backend lowering to Sensei-IR (SIR) and EVM is active.
 
-Expect breaking changes. Nothing here is production-ready.
+Breaking changes are still possible as the language evolves.
 
 ## Research focus
 

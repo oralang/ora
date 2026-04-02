@@ -8,8 +8,8 @@ description: Source-level EVM debugger with optimization-aware statement steppin
 
 Ora ships with a source-level EVM debugger that survives compiler optimizations. Set breakpoints on Ora source lines, step through statements, inspect bindings and machine state, and see exactly how your code lowers to SIR and EVM bytecode — even when the optimizer has reordered, hoisted, duplicated, or folded your code.
 
-> The debugger is pre-release. The workflow is usable today, but some features
-> are intentionally conservative about what they expose.
+> The debugger shipped with Asuka v0.1. Some features are intentionally
+> conservative about what they expose.
 
 ## Quick start
 

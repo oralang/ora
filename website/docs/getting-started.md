@@ -6,8 +6,8 @@ sidebar_position: 2
 
 Set up the Ora development environment and run the current compiler.
 
-> Ora is experimental and not ready for production use. Syntax and features
-> change frequently.
+> Ora Asuka v0.1 is the first release. Syntax and features may still change
+> as the language evolves.
 
 ## Prerequisites
 
@@ -145,4 +145,4 @@ the full guide.
 ## Status
 
 - Examples in `ora-example/` are aligned with the current compiler behavior.
-- Expect breaking changes before ASUKA.
+- Asuka v0.1 is the first release. Breaking changes are still possible.
