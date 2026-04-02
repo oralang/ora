@@ -824,7 +824,7 @@ const Ui = struct {
             .out_of_scope => try self.setCommandStatusFmt("{s} [{s}] = out of scope", .{ binding.name, binding_label }),
             .not_initialized => try self.setCommandStatusFmt("{s} [{s}] = not initialized", .{ binding.name, binding_label }),
             .unavailable => if (std.mem.eql(u8, binding.runtime_kind, "ssa"))
-                try self.setCommandStatusFmt("{s} [{s}] = unavailable [not materialized]", .{ binding.name, binding_label })
+                try self.setCommandStatusFmt("{s} [{s}] = unavailable [not recoverable at this stop]", .{ binding.name, binding_label })
             else
                 try self.setCommandStatusFmt("{s} [{s}] = unavailable", .{ binding.name, binding_label }),
             else => try self.setCommandStatusFmt("{s} [{s}]", .{ binding.name, binding_label }),
@@ -2504,8 +2504,8 @@ const Ui = struct {
         _ = self;
         return switch (provenance orelse return "no runtime coverage") {
             .direct => "direct coverage: executes as written",
-            .synthetic => "synthetic coverage: reached through compiler-generated lowering",
-            .mixed => "mixed coverage: has both direct runtime ops and synthetic lowered ops",
+            .synthetic => "synthetic coverage: reached through compiler-generated lowering only",
+            .mixed => "mixed coverage: partly executes as written and partly through lowered ops",
         };
     }
 
@@ -2856,7 +2856,7 @@ const Ui = struct {
                 self.scratchFmt("{s} {s} [{s}] = not initialized", .{ marker, binding.name, binding_label }) catch binding.name
             else if (availability == .unavailable)
                 if (std.mem.eql(u8, binding.runtime_kind, "ssa"))
-                    self.scratchFmt("{s} {s} [{s}] = unavailable [not materialized]", .{ marker, binding.name, binding_label }) catch binding.name
+                    self.scratchFmt("{s} {s} [{s}] = unavailable [not recoverable at this stop]", .{ marker, binding.name, binding_label }) catch binding.name
                 else
                     self.scratchFmt("{s} {s} [{s}] = unavailable", .{ marker, binding.name, binding_label }) catch binding.name
             else

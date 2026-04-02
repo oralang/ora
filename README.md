@@ -8,8 +8,6 @@ Ora is a smart-contract language and compiler for EVM with explicit semantics, v
 
 > **Pre-release (Asuka track).** Breaking changes are expected. Not production-ready.
 
-Current release-prep status is tracked in [RELEASE_CHECKLIST.md](/Users/logic/Ora/Ora/RELEASE_CHECKLIST.md).
-
 ## What Ora does
 
 ```ora

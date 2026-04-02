@@ -316,7 +316,13 @@ contract ERC20StreamCore {
         return payout;
     }
 
-    pub fn refundableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound | StreamStillOpen {
+    pub fn refundableNow(stream_id: u256, now_ts: u256) -> !u256 | StreamNotFound | StreamStillOpen
+        requires(spec_total_opened >= spec_total_claimed)
+        requires(spec_total_opened - spec_total_claimed >= spec_total_reclaimed)
+        requires(total_escrowed == spec_total_opened - spec_total_claimed - spec_total_reclaimed)
+        requires(accruedAt(stream_id, now_ts) <= stream_deposit[stream_id])
+        requires(stream_deposit[stream_id] - accruedAt(stream_id, now_ts) >= stream_reclaimed[stream_id])
+    {
         if (!stream_exists[stream_id]) {
             return StreamNotFound;
         }
@@ -325,11 +331,11 @@ contract ERC20StreamCore {
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let deposit: u256 = stream_deposit[stream_id];
-        var refundable_total: u256 = 0;
-        if (deposit > accrued) {
-            refundable_total = deposit - accrued;
-        }
         let reclaimed_before: u256 = stream_reclaimed[stream_id];
+        if (deposit <= accrued) {
+            return 0;
+        }
+        let refundable_total: u256 = deposit - accrued;
         if (refundable_total <= reclaimed_before) {
             return 0;
         }
@@ -338,6 +344,11 @@ contract ERC20StreamCore {
 
     pub fn reclaim(stream_id: u256, sender: address, now_ts: u256)
         -> !u256 | Unauthorized | InvalidAddress | StreamNotFound | StreamStillOpen | NotStreamSender | NothingToReclaim | EscrowUnderflow | SpecOverflow
+        requires(spec_total_opened >= spec_total_claimed)
+        requires(spec_total_opened - spec_total_claimed >= spec_total_reclaimed)
+        requires(total_escrowed == spec_total_opened - spec_total_claimed - spec_total_reclaimed)
+        requires(accruedAt(stream_id, now_ts) <= stream_deposit[stream_id])
+        requires(stream_deposit[stream_id] - accruedAt(stream_id, now_ts) >= stream_reclaimed[stream_id])
     {
         if (!onlyAdapter()) {
             return Unauthorized;
@@ -356,15 +367,15 @@ contract ERC20StreamCore {
         }
         let accrued: u256 = accruedAt(stream_id, now_ts);
         let deposit: u256 = stream_deposit[stream_id];
-        var refundable_total: u256 = 0;
-        if (deposit > accrued) {
-            refundable_total = deposit - accrued;
-        }
+        let claimed_before: u256 = stream_claimed[stream_id];
         let reclaimed_before: u256 = stream_reclaimed[stream_id];
+        if (deposit <= accrued) {
+            return NothingToReclaim;
+        }
+        let refundable_total: u256 = deposit - accrued;
         if (refundable_total <= reclaimed_before) {
             return NothingToReclaim;
         }
-        let claimed_before: u256 = stream_claimed[stream_id];
         if (@addWithOverflow(claimed_before, refundable_total).overflow) {
             return SpecOverflow;
         }
