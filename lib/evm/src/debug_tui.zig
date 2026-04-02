@@ -503,7 +503,7 @@ const Ui = struct {
             self.command_status = "quit";
             return true;
         }
-        if (std.mem.eql(u8, raw, "h") or std.mem.eql(u8, raw, "help")) {
+        if (std.mem.eql(u8, raw, "h") or std.mem.eql(u8, raw, "help") or std.mem.eql(u8, raw, "legend") or std.mem.eql(u8, raw, "marks")) {
             try self.describeHelp();
             return false;
         }
@@ -746,19 +746,19 @@ const Ui = struct {
 
     fn describeHelp(self: *Ui) !void {
         self.clearCommandLog();
-        try self.appendLogLine("help: exec   s/:in  x/:op  n next  o out  c cont  p prev");
+        try self.appendLogLine("help: exec   s step-in  x opcode  n next  o out  c continue  p previous");
         try self.appendLogLine("help: print  :print <binding>  gas  stack[i]  mem <off> <words>");
         try self.appendLogLine("help: print  :print slot <hex>  storage  tstore  calldata");
         try self.appendLogLine("help: set    :set <binding> = <v>  gas = <v>  mem <off> = <v>");
         try self.appendLogLine("help: set    :set slot <hex> = <v>");
         try self.appendLogLine("help: break  :break <line>  :delete <line>  :info break");
-        try self.appendLogLine("help: lines  :line-info <line>  :why-line <line>  :origin");
+        try self.appendLogLine("help: lines  :line-info <line>  :why-line <line>  :where  :origin");
         try self.appendLogLine("help: replay :checkpoint  :checkpoints  :restart <id>  :run");
         try self.appendLogLine("help: sess   :write-session <path>  :load-session <path>");
         try self.appendLogLine("help: nav    j/k Ora  J/K SIR  = sync  :sirline <n>  :sirfollow");
         try self.appendLogLine("help: tabs   1..5 tabs  [/] cycle  q quit");
-        try self.appendLogLine("help: marks  . direct  ~ synthetic  + mixed  ! guard");
-        try self.appendLogLine("help: marks  - removed  * break  ^ origin  >|< sir-range");
+        try self.appendLogLine("legend: . direct runtime  ~ synthetic-only  + mixed runtime");
+        try self.appendLogLine("legend: ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
         self.command_status = "help";
     }
 
@@ -1470,7 +1470,7 @@ const Ui = struct {
             if (entry.is_statement) {
                 if (self.shouldAcceptInitialStop(entry, initial_function)) {
                     self.status = "ready";
-                    self.syncFocusFromDebugger();
+                    self.syncInitialFocusFromDebugger();
                     self.alignInitialSourceView();
                     return;
                 }
@@ -1488,7 +1488,7 @@ const Ui = struct {
         }
 
         if (self.session.debugger.isHalted()) self.status = @tagName(self.session.debugger.stop_reason);
-        self.syncFocusFromDebugger();
+        self.syncInitialFocusFromDebugger();
         self.alignInitialSourceView();
     }
 
@@ -1527,6 +1527,18 @@ const Ui = struct {
             }
         }
         if (self.focus_line == null) self.focus_line = self.session.debugger.currentSourceLine();
+    }
+
+    fn syncInitialFocusFromDebugger(self: *Ui) void {
+        if (self.session.debugger.currentEntry()) |entry| {
+            if (entry.is_synthetic or entry.is_hoisted or entry.is_duplicated) {
+                if (self.currentOriginLine()) |origin_line| {
+                    self.focus_line = origin_line;
+                    return;
+                }
+            }
+        }
+        self.syncFocusFromDebugger();
     }
 
     fn shouldPreserveFocusOnTerminalStop(self: *const Ui) bool {
@@ -2241,7 +2253,7 @@ const Ui = struct {
 
     fn drawFooterConsole(self: *Ui, win: Window) void {
         if (self.command_log.items.len == 0) {
-            drawSegments(win, 0, 0, &.{seg(" debugger values show folded constants or rooted runtime values when readable ", style_footer_note())});
+            drawSegments(win, 0, 0, &.{seg(" :help for commands and marker legend  |  values show folded constants or readable runtime roots ", style_footer_note())});
             return;
         }
 
