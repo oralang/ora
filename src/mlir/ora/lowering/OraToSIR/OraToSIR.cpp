@@ -2297,12 +2297,19 @@ namespace mlir
                     if (!constantOp)
                         continue;
 
-                    auto intAttr = llvm::dyn_cast<IntegerAttr>(constantOp.getValue());
-                    auto intType = intAttr ? llvm::dyn_cast<mlir::IntegerType>(intAttr.getType()) : mlir::IntegerType();
-                    if (!intAttr || !intType || intType.getWidth() != 1)
-                        continue;
-
-                    const bool takeThen = intAttr.getValue().getBoolValue();
+                    bool takeThen = false;
+                    if (auto boolAttr = llvm::dyn_cast<BoolAttr>(constantOp.getValue()))
+                    {
+                        takeThen = boolAttr.getValue();
+                    }
+                    else
+                    {
+                        auto intAttr = llvm::dyn_cast<IntegerAttr>(constantOp.getValue());
+                        auto intType = intAttr ? llvm::dyn_cast<mlir::IntegerType>(intAttr.getType()) : mlir::IntegerType();
+                        if (!intAttr || !intType || intType.getWidth() != 1)
+                            continue;
+                        takeThen = intAttr.getValue().getBoolValue();
+                    }
                     Region &chosenRegion = takeThen ? ifOp.getThenRegion() : ifOp.getElseRegion();
 
                     if (chosenRegion.empty())

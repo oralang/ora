@@ -6635,6 +6635,11 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // 4. Inline functions marked with ora.inline attribute
         pm.addPass(mlir::ora::createOraInliningPass());
 
+        // 5. Re-run simple Ora optimization after inlining so constant control
+        // flow introduced or preserved across earlier passes is folded before
+        // Ora emission / Ora->SIR conversion.
+        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
+
         LogicalResult result = pm.run(moduleOp);
 
         if (failed(result))

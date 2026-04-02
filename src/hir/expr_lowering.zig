@@ -69,6 +69,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn tryLowerConstEvalValue(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?mlir.MlirValue {
             const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
             if (@This().exprDependsOnRuntimeState(self, expr_id)) return null;
+            if (@This().exprDependsOnMutablePatternLocals(self, expr_id)) return null;
             const expr = self.parent.file.expression(expr_id).*;
             switch (expr) {
                 .Binary, .Unary, .Comptime, .Group => {},
@@ -155,6 +156,64 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => false,
             };
+        }
+
+        fn exprDependsOnMutablePatternLocals(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Name => blk: {
+                    const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse break :blk false;
+                    break :blk switch (binding) {
+                        .pattern => |pattern_id| @This().patternIsMutableLocal(self, pattern_id) or @This().nameIsMutableLocal(self, self.parent.file.expression(expr_id).Name.name),
+                        .item => false,
+                    };
+                },
+                .Group => |group| @This().exprDependsOnMutablePatternLocals(self, group.expr),
+                .Binary => |binary| @This().exprDependsOnMutablePatternLocals(self, binary.lhs) or @This().exprDependsOnMutablePatternLocals(self, binary.rhs),
+                .Unary => |unary| @This().exprDependsOnMutablePatternLocals(self, unary.operand),
+                .Field => |field| @This().exprDependsOnMutablePatternLocals(self, field.base),
+                .Index => |index| @This().exprDependsOnMutablePatternLocals(self, index.base) or @This().exprDependsOnMutablePatternLocals(self, index.index),
+                .Comptime => false,
+                else => false,
+            };
+        }
+
+        fn patternIsMutableLocal(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            for (self.parent.file.bodies, 0..) |_, body_index| {
+                const body = self.parent.file.body(ast.BodyId.fromIndex(@intCast(body_index))).*;
+                for (body.statements) |statement_id| {
+                    switch (self.parent.file.statement(statement_id).*) {
+                        .VariableDecl => |decl| {
+                            if (decl.pattern != pattern_id) continue;
+                            return switch (decl.binding_kind) {
+                                .let_, .var_ => true,
+                                .constant, .immutable => false,
+                            };
+                        },
+                        else => {},
+                    }
+                }
+            }
+            return false;
+        }
+
+        fn nameIsMutableLocal(self: *FunctionLowerer, name: []const u8) bool {
+            for (self.parent.file.bodies, 0..) |_, body_index| {
+                const body = self.parent.file.body(ast.BodyId.fromIndex(@intCast(body_index))).*;
+                for (body.statements) |statement_id| {
+                    switch (self.parent.file.statement(statement_id).*) {
+                        .VariableDecl => |decl| {
+                            if (self.parent.file.pattern(decl.pattern).* != .Name) continue;
+                            if (!std.mem.eql(u8, self.parent.file.pattern(decl.pattern).Name.name, name)) continue;
+                            return switch (decl.binding_kind) {
+                                .let_, .var_ => true,
+                                .constant, .immutable => false,
+                            };
+                        },
+                        else => {},
+                    }
+                }
+            }
+            return false;
         }
 
         pub fn lowerExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *LocalEnv) anyerror!mlir.MlirValue {

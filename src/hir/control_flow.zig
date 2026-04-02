@@ -41,6 +41,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
     return struct {
         pub fn lowerIfStmt(self: *FunctionLowerer, if_stmt: ast.IfStmt, locals: *LocalEnv) anyerror!bool {
+            if (self.parent.const_eval.values[if_stmt.condition.index()]) |value| {
+                switch (value) {
+                    .boolean => |take_then| {
+                        if (take_then) {
+                            return self.lowerBody(if_stmt.then_body, locals);
+                        }
+                        if (if_stmt.else_body) |else_body| {
+                            return self.lowerBody(else_body, locals);
+                        }
+                        return false;
+                    },
+                    else => {},
+                }
+            }
+
             const has_return =
                 bodyMayReturn(self.parent.file, if_stmt.then_body) or
                 (if_stmt.else_body != null and bodyMayReturn(self.parent.file, if_stmt.else_body.?));

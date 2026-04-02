@@ -255,6 +255,9 @@ pub const VerificationPass = struct {
             if (ann.old_extra_constraints.len > 0) {
                 self.allocator.free(ann.old_extra_constraints);
             }
+            if (ann.loop_entry_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_entry_extra_constraints);
+            }
             if (ann.loop_step_extra_constraints.len > 0) {
                 self.allocator.free(ann.loop_step_extra_constraints);
             }

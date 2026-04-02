@@ -99,6 +99,7 @@ pub const CompilerDb = struct {
     resolution_slots: std.ArrayList(?*sema.NameResolutionResult),
     typecheck_slots: std.ArrayList(TypeCheckCache),
     consteval_slots: std.ArrayList(?*sema.ConstEvalResult),
+    consteval_tainted_slots: std.ArrayList(bool),
     consteval_in_progress: std.ArrayList(bool),
     consteval_sentinel_slots: std.ArrayList(?*sema.ConstEvalResult),
     verification_slots: std.ArrayList(VerificationCache),
@@ -116,6 +117,7 @@ pub const CompilerDb = struct {
             .resolution_slots = .{},
             .typecheck_slots = .{},
             .consteval_slots = .{},
+            .consteval_tainted_slots = .{},
             .consteval_in_progress = .{},
             .consteval_sentinel_slots = .{},
             .verification_slots = .{},
@@ -132,6 +134,7 @@ pub const CompilerDb = struct {
         deinitSlots(self.allocator, &self.resolution_slots);
         deinitCacheSlots(self.allocator, &self.typecheck_slots);
         deinitSlots(self.allocator, &self.consteval_slots);
+        self.consteval_tainted_slots.deinit(self.allocator);
         deinitSlots(self.allocator, &self.consteval_sentinel_slots);
         self.consteval_in_progress.deinit(self.allocator);
         deinitCacheSlots(self.allocator, &self.verification_slots);
@@ -160,6 +163,7 @@ pub const CompilerDb = struct {
         try ensureSlots(self.allocator, &self.resolution_slots, required);
         try self.typecheck_slots.append(self.allocator, TypeCheckCache.init(self.allocator));
         try ensureSlots(self.allocator, &self.consteval_slots, required);
+        try self.consteval_tainted_slots.append(self.allocator, false);
         try self.consteval_in_progress.append(self.allocator, false);
         try ensureSlots(self.allocator, &self.consteval_sentinel_slots, required);
         try self.verification_slots.append(self.allocator, VerificationCache.init(self.allocator));
@@ -276,6 +280,10 @@ pub const CompilerDb = struct {
             key,
         );
         errdefer result.deinit();
+        if (self.consteval_tainted_slots.items[module_id.index()]) {
+            clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+            self.consteval_tainted_slots.items[module_id.index()] = false;
+        }
         try cache.entries.put(typeCheckCacheKey(key), result);
         return result;
     }
@@ -304,8 +312,14 @@ pub const CompilerDb = struct {
 
     pub fn constEval(self: *CompilerDb, module_id: source.ModuleId) !*const sema.ConstEvalResult {
         const slot = &self.consteval_slots.items[module_id.index()];
+        const tainted_slot = &self.consteval_tainted_slots.items[module_id.index()];
         if (slot.* != null) {
-            return slot.*.?;
+            if (tainted_slot.* and self.typecheck_slots.items[module_id.index()].in_progress.count() == 0) {
+                clearPtrSlot(self.allocator, sema.ConstEvalResult, slot);
+                tainted_slot.* = false;
+            } else if (!tainted_slot.*) {
+                return slot.*.?;
+            }
         }
         if (self.consteval_in_progress.items[module_id.index()]) {
             return try self.unknownConstEvalResult(module_id);
@@ -315,6 +329,7 @@ pub const CompilerDb = struct {
 
         const module = self.sources.module(module_id);
         const ast_file = try self.astFile(module.file_id);
+        const tainted = self.typecheck_slots.items[module_id.index()].in_progress.count() != 0;
         const result = try self.allocator.create(sema.ConstEvalResult);
         result.* = try comptime_eval.constEval(self.allocator, ast_file, .{
             .module_id = module_id,
@@ -328,6 +343,7 @@ pub const CompilerDb = struct {
             },
         });
         slot.* = result;
+        tainted_slot.* = tainted;
         return slot.*.?;
     }
 
@@ -474,6 +490,7 @@ pub const CompilerDb = struct {
         clearPtrSlot(self.allocator, sema.NameResolutionResult, &self.resolution_slots.items[module_id.index()]);
         self.typecheck_slots.items[module_id.index()].clear(self.allocator);
         clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+        self.consteval_tainted_slots.items[module_id.index()] = false;
         self.consteval_in_progress.items[module_id.index()] = false;
         clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
         self.verification_slots.items[module_id.index()].clear(self.allocator);

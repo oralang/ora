@@ -224,7 +224,7 @@ const ConstEvaluator = struct {
                     if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
                 },
                 .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
-                .Assign => |assign| _ = self.evalExpr(assign.value) catch null,
+                .Assign => |assign| _ = self.evalComptimeAssign(assign) catch null,
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
                 },
@@ -350,6 +350,7 @@ const ConstEvaluator = struct {
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| {
                     break :blk try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 }
+                if (self.last_error != null) break :blk null;
                 break :blk try self.evalCall(call, use_cache);
             },
             .Builtin => |builtin| blk: {
@@ -1433,6 +1434,7 @@ const ConstEvaluator = struct {
         switch (self.file.expression(expr_id).*) {
             .Call => |call| {
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| return ct_value;
+                if (self.last_error != null) return null;
             },
             else => {
                 if (try self.evalExprCtValue(expr_id)) |ct_value| return ct_value;
@@ -2253,10 +2255,14 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
-        const rhs = (try self.evalExprUncached(assign.value)) orelse return null;
-        const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse (try constToCtValue(rhs)) orelse return null;
+        const rhs_const = try self.evalExprUncached(assign.value);
+        const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse blk: {
+            const rhs = rhs_const orelse break :blk null;
+            break :blk (try constToCtValue(rhs)) orelse break :blk null;
+        } orelse return null;
         switch (self.file.pattern(assign.target).*) {
             .Name => |name| {
+                const rhs = rhs_const orelse return null;
                 const value = switch (assign.op) {
                     .assign => rhs,
                     .add_assign => (try evalBinary(self.allocator, .add, try self.readBoundName(name.name), rhs)) orelse return null,
@@ -2277,7 +2283,22 @@ const ConstEvaluator = struct {
                 try self.bindName(name.name, value);
                 return value;
             },
+            .StructDestructure => |destructure| {
+                if (assign.op != .assign) return null;
+                const heap_id = switch (rhs_ct) {
+                    .struct_ref => |heap_id| heap_id,
+                    else => return null,
+                };
+                const struct_data = self.env.heap.getStruct(heap_id);
+                for (destructure.fields) |field| {
+                    const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                    if (field_index >= struct_data.fields.len) return null;
+                    try self.bindPatternCtValue(field.binding, struct_data.fields[field_index].value);
+                }
+                return rhs_const;
+            },
             .Index => |index| {
+                const rhs = rhs_const orelse return null;
                 const base_name = switch (self.file.pattern(index.base).*) {
                     .Name => |name| name.name,
                     else => return null,
@@ -2398,6 +2419,7 @@ const ConstEvaluator = struct {
                 });
             },
             .Field => |field| {
+                const rhs = rhs_const orelse return null;
                 const base_name = switch (self.file.pattern(field.base).*) {
                     .Name => |name| name.name,
                     else => return null,
