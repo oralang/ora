@@ -122,6 +122,6 @@ The Ora version makes five things *compiler-checked* that would otherwise be con
 ## Where to go from here
 
 - **Reference docs** — each feature has a dedicated reference page linked from its chapter
-- **Formal specification** — [`docs/formal-specs/ora-2.md`](https://github.com/oralang/Ora) for the type system calculus
+- **Formal specification** — [`docs/formal-specs/ora-2.md`](https://github.com/oralang/Ora/blob/main/docs/formal-specs/ora-2.md) for the type system calculus
 - **Compiler Field Guide** — [Field Guide](../compiler/field-guide) for contributing to the compiler
 - **Examples** — `ora-example/` in the repository for more contract patterns

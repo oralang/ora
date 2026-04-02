@@ -7,7 +7,6 @@ sidebar_position: 3
 Core language features and syntax in the current implementation.
 
 > Ora is experimental. Current behavior may change without notice.
-> behavior and may change without notice.
 
 ## Overview
 
@@ -93,8 +92,8 @@ error InsufficientBalance;
 error InvalidAddress;
 
 fn transfer(to: address, amount: u256) -> !u256 | InsufficientBalance | InvalidAddress {
-    if (amount == 0) return error.InvalidAddress;
-    if (balance < amount) return error.InsufficientBalance;
+    if (amount == 0) return InvalidAddress;
+    if (balance < amount) return InsufficientBalance;
     balance -= amount;
     return balance;
 }
@@ -116,12 +115,12 @@ Switch works as expression or statement:
 fn grade(score: u32) -> u8 {
     var g: u8 = 0;
     switch (score) {
-        0...59   => g = 0;,
-        60...69  => g = 1;,
-        70...79  => g = 2;,
-        80...89  => g = 3;,
-        90...100 => g = 4;,
-        else     => g = 5;,
+        0...59   => { g = 0; }
+        60...69  => { g = 1; }
+        70...79  => { g = 2; }
+        80...89  => { g = 3; }
+        90...100 => { g = 4; }
+        else     => { g = 5; }
     }
     return g;
 }

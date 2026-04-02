@@ -47,7 +47,7 @@ While loops can carry an `invariant` clause for formal verification (covered in 
 
 ```ora
 while (i < limit)
-    invariant(i <= limit)
+    invariant i <= limit
 {
     i += 1;
 }

@@ -21,7 +21,7 @@ pub fn add(a: u256, b: u256) -> u256 {
 
 ```ora
 // main.ora
-const math = @import("./math.ora");
+comptime const math = @import("./math.ora");
 
 contract Calculator {
     pub fn run() -> u256 {
@@ -36,11 +36,11 @@ renaming — the alias `math` is a namespace boundary.
 ## Syntax
 
 ```ora
-const <alias> = @import("<specifier>");
+comptime const <alias> = @import("<specifier>");
 ```
 
 - The alias is **required**. Omitting it is a compile error (`ImportAliasRequired`).
-- One import per `const` declaration.
+- One import per `comptime const` declaration.
 - Imports must appear at the top level (outside contracts).
 
 ## Import specifiers
@@ -48,8 +48,8 @@ const <alias> = @import("<specifier>");
 ### Relative imports
 
 ```ora
-const math = @import("./math.ora");
-const utils = @import("../lib/utils.ora");
+comptime const math = @import("./math.ora");
+comptime const utils = @import("../lib/utils.ora");
 ```
 
 - Must end with `.ora`. Missing extension is an error.
@@ -57,7 +57,7 @@ const utils = @import("../lib/utils.ora");
 ### Package imports
 
 ```ora
-const math = @import("acme/math");
+comptime const math = @import("acme/math");
 ```
 
 - Format is `package/module`.
@@ -67,7 +67,7 @@ const math = @import("acme/math");
 ### Built-in std
 
 ```ora
-const stdlib = @import("std");
+comptime const stdlib = @import("std");
 ```
 
 The `std` specifier is recognized by the compiler and provides built-in
@@ -78,7 +78,7 @@ functions and constants (e.g. `std.transaction.sender`).
 Imported members are accessed with dot-qualified syntax:
 
 ```ora
-const math = @import("./math.ora");
+comptime const math = @import("./math.ora");
 
 contract Example {
     pub fn compute() -> u256 {
@@ -103,7 +103,7 @@ For non-entry modules, the following top-level declarations are allowed in v1:
 | `pub fn` | Yes |
 | `struct` | Yes |
 | `bitfield` | Yes |
-| `const` (import) | Yes |
+| `comptime const` (import) | Yes |
 | comptime-only `fn` | Yes |
 | `contract` | No (v2) |
 | `enum` | No (v2) |
@@ -122,7 +122,7 @@ pub fn add(a: u256, b: u256) -> u256 { return a + b; }
 
 ```ora
 // ops.ora
-const math = @import("./math.ora");
+comptime const math = @import("./math.ora");
 
 pub fn twice(x: u256) -> u256 {
     return math.add(x, x);
@@ -131,7 +131,7 @@ pub fn twice(x: u256) -> u256 {
 
 ```ora
 // Main.ora
-const ops = @import("./ops.ora");
+comptime const ops = @import("./ops.ora");
 
 contract Main {
     pub fn run() -> u256 {

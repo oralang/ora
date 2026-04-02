@@ -18,7 +18,7 @@ This site has two complementary tracks:
 
 ## What Ora is
 
-Ora is not a Solidity clone. A language for contracts where the
+Ora is not a Solidity clone. It is a language for contracts where the
 compiler is a first-class research artifact. The design favors explicitness:
 regions, effects, and refinement constraints are surfaced and checked early.
 

@@ -383,7 +383,7 @@ Total overhead: zero (direct opcode mapping).
 
 ### Integration with Other APIs
 
-The standard library integrates seamlessly with other compiler phases:
+The standard library integrates with other compiler phases:
 
 **Semantic Analysis**:
 ```zig

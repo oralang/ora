@@ -8,7 +8,7 @@ The complete Application Binary Interface (ABI) specification for Ora contracts.
 
 ## Overview
 
-Ora ABI is a professional, tooling-first interface layer for smart contracts, with strong support for UI/UX, code generation, and stable type identities.
+The Ora ABI defines the interface layer for smart contracts, covering type identity, code generation, and UI integration.
 
 Ora ABI is split into two layers:
 

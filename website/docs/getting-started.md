@@ -47,7 +47,7 @@ zig build test
 ./zig-out/bin/ora fmt contract.ora
 
 # Emit Ora MLIR
-./zig-out/bin/ora emit-mlir ora-example/smoke.ora
+./zig-out/bin/ora --emit-mlir ora-example/smoke.ora
 ```
 
 ## Start a new project
@@ -107,7 +107,7 @@ See [Code Formatter](./code-formatter.md) for details.
 Ora supports namespace-qualified imports for splitting code across files:
 
 ```ora
-const math = @import("./math.ora");
+comptime const math = @import("./math.ora");
 
 contract Calculator {
     pub fn run() -> u256 {

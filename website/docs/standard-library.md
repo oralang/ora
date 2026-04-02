@@ -410,7 +410,7 @@ Here's a token contract using the standard library:
 contract SimpleToken {
     storage totalSupply: u256;
     storage balances: map<address, u256>;
-    storage allowances: doublemap<address, address, u256>;
+    storage allowances: map<address, map<address, u256>>;
     
     pub fn initialize(initialSupply: u256) -> bool {
         let deployer = std.msg.sender();
@@ -506,7 +506,7 @@ Use `std.msg.sender()` for most access control!
 
 ### Q: Do I need to import the standard library?
 
-**A**: No. The standard library is always available - just use `std.` prefix.
+**A**: Yes. Add `comptime const std = @import("std");` at the top of your file.
 
 ### Q: What's the gas cost?
 

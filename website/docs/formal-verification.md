@@ -1,6 +1,7 @@
 # Formal Verification
 
-Formal verification is a primary Ora feature: correctness properties are\n+explicit, mechanically checked, and traceable through the compiler pipeline.
+Formal verification is a primary Ora feature: correctness properties are
+explicit, mechanically checked, and traceable through the compiler pipeline.
 
 Research intent and current front-end integration.
 No guarantee of end-to-end proofs for all programs.

@@ -26,9 +26,9 @@ contract Payments {
     storage var balances: map<NonZeroAddress, u256>;
 
     fn withdraw(to: NonZeroAddress, amount: u256) -> !u256 | InvalidAmount | InsufficientBalance {
-        if (amount == 0) return error.InvalidAmount;
+        if (amount == 0) return InvalidAmount;
         if (balances[to] < amount) {
-            return error.InsufficientBalance(amount, balances[to]);
+            return InsufficientBalance(amount, balances[to]);
         }
         balances[to] = balances[to] - amount;
         return balances[to];
@@ -45,7 +45,7 @@ contract Wallet {
     error Fail;
 
     fn mayFail(x: u256) -> !u256 | Fail {
-        if (x == 0) return error.Fail;
+        if (x == 0) return Fail;
         return x + 1;
     }
 
@@ -68,7 +68,7 @@ contract Transfers {
     log Failed(to: address, amount: u256);
 
     fn move(to: NonZeroAddress, amount: u256) -> !u256 | InsufficientBalance {
-        if (amount == 0) return error.InsufficientBalance;
+        if (amount == 0) return InsufficientBalance;
         return amount;
     }
 

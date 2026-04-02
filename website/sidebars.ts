@@ -78,7 +78,6 @@ const sidebars: SidebarsConfig = {
         'memory-regions',
         'error-unions',
         'refinement-types',
-        'inline-functions',
         'logs-and-events',
         'standard-library',
       ],
