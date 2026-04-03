@@ -2024,6 +2024,7 @@ const DebugLocalInfo = struct {
     runtime_location_slot: ?u64,
     editable: bool,
     folded_value: ?[]const u8,
+    is_folded: bool,
 };
 
 const DebugScopeInfo = struct {
@@ -2083,6 +2084,7 @@ const ExtraScopeBinding = struct {
     runtime_location_slot: ?u64 = null,
     editable: bool = false,
     folded_value: ?[]const u8 = null,
+    is_folded: bool = false,
 };
 
 fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
@@ -2194,6 +2196,7 @@ fn appendPatternDebugLocals(
     runtime_location_slot: ?u64,
     editable: bool,
     folded_value: ?[]const u8,
+    is_folded: bool,
     next_local_id: *u32,
     locals: *std.ArrayList(DebugLocalInfo),
 ) !void {
@@ -2216,6 +2219,7 @@ fn appendPatternDebugLocals(
                 .runtime_location_slot = runtime_location_slot,
                 .editable = editable,
                 .folded_value = folded_value,
+                .is_folded = is_folded,
             });
             next_local_id.* += 1;
         },
@@ -2239,6 +2243,7 @@ fn appendPatternDebugLocals(
                     runtime_location_slot,
                     editable,
                     folded_value,
+                    is_folded,
                     next_local_id,
                     locals,
                 );
@@ -2262,6 +2267,7 @@ fn appendPatternDebugLocals(
             runtime_location_slot,
             editable,
             folded_value,
+            is_folded,
             next_local_id,
             locals,
         ),
@@ -2283,6 +2289,7 @@ fn appendPatternDebugLocals(
             runtime_location_slot,
             editable,
             folded_value,
+            is_folded,
             next_local_id,
             locals,
         ),
@@ -2333,6 +2340,7 @@ fn collectBodyScopeDebugInfo(
                 binding.runtime_location_slot,
                 binding.editable,
                 binding.folded_value,
+                binding.is_folded,
                 &state.next_local_id,
                 locals,
             );
@@ -2354,6 +2362,7 @@ fn collectBodyScopeDebugInfo(
                 .runtime_location_slot = binding.runtime_location_slot,
                 .editable = binding.editable,
                 .folded_value = binding.folded_value,
+                .is_folded = binding.is_folded,
             });
             state.next_local_id += 1;
         }
@@ -2427,6 +2436,7 @@ fn collectBodyScopeDebugInfo(
                         },
                     ),
                     folded_value,
+                    folded_value != null,
                     &state.next_local_id,
                     locals,
                 );
@@ -2593,12 +2603,13 @@ fn collectItemDebugScopes(
                             .runtime_name = field.name,
                             .runtime_location_kind = debugRuntimeLocationKindForStorageClass(field.storage_class, global_slots.get(field.name)),
                             .runtime_location_root = debugRuntimeLocationRootForStorageClass(field.storage_class, global_slots.get(field.name), field.name),
-                            .runtime_location_slot = global_slots.get(field.name),
-                            .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
-                            .folded_value = null,
-                        });
-                    }
+                        .runtime_location_slot = global_slots.get(field.name),
+                        .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
+                        .folded_value = null,
+                        .is_folded = false,
+                    });
                 }
+            }
             }
             try collectBodyScopeDebugInfo(
                 allocator,
@@ -4922,6 +4933,7 @@ fn writeDebugInfoSidecar(
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.print(",\"is_folded\":{s}", .{if (local.is_folded) "true" else "false"});
                 try writer.writeAll(",\"decl\":");
                 try writeDebugRangeJson(writer, sources, local.file_id, local.decl_range);
                 try writer.writeAll(",\"live\":");

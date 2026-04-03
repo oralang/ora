@@ -758,7 +758,7 @@ const Ui = struct {
         try self.appendLogLine("help: nav    j/k Ora  J/K SIR  = sync  :sirline <n>  :sirfollow");
         try self.appendLogLine("help: tabs   1..5 tabs  [/] cycle  q quit");
         try self.appendLogLine("legend: . direct runtime  ~ synthetic-only  + mixed runtime");
-        try self.appendLogLine("legend: ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
+        try self.appendLogLine("legend: = folded  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
         self.command_status = "help";
     }
 
@@ -1130,6 +1130,13 @@ const Ui = struct {
     fn describeLineInfo(self: *Ui, line: u32) !void {
         const src_map = &self.session.debugger.src_map;
         const file = self.seed.source_path;
+        if (self.isFoldedSourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: folded source line; {s}", .{
+                line,
+                self.foldedLineExplanation(line),
+            });
+            return;
+        }
         if (self.isRemovedSourceLine(line)) {
             try self.setCommandStatusFmt("line {d}: removed source line; {s}", .{
                 line,
@@ -2219,7 +2226,7 @@ const Ui = struct {
 
         const help = win.child(.{ .y_off = @intCast(win.height - 1), .height = 1 });
         help.fill(.{ .char = .{ .grapheme = " " }, .style = style_header_title() });
-        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
+        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  = folded  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
     }
 
     fn clearCommandLog(self: *Ui) void {
@@ -2377,6 +2384,8 @@ const Ui = struct {
             const text = std.mem.trimRight(u8, line_text, "\r");
             const style = if (line == current_line)
                 Style{ .bg = Color.rgbFromUint(0x303A45), .fg = Color.rgbFromUint(0xF5F7FA) }
+            else if (self.isFoldedSourceLine(line))
+                style_hint()
             else if (self.isRemovedSourceLine(line))
                 style_dead()
             else
@@ -2490,6 +2499,7 @@ const Ui = struct {
     }
 
     fn statementKindLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
         const kind = self.statementKindForLine(line) orelse return "none";
         return switch (kind) {
@@ -2507,6 +2517,7 @@ const Ui = struct {
     }
 
     fn lineProvenanceLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
         const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line) orelse return "none";
         return provenance.label();
@@ -2521,10 +2532,34 @@ const Ui = struct {
         };
     }
 
+    fn foldedLineExplanation(self: *Ui, line: u32) []const u8 {
+        _ = self;
+        _ = line;
+        return "folded at compile time: source declaration stays visible, but runtime uses the folded value directly";
+    }
+
     fn removedLineExplanation(self: *Ui, line: u32) []const u8 {
         _ = self;
         _ = line;
         return "removed from runtime: source declaration has no SIR or bytecode coverage";
+    }
+
+    fn isFoldedSourceLine(self: *Ui, line: u32) bool {
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
+        const info = self.session.debugger.debug_info orelse return false;
+        if (!self.lineInAnyFunctionScope(info, line)) return false;
+
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line < range.start.line or line > range.end.line) continue;
+            for (scope.locals) |local| {
+                const decl = local.decl orelse continue;
+                if (decl.start.line != line) continue;
+                if (local.is_folded) return true;
+            }
+        }
+        return false;
     }
 
     fn isRemovedSourceLine(self: *Ui, line: u32) bool {
@@ -2540,7 +2575,6 @@ const Ui = struct {
             for (scope.locals) |local| {
                 const decl = local.decl orelse continue;
                 if (decl.start.line != line) continue;
-                if (local.folded_value != null) return true;
                 if (std.mem.eql(u8, local.runtime.kind, "ssa")) return true;
             }
         }
@@ -3107,7 +3141,9 @@ const Ui = struct {
             }
 
             if (row < root.height) {
-                const explain_line = if (self.isRemovedSourceLine(current_line))
+                const explain_line = if (self.isFoldedSourceLine(current_line))
+                    self.foldedLineExplanation(current_line)
+                else if (self.isRemovedSourceLine(current_line))
                     self.removedLineExplanation(current_line)
                 else
                     self.scratchFmt("{s}; {s}", .{
@@ -3485,7 +3521,7 @@ const Ui = struct {
     ) BindingAvailability {
         if (self.bindingBeforeDeclaration(binding)) return .not_initialized;
         if (self.bindingPastLiveRange(binding)) return .out_of_scope;
-        if (binding.folded_value != null) return .derived;
+        if (binding.is_folded or binding.folded_value != null) return .derived;
         if (std.mem.eql(u8, binding.runtime_kind, "optimized_out")) return .optimized_away;
         if (resolved_value != null) {
             if (std.mem.eql(u8, binding.runtime_kind, "ssa")) return .derived;
@@ -3660,6 +3696,7 @@ const Ui = struct {
             const is_origin = if (origin_line) |origin| origin == line and origin != current_line else false;
             const kind = self.statementKindForLine(line);
             const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line);
+            const folded = self.isFoldedSourceLine(line);
             const removed = self.isRemovedSourceLine(line);
             const marker = if (has_break and is_current)
                 ">"
@@ -3667,6 +3704,8 @@ const Ui = struct {
                 "*"
             else if (is_origin)
                 "^"
+            else if (folded)
+                "="
             else if (removed)
                 "-"
             else if (provenance == .mixed)
@@ -3683,6 +3722,8 @@ const Ui = struct {
                 style_changed()
             else if (is_origin)
                 style_emphasis()
+            else if (folded)
+                style_hint()
             else if (removed)
                 style_dead()
             else if (provenance == .mixed)

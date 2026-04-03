@@ -35,6 +35,7 @@ pub const DebugInfo = struct {
         storage_class: ?[]const u8 = null,
         runtime: Runtime,
         folded_value: ?[]const u8 = null,
+        is_folded: bool = false,
         decl: ?Range = null,
         live: ?Range = null,
     };
@@ -97,6 +98,7 @@ pub const DebugInfo = struct {
         runtime_location_slot: ?u64 = null,
         editable: bool,
         folded_value: ?[]const u8 = null,
+        is_folded: bool = false,
         scope_id: ?u32 = null,
         scope_kind: ?[]const u8 = null,
         function: ?[]const u8 = null,
@@ -210,6 +212,7 @@ pub const DebugInfo = struct {
                 .runtime_location_slot = if (visible.local.runtime.location) |location| location.slot else null,
                 .editable = visible.local.runtime.editable,
                 .folded_value = visible.local.folded_value,
+                .is_folded = visible.local.is_folded,
                 .scope_id = if (scope) |s| s.id else null,
                 .scope_kind = if (scope) |s| s.kind else null,
                 .function = if (scope) |s| s.function else null,
