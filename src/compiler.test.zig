@@ -11682,6 +11682,61 @@ test "compiler unrolls small constant runtime while loops with unlabeled continu
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.3.4") != null);
 }
 
+test "compiler unrolls small constant labeled runtime while loops with labeled break" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let i = 0;
+        \\        let sum = 0;
+        \\        outer: while (i < 4) {
+        \\            if (i == 2) {
+        \\                break :outer;
+        \\            }
+        \\            sum += i;
+        \\            i += 1;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.break") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3") != null);
+}
+
+test "compiler unrolls small constant labeled runtime while loops with labeled continue" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let i = 0;
+        \\        let sum = 0;
+        \\        outer: while (i < 4) {
+        \\            i += 1;
+        \\            if (i == 2) {
+        \\                continue :outer;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.3.4") != null);
+}
+
 test "compiler leaves optional partial evaluation runtime when recursion limit is exceeded" {
     const source_text =
         \\comptime fn factorial(n: u256) -> u256 {
