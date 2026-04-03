@@ -126,17 +126,6 @@ pub const LocalEnv = struct {
         _ = self.known_bools.remove(local_id);
     }
 
-    pub fn setValueWithKnownInt(self: *LocalEnv, local_id: LocalId, value: mlir.MlirValue, known_int: ?i64) !void {
-        if (!self.values.contains(local_id)) return error.UnknownLocalId;
-        try self.values.put(local_id, value);
-        if (known_int) |integer| {
-            try self.known_ints.put(local_id, integer);
-            _ = self.known_bools.remove(local_id);
-        } else {
-            _ = self.known_ints.remove(local_id);
-        }
-    }
-
     pub fn setPatternKnownInt(self: *LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId, known_int: ?i64) !void {
         switch (file.pattern(pattern_id).*) {
             .StructDestructure => |destructure| {

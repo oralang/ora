@@ -33,12 +33,12 @@ const LoopContext = support.LoopContext;
 const SwitchContext = support.SwitchContext;
 const UnrolledLoopContext = support.UnrolledLoopContext;
 const UnrolledLoopSignal = support.UnrolledLoopSignal;
+const runtime_loop_unroll_limit = support.runtime_loop_unroll_limit;
+const runtime_total_unroll_budget = support.runtime_total_unroll_budget;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const statementMayReturn = analysis.statementMayReturn;
-const runtime_for_unroll_limit: u64 = 8;
-const runtime_total_unroll_budget: u64 = 16;
 
 fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
@@ -2565,7 +2565,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (for_stmt.invariants.len != 0) return null;
 
             const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
-            if (finite_range.trip_count > runtime_for_unroll_limit) return null;
+            if (finite_range.trip_count > runtime_loop_unroll_limit) return null;
             if (self.unroll_multiplier > runtime_total_unroll_budget / finite_range.trip_count) return null;
 
             var unrolled_loop_context = UnrolledLoopContext{

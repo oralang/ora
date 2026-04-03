@@ -25,6 +25,9 @@ pub const UnrolledLoopContext = struct {
     signal: UnrolledLoopSignal = .none,
 };
 
+pub const runtime_loop_unroll_limit: u64 = 8;
+pub const runtime_total_unroll_budget: u64 = 16;
+
 pub const BlockContext = struct {
     parent: ?*const BlockContext,
     label: ?[]const u8 = null,

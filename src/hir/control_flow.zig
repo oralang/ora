@@ -12,6 +12,8 @@ const SwitchContext = support.SwitchContext;
 const SwitchPatternData = support.SwitchPatternData;
 const UnrolledLoopContext = support.UnrolledLoopContext;
 const UnrolledLoopSignal = support.UnrolledLoopSignal;
+const runtime_loop_unroll_limit = support.runtime_loop_unroll_limit;
+const runtime_total_unroll_budget = support.runtime_total_unroll_budget;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
@@ -38,8 +40,6 @@ const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const collectSwitchCarriedLocals = analysis.collectSwitchCarriedLocals;
 const collectTryCarriedLocals = analysis.collectTryCarriedLocals;
 const switchMayReturn = analysis.switchMayReturn;
-const runtime_while_unroll_limit: u64 = 8;
-const runtime_total_unroll_budget: u64 = 16;
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
@@ -654,7 +654,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             while (true) {
                 const condition = FunctionLowerer.evalKnownBoolExpr(self, while_stmt.condition, &simulated_locals) orelse return null;
                 if (!condition) break;
-                if (trip_count >= runtime_while_unroll_limit) return null;
+                if (trip_count >= runtime_loop_unroll_limit) return null;
                 const signal = try @This().simulateUnrolledWhileBody(self, while_stmt.body, &simulated_locals, while_stmt.label) orelse return null;
                 trip_count += 1;
                 switch (signal) {
@@ -779,7 +779,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     while (true) {
                         const condition = FunctionLowerer.evalKnownBoolExpr(self, nested_while.condition, locals) orelse break :blk null;
                         if (!condition) break;
-                        if (trip_count >= runtime_while_unroll_limit) break :blk null;
+                        if (trip_count >= runtime_loop_unroll_limit) break :blk null;
                         const signal = try @This().simulateUnrolledWhileBody(self, nested_while.body, locals, nested_while.label) orelse break :blk null;
                         trip_count += 1;
                         switch (signal) {

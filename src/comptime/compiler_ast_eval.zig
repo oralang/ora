@@ -604,7 +604,7 @@ const ConstEvaluator = struct {
 
     fn evalExprCtValueAsImpl(self: *ConstEvaluator, expr_id: ast.ExprId, target: ValueConstructionTarget, comptime use_cache: bool) anyerror!?CtValue {
         return switch (target) {
-                    .none => try self.evalExprCtValueImpl(expr_id, use_cache, true),
+            .none => try self.evalExprCtValueImpl(expr_id, use_cache, true),
             .slice => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral => |array| blk: {
                     const elems = try self.allocator.alloc(CtValue, array.elements.len);
