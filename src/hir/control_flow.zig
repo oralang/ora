@@ -10,6 +10,8 @@ const LoopContext = support.LoopContext;
 const BlockContext = support.BlockContext;
 const SwitchContext = support.SwitchContext;
 const SwitchPatternData = support.SwitchPatternData;
+const UnrolledLoopContext = support.UnrolledLoopContext;
+const UnrolledLoopSignal = support.UnrolledLoopSignal;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
@@ -36,6 +38,7 @@ const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const collectSwitchCarriedLocals = analysis.collectSwitchCarriedLocals;
 const collectTryCarriedLocals = analysis.collectTryCarriedLocals;
 const switchMayReturn = analysis.switchMayReturn;
+const runtime_while_unroll_limit: u64 = 8;
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
@@ -455,6 +458,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
+            if (try @This().lowerUnrolledFiniteWhileStmt(self, while_stmt, locals)) |terminated| {
+                return terminated;
+            }
+
             const has_return = bodyMayReturn(self.parent.file, while_stmt.body);
             if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body)) {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
@@ -635,6 +642,134 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendDeferredReturnCheck(while_stmt.range, locals);
             }
             return false;
+        }
+
+        fn lowerUnrolledFiniteWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!?bool {
+            if (while_stmt.invariants.len != 0) return null;
+            if (bodyMayReturn(self.parent.file, while_stmt.body)) return null;
+            if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body)) return null;
+
+            var simulated_locals = try locals.clone();
+            var trip_count: u64 = 0;
+            while (true) {
+                const condition = FunctionLowerer.evalKnownBoolExpr(self, while_stmt.condition, &simulated_locals) orelse return null;
+                if (!condition) break;
+                if (trip_count >= runtime_while_unroll_limit) return null;
+                const signal = try @This().simulateUnrolledWhileBody(self, while_stmt.body, &simulated_locals, while_stmt.label) orelse return null;
+                trip_count += 1;
+                switch (signal) {
+                    .none, .continue_loop => {},
+                    .break_loop => break,
+                }
+            }
+
+            var unrolled_loop_context = UnrolledLoopContext{
+                .parent = self.unrolled_loop_context,
+                .label = while_stmt.label,
+            };
+            const prev_unrolled_loop_context = self.unrolled_loop_context;
+            self.unrolled_loop_context = &unrolled_loop_context;
+            defer self.unrolled_loop_context = prev_unrolled_loop_context;
+
+            var iteration: u64 = 0;
+            while (iteration < trip_count) : (iteration += 1) {
+                const prev_synthetic_index = self.parent.current_synthetic_index;
+                const prev_synthetic_count = self.parent.current_synthetic_count;
+                self.parent.current_synthetic_index = @intCast(iteration);
+                self.parent.current_synthetic_count = @intCast(trip_count);
+                defer {
+                    self.parent.current_synthetic_index = prev_synthetic_index;
+                    self.parent.current_synthetic_count = prev_synthetic_count;
+                }
+
+                const body_terminated = try self.lowerBody(while_stmt.body, locals);
+                switch (unrolled_loop_context.signal) {
+                    .none => if (body_terminated) return true,
+                    .continue_loop => {
+                        unrolled_loop_context.signal = .none;
+                        continue;
+                    },
+                    .break_loop => {
+                        unrolled_loop_context.signal = .none;
+                        break;
+                    },
+                }
+            }
+            return false;
+        }
+
+        fn simulateUnrolledWhileBody(
+            self: *FunctionLowerer,
+            body_id: ast.BodyId,
+            locals: *LocalEnv,
+            loop_label: ?[]const u8,
+        ) anyerror!?UnrolledLoopSignal {
+            const body = self.parent.file.body(body_id).*;
+            for (body.statements) |statement_id| {
+                const signal = try @This().simulateUnrolledWhileStmt(self, statement_id, locals, loop_label) orelse return null;
+                switch (signal) {
+                    .none => {},
+                    .continue_loop, .break_loop => return signal,
+                }
+            }
+            return .none;
+        }
+
+        fn simulateUnrolledWhileStmt(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            locals: *LocalEnv,
+            loop_label: ?[]const u8,
+        ) anyerror!?UnrolledLoopSignal {
+            return switch (self.parent.file.statement(statement_id).*) {
+                .Assign => |assign| blk: {
+                    const local_id = locals.resolvePatternTarget(self.parent.file, assign.target) orelse break :blk null;
+                    const known_int = switch (assign.op) {
+                        .assign => FunctionLowerer.evalKnownIntExpr(self, assign.value, locals),
+                        .add_assign => add_blk: {
+                            const lhs = locals.getKnownInt(local_id) orelse break :add_blk null;
+                            const rhs = FunctionLowerer.evalKnownIntExpr(self, assign.value, locals) orelse break :add_blk null;
+                            break :add_blk std.math.add(i64, lhs, rhs) catch null;
+                        },
+                        .sub_assign => sub_blk: {
+                            const lhs = locals.getKnownInt(local_id) orelse break :sub_blk null;
+                            const rhs = FunctionLowerer.evalKnownIntExpr(self, assign.value, locals) orelse break :sub_blk null;
+                            break :sub_blk std.math.sub(i64, lhs, rhs) catch null;
+                        },
+                        else => null,
+                    } orelse break :blk null;
+                    try locals.setKnownInt(local_id, known_int);
+                    break :blk .none;
+                },
+                .If => |if_stmt| blk: {
+                    const condition = FunctionLowerer.evalKnownBoolExpr(self, if_stmt.condition, locals) orelse break :blk null;
+                    if (condition) {
+                        break :blk try @This().simulateUnrolledWhileBody(self, if_stmt.then_body, locals, loop_label);
+                    }
+                    if (if_stmt.else_body) |else_body| {
+                        break :blk try @This().simulateUnrolledWhileBody(self, else_body, locals, loop_label);
+                    }
+                    break :blk .none;
+                },
+                .Break => |jump| blk: {
+                    if (jump.label == null or (loop_label != null and std.mem.eql(u8, jump.label.?, loop_label.?))) {
+                        break :blk .break_loop;
+                    }
+                    break :blk null;
+                },
+                .Continue => |jump| blk: {
+                    if (jump.label == null or (loop_label != null and std.mem.eql(u8, jump.label.?, loop_label.?))) {
+                        break :blk .continue_loop;
+                    }
+                    break :blk null;
+                },
+                .Block => |block_stmt| try @This().simulateUnrolledWhileBody(self, block_stmt.body, locals, loop_label),
+                .Expr => |expr_stmt| blk: {
+                    _ = FunctionLowerer.evalKnownExprValue(self, expr_stmt.expr, locals) orelse break :blk null;
+                    break :blk .none;
+                },
+                else => null,
+            };
         }
 
         pub fn lowerSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {

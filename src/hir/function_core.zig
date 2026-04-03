@@ -22,6 +22,7 @@ const cmpPredicate = support.cmpPredicate;
 const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
+const parseIntLiteral = support.parseIntLiteral;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
@@ -831,6 +832,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk try self.defaultValue(lowered_type, decl.range);
                     } else try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
                     try self.bindPatternValue(decl.pattern, value, locals);
+                    if (decl.value) |expr_id| {
+                        try locals.setPatternKnownInt(self.parent.file, decl.pattern, @This().evalKnownIntExpr(self, expr_id, locals));
+                    }
                     return false;
                 },
                 .Return => |ret| {
@@ -960,6 +964,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return true;
                 },
                 .Assign => |assign| {
+                    const target_local_id = locals.resolvePatternTarget(self.parent.file, assign.target);
+                    const known_int = switch (assign.op) {
+                        .assign => @This().evalKnownIntExpr(self, assign.value, locals),
+                        .add_assign => blk: {
+                            const local_id = target_local_id orelse break :blk null;
+                            const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                            const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                            break :blk std.math.add(i64, lhs, rhs) catch null;
+                        },
+                        .sub_assign => blk: {
+                            const local_id = target_local_id orelse break :blk null;
+                            const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                            const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                            break :blk std.math.sub(i64, lhs, rhs) catch null;
+                        },
+                        else => null,
+                    };
                     const value = switch (assign.op) {
                         .assign => try self.lowerExpr(assign.value, locals),
                         .add_assign => blk: {
@@ -1075,6 +1096,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         },
                     };
                     try self.storePattern(assign.target, value, locals);
+                    if (target_local_id) |local_id| try locals.setKnownInt(local_id, known_int);
                     return false;
                 },
                 .Expr => |expr_stmt| {
@@ -2611,6 +2633,163 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
             return switch (value) {
                 .integer => |integer| integer.toInt(u64) catch null,
+                else => null,
+            };
+        }
+
+        pub const KnownExprValue = union(enum) {
+            integer: i64,
+            boolean: bool,
+        };
+
+        pub fn evalKnownIntExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?i64 {
+            return switch (@This().evalKnownExprValue(self, expr_id, locals) orelse return null) {
+                .integer => |integer| integer,
+                else => null,
+            };
+        }
+
+        pub fn evalKnownBoolExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?bool {
+            return switch (@This().evalKnownExprValue(self, expr_id, locals) orelse return null) {
+                .boolean => |boolean| boolean,
+                else => null,
+            };
+        }
+
+        pub fn evalKnownExprValue(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?KnownExprValue {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| .{ .integer = parseIntLiteral(literal.text) orelse return null },
+                .BoolLiteral => |literal| .{ .boolean = literal.value },
+                .Group => |group| @This().evalKnownExprValue(self, group.expr, locals),
+                .Name => |name| blk: {
+                    const local_id = locals.lookupName(name.name) orelse break :blk null;
+                    const integer = locals.getKnownInt(local_id) orelse break :blk null;
+                    break :blk .{ .integer = integer };
+                },
+                .Unary => |unary| blk: {
+                    const operand = @This().evalKnownExprValue(self, unary.operand, locals) orelse break :blk null;
+                    switch (unary.op) {
+                        .neg => switch (operand) {
+                            .integer => |integer| break :blk .{ .integer = std.math.negate(integer) catch return null },
+                            else => break :blk null,
+                        },
+                        .not_ => switch (operand) {
+                            .boolean => |boolean| break :blk .{ .boolean = !boolean },
+                            .integer => |integer| break :blk .{ .boolean = integer == 0 },
+                        },
+                        else => break :blk null,
+                    }
+                },
+                .Binary => |binary| blk: {
+                    const lhs = @This().evalKnownExprValue(self, binary.lhs, locals) orelse break :blk null;
+                    const rhs = @This().evalKnownExprValue(self, binary.rhs, locals) orelse break :blk null;
+                    switch (binary.op) {
+                        .add => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.add(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .sub => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.sub(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .mul => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.mul(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .div => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| {
+                                    if (rhs_int == 0) break :blk null;
+                                    break :blk .{ .integer = @divTrunc(lhs_int, rhs_int) };
+                                },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .mod => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| {
+                                    if (rhs_int == 0) break :blk null;
+                                    break :blk .{ .integer = @mod(lhs_int, rhs_int) };
+                                },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .eq => break :blk switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| .{ .boolean = lhs_int == rhs_int },
+                                else => return null,
+                            },
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| .{ .boolean = lhs_bool == rhs_bool },
+                                else => return null,
+                            },
+                        },
+                        .ne => break :blk switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| .{ .boolean = lhs_int != rhs_int },
+                                else => return null,
+                            },
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| .{ .boolean = lhs_bool != rhs_bool },
+                                else => return null,
+                            },
+                        },
+                        .lt => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int < rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .le => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int <= rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .gt => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int > rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .ge => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int >= rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .and_and => switch (lhs) {
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| break :blk .{ .boolean = lhs_bool and rhs_bool },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .or_or => switch (lhs) {
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| break :blk .{ .boolean = lhs_bool or rhs_bool },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        else => break :blk null,
+                    }
+                },
                 else => null,
             };
         }

@@ -11,12 +11,14 @@ pub const LocalEnv = struct {
     allocator: std.mem.Allocator,
     visible_names: std.StringHashMap(LocalId),
     values: std.AutoHashMap(LocalId, mlir.MlirValue),
+    known_ints: std.AutoHashMap(LocalId, i64),
 
     pub fn init(allocator: std.mem.Allocator) LocalEnv {
         return .{
             .allocator = allocator,
             .visible_names = std.StringHashMap(LocalId).init(allocator),
             .values = std.AutoHashMap(LocalId, mlir.MlirValue).init(allocator),
+            .known_ints = std.AutoHashMap(LocalId, i64).init(allocator),
         };
     }
 
@@ -33,6 +35,11 @@ pub const LocalEnv = struct {
             try env_clone.values.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        var known_it = self.known_ints.iterator();
+        while (known_it.next()) |entry| {
+            try env_clone.known_ints.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
         return env_clone;
     }
 
@@ -47,6 +54,7 @@ pub const LocalEnv = struct {
                 const binding = bindingRefFromPattern(file, pattern_id) orelse return;
                 try self.visible_names.put(binding.name, binding.id);
                 try self.values.put(binding.id, value);
+                _ = self.known_ints.remove(binding.id);
             },
         }
     }
@@ -77,9 +85,46 @@ pub const LocalEnv = struct {
         return self.values.get(local_id);
     }
 
+    pub fn getKnownInt(self: *const LocalEnv, local_id: LocalId) ?i64 {
+        return self.known_ints.get(local_id);
+    }
+
+    pub fn setKnownInt(self: *LocalEnv, local_id: LocalId, known_int: ?i64) !void {
+        if (known_int) |integer| {
+            try self.known_ints.put(local_id, integer);
+        } else {
+            _ = self.known_ints.remove(local_id);
+        }
+    }
+
     pub fn setValue(self: *LocalEnv, local_id: LocalId, value: mlir.MlirValue) !void {
         if (!self.values.contains(local_id)) return error.UnknownLocalId;
         try self.values.put(local_id, value);
+        _ = self.known_ints.remove(local_id);
+    }
+
+    pub fn setValueWithKnownInt(self: *LocalEnv, local_id: LocalId, value: mlir.MlirValue, known_int: ?i64) !void {
+        if (!self.values.contains(local_id)) return error.UnknownLocalId;
+        try self.values.put(local_id, value);
+        if (known_int) |integer| {
+            try self.known_ints.put(local_id, integer);
+        } else {
+            _ = self.known_ints.remove(local_id);
+        }
+    }
+
+    pub fn setPatternKnownInt(self: *LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId, known_int: ?i64) !void {
+        switch (file.pattern(pattern_id).*) {
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.setPatternKnownInt(file, field.binding, null);
+                }
+            },
+            else => {
+                const binding = bindingRefFromPattern(file, pattern_id) orelse return;
+                try self.setKnownInt(binding.id, known_int);
+            },
+        }
     }
 
     pub fn resolvePatternTarget(self: *const LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId) ?LocalId {
