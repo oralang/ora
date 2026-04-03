@@ -10419,6 +10419,67 @@ test "compiler const eval executes comptime integer for loops" {
     try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval reports explicit iteration-limit diagnostics for comptime for loops" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    return comptime {
+        \\        let total = 0;
+        \\        for (5) |i| {
+        \\            total += i;
+        \\        }
+        \\        total;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_loop_iterations = 2,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expectEqual(@as(usize, 1), consteval.diagnostics.items.items.len);
+    const diag = consteval.diagnostics.items.items[0];
+    try testing.expect(std.mem.indexOf(u8, diag.message, "comptime loop iteration limit exceeded") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "evaluation exceeded max_loop_iterations") != null);
+}
+
+test "compiler const eval reports explicit recursion-limit diagnostics" {
+    const source_text =
+        \\comptime fn factorial(n: u256) -> u256 {
+        \\    if (n == 0) { return 1; }
+        \\    return n * factorial(n - 1);
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = factorial(5);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_recursion_depth = 2,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expectEqual(@as(usize, 1), consteval.diagnostics.items.items.len);
+    const diag = consteval.diagnostics.items.items[0];
+    try testing.expect(std.mem.indexOf(u8, diag.message, "comptime recursion depth exceeded") != null);
+}
+
 test "compiler const eval executes comptime array for loops" {
     const source_text =
         \\pub fn sum() -> u256 {
@@ -11038,6 +11099,78 @@ test "compiler const eval folds pure loop helper calls in ordinary const binding
     try testing.expectEqual(@as(i128, 1024), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval folds top-level comptime loop helpers and skips runtime lowering" {
+    const source_text =
+        \\comptime fn power(base: u256, exp: u256) -> u256 {
+        \\    var acc: u256 = 1;
+        \\    var i: u256 = 0;
+        \\    while (i < exp) {
+        \\        acc = acc * base;
+        \\        i = i + 1;
+        \\    }
+        \\    return acc;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = power(2, 10);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 1024), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "func.func @power"));
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @power"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 1024 : i256") != null);
+}
+
+test "compiler const eval folds top-level comptime for-loop helpers and skips runtime lowering" {
+    const source_text =
+        \\comptime fn sum_first_n(n: u256) -> u256 {
+        \\    var total: u256 = 0;
+        \\    for (n) |i| {
+        \\        total = total + i;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = sum_first_n(5);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 10), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "func.func @sum_first_n"));
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @sum_first_n"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 10 : i256") != null);
+}
+
 test "compiler const eval folds pure recursive helper calls in ordinary const bindings" {
     const source_text =
         \\comptime fn factorial(n: u256) -> u256 {
@@ -11067,7 +11200,7 @@ test "compiler const eval folds pure recursive helper calls in ordinary const bi
     defer testing.allocator.free(rendered);
     try testing.expectEqual(0, std.mem.count(u8, rendered, "func.func @factorial"));
     try testing.expectEqual(0, std.mem.count(u8, rendered, "call @factorial"));
-    try testing.expect(std.mem.indexOf(u8, rendered, "arith.constant 120") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, " 120 : i256") != null);
 }
 
 test "compiler const eval folds contract member helper calls in ordinary const bindings" {

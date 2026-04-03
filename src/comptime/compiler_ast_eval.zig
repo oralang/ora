@@ -23,6 +23,7 @@ const ctValueToConstValue = bridge.ctValueToConstValue;
 const constToCtValue = bridge.constToCtValue;
 const evalBinary = bridge.evalBinary;
 const evalUnary = bridge.evalUnary;
+const EvalConfig = comptime_mod.EvalConfig;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
 const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
 const named_type_id_base: u32 = 1_000_000;
@@ -39,6 +40,7 @@ pub const TypeQuery = struct {
 pub const ConstEvalOptions = struct {
     module_id: ?source.ModuleId = null,
     type_query: ?TypeQuery = null,
+    config: EvalConfig = .default,
 };
 
 /// Compiler-AST constant evaluator.
@@ -68,7 +70,7 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
         .allocator = arena,
         .file = file,
         .values = values,
-        .env = CtEnv.init(arena, .{}),
+        .env = CtEnv.init(arena, options.config),
         .module_id = options.module_id,
         .type_query = options.type_query,
     };
@@ -116,7 +118,6 @@ const ConstEvaluator = struct {
     current_typecheck_key: ?model.TypeCheckKey = null,
     current_contract: ?ast.ItemId = null,
     call_depth: u32 = 0,
-    max_call_depth: u32 = 64,
     last_error: ?error_mod.CtError = null,
 
     const BodyControl = union(enum) {
@@ -1360,7 +1361,7 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (self.call_depth >= self.max_call_depth) {
+        if (self.call_depth >= self.env.config.max_recursion_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
@@ -1427,7 +1428,7 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (self.call_depth >= self.max_call_depth) {
+        if (self.call_depth >= self.env.config.max_recursion_depth) {
             self.last_error = error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
@@ -1733,6 +1734,16 @@ const ConstEvaluator = struct {
             error_mod.CtError.withReason(.not_comptime, span, message, detail)
         else
             error_mod.CtError.init(.not_comptime, span, message);
+    }
+
+    fn recordLoopLimitExceeded(self: *ConstEvaluator, range: source.TextRange) void {
+        if (self.last_error != null) return;
+        self.last_error = error_mod.CtError.withReason(
+            .iteration_limit,
+            self.sourceSpan(range),
+            "comptime loop iteration limit exceeded",
+            "evaluation exceeded max_loop_iterations",
+        );
     }
 
     fn statementRange(self: *ConstEvaluator, statement_id: ast.StmtId) source.TextRange {
@@ -2082,7 +2093,10 @@ const ConstEvaluator = struct {
         var last_value: ?ConstValue = null;
         while (true) {
             iterations += 1;
-            if (iterations > self.env.config.max_loop_iterations) return .{ .value = null };
+            if (iterations > self.env.config.max_loop_iterations) {
+                self.recordLoopLimitExceeded(while_stmt.range);
+                return .{ .value = null };
+            }
 
             const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
             const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
@@ -2103,7 +2117,10 @@ const ConstEvaluator = struct {
         var last_value: ?CtValue = null;
         while (true) {
             iterations += 1;
-            if (iterations > self.env.config.max_loop_iterations) return .{ .value = null };
+            if (iterations > self.env.config.max_loop_iterations) {
+                self.recordLoopLimitExceeded(while_stmt.range);
+                return .{ .value = null };
+            }
 
             const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
             const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
@@ -2129,7 +2146,10 @@ const ConstEvaluator = struct {
                 const trip_count: usize = @intCast(integer);
                 var iteration: usize = 0;
                 while (iteration < trip_count) : (iteration += 1) {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     const item_value = CtValue{ .integer = @intCast(iteration) };
                     try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
@@ -2150,7 +2170,10 @@ const ConstEvaluator = struct {
             .array_ref => |heap_id| {
                 const elems = self.env.heap.getArray(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2169,7 +2192,10 @@ const ConstEvaluator = struct {
             .slice_ref => |heap_id| {
                 const elems = self.env.heap.getSlice(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2188,7 +2214,10 @@ const ConstEvaluator = struct {
             .tuple_ref => |heap_id| {
                 const elems = self.env.heap.getTuple(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2219,7 +2248,10 @@ const ConstEvaluator = struct {
                 const trip_count: usize = @intCast(integer);
                 var iteration: usize = 0;
                 while (iteration < trip_count) : (iteration += 1) {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     const item_value = CtValue{ .integer = @intCast(iteration) };
                     try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
@@ -2240,7 +2272,10 @@ const ConstEvaluator = struct {
             .array_ref => |heap_id| {
                 const elems = self.env.heap.getArray(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2259,7 +2294,10 @@ const ConstEvaluator = struct {
             .slice_ref => |heap_id| {
                 const elems = self.env.heap.getSlice(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2278,7 +2316,10 @@ const ConstEvaluator = struct {
             .tuple_ref => |heap_id| {
                 const elems = self.env.heap.getTuple(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
+                    if (iteration >= self.env.config.max_loop_iterations) {
+                        self.recordLoopLimitExceeded(for_stmt.range);
+                        return .{ .value = null };
+                    }
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
