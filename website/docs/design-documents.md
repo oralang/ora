@@ -13,7 +13,6 @@ artifacts: they record intent, trade-offs, and open questions.
 ## Current documents
 
 - [Type System (v0.1)](./design-documents/type-system-v0.1)
-- [Comptime Phase 1: Pure Compile-Time Evaluation](./design-documents/comptime-phase-1-evaluation)
 - [Optimization-Aware Debugger](./design-documents/optimization-aware-debugger)
 
 ## Contributing

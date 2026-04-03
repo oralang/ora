@@ -11250,6 +11250,65 @@ test "compiler const eval folds contract member helper calls in ordinary const b
     try testing.expect(std.mem.indexOf(u8, rendered, "arith.constant 1029") != null);
 }
 
+test "compiler partially evaluates pure helper calls in runtime return expressions" {
+    const source_text =
+        \\fn helper(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        return x + helper(2, 3);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @helper"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 5 : i256") != null);
+}
+
+test "compiler partially evaluates nested pure helper calls in runtime functions" {
+    const source_text =
+        \\fn helper(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        return x + helper(helper(1, 2), 3);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @helper"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 6 : i256") != null);
+}
+
+test "compiler does not partially evaluate impure helper calls in runtime functions" {
+    const source_text =
+        \\contract Sample {
+        \\    storage var counter: u256;
+        \\
+        \\    fn read_counter() -> u256 {
+        \\        return counter;
+        \\    }
+        \\
+        \\    pub fn run(x: u256) -> u256 {
+        \\        return x + read_counter();
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @read_counter") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.sload") != null);
+}
+
 test "compiler const eval binds function call arguments by parameter pattern" {
     const source_text =
         \\fn pick(pair: (u256, u256)) -> u256 {
