@@ -121,12 +121,14 @@ const ConstEvaluator = struct {
 
     const BodyControl = union(enum) {
         value: ?ConstValue,
+        return_value: ?ConstValue,
         break_loop,
         continue_loop,
     };
 
     const CtBodyControl = union(enum) {
         value: ?CtValue,
+        return_value: ?CtValue,
         break_loop,
         continue_loop,
     };
@@ -256,7 +258,7 @@ const ConstEvaluator = struct {
         }
 
         if (!self.exprUsesConstFallbackForCtValue(expr_id)) {
-            if (try self.evalExprCtValue(expr_id)) |ct_value| {
+            if (try self.evalExprCtValueImpl(expr_id, use_cache)) |ct_value| {
                 const const_value = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 if (const_value != null) {
                     if (use_cache) self.values[expr_id.index()] = const_value;
@@ -393,6 +395,10 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
+        return self.evalExprCtValueImpl(expr_id, true);
+    }
+
+    fn evalExprCtValueImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| blk: {
                 const value = (try parseIntegerLiteral(self.allocator, literal.text)) orelse break :blk null;
@@ -416,17 +422,17 @@ const ConstEvaluator = struct {
                 if (self.pathTypeId(name.name)) |type_id| break :blk CtValue{ .type_val = type_id };
                 break :blk null;
             },
-            .Group => |group| try self.evalExprCtValue(group.expr),
-            .Call => |call| try self.evalCallCtValue(call, true),
+            .Group => |group| try self.evalExprCtValueImpl(group.expr, use_cache),
+            .Call => |call| try self.evalCallCtValue(call, use_cache),
             .Unary, .Switch, .Comptime => blk: {
-                const const_value = (try self.evalExprImpl(expr_id, true)) orelse break :blk null;
+                const const_value = (try self.evalExprImpl(expr_id, use_cache)) orelse break :blk null;
                 break :blk (try constToCtValue(const_value)) orelse null;
             },
             .ArrayLiteral => |array| blk: {
                 const elems = try self.allocator.alloc(CtValue, array.elements.len);
                 for (array.elements, 0..) |element_id, idx| {
-                    _ = try self.evalExpr(element_id);
-                    elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                    _ = try self.evalExprImpl(element_id, use_cache);
+                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
                 }
                 const heap_id = try self.env.heap.allocArray(elems);
                 break :blk CtValue{ .array_ref = heap_id };
@@ -434,8 +440,8 @@ const ConstEvaluator = struct {
             .Tuple => |tuple| blk: {
                 const elems = try self.allocator.alloc(CtValue, tuple.elements.len);
                 for (tuple.elements, 0..) |element_id, idx| {
-                    _ = try self.evalExpr(element_id);
-                    elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                    _ = try self.evalExprImpl(element_id, use_cache);
+                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
                 }
                 const heap_id = try self.env.heap.allocTuple(elems);
                 break :blk CtValue{ .tuple_ref = heap_id };
@@ -443,10 +449,10 @@ const ConstEvaluator = struct {
             .StructLiteral => |struct_literal| blk: {
                 const fields = try self.allocator.alloc(CtAggregate.StructField, struct_literal.fields.len);
                 for (struct_literal.fields, 0..) |field, idx| {
-                    _ = try self.evalExpr(field.value);
+                    _ = try self.evalExprImpl(field.value, use_cache);
                     fields[idx] = .{
                         .field_id = @intCast(idx),
-                        .value = (try self.evalExprCtValue(field.value)) orelse break :blk null,
+                        .value = (try self.evalExprCtValueImpl(field.value, use_cache)) orelse break :blk null,
                     };
                 }
                 const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
@@ -454,10 +460,10 @@ const ConstEvaluator = struct {
                 break :blk CtValue{ .struct_ref = heap_id };
             },
             .Index => |index| blk: {
-                _ = try self.evalExpr(index.base);
-                _ = try self.evalExpr(index.index);
-                const base = (try self.evalExprCtValue(index.base)) orelse break :blk null;
-                const index_value = (try self.evalExprCtValue(index.index)) orelse break :blk null;
+                _ = try self.evalExprImpl(index.base, use_cache);
+                _ = try self.evalExprImpl(index.index, use_cache);
+                const base = (try self.evalExprCtValueImpl(index.base, use_cache)) orelse break :blk null;
+                const index_value = (try self.evalExprCtValueImpl(index.index, use_cache)) orelse break :blk null;
 
                 break :blk switch (base) {
                     .array_ref => |heap_id| blk_elem: {
@@ -505,21 +511,21 @@ const ConstEvaluator = struct {
                 if (std.mem.eql(u8, builtin.name, "cast") and builtin.type_arg != null and builtin.args.len > 0) {
                     const target = self.valueConstructionTarget(builtin.type_arg.?);
                     if (target != .none) {
-                        break :blk try self.evalExprCtValueAs(builtin.args[0], target);
+                        break :blk try self.evalExprCtValueAsImpl(builtin.args[0], target, use_cache);
                     }
                 }
                 const const_value = (try self.evalBuiltin(builtin)) orelse break :blk null;
                 break :blk (try constToCtValue(const_value)) orelse null;
             },
             .Field => |field| blk: {
-                _ = try self.evalExpr(field.base);
+                _ = try self.evalExprImpl(field.base, use_cache);
                 switch (self.file.expression(field.base).*) {
                     .Name => |name| {
                         if (self.lookupNamedEnumVariant(name.name, field.name)) |enum_value| break :blk enum_value;
                     },
                     else => {},
                 }
-                const base = (try self.evalExprCtValue(field.base)) orelse break :blk null;
+                const base = (try self.evalExprCtValueImpl(field.base, use_cache)) orelse break :blk null;
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
@@ -547,8 +553,8 @@ const ConstEvaluator = struct {
                 };
             },
             .Binary => |binary| blk: {
-                const lhs = (try self.evalExprCtValue(binary.lhs)) orelse break :blk null;
-                const rhs = (try self.evalExprCtValue(binary.rhs)) orelse break :blk null;
+                const lhs = (try self.evalExprCtValueImpl(binary.lhs, use_cache)) orelse break :blk null;
+                const rhs = (try self.evalExprCtValueImpl(binary.rhs, use_cache)) orelse break :blk null;
                 break :blk switch (binary.op) {
                     .eq => CtValue{ .boolean = self.ctValuesEqual(lhs, rhs) },
                     .ne => CtValue{ .boolean = !self.ctValuesEqual(lhs, rhs) },
@@ -575,19 +581,23 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprCtValueAs(self: *ConstEvaluator, expr_id: ast.ExprId, target: ValueConstructionTarget) anyerror!?CtValue {
+        return self.evalExprCtValueAsImpl(expr_id, target, true);
+    }
+
+    fn evalExprCtValueAsImpl(self: *ConstEvaluator, expr_id: ast.ExprId, target: ValueConstructionTarget, comptime use_cache: bool) anyerror!?CtValue {
         return switch (target) {
-            .none => try self.evalExprCtValue(expr_id),
+            .none => try self.evalExprCtValueImpl(expr_id, use_cache),
             .slice => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral => |array| blk: {
                     const elems = try self.allocator.alloc(CtValue, array.elements.len);
                     for (array.elements, 0..) |element_id, idx| {
-                        _ = try self.evalExpr(element_id);
-                        elems[idx] = (try self.evalExprCtValue(element_id)) orelse break :blk null;
+                        _ = try self.evalExprImpl(element_id, use_cache);
+                        elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
                     }
                     const heap_id = try self.env.heap.allocSlice(elems);
                     break :blk CtValue{ .slice_ref = heap_id };
                 },
-                else => try self.evalExprCtValue(expr_id),
+                else => try self.evalExprCtValueImpl(expr_id, use_cache),
             },
             .map => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral, .Tuple => blk: {
@@ -595,7 +605,7 @@ const ConstEvaluator = struct {
                     const heap_id = try self.env.heap.allocMap(entries);
                     break :blk CtValue{ .map_ref = heap_id };
                 },
-                else => try self.evalExprCtValue(expr_id),
+                else => try self.evalExprCtValueImpl(expr_id, use_cache),
             },
         };
     }
@@ -1463,7 +1473,7 @@ const ConstEvaluator = struct {
                 if (self.last_error != null) return null;
             },
             else => {
-                if (try self.evalExprCtValue(expr_id)) |ct_value| return ct_value;
+                if (try self.evalExprCtValueImpl(expr_id, use_cache)) |ct_value| return ct_value;
             },
         }
 
@@ -1796,6 +1806,7 @@ const ConstEvaluator = struct {
     fn evalComptimeBody(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!?ConstValue {
         return switch (try self.evalComptimeBodyControl(body_id)) {
             .value => |value| value,
+            .return_value => |value| value,
             .break_loop, .continue_loop => null,
         };
     }
@@ -1803,6 +1814,7 @@ const ConstEvaluator = struct {
     fn evalComptimeBodyCtValue(self: *ConstEvaluator, body_id: ast.BodyId, comptime use_cache: bool) anyerror!?CtValue {
         return switch (try self.evalComptimeBodyControlCtValue(body_id, use_cache)) {
             .value => |value| value,
+            .return_value => |value| value,
             .break_loop, .continue_loop => null,
         };
     }
@@ -1860,11 +1872,12 @@ const ConstEvaluator = struct {
                     last_value = try self.evalExprUncached(expr_stmt.expr);
                 },
                 .Return => |ret| {
-                    return .{ .value = if (ret.value) |ret_value| try self.evalExprUncached(ret_value) else null };
+                    return .{ .return_value = if (ret.value) |ret_value| try self.evalExprUncached(ret_value) else null };
                 },
                 .Block => |block_stmt| {
                     switch (try self.evalComptimeBodyControl(block_stmt.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -1872,6 +1885,7 @@ const ConstEvaluator = struct {
                 .LabeledBlock => |labeled| {
                     switch (try self.evalComptimeBodyControl(labeled.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -1879,19 +1893,31 @@ const ConstEvaluator = struct {
                 .If => |if_stmt| {
                     switch (try self.evalComptimeIf(if_stmt)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
                 },
                 .While => |while_stmt| {
-                    last_value = try self.evalComptimeWhile(while_stmt);
+                    switch (try self.evalComptimeWhile(while_stmt)) {
+                        .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .For => |for_stmt| {
-                    last_value = try self.evalComptimeFor(for_stmt);
+                    switch (try self.evalComptimeFor(for_stmt)) {
+                        .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .Switch => |switch_stmt| {
                     switch (try self.evalComptimeSwitchStmt(switch_stmt)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -1948,11 +1974,12 @@ const ConstEvaluator = struct {
                     last_value = try self.evalExprAsCtValue(expr_stmt.expr, use_cache);
                 },
                 .Return => |ret| {
-                    return .{ .value = if (ret.value) |ret_value| try self.evalExprAsCtValue(ret_value, use_cache) else null };
+                    return .{ .return_value = if (ret.value) |ret_value| try self.evalExprAsCtValue(ret_value, use_cache) else null };
                 },
                 .Block => |block_stmt| {
                     switch (try self.evalComptimeBodyControlCtValue(block_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -1960,6 +1987,7 @@ const ConstEvaluator = struct {
                 .LabeledBlock => |labeled| {
                     switch (try self.evalComptimeBodyControlCtValue(labeled.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -1967,19 +1995,31 @@ const ConstEvaluator = struct {
                 .If => |if_stmt| {
                     switch (try self.evalComptimeIfCtValue(if_stmt, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
                 },
                 .While => |while_stmt| {
-                    last_value = try self.evalComptimeWhileCtValue(while_stmt, use_cache);
+                    switch (try self.evalComptimeWhileCtValue(while_stmt, use_cache)) {
+                        .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .For => |for_stmt| {
-                    last_value = try self.evalComptimeForCtValue(for_stmt, use_cache);
+                    switch (try self.evalComptimeForCtValue(for_stmt, use_cache)) {
+                        .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
+                        .break_loop => return .break_loop,
+                        .continue_loop => return .continue_loop,
+                    }
                 },
                 .Switch => |switch_stmt| {
                     switch (try self.evalComptimeSwitchStmtCtValue(switch_stmt, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
                     }
@@ -2037,57 +2077,59 @@ const ConstEvaluator = struct {
         return .{ .value = null };
     }
 
-    fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!?ConstValue {
+    fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!BodyControl {
         var iterations: u64 = 0;
         var last_value: ?ConstValue = null;
         while (true) {
             iterations += 1;
-            if (iterations > self.env.config.max_loop_iterations) return null;
+            if (iterations > self.env.config.max_loop_iterations) return .{ .value = null };
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return null;
-            const should_continue = self.constConditionTruthy(condition) orelse return null;
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
+            const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
             if (!should_continue) break;
 
             switch (try self.evalComptimeBodyControl(while_stmt.body)) {
                 .value => |value| last_value = value,
+                .return_value => |value| return .{ .return_value = value },
                 .break_loop => break,
                 .continue_loop => continue,
             }
         }
-        return last_value;
+        return .{ .value = last_value };
     }
 
-    fn evalComptimeWhileCtValue(self: *ConstEvaluator, while_stmt: ast.WhileStmt, comptime use_cache: bool) anyerror!?CtValue {
+    fn evalComptimeWhileCtValue(self: *ConstEvaluator, while_stmt: ast.WhileStmt, comptime use_cache: bool) anyerror!CtBodyControl {
         var iterations: u64 = 0;
         var last_value: ?CtValue = null;
         while (true) {
             iterations += 1;
-            if (iterations > self.env.config.max_loop_iterations) return null;
+            if (iterations > self.env.config.max_loop_iterations) return .{ .value = null };
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return null;
-            const should_continue = self.constConditionTruthy(condition) orelse return null;
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
+            const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
             if (!should_continue) break;
 
             switch (try self.evalComptimeBodyControlCtValue(while_stmt.body, use_cache)) {
                 .value => |value| last_value = value,
+                .return_value => |value| return .{ .return_value = value },
                 .break_loop => break,
                 .continue_loop => continue,
             }
         }
-        return last_value;
+        return .{ .value = last_value };
     }
 
-    fn evalComptimeFor(self: *ConstEvaluator, for_stmt: ast.ForStmt) anyerror!?ConstValue {
-        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return null;
+    fn evalComptimeFor(self: *ConstEvaluator, for_stmt: ast.ForStmt) anyerror!BodyControl {
+        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return .{ .value = null };
         var last_value: ?ConstValue = null;
 
         switch (iterable) {
             .integer => |integer| {
-                if (integer > std.math.maxInt(usize)) return null;
+                if (integer > std.math.maxInt(usize)) return .{ .value = null };
                 const trip_count: usize = @intCast(integer);
                 var iteration: usize = 0;
                 while (iteration < trip_count) : (iteration += 1) {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     const item_value = CtValue{ .integer = @intCast(iteration) };
                     try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
@@ -2099,6 +2141,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControl(for_stmt.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2107,7 +2150,7 @@ const ConstEvaluator = struct {
             .array_ref => |heap_id| {
                 const elems = self.env.heap.getArray(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2117,6 +2160,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControl(for_stmt.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2125,7 +2169,7 @@ const ConstEvaluator = struct {
             .slice_ref => |heap_id| {
                 const elems = self.env.heap.getSlice(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2135,6 +2179,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControl(for_stmt.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2143,7 +2188,7 @@ const ConstEvaluator = struct {
             .tuple_ref => |heap_id| {
                 const elems = self.env.heap.getTuple(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2153,27 +2198,28 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControl(for_stmt.body)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
                 }
             },
-            else => return null,
+            else => return .{ .value = null },
         }
-        return last_value;
+        return .{ .value = last_value };
     }
 
-    fn evalComptimeForCtValue(self: *ConstEvaluator, for_stmt: ast.ForStmt, comptime use_cache: bool) anyerror!?CtValue {
-        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return null;
+    fn evalComptimeForCtValue(self: *ConstEvaluator, for_stmt: ast.ForStmt, comptime use_cache: bool) anyerror!CtBodyControl {
+        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return .{ .value = null };
         var last_value: ?CtValue = null;
 
         switch (iterable) {
             .integer => |integer| {
-                if (integer > std.math.maxInt(usize)) return null;
+                if (integer > std.math.maxInt(usize)) return .{ .value = null };
                 const trip_count: usize = @intCast(integer);
                 var iteration: usize = 0;
                 while (iteration < trip_count) : (iteration += 1) {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     const item_value = CtValue{ .integer = @intCast(iteration) };
                     try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
@@ -2185,6 +2231,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2193,7 +2240,7 @@ const ConstEvaluator = struct {
             .array_ref => |heap_id| {
                 const elems = self.env.heap.getArray(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2203,6 +2250,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2211,7 +2259,7 @@ const ConstEvaluator = struct {
             .slice_ref => |heap_id| {
                 const elems = self.env.heap.getSlice(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2221,6 +2269,7 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
@@ -2229,7 +2278,7 @@ const ConstEvaluator = struct {
             .tuple_ref => |heap_id| {
                 const elems = self.env.heap.getTuple(heap_id).elems;
                 for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) return null;
+                    if (iteration >= self.env.config.max_loop_iterations) return .{ .value = null };
 
                     try self.bindPatternCtValue(for_stmt.item_pattern, elem);
                     if (for_stmt.index_pattern) |index_pattern| {
@@ -2239,14 +2288,15 @@ const ConstEvaluator = struct {
 
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
+                        .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
                     }
                 }
             },
-            else => return null,
+            else => return .{ .value = null },
         }
-        return last_value;
+        return .{ .value = last_value };
     }
 
     fn evalIterableCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {

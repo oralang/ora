@@ -3001,6 +3001,34 @@ test "compiler parses and lowers structured top-level item forms" {
     try testing.expect(found_error);
 }
 
+test "compiler parses top-level comptime functions" {
+    const source_text =
+        \\comptime fn helper() -> u256 {
+        \\    return 1;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return helper();
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+
+    try testing.expectEqual(@as(usize, 2), file.root_items.len);
+
+    const helper = file.item(file.root_items[0]).Function;
+    try testing.expectEqualStrings("helper", helper.name);
+    try testing.expect(helper.is_comptime);
+
+    const run = file.item(file.root_items[1]).Function;
+    try testing.expectEqualStrings("run", run.name);
+    try testing.expect(!run.is_comptime);
+}
+
 test "compiler parses tuple dot access as index expressions" {
     const source_text =
         \\contract TupleDot {
@@ -11008,6 +11036,38 @@ test "compiler const eval folds pure loop helper calls in ordinary const binding
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqual(@as(i128, 1024), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval folds pure recursive helper calls in ordinary const bindings" {
+    const source_text =
+        \\comptime fn factorial(n: u256) -> u256 {
+        \\    if (n == 0) { return 1; }
+        \\    return n * factorial(n - 1);
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = factorial(5);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 120), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "func.func @factorial"));
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @factorial"));
+    try testing.expect(std.mem.indexOf(u8, rendered, "arith.constant 120") != null);
 }
 
 test "compiler const eval folds contract member helper calls in ordinary const bindings" {

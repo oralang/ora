@@ -137,6 +137,12 @@ const Parser = struct {
         if (self.at(.Comptime) and self.peekKind(1) == .Const) {
             return self.parseConstOrImportItem();
         }
+        if (self.at(.Comptime) and self.peekKind(1) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
         if (self.startsTypeAliasItem()) {
             return self.parseTypeAliasItem();
         }
@@ -215,6 +221,10 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.Comptime)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
 
@@ -2595,7 +2605,7 @@ const Parser = struct {
         const kind = self.current().kind;
         return switch (kind) {
             .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
-            .Comptime => self.peekKind(1) == .Const,
+            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn,
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };

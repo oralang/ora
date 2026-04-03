@@ -95,7 +95,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, parent_block: mlir.MlirBlock) anyerror!void {
-            if (function.is_generic) return;
+            if (function.is_generic or function.is_comptime) return;
             const parameters = try self.runtimeFunctionParameters(function);
             try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{});
         }
@@ -110,7 +110,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .Function => |function| function,
                     else => continue,
                 };
-                if (function.is_generic) continue;
+                if (function.is_generic or function.is_comptime) continue;
                 const symbol_name = try @This().implMethodSymbolName(self, impl_item.target_name, function.name);
                 if (self.monomorphized_function_names.contains(symbol_name)) continue;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{});
