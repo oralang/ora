@@ -114,6 +114,7 @@ const ConstEvaluator = struct {
     module_id: ?source.ModuleId = null,
     type_query: ?TypeQuery = null,
     current_typecheck_key: ?model.TypeCheckKey = null,
+    current_contract: ?ast.ItemId = null,
     call_depth: u32 = 0,
     max_call_depth: u32 = 64,
     last_error: ?error_mod.CtError = null,
@@ -143,6 +144,9 @@ const ConstEvaluator = struct {
 
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
+                const previous_contract = self.current_contract;
+                self.current_contract = item_id;
+                defer self.current_contract = previous_contract;
                 for (contract.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
                 for (contract.members) |member_id| self.visitItem(member_id);
             },
@@ -755,6 +759,16 @@ const ConstEvaluator = struct {
     }
 
     fn lookupNamedItem(self: *ConstEvaluator, name: []const u8) ?ast.ItemId {
+        if (self.current_contract) |contract_id| {
+            const contract_item = self.file.item(contract_id).*;
+            if (contract_item == .Contract) {
+                for (contract_item.Contract.members) |member_id| {
+                    if (self.itemName(member_id)) |item_name| {
+                        if (std.mem.eql(u8, item_name, name)) return member_id;
+                    }
+                }
+            }
+        }
         for (self.file.root_items) |item_id| {
             if (self.itemName(item_id)) |item_name| {
                 if (std.mem.eql(u8, item_name, name)) return item_id;
@@ -775,6 +789,7 @@ const ConstEvaluator = struct {
         file: *const ast.AstFile,
         item_id: ast.ItemId,
         function: ast.FunctionItem,
+        contract_id: ?ast.ItemId = null,
         synthetic_self_arg: ?ast.ExprId = null,
     };
 
@@ -1121,6 +1136,7 @@ const ConstEvaluator = struct {
                     .file = self.file,
                     .item_id = function_item_id,
                     .function = item.Function,
+                    .contract_id = self.current_contract,
                 };
             },
             .Field => |field| {
@@ -1138,6 +1154,7 @@ const ConstEvaluator = struct {
                                 .file = target_file,
                                 .item_id = function_item_id,
                                 .function = item.Function,
+                                .contract_id = null,
                             };
                         }
                     }
@@ -1312,13 +1329,16 @@ const ConstEvaluator = struct {
         const previous_file = self.file;
         const previous_module_id = self.module_id;
         const previous_key = self.current_typecheck_key;
+        const previous_contract = self.current_contract;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
+        self.current_contract = callable.contract_id;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
+            self.current_contract = previous_contract;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
@@ -1376,13 +1396,16 @@ const ConstEvaluator = struct {
         const previous_file = self.file;
         const previous_module_id = self.module_id;
         const previous_key = self.current_typecheck_key;
+        const previous_contract = self.current_contract;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
+        self.current_contract = callable.contract_id;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
+            self.current_contract = previous_contract;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
@@ -1419,7 +1442,10 @@ const ConstEvaluator = struct {
             if (!truthy) return null;
         }
 
-        const value = try self.evalComptimeBodyCtValue(function.body, use_cache);
+        // Do not persist callee-body expression values into the module-global
+        // const-eval cache. Those expression ids belong to the generic function
+        // body and can otherwise be polluted by one concrete call context.
+        const value = try self.evalComptimeBodyCtValue(function.body, false);
         if (value == null) {
             self.recordMissingComptimeValue(
                 self.sourceSpan(call.range),
@@ -1451,7 +1477,7 @@ const ConstEvaluator = struct {
         }
 
         _ = try self.evalExprImpl(arg, use_cache);
-        return (try self.evalExprCtValue(arg)) orelse blk: {
+        return (try self.evalExprAsCtValue(arg, use_cache)) orelse blk: {
             const const_value = (try self.evalExprImpl(arg, use_cache)) orelse return null;
             break :blk (try constToCtValue(const_value)) orelse return null;
         };
@@ -1727,12 +1753,20 @@ const ConstEvaluator = struct {
     fn bindName(self: *ConstEvaluator, name: []const u8, value: ?ConstValue) !void {
         const const_value = value orelse return;
         const ct_value = (try constToCtValue(const_value)) orelse return;
-        try self.env.set(name, ct_value);
+        if (self.env.isBoundInCurrentScope(name)) {
+            try self.env.set(name, ct_value);
+        } else {
+            _ = try self.env.bind(name, ct_value);
+        }
     }
 
     fn bindNameCtValue(self: *ConstEvaluator, name: []const u8, value: ?CtValue) !void {
         const ct_value = value orelse return;
-        try self.env.set(name, ct_value);
+        if (self.env.isBoundInCurrentScope(name)) {
+            try self.env.set(name, ct_value);
+        } else {
+            _ = try self.env.bind(name, ct_value);
+        }
     }
 
     fn bindPattern(self: *ConstEvaluator, pattern_id: ast.PatternId, value: ?ConstValue) !void {
@@ -2280,7 +2314,8 @@ const ConstEvaluator = struct {
                     .wrapping_sub_assign => (try evalBinary(self.allocator, .wrapping_sub, try self.readBoundName(name.name), rhs)) orelse return null,
                     .wrapping_mul_assign => (try evalBinary(self.allocator, .wrapping_mul, try self.readBoundName(name.name), rhs)) orelse return null,
                 };
-                try self.bindName(name.name, value);
+                const ct_value = (try constToCtValue(value)) orelse return null;
+                try self.env.set(name.name, ct_value);
                 return value;
             },
             .StructDestructure => |destructure| {

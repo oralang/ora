@@ -2367,12 +2367,11 @@ test "compiler accepts explicit comptime value bindings on generic calls" {
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(typecheck.diagnostics.isEmpty());
 
-    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    const hir_text = try hir_result.renderText(testing.allocator);
-    defer testing.allocator.free(hir_text);
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @ct__u8__18()"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant {ora.result_name_0 = \"value\"} 18 : i8"));
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @ct") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "arith.constant 18 : i8") != null);
 }
 
 test "compiler rejects conflicting inferred generic type arguments" {
@@ -10953,6 +10952,109 @@ test "compiler const eval executes nested direct function calls" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqual(@as(i128, 6), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval folds pure helper calls in ordinary const bindings" {
+    const source_text =
+        \\fn add(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = add(2, 3);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval folds pure loop helper calls in ordinary const bindings" {
+    const source_text =
+        \\fn power(base: u256, exp: u256) -> u256 {
+        \\    var acc: u256 = 1;
+        \\    var i: u256 = 0;
+        \\    while (i < exp) {
+        \\        acc = acc * base;
+        \\        i = i + 1;
+        \\    }
+        \\    return acc;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const val: u256 = power(2, 10);
+        \\    return val;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 1024), try consteval.values[decl.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval folds contract member helper calls in ordinary const bindings" {
+    const source_text =
+        \\contract Sample {
+        \\    fn add(a: u256, b: u256) -> u256 {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    fn power(base: u256, exp: u256) -> u256 {
+        \\        var acc: u256 = 1;
+        \\        var i: u256 = 0;
+        \\        while (i < exp) {
+        \\            acc = acc * base;
+        \\            i = i + 1;
+        \\        }
+        \\        return acc;
+        \\    }
+        \\
+        \\    pub fn run() -> u256 {
+        \\        const a: u256 = add(2, 3);
+        \\        const b: u256 = power(2, 10);
+        \\        return a + b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const function = ast_file.item(contract.members[2]).Function;
+    const body = ast_file.body(function.body);
+    const decl_a = ast_file.statement(body.statements[0]).VariableDecl;
+    const decl_b = ast_file.statement(body.statements[1]).VariableDecl;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[decl_a.value.?.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, 1024), try consteval.values[decl_b.value.?.index()].?.integer.toInt(i128));
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @add"));
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @power"));
+    try testing.expect(std.mem.indexOf(u8, rendered, "arith.constant 1029") != null);
 }
 
 test "compiler const eval binds function call arguments by parameter pattern" {

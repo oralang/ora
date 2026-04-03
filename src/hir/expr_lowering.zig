@@ -72,7 +72,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (@This().exprDependsOnMutablePatternLocals(self, expr_id)) return null;
             const expr = self.parent.file.expression(expr_id).*;
             switch (expr) {
-                .Binary, .Unary, .Comptime, .Group => {},
+                .Binary, .Unary, .Comptime, .Group, .Call => {},
                 .Name => {
                     const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse return null;
                     switch (binding) {
@@ -88,9 +88,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const result_type = self.parent.lowerExprType(expr_id);
+            if (mlir.oraTypeIsNull(result_type)) return null;
             const loc = self.parent.location(exprRange(self.parent.file, expr_id));
             return switch (value) {
                 .integer => |integer| blk: {
+                    if (!mlir.oraTypeIsAInteger(result_type)) break :blk null;
                     const attr = if (integer.toInt(i64)) |small|
                         mlir.oraIntegerAttrCreateI64FromType(result_type, small)
                     else |_| blk2: {
@@ -101,9 +103,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, result_type, attr));
                 },
                 .boolean => |boolean| blk: {
+                    if (!mlir.oraTypeIsAInteger(result_type)) break :blk null;
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), if (boolean) 1 else 0));
                 },
                 .string => |text| blk: {
+                    if (!mlir.oraTypeEqual(result_type, stringType(self.parent.context))) break :blk null;
                     const op = mlir.oraStringConstantOpCreate(self.parent.context, loc, strRef(text), stringType(self.parent.context));
                     mlir.oraOperationSetAttributeByName(
                         op,

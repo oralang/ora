@@ -31,9 +31,7 @@ contract ComptimeEdgeCases {
     }
 
     pub fn test_recursive() -> u256 {
-        // Recursive comptime folding is still a compiler limitation on this branch.
-        // Keep the observable result stable for verification.
-        const fact5: u256 = 120;
+        const fact5: u256 = factorial(5);
         return fact5;
     }
 
@@ -67,9 +65,7 @@ contract ComptimeEdgeCases {
     }
 
     pub fn test_power() -> u256 {
-        // Loop-based comptime folding is still a compiler limitation on this branch.
-        // Keep the observable result stable for verification.
-        const val: u256 = 1024;
+        const val: u256 = power(2, 10);
         return val;
     }
 
