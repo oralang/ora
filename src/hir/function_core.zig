@@ -38,6 +38,7 @@ const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const statementMayReturn = analysis.statementMayReturn;
 const runtime_for_unroll_limit: u64 = 8;
+const runtime_total_unroll_budget: u64 = 16;
 
 fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
@@ -64,6 +65,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .current_scf_carried_locals = null,
                 .block_context = null,
                 .unrolled_loop_context = null,
+                .unroll_multiplier = 1,
             };
 
             var runtime_index: usize = 0;
@@ -107,6 +109,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .current_scf_carried_locals = null,
                 .block_context = null,
                 .unrolled_loop_context = null,
+                .unroll_multiplier = 1,
             };
         }
 
@@ -2563,6 +2566,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
             if (finite_range.trip_count > runtime_for_unroll_limit) return null;
+            if (self.unroll_multiplier > runtime_total_unroll_budget / finite_range.trip_count) return null;
 
             var unrolled_loop_context = UnrolledLoopContext{
                 .parent = self.unrolled_loop_context,
@@ -2571,18 +2575,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const prev_unrolled_loop_context = self.unrolled_loop_context;
             self.unrolled_loop_context = &unrolled_loop_context;
             defer self.unrolled_loop_context = prev_unrolled_loop_context;
+            const prev_unroll_multiplier = self.unroll_multiplier;
+            self.unroll_multiplier *= finite_range.trip_count;
+            defer self.unroll_multiplier = prev_unroll_multiplier;
 
             var iteration: u64 = 0;
             var current = finite_range.start;
             while (iteration < finite_range.trip_count) : (iteration += 1) {
-                const prev_synthetic_index = self.parent.current_synthetic_index;
-                const prev_synthetic_count = self.parent.current_synthetic_count;
-                self.parent.current_synthetic_index = @intCast(iteration);
-                self.parent.current_synthetic_count = @intCast(finite_range.trip_count);
-                defer {
-                    self.parent.current_synthetic_index = prev_synthetic_index;
-                    self.parent.current_synthetic_count = prev_synthetic_count;
-                }
+                self.parent.pushSyntheticFrame(@intCast(iteration), @intCast(finite_range.trip_count));
+                defer self.parent.popSyntheticFrame();
 
                 const loc = self.parent.location(for_stmt.range);
                 const item_value = appendValueOp(
@@ -2590,12 +2591,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), current),
                 );
                 try self.bindPatternValue(for_stmt.item_pattern, item_value, locals);
+                try locals.setPatternKnownInt(self.parent.file, for_stmt.item_pattern, current);
                 if (for_stmt.index_pattern) |index_pattern| {
                     const index_value = appendValueOp(
                         self.block,
                         createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), @intCast(iteration)),
                     );
                     try self.bindPatternValue(index_pattern, index_value, locals);
+                    try locals.setPatternKnownInt(self.parent.file, index_pattern, @intCast(iteration));
                 }
 
                 const body_terminated = try self.lowerBody(for_stmt.body, locals);

@@ -39,6 +39,7 @@ const collectSwitchCarriedLocals = analysis.collectSwitchCarriedLocals;
 const collectTryCarriedLocals = analysis.collectTryCarriedLocals;
 const switchMayReturn = analysis.switchMayReturn;
 const runtime_while_unroll_limit: u64 = 8;
+const runtime_total_unroll_budget: u64 = 16;
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
@@ -647,7 +648,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerUnrolledFiniteWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!?bool {
             if (while_stmt.invariants.len != 0) return null;
             if (bodyMayReturn(self.parent.file, while_stmt.body)) return null;
-            if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body)) return null;
 
             var simulated_locals = try locals.clone();
             var trip_count: u64 = 0;
@@ -662,6 +662,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .break_loop => break,
                 }
             }
+            if (trip_count == 0) return false;
+            if (self.unroll_multiplier > runtime_total_unroll_budget / trip_count) return null;
 
             var unrolled_loop_context = UnrolledLoopContext{
                 .parent = self.unrolled_loop_context,
@@ -670,17 +672,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const prev_unrolled_loop_context = self.unrolled_loop_context;
             self.unrolled_loop_context = &unrolled_loop_context;
             defer self.unrolled_loop_context = prev_unrolled_loop_context;
+            const prev_unroll_multiplier = self.unroll_multiplier;
+            self.unroll_multiplier *= trip_count;
+            defer self.unroll_multiplier = prev_unroll_multiplier;
 
             var iteration: u64 = 0;
             while (iteration < trip_count) : (iteration += 1) {
-                const prev_synthetic_index = self.parent.current_synthetic_index;
-                const prev_synthetic_count = self.parent.current_synthetic_count;
-                self.parent.current_synthetic_index = @intCast(iteration);
-                self.parent.current_synthetic_count = @intCast(trip_count);
-                defer {
-                    self.parent.current_synthetic_index = prev_synthetic_index;
-                    self.parent.current_synthetic_count = prev_synthetic_count;
-                }
+                self.parent.pushSyntheticFrame(@intCast(iteration), @intCast(trip_count));
+                defer self.parent.popSyntheticFrame();
 
                 const body_terminated = try self.lowerBody(while_stmt.body, locals);
                 switch (unrolled_loop_context.signal) {
@@ -769,6 +768,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (if_stmt.else_body) |else_body| {
                         break :blk try @This().simulateUnrolledWhileBody(self, else_body, locals, loop_label);
+                    }
+                    break :blk .none;
+                },
+                .While => |nested_while| blk: {
+                    if (nested_while.invariants.len != 0) break :blk null;
+                    if (bodyMayReturn(self.parent.file, nested_while.body)) break :blk null;
+
+                    var trip_count: u64 = 0;
+                    while (true) {
+                        const condition = FunctionLowerer.evalKnownBoolExpr(self, nested_while.condition, locals) orelse break :blk null;
+                        if (!condition) break;
+                        if (trip_count >= runtime_while_unroll_limit) break :blk null;
+                        const signal = try @This().simulateUnrolledWhileBody(self, nested_while.body, locals, nested_while.label) orelse break :blk null;
+                        trip_count += 1;
+                        switch (signal) {
+                            .none, .continue_loop => {},
+                            .break_loop => break,
+                        }
                     }
                     break :blk .none;
                 },

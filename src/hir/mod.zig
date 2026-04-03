@@ -58,6 +58,11 @@ pub const TypeFallbackRecord = struct {
     location: source.SourceLocation,
 };
 
+const SyntheticFrame = struct {
+    index: u32,
+    count: u32,
+};
+
 pub const LoweringResult = struct {
     arena: std.heap.ArenaAllocator,
     context: mlir.MlirContext = std.mem.zeroes(mlir.MlirContext),
@@ -200,6 +205,8 @@ const Lowerer = struct {
     current_statement_id: ?ast.StmtId = null,
     current_synthetic_index: ?u32 = null,
     current_synthetic_count: ?u32 = null,
+    synthetic_stack_len: u8 = 0,
+    synthetic_stack: [16]SyntheticFrame = undefined,
 
     const ModuleLowering = module_lowering.mixin(Lowerer, ContractLowerer, FunctionLowerer, HirSymbolKind);
     pub const lowerItem = ModuleLowering.lowerItem;
@@ -232,16 +239,44 @@ const Lowerer = struct {
     pub const bitfieldFieldSign = ModuleLowering.bitfieldFieldSign;
 
     pub fn location(self: *const Lowerer, range: source.TextRange) mlir.MlirLocation {
-        const base = support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
-        if (self.current_synthetic_index) |synthetic_index| {
-            return mlir.oraLocationSyntheticTaggedGet(
+        var loc = support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
+        var i: usize = 0;
+        while (i < self.synthetic_stack_len) : (i += 1) {
+            const frame = self.synthetic_stack[i];
+            loc = mlir.oraLocationSyntheticTaggedGet(
                 self.context,
-                base,
-                synthetic_index,
-                self.current_synthetic_count orelse 1,
+                loc,
+                frame.index,
+                frame.count,
             );
         }
-        return base;
+        return loc;
+    }
+
+    pub fn pushSyntheticFrame(self: *Lowerer, index: u32, count: u32) void {
+        if (self.synthetic_stack_len < self.synthetic_stack.len) {
+            self.synthetic_stack[self.synthetic_stack_len] = .{ .index = index, .count = count };
+            self.synthetic_stack_len += 1;
+        }
+        self.current_synthetic_index = index;
+        self.current_synthetic_count = count;
+    }
+
+    pub fn popSyntheticFrame(self: *Lowerer) void {
+        if (self.synthetic_stack_len == 0) {
+            self.current_synthetic_index = null;
+            self.current_synthetic_count = null;
+            return;
+        }
+        self.synthetic_stack_len -= 1;
+        if (self.synthetic_stack_len == 0) {
+            self.current_synthetic_index = null;
+            self.current_synthetic_count = null;
+            return;
+        }
+        const frame = self.synthetic_stack[self.synthetic_stack_len - 1];
+        self.current_synthetic_index = frame.index;
+        self.current_synthetic_count = frame.count;
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
@@ -873,6 +908,7 @@ const FunctionLowerer = struct {
     block_context: ?*const support.BlockContext = null,
     switch_context: ?*const support.SwitchContext = null,
     unrolled_loop_context: ?*support.UnrolledLoopContext = null,
+    unroll_multiplier: u64 = 1,
 
     const FunctionCore = function_core.mixin(FunctionLowerer, Lowerer);
     const ControlFlow = control_flow.mixin(FunctionLowerer, Lowerer);

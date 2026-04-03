@@ -71,6 +71,7 @@ pub const DebugInfo = struct {
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -239,6 +240,20 @@ test "DebugInfo parses scope and visibility metadata" {
     const json =
         \\{
         \\  "version": 2,
+        \\  "ops": [
+        \\    {
+        \\      "idx": 7,
+        \\      "op": "add",
+        \\      "function": "foo",
+        \\      "block": "bb0",
+        \\      "is_synthetic": true,
+        \\      "synthetic_index": 1,
+        \\      "synthetic_count": 3,
+        \\      "synthetic_path": "0.2/1.3",
+        \\      "statement_id": 9,
+        \\      "origin_statement_id": 9
+        \\    }
+        \\  ],
         \\  "source_scopes": [
         \\    {
         \\      "id": 1,
@@ -274,6 +289,11 @@ test "DebugInfo parses scope and visibility metadata" {
     defer info.deinit();
 
     try std.testing.expectEqual(@as(u32, 2), info.version());
+    const op = info.getOpMetaForIdx(7).?;
+    try std.testing.expect(op.is_synthetic);
+    try std.testing.expectEqual(@as(?u32, 1), op.synthetic_index);
+    try std.testing.expectEqual(@as(?u32, 3), op.synthetic_count);
+    try std.testing.expectEqualStrings("0.2/1.3", op.synthetic_path.?);
     const visibility = info.getVisibilityForIdx(7).?;
     try std.testing.expectEqual(@as(usize, 1), visibility.visible_local_ids.len);
     const local = info.getLocalById(10).?;

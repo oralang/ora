@@ -4339,6 +4339,7 @@ fn mergeSourceMaps(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
     };
     var idx_to_provenance = std.AutoHashMap(u32, OpProvenance).init(allocator);
     defer idx_to_provenance.deinit();
@@ -4356,6 +4357,7 @@ fn mergeSourceMaps(
             is_synthetic: bool = false,
             synthetic_index: ?u32 = null,
             synthetic_count: ?u32 = null,
+            synthetic_path: ?[]const u8 = null,
         };
         const DebugInfoParse = struct {
             ops: []const DebugOp = &.{},
@@ -4380,6 +4382,7 @@ fn mergeSourceMaps(
                 .is_synthetic = op.is_synthetic,
                 .synthetic_index = op.synthetic_index,
                 .synthetic_count = op.synthetic_count,
+                .synthetic_path = op.synthetic_path,
             });
         }
     }
@@ -4417,6 +4420,7 @@ fn mergeSourceMaps(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         is_hoisted: bool = false,
         is_duplicated: bool = false,
         stmt: bool,
@@ -4467,6 +4471,7 @@ fn mergeSourceMaps(
             .is_synthetic = if (idx_to_provenance.get(loc.idx)) |p| p.is_synthetic else false,
             .synthetic_index = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_index else null,
             .synthetic_count = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_count else null,
+            .synthetic_path = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_path else null,
             .is_hoisted = false,
             .is_duplicated = false,
             .stmt = false,
@@ -4649,6 +4654,10 @@ fn mergeSourceMaps(
             if (entry.synthetic_count) |synthetic_count| {
                 try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
             }
+            if (entry.synthetic_path) |synthetic_path| {
+                try writer.writeAll(",\"synthetic_path\":");
+                try writeJsonString(writer, synthetic_path);
+            }
         }
         if (entry.is_hoisted) {
             try writer.writeAll(",\"is_hoisted\":true");
@@ -4704,6 +4713,7 @@ fn writeDebugInfoSidecar(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -4754,6 +4764,7 @@ fn writeDebugInfoSidecar(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -4783,6 +4794,7 @@ fn writeDebugInfoSidecar(
             .is_synthetic = op.is_synthetic,
             .synthetic_index = op.synthetic_index,
             .synthetic_count = op.synthetic_count,
+            .synthetic_path = op.synthetic_path,
             .statement_id = op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
             .origin_statement_id = op.origin_statement_id orelse op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
             .execution_region_id = op.execution_region_id,
@@ -4834,6 +4846,10 @@ fn writeDebugInfoSidecar(
         }
         if (op.synthetic_count) |synthetic_count| {
             try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
+        }
+        if (op.synthetic_path) |synthetic_path| {
+            try writer.writeAll(",\"synthetic_path\":");
+            try writeJsonString(writer, synthetic_path);
         }
         if (op.kind) |kind| {
             try writer.writeAll(",\"kind\":");

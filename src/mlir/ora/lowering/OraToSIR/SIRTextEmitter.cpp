@@ -304,42 +304,101 @@ namespace
 
     std::optional<std::pair<uint32_t, uint32_t>> extractSyntheticLocTag(Location loc)
     {
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> tags;
+        std::function<void(Location)> collect = [&](Location current) {
+            if (current == nullptr)
+                return;
+            if (auto nameLoc = dyn_cast<NameLoc>(current))
+            {
+                collect(nameLoc.getChildLoc());
+                StringRef name = nameLoc.getName().getValue();
+                constexpr StringLiteral prefix("ora.synthetic.");
+                if (name.starts_with(prefix))
+                {
+                    StringRef rest = name.drop_front(prefix.size());
+                    auto parts = rest.split('.');
+                    uint32_t syntheticIndex = 0;
+                    uint32_t syntheticCount = 0;
+                    if (!parts.first.empty() && !parts.second.empty() &&
+                        !parts.first.getAsInteger(10, syntheticIndex) &&
+                        !parts.second.getAsInteger(10, syntheticCount))
+                    {
+                        tags.emplace_back(syntheticIndex, syntheticCount);
+                    }
+                }
+                return;
+            }
+            if (auto callSite = dyn_cast<CallSiteLoc>(current))
+            {
+                collect(callSite.getCallee());
+                collect(callSite.getCaller());
+                return;
+            }
+            if (auto fusedLoc = dyn_cast<FusedLoc>(current))
+            {
+                for (Location child : fusedLoc.getLocations())
+                    collect(child);
+            }
+        };
+        collect(loc);
+        if (tags.empty())
+            return std::nullopt;
+        return tags.back();
+    }
+
+    std::optional<std::string> extractSyntheticLocPath(Location loc)
+    {
         if (loc == nullptr)
             return std::nullopt;
-        if (auto nameLoc = dyn_cast<NameLoc>(loc))
-        {
-            StringRef name = nameLoc.getName().getValue();
-            constexpr StringLiteral prefix("ora.synthetic.");
-            if (name.starts_with(prefix))
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> tags;
+        std::function<void(Location)> collect = [&](Location current) {
+            if (current == nullptr)
+                return;
+            if (auto nameLoc = dyn_cast<NameLoc>(current))
             {
-                StringRef rest = name.drop_front(prefix.size());
-                auto parts = rest.split('.');
-                uint32_t syntheticIndex = 0;
-                uint32_t syntheticCount = 0;
-                if (!parts.first.empty() && !parts.second.empty() &&
-                    !parts.first.getAsInteger(10, syntheticIndex) &&
-                    !parts.second.getAsInteger(10, syntheticCount))
+                collect(nameLoc.getChildLoc());
+                StringRef name = nameLoc.getName().getValue();
+                constexpr StringLiteral prefix("ora.synthetic.");
+                if (name.starts_with(prefix))
                 {
-                    return std::make_pair(syntheticIndex, syntheticCount);
+                    StringRef rest = name.drop_front(prefix.size());
+                    auto parts = rest.split('.');
+                    uint32_t syntheticIndex = 0;
+                    uint32_t syntheticCount = 0;
+                    if (!parts.first.empty() && !parts.second.empty() &&
+                        !parts.first.getAsInteger(10, syntheticIndex) &&
+                        !parts.second.getAsInteger(10, syntheticCount))
+                    {
+                        tags.emplace_back(syntheticIndex, syntheticCount);
+                    }
                 }
+                return;
             }
-            return extractSyntheticLocTag(nameLoc.getChildLoc());
-        }
-        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
-        {
-            if (auto calleeTag = extractSyntheticLocTag(callSite.getCallee()))
-                return calleeTag;
-            return extractSyntheticLocTag(callSite.getCaller());
-        }
-        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
-        {
-            for (Location child : fusedLoc.getLocations())
+            if (auto callSite = dyn_cast<CallSiteLoc>(current))
             {
-                if (auto tag = extractSyntheticLocTag(child))
-                    return tag;
+                collect(callSite.getCallee());
+                collect(callSite.getCaller());
+                return;
             }
+            if (auto fusedLoc = dyn_cast<FusedLoc>(current))
+            {
+                for (Location child : fusedLoc.getLocations())
+                    collect(child);
+            }
+        };
+        collect(loc);
+        if (tags.empty())
+            return std::nullopt;
+        std::string path;
+        llvm::raw_string_ostream os(path);
+        for (size_t i = 0; i < tags.size(); ++i)
+        {
+            if (i != 0)
+                os << "/";
+            os << tags[i].first << "." << tags[i].second;
         }
-        return std::nullopt;
+        os.flush();
+        return path;
     }
 
     template <typename RangeT>
@@ -1210,6 +1269,7 @@ namespace mlir
                 bool isSynthetic = false;
                 std::optional<uint32_t> syntheticIndex;
                 std::optional<uint32_t> syntheticCount;
+                std::optional<std::string> syntheticPath;
                 std::optional<uint32_t> statementId;
                 std::optional<uint32_t> originStatementId;
                 std::optional<uint32_t> executionRegionId;
@@ -1244,6 +1304,7 @@ namespace mlir
                     record.resultNames.push_back(names.nameFor(op.getResult(i)));
                 record.isTerminator = op.hasTrait<OpTrait::IsTerminator>();
                 const auto locSyntheticTag = extractSyntheticLocTag(op.getLoc());
+                const auto locSyntheticPath = extractSyntheticLocPath(op.getLoc());
                 record.isSynthetic = synthetic || locSyntheticTag.has_value() || hasSyntheticLocTag(op.getLoc());
                 if (synthetic)
                 {
@@ -1255,6 +1316,8 @@ namespace mlir
                     record.syntheticIndex = locSyntheticTag->first;
                     record.syntheticCount = locSyntheticTag->second;
                 }
+                if (locSyntheticPath)
+                    record.syntheticPath = *locSyntheticPath;
                 records.push_back(std::move(record));
             });
 
@@ -1381,6 +1444,11 @@ namespace mlir
                 {
                     os << ",\"synthetic_index\":" << *record.syntheticIndex
                        << ",\"synthetic_count\":" << *record.syntheticCount;
+                }
+                if (record.syntheticPath)
+                {
+                    os << ",\"synthetic_path\":";
+                    emitJsonString(os, *record.syntheticPath);
                 }
                 if (record.isHoisted)
                     os << ",\"is_hoisted\":true";

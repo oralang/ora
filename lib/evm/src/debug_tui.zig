@@ -1216,15 +1216,21 @@ const Ui = struct {
         const prov = self.currentProvenanceLabel();
         const kind = self.statementKindExplanation(self.statementKindForLine(current_line));
         const origin_line = self.currentOriginLine();
+        const synthetic_path = self.currentSyntheticPath();
 
         if (origin_line) |origin|
             if (origin != current_line)
                 if (entry.statement_id) |stmt|
                     if (entry.execution_region_id) |region|
                         if (entry.statement_run_index) |run|
-                            try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}", .{
-                                prov, kind, stmt, current_line, origin, region, run,
-                            })
+                            if (synthetic_path) |path|
+                                try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}; copies={s}", .{
+                                    prov, kind, stmt, current_line, origin, region, run, self.scratchSyntheticPathSummary(path),
+                                })
+                            else
+                                try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}", .{
+                                    prov, kind, stmt, current_line, origin, region, run,
+                                })
                         else
                             try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}", .{
                                 prov, kind, stmt, current_line, origin, region,
@@ -2703,6 +2709,44 @@ const Ui = struct {
             self.session.debugger.src_map.getFirstLineForOriginStatementId(self.config.source_path, origin_stmt_id);
     }
 
+    fn currentSyntheticPath(self: *Ui) ?[]const u8 {
+        if (self.currentOpMeta()) |meta| {
+            if (meta.synthetic_path) |path| return path;
+        }
+        if (self.session.debugger.currentEntry()) |entry| {
+            return entry.synthetic_path;
+        }
+        return null;
+    }
+
+    fn scratchSyntheticPathSummary(self: *Ui, path: []const u8) []const u8 {
+        const start = self.render_scratch.items.len;
+        const writer = self.render_scratch.writer(self.allocator);
+        writer.writeAll("copies ") catch return path;
+
+        var it = std.mem.splitScalar(u8, path, '/');
+        var wrote_any = false;
+        while (it.next()) |segment| {
+            const dot = std.mem.indexOfScalar(u8, segment, '.') orelse {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            const idx = std.fmt.parseInt(u32, segment[0..dot], 10) catch {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            const count = std.fmt.parseInt(u32, segment[dot + 1 ..], 10) catch {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            if (wrote_any) writer.writeAll(" -> ") catch return path;
+            writer.print("{d}/{d}", .{ idx + 1, count }) catch return path;
+            wrote_any = true;
+        }
+
+        return self.render_scratch.items[start..];
+    }
+
     fn updateCommandStatusForCurrentStop(self: *Ui, action: []const u8) !void {
         const entry = self.session.debugger.currentEntry();
         const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
@@ -2955,15 +2999,21 @@ const Ui = struct {
         row += 1;
         const current_entry = self.session.debugger.currentEntry();
         const mapping = self.currentMappingWindow();
+        const synthetic_path = self.currentSyntheticPath();
         const provenance_line = if (current_entry) |entry|
             if (mapping) |m|
                 if (entry.statement_id) |stmt_id|
                     if (entry.origin_statement_id) |origin_stmt_id|
                         if (m.execution_region_id) |region_id|
                             if (m.statement_run_index) |run_index|
-                                self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}", .{
-                                    self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index,
-                                }) catch "prov"
+                                if (synthetic_path) |path|
+                                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}  copies={s}", .{
+                                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index, self.scratchSyntheticPathSummary(path),
+                                    }) catch "prov"
+                                else
+                                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}", .{
+                                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index,
+                                    }) catch "prov"
                             else
                                 self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}", .{
                                     self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id,
@@ -3109,13 +3159,19 @@ const Ui = struct {
             row += 1;
 
             if (row < root.height) {
+                const synthetic_path = self.currentSyntheticPath();
                 const meta_line = if (stmt_id) |stmt|
                     if (origin_stmt_id) |origin_stmt|
                         if (region_id) |region|
                             if (run_index) |run|
-                                self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  kind={s}/{s}", .{
-                                    stmt, origin_stmt, region, run, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
-                                }) catch "meta"
+                                if (synthetic_path) |path|
+                                    self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  copies={s}  kind={s}/{s}", .{
+                                        stmt, origin_stmt, region, run, self.scratchSyntheticPathSummary(path), self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                    }) catch "meta"
+                                else
+                                    self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  kind={s}/{s}", .{
+                                        stmt, origin_stmt, region, run, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                    }) catch "meta"
                             else
                                 self.scratchFmt("stmt={d}  origin={d}  region={d}  kind={s}/{s}", .{
                                     stmt, origin_stmt, region, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
@@ -4271,6 +4327,7 @@ fn rebaseSourceMapForRuntime(
             .is_synthetic = entry.is_synthetic,
             .synthetic_index = entry.synthetic_index,
             .synthetic_count = entry.synthetic_count,
+            .synthetic_path = entry.synthetic_path,
             .is_hoisted = entry.is_hoisted,
             .is_duplicated = entry.is_duplicated,
             .is_statement = entry.is_statement,

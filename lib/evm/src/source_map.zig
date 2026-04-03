@@ -67,6 +67,7 @@ pub const SourceMap = struct {
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         /// Whether this entry appears earlier in execution order than its
         /// statement-id ordering suggests.
         is_hoisted: bool = false,
@@ -224,6 +225,7 @@ pub const SourceMap = struct {
                 .is_synthetic = je.is_synthetic,
                 .synthetic_index = je.synthetic_index,
                 .synthetic_count = je.synthetic_count,
+                .synthetic_path = je.synthetic_path,
                 .is_hoisted = je.is_hoisted,
                 .is_duplicated = je.is_duplicated,
                 .is_statement = je.stmt,
@@ -257,6 +259,7 @@ pub const SourceMap = struct {
                 .is_synthetic = e.is_synthetic,
                 .synthetic_index = e.synthetic_index,
                 .synthetic_count = e.synthetic_count,
+                .synthetic_path = e.synthetic_path,
                 .is_hoisted = e.is_hoisted,
                 .is_duplicated = e.is_duplicated,
                 .is_statement = e.is_statement,
@@ -301,6 +304,7 @@ pub const SourceMap = struct {
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         is_hoisted: bool = false,
         is_duplicated: bool = false,
         stmt: bool,
@@ -351,7 +355,7 @@ test "SourceMap.loadFromJson" {
     const allocator = std.testing.allocator;
     const json =
         \\{"version":1,"entries":[
-        \\  {"idx":7,"pc":0,"file":"main.ora","line":3,"col":5,"statement_id":9,"origin_statement_id":9,"function":"foo","sir_line":17,"is_synthetic":true,"synthetic_index":1,"synthetic_count":3,"is_hoisted":true,"is_duplicated":true,"stmt":true,"kind":"runtime_guard"},
+        \\  {"idx":7,"pc":0,"file":"main.ora","line":3,"col":5,"statement_id":9,"origin_statement_id":9,"function":"foo","sir_line":17,"is_synthetic":true,"synthetic_index":1,"synthetic_count":3,"synthetic_path":"0.2/1.3","is_hoisted":true,"is_duplicated":true,"stmt":true,"kind":"runtime_guard"},
         \\  {"idx":8,"pc":6,"file":"main.ora","line":4,"col":5,"statement_id":10,"origin_statement_id":10,"function":"foo","sir_line":18,"stmt":true,"kind":"runtime"}
         \\]}
     ;
@@ -369,11 +373,37 @@ test "SourceMap.loadFromJson" {
     try std.testing.expect(sm.entries[0].is_synthetic);
     try std.testing.expectEqual(@as(?u32, 1), sm.entries[0].synthetic_index);
     try std.testing.expectEqual(@as(?u32, 3), sm.entries[0].synthetic_count);
+    try std.testing.expectEqualStrings("0.2/1.3", sm.entries[0].synthetic_path.?);
     try std.testing.expect(sm.entries[0].is_hoisted);
     try std.testing.expect(sm.entries[0].is_duplicated);
     try std.testing.expect(sm.entries[0].is_statement);
     try std.testing.expectEqual(SourceMap.StatementKind.runtime_guard, sm.entries[0].kind.?);
     try std.testing.expectEqualStrings("main.ora", sm.entries[0].file);
+}
+
+test "SourceMap.fromEntries preserves synthetic_path" {
+    const allocator = std.testing.allocator;
+    const entries = [_]SourceMap.Entry{
+        .{
+            .idx = 0,
+            .pc = 0,
+            .file = "test.ora",
+            .line = 1,
+            .col = 1,
+            .statement_id = 1,
+            .origin_statement_id = 1,
+            .is_statement = true,
+            .is_synthetic = true,
+            .synthetic_index = 1,
+            .synthetic_count = 2,
+            .synthetic_path = "0.2/1.2",
+            .kind = .runtime,
+        },
+    };
+    var sm = try SourceMap.fromEntries(allocator, &entries);
+    defer sm.deinit();
+
+    try std.testing.expectEqualStrings("0.2/1.2", sm.entries[0].synthetic_path.?);
 }
 
 test "SourceMap.getLineProvenance" {

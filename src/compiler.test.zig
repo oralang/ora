@@ -10463,18 +10463,8 @@ test "compiler const eval reports explicit recursion-limit diagnostics" {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
 
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
-    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
-        .config = .{
-            .max_recursion_depth = 2,
-        },
-    });
-    defer consteval.deinit();
-
-    try testing.expect(consteval.diagnostics.items.items.len >= 1);
-    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "comptime recursion depth exceeded"));
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "comptime recursion depth exceeded"));
 }
 
 test "compiler const eval reports explicit step-limit diagnostics" {
@@ -11557,7 +11547,7 @@ test "compiler does not unroll runtime for-count loops above the unroll limit" {
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
 }
 
@@ -11576,7 +11566,7 @@ test "compiler does not unroll runtime range-for loops above the unroll limit" {
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
 }
 
@@ -11817,6 +11807,138 @@ test "compiler unrolls bounded runtime while loops with declarations inside if b
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.break") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") != null);
+}
+
+test "compiler preserves outer while while unrolling nested small runtime for loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let outer = 0;
+        \\        let sum = 0;
+        \\        while (outer < 3) {
+        \\            for (2) |i| {
+        \\                sum += i;
+        \\            }
+        \\            outer += 1;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.2") != null);
+}
+
+test "compiler fully unrolls bounded runtime while loops nested inside small runtime for loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let total = 0;
+        \\        for (2) |outer| {
+        \\            let i = 0;
+        \\            while (i < 3) {
+        \\                total += outer + i;
+        \\                i += 1;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3\"(\"ora.synthetic.0.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3\"(\"ora.synthetic.1.2\"") != null);
+}
+
+test "compiler fully unrolls bounded runtime while loops nested inside bounded runtime while loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let outer = 0;
+        \\        let total = 0;
+        \\        while (outer < 2) {
+        \\            let i = 0;
+        \\            while (i < 3) {
+        \\                total += outer + i;
+        \\                i += 1;
+        \\            }
+        \\            outer += 1;
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3\"(\"ora.synthetic.0.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3\"(\"ora.synthetic.1.2\"") != null);
+}
+
+test "compiler fully unrolls nested small runtime for loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let total = 0;
+        \\        for (2) |outer| {
+        \\            for (1..3) |inner, _| {
+        \\                total += outer + inner;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.2") != null);
+}
+
+test "compiler keeps nested runtime while structured when nested unroll budget would explode" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let total = 0;
+        \\        for (5) |outer| {
+        \\            let i = 0;
+        \\            while (i < 5) {
+        \\                total += outer + i;
+        \\                i += 1;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.5") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.4.5") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.while") != null);
 }
 
 test "compiler leaves optional partial evaluation runtime when recursion limit is exceeded" {

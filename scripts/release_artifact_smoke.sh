@@ -12,6 +12,7 @@ mkdir -p "$OUT_ROOT"
 contracts=(
   "ora-example/debugger/comptime_debug_probe.ora"
   "ora-example/debugger/partial_eval_probe.ora"
+  "ora-example/debugger/nested_unroll_probe.ora"
   "ora-example/debugger/constructor_value.ora"
   "ora-example/corpus/patterns/multi_asset.ora"
   "ora-example/vault/05_locks.ora"
