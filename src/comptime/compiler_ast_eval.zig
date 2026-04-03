@@ -18,6 +18,7 @@ const CtValue = bridge.CtValue;
 const type_ids = comptime_mod.type_ids;
 const SourceSpan = error_mod.SourceSpan;
 const Stage = stage_mod.Stage;
+const LimitCheck = comptime_mod.LimitCheck;
 const constEquals = bridge.constEquals;
 const ctValueToConstValue = bridge.ctValueToConstValue;
 const constToCtValue = bridge.constToCtValue;
@@ -118,6 +119,7 @@ const ConstEvaluator = struct {
     current_typecheck_key: ?model.TypeCheckKey = null,
     current_contract: ?ast.ItemId = null,
     call_depth: u32 = 0,
+    required_comptime_depth: u32 = 0,
     last_error: ?error_mod.CtError = null,
 
     const BodyControl = union(enum) {
@@ -159,12 +161,16 @@ const ConstEvaluator = struct {
             },
             .Field => |field| {
                 if (field.value) |expr_id| {
+                    self.required_comptime_depth += 1;
+                    defer self.required_comptime_depth -= 1;
                     const value = self.evalExpr(expr_id) catch null;
                     self.bindName(field.name, value) catch {};
                     self.values[expr_id.index()] = value;
                 }
             },
             .Constant => |constant| {
+                self.required_comptime_depth += 1;
+                defer self.required_comptime_depth -= 1;
                 const value = self.evalExpr(constant.value) catch null;
                 self.bindName(constant.name, value) catch {};
                 self.values[constant.value.index()] = value;
@@ -258,8 +264,10 @@ const ConstEvaluator = struct {
             if (self.values[expr_id.index()]) |cached| return cached;
         }
 
+        if (self.consumeStep(self.exprRange(expr_id))) return null;
+
         if (!self.exprUsesConstFallbackForCtValue(expr_id)) {
-            if (try self.evalExprCtValueImpl(expr_id, use_cache)) |ct_value| {
+            if (try self.evalExprCtValueImpl(expr_id, use_cache, false)) |ct_value| {
                 const const_value = try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 if (const_value != null) {
                     if (use_cache) self.values[expr_id.index()] = const_value;
@@ -332,6 +340,8 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Comptime => |comptime_expr| blk: {
+                self.required_comptime_depth += 1;
+                defer self.required_comptime_depth -= 1;
                 const value = try self.evalComptimeBody(comptime_expr.body);
                 if (value == null) {
                     self.recordMissingComptimeValue(
@@ -362,10 +372,10 @@ const ConstEvaluator = struct {
             },
             .Builtin => |builtin| blk: {
                 if (self.exprStage(expr_id) == .runtime_only) {
-                    self.last_error = error_mod.CtError.stageViolation(
+                    self.recordCtError(error_mod.CtError.stageViolation(
                         self.sourceSpan(builtin.range),
                         builtin.name,
-                    );
+                    ));
                     break :blk null;
                 }
                 break :blk try self.evalBuiltin(builtin);
@@ -396,10 +406,17 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
-        return self.evalExprCtValueImpl(expr_id, true);
+        return self.evalExprCtValueImpl(expr_id, true, true);
     }
 
-    fn evalExprCtValueImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
+    fn evalExprCtValueImpl(
+        self: *ConstEvaluator,
+        expr_id: ast.ExprId,
+        comptime use_cache: bool,
+        comptime charge_step: bool,
+    ) anyerror!?CtValue {
+        if (charge_step and self.consumeStep(self.exprRange(expr_id))) return null;
+
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| blk: {
                 const value = (try parseIntegerLiteral(self.allocator, literal.text)) orelse break :blk null;
@@ -423,7 +440,7 @@ const ConstEvaluator = struct {
                 if (self.pathTypeId(name.name)) |type_id| break :blk CtValue{ .type_val = type_id };
                 break :blk null;
             },
-            .Group => |group| try self.evalExprCtValueImpl(group.expr, use_cache),
+            .Group => |group| try self.evalExprCtValueImpl(group.expr, use_cache, true),
             .Call => |call| try self.evalCallCtValue(call, use_cache),
             .Unary, .Switch, .Comptime => blk: {
                 const const_value = (try self.evalExprImpl(expr_id, use_cache)) orelse break :blk null;
@@ -433,7 +450,7 @@ const ConstEvaluator = struct {
                 const elems = try self.allocator.alloc(CtValue, array.elements.len);
                 for (array.elements, 0..) |element_id, idx| {
                     _ = try self.evalExprImpl(element_id, use_cache);
-                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
+                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                 }
                 const heap_id = try self.env.heap.allocArray(elems);
                 break :blk CtValue{ .array_ref = heap_id };
@@ -442,7 +459,7 @@ const ConstEvaluator = struct {
                 const elems = try self.allocator.alloc(CtValue, tuple.elements.len);
                 for (tuple.elements, 0..) |element_id, idx| {
                     _ = try self.evalExprImpl(element_id, use_cache);
-                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
+                    elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                 }
                 const heap_id = try self.env.heap.allocTuple(elems);
                 break :blk CtValue{ .tuple_ref = heap_id };
@@ -453,7 +470,7 @@ const ConstEvaluator = struct {
                     _ = try self.evalExprImpl(field.value, use_cache);
                     fields[idx] = .{
                         .field_id = @intCast(idx),
-                        .value = (try self.evalExprCtValueImpl(field.value, use_cache)) orelse break :blk null,
+                        .value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null,
                     };
                 }
                 const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
@@ -463,8 +480,8 @@ const ConstEvaluator = struct {
             .Index => |index| blk: {
                 _ = try self.evalExprImpl(index.base, use_cache);
                 _ = try self.evalExprImpl(index.index, use_cache);
-                const base = (try self.evalExprCtValueImpl(index.base, use_cache)) orelse break :blk null;
-                const index_value = (try self.evalExprCtValueImpl(index.index, use_cache)) orelse break :blk null;
+                const base = (try self.evalExprCtValueImpl(index.base, use_cache, true)) orelse break :blk null;
+                const index_value = (try self.evalExprCtValueImpl(index.index, use_cache, true)) orelse break :blk null;
 
                 break :blk switch (base) {
                     .array_ref => |heap_id| blk_elem: {
@@ -526,7 +543,7 @@ const ConstEvaluator = struct {
                     },
                     else => {},
                 }
-                const base = (try self.evalExprCtValueImpl(field.base, use_cache)) orelse break :blk null;
+                const base = (try self.evalExprCtValueImpl(field.base, use_cache, true)) orelse break :blk null;
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
@@ -554,8 +571,8 @@ const ConstEvaluator = struct {
                 };
             },
             .Binary => |binary| blk: {
-                const lhs = (try self.evalExprCtValueImpl(binary.lhs, use_cache)) orelse break :blk null;
-                const rhs = (try self.evalExprCtValueImpl(binary.rhs, use_cache)) orelse break :blk null;
+                const lhs = (try self.evalExprCtValueImpl(binary.lhs, use_cache, true)) orelse break :blk null;
+                const rhs = (try self.evalExprCtValueImpl(binary.rhs, use_cache, true)) orelse break :blk null;
                 break :blk switch (binary.op) {
                     .eq => CtValue{ .boolean = self.ctValuesEqual(lhs, rhs) },
                     .ne => CtValue{ .boolean = !self.ctValuesEqual(lhs, rhs) },
@@ -587,18 +604,18 @@ const ConstEvaluator = struct {
 
     fn evalExprCtValueAsImpl(self: *ConstEvaluator, expr_id: ast.ExprId, target: ValueConstructionTarget, comptime use_cache: bool) anyerror!?CtValue {
         return switch (target) {
-            .none => try self.evalExprCtValueImpl(expr_id, use_cache),
+                    .none => try self.evalExprCtValueImpl(expr_id, use_cache, true),
             .slice => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral => |array| blk: {
                     const elems = try self.allocator.alloc(CtValue, array.elements.len);
                     for (array.elements, 0..) |element_id, idx| {
                         _ = try self.evalExprImpl(element_id, use_cache);
-                        elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache)) orelse break :blk null;
+                        elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                     }
                     const heap_id = try self.env.heap.allocSlice(elems);
                     break :blk CtValue{ .slice_ref = heap_id };
                 },
-                else => try self.evalExprCtValueImpl(expr_id, use_cache),
+                else => try self.evalExprCtValueImpl(expr_id, use_cache, true),
             },
             .map => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral, .Tuple => blk: {
@@ -606,7 +623,7 @@ const ConstEvaluator = struct {
                     const heap_id = try self.env.heap.allocMap(entries);
                     break :blk CtValue{ .map_ref = heap_id };
                 },
-                else => try self.evalExprCtValueImpl(expr_id, use_cache),
+                else => try self.evalExprCtValueImpl(expr_id, use_cache, true),
             },
         };
     }
@@ -1354,19 +1371,19 @@ const ConstEvaluator = struct {
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
         if (self.functionStage(function) == .runtime_only) {
-            self.last_error = error_mod.CtError.stageViolation(
+            self.recordCtError(error_mod.CtError.stageViolation(
                 self.sourceSpan(call.range),
                 function.name,
-            );
+            ));
             return null;
         }
 
         if (self.call_depth >= self.env.config.max_recursion_depth) {
-            self.last_error = error_mod.CtError.init(
+            self.recordCtError(error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
                 "comptime recursion depth exceeded",
-            );
+            ));
             return null;
         }
 
@@ -1421,19 +1438,19 @@ const ConstEvaluator = struct {
         try self.ensureTypeChecked(.{ .item = callable.item_id });
 
         if (self.functionStage(function) == .runtime_only) {
-            self.last_error = error_mod.CtError.stageViolation(
+            self.recordCtError(error_mod.CtError.stageViolation(
                 self.sourceSpan(call.range),
                 function.name,
-            );
+            ));
             return null;
         }
 
         if (self.call_depth >= self.env.config.max_recursion_depth) {
-            self.last_error = error_mod.CtError.init(
+            self.recordCtError(error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
                 "comptime recursion depth exceeded",
-            );
+            ));
             return null;
         }
 
@@ -1474,7 +1491,7 @@ const ConstEvaluator = struct {
                 if (self.last_error != null) return null;
             },
             else => {
-                if (try self.evalExprCtValueImpl(expr_id, use_cache)) |ct_value| return ct_value;
+                if (try self.evalExprCtValueImpl(expr_id, use_cache, true)) |ct_value| return ct_value;
             },
         }
 
@@ -1729,21 +1746,48 @@ const ConstEvaluator = struct {
         message: []const u8,
         reason: ?[]const u8,
     ) void {
-        if (self.last_error != null) return;
-        self.last_error = if (reason) |detail|
+        const ct_error = if (reason) |detail|
             error_mod.CtError.withReason(.not_comptime, span, message, detail)
         else
             error_mod.CtError.init(.not_comptime, span, message);
+        self.recordCtError(ct_error);
     }
 
     fn recordLoopLimitExceeded(self: *ConstEvaluator, range: source.TextRange) void {
-        if (self.last_error != null) return;
-        self.last_error = error_mod.CtError.withReason(
+        self.recordCtError(error_mod.CtError.withReason(
             .iteration_limit,
             self.sourceSpan(range),
             "comptime loop iteration limit exceeded",
             "evaluation exceeded max_loop_iterations",
-        );
+        ));
+    }
+
+    fn recordStepLimitExceeded(self: *ConstEvaluator, range: source.TextRange) void {
+        self.recordCtError(error_mod.CtError.withReason(
+            .step_limit,
+            self.sourceSpan(range),
+            "evaluation step limit exceeded",
+            "evaluation exceeded max_steps",
+        ));
+    }
+
+    fn inRequiredComptime(self: *const ConstEvaluator) bool {
+        return self.required_comptime_depth > 0;
+    }
+
+    fn recordCtError(self: *ConstEvaluator, ct_error: error_mod.CtError) void {
+        if (!self.inRequiredComptime()) return;
+        if (self.last_error != null) return;
+        self.last_error = ct_error;
+    }
+
+    fn consumeStep(self: *ConstEvaluator, range: source.TextRange) bool {
+        self.env.stats.recordStep();
+        if (LimitCheck.init(self.env.config, &self.env.stats).checkSteps() != null) {
+            self.recordStepLimitExceeded(range);
+            return true;
+        }
+        return false;
     }
 
     fn statementRange(self: *ConstEvaluator, statement_id: ast.StmtId) source.TextRange {
@@ -1768,6 +1812,36 @@ const ConstEvaluator = struct {
             .Block => |stmt| stmt.range,
             .LabeledBlock => |stmt| stmt.range,
             .Error => |stmt| stmt.range,
+        };
+    }
+
+    fn exprRange(self: *ConstEvaluator, expr_id: ast.ExprId) source.TextRange {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |expr| expr.range,
+            .StringLiteral => |expr| expr.range,
+            .BoolLiteral => |expr| expr.range,
+            .AddressLiteral => |expr| expr.range,
+            .BytesLiteral => |expr| expr.range,
+            .TypeValue => |expr| expr.range,
+            .Tuple => |expr| expr.range,
+            .ArrayLiteral => |expr| expr.range,
+            .StructLiteral => |expr| expr.range,
+            .ExternalProxy => |expr| expr.range,
+            .Switch => |expr| expr.range,
+            .Comptime => |expr| expr.range,
+            .ErrorReturn => |expr| expr.range,
+            .Name => |expr| expr.range,
+            .Result => |expr| expr.range,
+            .Unary => |expr| expr.range,
+            .Binary => |expr| expr.range,
+            .Call => |expr| expr.range,
+            .Builtin => |expr| expr.range,
+            .Field => |expr| expr.range,
+            .Index => |expr| expr.range,
+            .Group => |expr| expr.range,
+            .Old => |expr| expr.range,
+            .Quantified => |expr| expr.range,
+            .Error => |expr| expr.range,
         };
     }
 
@@ -1837,11 +1911,12 @@ const ConstEvaluator = struct {
         const body = self.file.body(body_id).*;
         var last_value: ?ConstValue = null;
         for (body.statements) |statement_id| {
+            if (self.consumeStep(self.statementRange(statement_id))) return .{ .value = null };
             if (self.statementStage(statement_id) == .runtime_only) {
-                self.last_error = error_mod.CtError.stageViolation(
+                self.recordCtError(error_mod.CtError.stageViolation(
                     self.sourceSpan(self.statementRange(statement_id)),
                     "runtime-only statement",
-                );
+                ));
                 return .{ .value = null };
             }
             switch (self.file.statement(statement_id).*) {
@@ -1954,11 +2029,12 @@ const ConstEvaluator = struct {
         const body = self.file.body(body_id).*;
         var last_value: ?CtValue = null;
         for (body.statements) |statement_id| {
+            if (self.consumeStep(self.statementRange(statement_id))) return .{ .value = null };
             if (self.statementStage(statement_id) == .runtime_only) {
-                self.last_error = error_mod.CtError.stageViolation(
+                self.recordCtError(error_mod.CtError.stageViolation(
                     self.sourceSpan(self.statementRange(statement_id)),
                     "runtime-only statement",
-                );
+                ));
                 return .{ .value = null };
             }
             switch (self.file.statement(statement_id).*) {

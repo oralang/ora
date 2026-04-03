@@ -10457,10 +10457,7 @@ test "compiler const eval reports explicit recursion-limit diagnostics" {
         \\    return n * factorial(n - 1);
         \\}
         \\
-        \\pub fn run() -> u256 {
-        \\    const val: u256 = factorial(5);
-        \\    return val;
-        \\}
+        \\const VALUE: u256 = factorial(5);
     ;
 
     var compilation = try compileText(source_text);
@@ -10475,9 +10472,39 @@ test "compiler const eval reports explicit recursion-limit diagnostics" {
     });
     defer consteval.deinit();
 
-    try testing.expectEqual(@as(usize, 1), consteval.diagnostics.items.items.len);
-    const diag = consteval.diagnostics.items.items[0];
-    try testing.expect(std.mem.indexOf(u8, diag.message, "comptime recursion depth exceeded") != null);
+    try testing.expect(consteval.diagnostics.items.items.len >= 1);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "comptime recursion depth exceeded"));
+}
+
+test "compiler const eval reports explicit step-limit diagnostics" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    return comptime {
+        \\        let total = 0;
+        \\        for (5) |i| {
+        \\            total += i;
+        \\        }
+        \\        total;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_loop_iterations = 100,
+            .max_steps = 8,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expect(consteval.diagnostics.items.items.len >= 1);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "evaluation step limit exceeded"));
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "evaluation exceeded max_steps"));
 }
 
 test "compiler const eval executes comptime array for loops" {
@@ -11288,6 +11315,46 @@ test "compiler partially evaluates nested pure helper calls in runtime functions
     try testing.expect(std.mem.indexOf(u8, rendered, " 6 : i256") != null);
 }
 
+test "compiler partially evaluates pure helper calls in runtime const declarations" {
+    const source_text =
+        \\fn helper(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const ct: u256 = helper(2, 3);
+        \\        return x + ct;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @helper"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 5 : i256") != null);
+}
+
+test "compiler partially evaluates nested pure helper calls in runtime const declarations" {
+    const source_text =
+        \\fn helper(a: u256, b: u256) -> u256 {
+        \\    return a + b;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const nested: u256 = helper(helper(1, 2), 3);
+        \\        return x + nested;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expectEqual(0, std.mem.count(u8, rendered, "call @helper"));
+    try testing.expect(std.mem.indexOf(u8, rendered, " 6 : i256") != null);
+}
+
 test "compiler does not partially evaluate impure helper calls in runtime functions" {
     const source_text =
         \\contract Sample {
@@ -11307,6 +11374,145 @@ test "compiler does not partially evaluate impure helper calls in runtime functi
     defer testing.allocator.free(rendered);
     try testing.expect(std.mem.indexOf(u8, rendered, "call @read_counter") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.sload") != null);
+}
+
+test "compiler does not partially evaluate impure helper calls in runtime const declarations" {
+    const source_text =
+        \\contract Sample {
+        \\    storage var counter: u256;
+        \\
+        \\    fn read_counter() -> u256 {
+        \\        return counter;
+        \\    }
+        \\
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const live: u256 = read_counter();
+        \\        return x + live;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @read_counter") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.sload") != null);
+}
+
+test "compiler leaves optional partial evaluation runtime when recursion limit is exceeded" {
+    const source_text =
+        \\comptime fn factorial(n: u256) -> u256 {
+        \\    if (n == 0) { return 1; }
+        \\    return n * factorial(n - 1);
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const ct: u256 = factorial(5);
+        \\        return x + ct;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract = ast_file.item(ast_file.root_items[1]).Contract;
+    const function = ast_file.item(contract.members[0]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_recursion_depth = 2,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[decl.value.?.index()]);
+    try testing.expectEqual(@as(usize, 0), consteval.diagnostics.items.items.len);
+}
+
+test "compiler leaves optional partial evaluation runtime when loop iteration limit is exceeded" {
+    const source_text =
+        \\comptime fn power(base: u256, exp: u256) -> u256 {
+        \\    let acc = 1;
+        \\    let i = 0;
+        \\    while (i < exp) {
+        \\        acc *= base;
+        \\        i += 1;
+        \\    }
+        \\    return acc;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const ct: u256 = power(2, 10);
+        \\        return x + ct;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract = ast_file.item(ast_file.root_items[1]).Contract;
+    const function = ast_file.item(contract.members[0]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_loop_iterations = 2,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[decl.value.?.index()]);
+    try testing.expectEqual(@as(usize, 0), consteval.diagnostics.items.items.len);
+}
+
+test "compiler leaves optional partial evaluation runtime when step limit is exceeded" {
+    const source_text =
+        \\comptime fn sum_to(n: u256) -> u256 {
+        \\    let total = 0;
+        \\    for (n) |i| {
+        \\        total += i;
+        \\    }
+        \\    return total;
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn run(x: u256) -> u256 {
+        \\        const ct: u256 = sum_to(5);
+        \\        return x + ct;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract = ast_file.item(ast_file.root_items[1]).Contract;
+    const function = ast_file.item(contract.members[0]).Function;
+    const body = ast_file.body(function.body);
+    const decl = ast_file.statement(body.statements[0]).VariableDecl;
+
+    var consteval = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+        .config = .{
+            .max_loop_iterations = 100,
+            .max_steps = 8,
+        },
+    });
+    defer consteval.deinit();
+
+    try testing.expectEqual(@as(?compiler.sema.ConstValue, null), consteval.values[decl.value.?.index()]);
+    try testing.expectEqual(@as(usize, 0), consteval.diagnostics.items.items.len);
 }
 
 test "compiler const eval binds function call arguments by parameter pattern" {

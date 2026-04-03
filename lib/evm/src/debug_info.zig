@@ -321,7 +321,8 @@ test "DebugInfo parses concrete memory and transient root payloads" {
         \\          "binding_kind": null,
         \\          "storage_class": "memory",
         \\          "runtime": {"kind":"memory_field","name":"scratch","location":{"kind":"memory_root","root":"scratch","slot":0},"editable":true},
-        \\          "folded_value": "30"
+        \\          "folded_value": "30",
+        \\          "is_folded": true
         \\        },
         \\        {
         \\          "id": 11,
@@ -330,7 +331,8 @@ test "DebugInfo parses concrete memory and transient root payloads" {
         \\          "binding_kind": null,
         \\          "storage_class": "tstore",
         \\          "runtime": {"kind":"tstore_field","name":"temp_counter","location":{"kind":"tstore_root","root":"temp_counter","slot":1},"editable":true},
-        \\          "folded_value": null
+        \\          "folded_value": null,
+        \\          "is_folded": false
         \\        }
         \\      ]
         \\    }
@@ -356,6 +358,7 @@ test "DebugInfo parses concrete memory and transient root payloads" {
     try std.testing.expectEqual(@as(?u64, 0), bindings[0].runtime_location_slot);
     try std.testing.expect(bindings[0].editable);
     try std.testing.expectEqualStrings("30", bindings[0].folded_value.?);
+    try std.testing.expect(bindings[0].is_folded);
 
     try std.testing.expectEqualStrings("temp_counter", bindings[1].name);
     try std.testing.expectEqualStrings("tstore_field", bindings[1].runtime_kind);
@@ -363,4 +366,5 @@ test "DebugInfo parses concrete memory and transient root payloads" {
     try std.testing.expectEqualStrings("temp_counter", bindings[1].runtime_location_root.?);
     try std.testing.expectEqual(@as(?u64, 1), bindings[1].runtime_location_slot);
     try std.testing.expect(bindings[1].editable);
+    try std.testing.expect(!bindings[1].is_folded);
 }
