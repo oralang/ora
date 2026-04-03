@@ -833,7 +833,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     } else try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
                     try self.bindPatternValue(decl.pattern, value, locals);
                     if (decl.value) |expr_id| {
-                        try locals.setPatternKnownInt(self.parent.file, decl.pattern, @This().evalKnownIntExpr(self, expr_id, locals));
+                        if (@This().evalKnownIntExpr(self, expr_id, locals)) |known_int| {
+                            try locals.setPatternKnownInt(self.parent.file, decl.pattern, known_int);
+                        } else if (@This().evalKnownBoolExpr(self, expr_id, locals)) |known_bool| {
+                            try locals.setPatternKnownBool(self.parent.file, decl.pattern, known_bool);
+                        } else {
+                            try locals.setPatternKnownInt(self.parent.file, decl.pattern, null);
+                            try locals.setPatternKnownBool(self.parent.file, decl.pattern, null);
+                        }
                     }
                     return false;
                 },
@@ -981,6 +988,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         },
                         else => null,
                     };
+                    const known_bool = if (assign.op == .assign) @This().evalKnownBoolExpr(self, assign.value, locals) else null;
                     const value = switch (assign.op) {
                         .assign => try self.lowerExpr(assign.value, locals),
                         .add_assign => blk: {
@@ -1096,7 +1104,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         },
                     };
                     try self.storePattern(assign.target, value, locals);
-                    if (target_local_id) |local_id| try locals.setKnownInt(local_id, known_int);
+                    if (target_local_id) |local_id| {
+                        if (known_int) |integer| {
+                            try locals.setKnownInt(local_id, integer);
+                        } else if (known_bool) |boolean| {
+                            try locals.setKnownBool(local_id, boolean);
+                        } else {
+                            try locals.setKnownInt(local_id, null);
+                            try locals.setKnownBool(local_id, null);
+                        }
+                    }
                     return false;
                 },
                 .Expr => |expr_stmt| {
@@ -2544,7 +2561,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
             if (for_stmt.invariants.len != 0) return null;
 
-            const finite_range = @This().finiteForRange(self, for_stmt) orelse return null;
+            const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
             if (finite_range.trip_count > runtime_for_unroll_limit) return null;
 
             var unrolled_loop_context = UnrolledLoopContext{
@@ -2605,10 +2622,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             trip_count: u64,
         };
 
-        fn finiteForRange(self: *FunctionLowerer, for_stmt: ast.ForStmt) ?FiniteForRange {
+        fn finiteForRange(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *const LocalEnv) ?FiniteForRange {
             if (for_stmt.range_end) |range_end| {
-                const start = @This().constEvalI64(self, for_stmt.iterable) orelse return null;
-                const finish = @This().constEvalI64(self, range_end) orelse return null;
+                const start = @This().evalKnownIntExpr(self, for_stmt.iterable, locals) orelse
+                    @This().constEvalI64(self, for_stmt.iterable) orelse
+                    return null;
+                const finish = @This().evalKnownIntExpr(self, range_end, locals) orelse
+                    @This().constEvalI64(self, range_end) orelse
+                    return null;
                 if (for_stmt.range_inclusive) {
                     if (start > finish) return .{ .start = start, .trip_count = 0 };
                     return .{ .start = start, .trip_count = @intCast(finish - start + 1) };
@@ -2617,7 +2638,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return .{ .start = start, .trip_count = @intCast(finish - start) };
             }
 
-            const trip_count = @This().constEvalU64(self, for_stmt.iterable) orelse return null;
+            const trip_count = if (@This().evalKnownIntExpr(self, for_stmt.iterable, locals)) |known_trip_count|
+                std.math.cast(u64, known_trip_count) orelse return null
+            else
+                @This().constEvalU64(self, for_stmt.iterable) orelse return null;
             return .{ .start = 0, .trip_count = trip_count };
         }
 
@@ -2663,8 +2687,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Group => |group| @This().evalKnownExprValue(self, group.expr, locals),
                 .Name => |name| blk: {
                     const local_id = locals.lookupName(name.name) orelse break :blk null;
-                    const integer = locals.getKnownInt(local_id) orelse break :blk null;
-                    break :blk .{ .integer = integer };
+                    if (locals.getKnownInt(local_id)) |integer| {
+                        break :blk .{ .integer = integer };
+                    }
+                    if (locals.getKnownBool(local_id)) |boolean| {
+                        break :blk .{ .boolean = boolean };
+                    }
+                    break :blk null;
                 },
                 .Unary => |unary| blk: {
                     const operand = @This().evalKnownExprValue(self, unary.operand, locals) orelse break :blk null;

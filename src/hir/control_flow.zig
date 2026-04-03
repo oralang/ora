@@ -722,6 +722,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             loop_label: ?[]const u8,
         ) anyerror!?UnrolledLoopSignal {
             return switch (self.parent.file.statement(statement_id).*) {
+                .VariableDecl => |decl| blk: {
+                    const expr_id = decl.value orelse break :blk null;
+                    try locals.bindPatternWithoutValue(self.parent.file, decl.pattern);
+                    if (FunctionLowerer.evalKnownIntExpr(self, expr_id, locals)) |known_int| {
+                        try locals.setPatternKnownInt(self.parent.file, decl.pattern, known_int);
+                    } else if (FunctionLowerer.evalKnownBoolExpr(self, expr_id, locals)) |known_bool| {
+                        try locals.setPatternKnownBool(self.parent.file, decl.pattern, known_bool);
+                    } else {
+                        break :blk null;
+                    }
+                    break :blk .none;
+                },
                 .Assign => |assign| blk: {
                     const local_id = locals.resolvePatternTarget(self.parent.file, assign.target) orelse break :blk null;
                     const known_int = switch (assign.op) {
@@ -737,9 +749,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :sub_blk std.math.sub(i64, lhs, rhs) catch null;
                         },
                         else => null,
-                    } orelse break :blk null;
-                    try locals.setKnownInt(local_id, known_int);
-                    break :blk .none;
+                    };
+                    if (known_int) |integer| {
+                        try locals.setKnownInt(local_id, integer);
+                        break :blk .none;
+                    }
+                    if (assign.op == .assign) {
+                        if (FunctionLowerer.evalKnownBoolExpr(self, assign.value, locals)) |known_bool| {
+                            try locals.setKnownBool(local_id, known_bool);
+                            break :blk .none;
+                        }
+                    }
+                    break :blk null;
                 },
                 .If => |if_stmt| blk: {
                     const condition = FunctionLowerer.evalKnownBoolExpr(self, if_stmt.condition, locals) orelse break :blk null;
