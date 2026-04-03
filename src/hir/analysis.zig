@@ -22,6 +22,14 @@ pub fn bodyContainsLoopControl(file: *const ast.AstFile, body_id: ast.BodyId) bo
     return false;
 }
 
+pub fn bodyContainsLabeledLoopControl(file: *const ast.AstFile, body_id: ast.BodyId) bool {
+    const body = file.body(body_id).*;
+    for (body.statements) |statement_id| {
+        if (stmtContainsLabeledLoopControl(file, statement_id)) return true;
+    }
+    return false;
+}
+
 pub fn bodyContainsStructuredLoopControl(file: *const ast.AstFile, body_id: ast.BodyId) bool {
     return bodyContainsLoopControlInContext(file, body_id, false);
 }
@@ -311,6 +319,29 @@ pub fn stmtContainsLoopControl(file: *const ast.AstFile, statement_id: ast.StmtI
             (try_stmt.catch_clause != null and bodyContainsLoopControl(file, try_stmt.catch_clause.?.body)),
         .Block => |block_stmt| bodyContainsLoopControl(file, block_stmt.body),
         .LabeledBlock => |block_stmt| bodyContainsLoopControl(file, block_stmt.body),
+        else => false,
+    };
+}
+
+fn stmtContainsLabeledLoopControl(file: *const ast.AstFile, statement_id: ast.StmtId) bool {
+    return switch (file.statement(statement_id).*) {
+        .Break => |jump| jump.label != null,
+        .Continue => |jump| jump.label != null,
+        .If => |if_stmt| bodyContainsLabeledLoopControl(file, if_stmt.then_body) or
+            (if_stmt.else_body != null and bodyContainsLabeledLoopControl(file, if_stmt.else_body.?)),
+        .While => |while_stmt| bodyContainsLabeledLoopControl(file, while_stmt.body),
+        .For => |for_stmt| bodyContainsLabeledLoopControl(file, for_stmt.body),
+        .Switch => |switch_stmt| blk: {
+            for (switch_stmt.arms) |arm| {
+                if (bodyContainsLabeledLoopControl(file, arm.body)) break :blk true;
+            }
+            if (switch_stmt.else_body) |else_body| break :blk bodyContainsLabeledLoopControl(file, else_body);
+            break :blk false;
+        },
+        .Try => |try_stmt| bodyContainsLabeledLoopControl(file, try_stmt.try_body) or
+            (try_stmt.catch_clause != null and bodyContainsLabeledLoopControl(file, try_stmt.catch_clause.?.body)),
+        .Block => |block_stmt| bodyContainsLabeledLoopControl(file, block_stmt.body),
+        .LabeledBlock => |block_stmt| bodyContainsLabeledLoopControl(file, block_stmt.body),
         else => false,
     };
 }

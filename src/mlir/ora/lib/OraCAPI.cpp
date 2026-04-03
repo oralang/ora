@@ -174,6 +174,23 @@ extern "C"
         return MlirLocation{loc.getAsOpaquePointer()};
     }
 
+    MlirLocation oraLocationSyntheticTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t syntheticIndex,
+        uint32_t syntheticCount)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::Location childLoc = unwrap(child);
+        if (childLoc == nullptr)
+        {
+            childLoc = mlir::UnknownLoc::get(context);
+        }
+        std::string tag = "ora.synthetic." + std::to_string(syntheticIndex) + "." + std::to_string(syntheticCount);
+        mlir::Location loc = mlir::NameLoc::get(mlir::StringAttr::get(context, tag), childLoc);
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
     bool oraLocationIsNull(MlirLocation loc)
     {
         return loc.ptr == nullptr;

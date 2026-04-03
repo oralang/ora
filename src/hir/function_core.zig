@@ -30,10 +30,13 @@ const LocalIdSet = hir_locals.LocalIdSet;
 const BlockContext = support.BlockContext;
 const LoopContext = support.LoopContext;
 const SwitchContext = support.SwitchContext;
+const UnrolledLoopContext = support.UnrolledLoopContext;
+const UnrolledLoopSignal = support.UnrolledLoopSignal;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const statementMayReturn = analysis.statementMayReturn;
+const runtime_for_unroll_limit: u64 = 8;
 
 fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
@@ -59,6 +62,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .in_ghost_context = function.is_ghost,
                 .current_scf_carried_locals = null,
                 .block_context = null,
+                .unrolled_loop_context = null,
             };
 
             var runtime_index: usize = 0;
@@ -101,6 +105,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .in_ghost_context = false,
                 .current_scf_carried_locals = null,
                 .block_context = null,
+                .unrolled_loop_context = null,
             };
         }
 
@@ -1214,6 +1219,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label)) |unrolled_loop_context| {
+                        unrolled_loop_context.signal = .break_loop;
+                        return true;
+                    }
                     const op = mlir.oraBreakOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef(), null, 0);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
@@ -1324,6 +1333,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label)) |unrolled_loop_context| {
+                        unrolled_loop_context.signal = .continue_loop;
+                        return true;
+                    }
                     const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
@@ -1356,6 +1369,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                 } else {
                     return loop_context;
+                }
+            }
+            return null;
+        }
+
+        fn findTargetUnrolledLoopContext(self: *FunctionLowerer, label: ?[]const u8) ?*UnrolledLoopContext {
+            var current = self.unrolled_loop_context;
+            while (current) |unrolled_loop_context| : (current = unrolled_loop_context.parent) {
+                if (label) |target| {
+                    if (unrolled_loop_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return unrolled_loop_context;
+                    }
+                } else {
+                    return unrolled_loop_context;
                 }
             }
             return null;
@@ -2224,6 +2251,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
+            if (try @This().lowerUnrolledFiniteForStmt(self, for_stmt, locals)) |terminated| {
+                return terminated;
+            }
+
             const loc = self.parent.location(for_stmt.range);
             const is_range_iterable = for_stmt.range_end != null;
             const iterable = try self.lowerExpr(for_stmt.iterable, locals);
@@ -2486,6 +2517,102 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.appendDeferredReturnCheck(for_stmt.range, locals);
             }
             return false;
+        }
+
+        fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
+            if (for_stmt.invariants.len != 0) return null;
+
+            const finite_range = @This().finiteForRange(self, for_stmt) orelse return null;
+            if (finite_range.trip_count > runtime_for_unroll_limit) return null;
+
+            var unrolled_loop_context = UnrolledLoopContext{
+                .parent = self.unrolled_loop_context,
+                .label = for_stmt.label,
+            };
+            const prev_unrolled_loop_context = self.unrolled_loop_context;
+            self.unrolled_loop_context = &unrolled_loop_context;
+            defer self.unrolled_loop_context = prev_unrolled_loop_context;
+
+            var iteration: u64 = 0;
+            var current = finite_range.start;
+            while (iteration < finite_range.trip_count) : (iteration += 1) {
+                const prev_synthetic_index = self.parent.current_synthetic_index;
+                const prev_synthetic_count = self.parent.current_synthetic_count;
+                self.parent.current_synthetic_index = @intCast(iteration);
+                self.parent.current_synthetic_count = @intCast(finite_range.trip_count);
+                defer {
+                    self.parent.current_synthetic_index = prev_synthetic_index;
+                    self.parent.current_synthetic_count = prev_synthetic_count;
+                }
+
+                const loc = self.parent.location(for_stmt.range);
+                const item_value = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), current),
+                );
+                try self.bindPatternValue(for_stmt.item_pattern, item_value, locals);
+                if (for_stmt.index_pattern) |index_pattern| {
+                    const index_value = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), @intCast(iteration)),
+                    );
+                    try self.bindPatternValue(index_pattern, index_value, locals);
+                }
+
+                const body_terminated = try self.lowerBody(for_stmt.body, locals);
+                switch (unrolled_loop_context.signal) {
+                    .none => if (body_terminated) return true,
+                    .continue_loop => {
+                        unrolled_loop_context.signal = .none;
+                        current += 1;
+                        continue;
+                    },
+                    .break_loop => {
+                        unrolled_loop_context.signal = .none;
+                        break;
+                    },
+                }
+                current += 1;
+            }
+
+            return false;
+        }
+
+        const FiniteForRange = struct {
+            start: i64,
+            trip_count: u64,
+        };
+
+        fn finiteForRange(self: *FunctionLowerer, for_stmt: ast.ForStmt) ?FiniteForRange {
+            if (for_stmt.range_end) |range_end| {
+                const start = @This().constEvalI64(self, for_stmt.iterable) orelse return null;
+                const finish = @This().constEvalI64(self, range_end) orelse return null;
+                if (for_stmt.range_inclusive) {
+                    if (start > finish) return .{ .start = start, .trip_count = 0 };
+                    return .{ .start = start, .trip_count = @intCast(finish - start + 1) };
+                }
+                if (start >= finish) return .{ .start = start, .trip_count = 0 };
+                return .{ .start = start, .trip_count = @intCast(finish - start) };
+            }
+
+            const trip_count = @This().constEvalU64(self, for_stmt.iterable) orelse return null;
+            return .{ .start = 0, .trip_count = trip_count };
+        }
+
+        fn constEvalI64(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                else => null,
+            };
+        }
+
+        fn constEvalU64(self: *FunctionLowerer, expr_id: ast.ExprId) ?u64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(u64) catch null,
+                else => null,
+            };
         }
 
         fn lowerLoopInvariants(self: *FunctionLowerer, invariants: []const ast.ExprId, locals: *LocalEnv) anyerror!void {

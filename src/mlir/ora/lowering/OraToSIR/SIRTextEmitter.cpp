@@ -302,6 +302,46 @@ namespace
         return false;
     }
 
+    std::optional<std::pair<uint32_t, uint32_t>> extractSyntheticLocTag(Location loc)
+    {
+        if (loc == nullptr)
+            return std::nullopt;
+        if (auto nameLoc = dyn_cast<NameLoc>(loc))
+        {
+            StringRef name = nameLoc.getName().getValue();
+            constexpr StringLiteral prefix("ora.synthetic.");
+            if (name.starts_with(prefix))
+            {
+                StringRef rest = name.drop_front(prefix.size());
+                auto parts = rest.split('.');
+                uint32_t syntheticIndex = 0;
+                uint32_t syntheticCount = 0;
+                if (!parts.first.empty() && !parts.second.empty() &&
+                    !parts.first.getAsInteger(10, syntheticIndex) &&
+                    !parts.second.getAsInteger(10, syntheticCount))
+                {
+                    return std::make_pair(syntheticIndex, syntheticCount);
+                }
+            }
+            return extractSyntheticLocTag(nameLoc.getChildLoc());
+        }
+        if (auto callSite = dyn_cast<CallSiteLoc>(loc))
+        {
+            if (auto calleeTag = extractSyntheticLocTag(callSite.getCallee()))
+                return calleeTag;
+            return extractSyntheticLocTag(callSite.getCaller());
+        }
+        if (auto fusedLoc = dyn_cast<FusedLoc>(loc))
+        {
+            for (Location child : fusedLoc.getLocations())
+            {
+                if (auto tag = extractSyntheticLocTag(child))
+                    return tag;
+            }
+        }
+        return std::nullopt;
+    }
+
     template <typename RangeT>
     void emitValueList(raw_ostream &os, NameTable &names, RangeT values)
     {
@@ -1203,11 +1243,17 @@ namespace mlir
                 for (unsigned i = 0; i < op.getNumResults(); ++i)
                     record.resultNames.push_back(names.nameFor(op.getResult(i)));
                 record.isTerminator = op.hasTrait<OpTrait::IsTerminator>();
-                record.isSynthetic = synthetic || hasSyntheticLocTag(op.getLoc());
+                const auto locSyntheticTag = extractSyntheticLocTag(op.getLoc());
+                record.isSynthetic = synthetic || locSyntheticTag.has_value() || hasSyntheticLocTag(op.getLoc());
                 if (synthetic)
                 {
                     record.syntheticIndex = syntheticIndex;
                     record.syntheticCount = syntheticCount;
+                }
+                else if (locSyntheticTag)
+                {
+                    record.syntheticIndex = locSyntheticTag->first;
+                    record.syntheticCount = locSyntheticTag->second;
                 }
                 records.push_back(std::move(record));
             });

@@ -198,6 +198,8 @@ const Lowerer = struct {
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
     current_statement_id: ?ast.StmtId = null,
+    current_synthetic_index: ?u32 = null,
+    current_synthetic_count: ?u32 = null,
 
     const ModuleLowering = module_lowering.mixin(Lowerer, ContractLowerer, FunctionLowerer, HirSymbolKind);
     pub const lowerItem = ModuleLowering.lowerItem;
@@ -230,7 +232,16 @@ const Lowerer = struct {
     pub const bitfieldFieldSign = ModuleLowering.bitfieldFieldSign;
 
     pub fn location(self: *const Lowerer, range: source.TextRange) mlir.MlirLocation {
-        return support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
+        const base = support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
+        if (self.current_synthetic_index) |synthetic_index| {
+            return mlir.oraLocationSyntheticTaggedGet(
+                self.context,
+                base,
+                synthetic_index,
+                self.current_synthetic_count orelse 1,
+            );
+        }
+        return base;
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
@@ -861,6 +872,7 @@ const FunctionLowerer = struct {
     loop_context: ?*const support.LoopContext = null,
     block_context: ?*const support.BlockContext = null,
     switch_context: ?*const support.SwitchContext = null,
+    unrolled_loop_context: ?*support.UnrolledLoopContext = null,
 
     const FunctionCore = function_core.mixin(FunctionLowerer, Lowerer);
     const ControlFlow = control_flow.mixin(FunctionLowerer, Lowerer);

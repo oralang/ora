@@ -44,6 +44,11 @@ extern "C"
         MlirContext ctx,
         MlirLocation child,
         uint32_t stmtId);
+    MLIR_CAPI_EXPORTED MlirLocation oraLocationSyntheticTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t syntheticIndex,
+        uint32_t syntheticCount);
     MLIR_CAPI_EXPORTED bool oraLocationIsNull(MlirLocation loc);
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraLocationPrintToString(MlirLocation loc);

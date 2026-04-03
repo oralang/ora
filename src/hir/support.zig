@@ -13,6 +13,18 @@ pub const LoopContext = struct {
     carried_locals: []const ast.PatternId,
 };
 
+pub const UnrolledLoopSignal = enum {
+    none,
+    break_loop,
+    continue_loop,
+};
+
+pub const UnrolledLoopContext = struct {
+    parent: ?*UnrolledLoopContext,
+    label: ?[]const u8 = null,
+    signal: UnrolledLoopSignal = .none,
+};
+
 pub const BlockContext = struct {
     parent: ?*const BlockContext,
     label: ?[]const u8 = null,

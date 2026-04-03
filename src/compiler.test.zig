@@ -11398,6 +11398,151 @@ test "compiler does not partially evaluate impure helper calls in runtime const 
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.sload") != null);
 }
 
+test "compiler unrolls small constant runtime for-count loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        for (4) |i| {
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") == null);
+    try testing.expect(std.mem.count(u8, rendered, "ora.stmt.1") >= 4);
+    try testing.expect(std.mem.count(u8, rendered, "ora.stmt.2") >= 4);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.3.4") != null);
+}
+
+test "compiler unrolls small constant runtime range-for loops" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        for (2..5) |i, _| {
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") == null);
+    try testing.expect(std.mem.count(u8, rendered, "ora.stmt.1") >= 3);
+    try testing.expect(std.mem.count(u8, rendered, "ora.stmt.2") >= 3);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.3") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.3") != null);
+}
+
+test "compiler unrolls small constant runtime for loops with unlabeled break" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        for (4) |i| {
+        \\            if (i == 2) {
+        \\                break;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.break") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.4") != null);
+}
+
+test "compiler unrolls small constant runtime for loops with unlabeled continue" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        for (4) |i| {
+        \\            if (i == 2) {
+        \\                continue;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+}
+
+test "compiler unrolls small constant labeled runtime for loops with labeled break" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        outer: for (4) |i| {
+        \\            if (i == 2) {
+        \\                break :outer;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.break") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.1.4") != null);
+}
+
+test "compiler unrolls small constant labeled runtime for loops with labeled continue" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum = 0;
+        \\        outer: for (4) |i| {
+        \\            if (i == 2) {
+        \\                continue :outer;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+}
+
 test "compiler leaves optional partial evaluation runtime when recursion limit is exceeded" {
     const source_text =
         \\comptime fn factorial(n: u256) -> u256 {
