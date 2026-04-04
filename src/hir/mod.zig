@@ -254,10 +254,11 @@ const Lowerer = struct {
     }
 
     pub fn pushSyntheticFrame(self: *Lowerer, index: u32, count: u32) void {
-        if (self.synthetic_stack_len < self.synthetic_stack.len) {
-            self.synthetic_stack[self.synthetic_stack_len] = .{ .index = index, .count = count };
-            self.synthetic_stack_len += 1;
-        }
+        // This stack should never overflow under the current nested-unroll policy.
+        // Keep the bound explicit so future budget changes do not silently truncate provenance.
+        std.debug.assert(self.synthetic_stack_len < self.synthetic_stack.len);
+        self.synthetic_stack[self.synthetic_stack_len] = .{ .index = index, .count = count };
+        self.synthetic_stack_len += 1;
         self.current_synthetic_index = index;
         self.current_synthetic_count = count;
     }

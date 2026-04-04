@@ -302,7 +302,7 @@ namespace
         return false;
     }
 
-    std::optional<std::pair<uint32_t, uint32_t>> extractSyntheticLocTag(Location loc)
+    SmallVector<std::pair<uint32_t, uint32_t>, 4> collectSyntheticLocTags(Location loc)
     {
         SmallVector<std::pair<uint32_t, uint32_t>, 4> tags;
         std::function<void(Location)> collect = [&](Location current) {
@@ -341,6 +341,12 @@ namespace
             }
         };
         collect(loc);
+        return tags;
+    }
+
+    std::optional<std::pair<uint32_t, uint32_t>> extractSyntheticLocTag(Location loc)
+    {
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> tags = collectSyntheticLocTags(loc);
         if (tags.empty())
             return std::nullopt;
         return tags.back();
@@ -350,43 +356,7 @@ namespace
     {
         if (loc == nullptr)
             return std::nullopt;
-        SmallVector<std::pair<uint32_t, uint32_t>, 4> tags;
-        std::function<void(Location)> collect = [&](Location current) {
-            if (current == nullptr)
-                return;
-            if (auto nameLoc = dyn_cast<NameLoc>(current))
-            {
-                collect(nameLoc.getChildLoc());
-                StringRef name = nameLoc.getName().getValue();
-                constexpr StringLiteral prefix("ora.synthetic.");
-                if (name.starts_with(prefix))
-                {
-                    StringRef rest = name.drop_front(prefix.size());
-                    auto parts = rest.split('.');
-                    uint32_t syntheticIndex = 0;
-                    uint32_t syntheticCount = 0;
-                    if (!parts.first.empty() && !parts.second.empty() &&
-                        !parts.first.getAsInteger(10, syntheticIndex) &&
-                        !parts.second.getAsInteger(10, syntheticCount))
-                    {
-                        tags.emplace_back(syntheticIndex, syntheticCount);
-                    }
-                }
-                return;
-            }
-            if (auto callSite = dyn_cast<CallSiteLoc>(current))
-            {
-                collect(callSite.getCallee());
-                collect(callSite.getCaller());
-                return;
-            }
-            if (auto fusedLoc = dyn_cast<FusedLoc>(current))
-            {
-                for (Location child : fusedLoc.getLocations())
-                    collect(child);
-            }
-        };
-        collect(loc);
+        SmallVector<std::pair<uint32_t, uint32_t>, 4> tags = collectSyntheticLocTags(loc);
         if (tags.empty())
             return std::nullopt;
         std::string path;
@@ -397,7 +367,6 @@ namespace
                 os << "/";
             os << tags[i].first << "." << tags[i].second;
         }
-        os.flush();
         return path;
     }
 
