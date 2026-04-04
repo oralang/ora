@@ -266,6 +266,7 @@ const Resolver = struct {
                             if (try self.visitExpr(range_pattern.start)) return true;
                             if (try self.visitExpr(range_pattern.end)) return true;
                         },
+                        .Ok, .Err => |pattern_id| if (self.matchPatternDeclaration(pattern_id)) return true,
                         .Else => {},
                     }
                     if (try self.visitBody(arm.body)) return true;
@@ -369,6 +370,7 @@ const Resolver = struct {
                             if (try self.visitExpr(range_pattern.start)) return true;
                             if (try self.visitExpr(range_pattern.end)) return true;
                         },
+                        .Ok, .Err => |pattern_id| if (self.matchPatternDeclaration(pattern_id)) return true,
                         .Else => {},
                     }
                     if (try self.visitExpr(arm.value)) return true;

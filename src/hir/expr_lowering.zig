@@ -958,6 +958,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerTraitBoundMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerErrorDeclCall(self, expr_id, call, locals)) |value| return value;
+            if (try @This().lowerResultConstructorCall(self, expr_id, call, locals)) |value| return value;
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
@@ -1040,6 +1041,40 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerResultConstructorCall(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            call: ast.CallExpr,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            const callee_name = @This().calleeName(self, call.callee) orelse return null;
+            if (!std.mem.eql(u8, callee_name, "Ok") and !std.mem.eql(u8, callee_name, "Err")) return null;
+            if (call.args.len != 1) return null;
+
+            const result_sema_type = self.parent.typecheck.exprType(expr_id);
+            if (result_sema_type.kind() != .error_union) return null;
+
+            const loc = self.parent.location(call.range);
+            const result_type = self.parent.lowerExprType(expr_id);
+            const operand = try self.lowerExpr(call.args[0], locals);
+
+            if (std.mem.eql(u8, callee_name, "Ok")) {
+                const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, operand, result_type);
+                if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                    mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                return appendValueOp(self.block, ok_op);
+            }
+
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, operand, result_type);
+            if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+            if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
+            return appendValueOp(self.block, err_op);
         }
 
         const ResolvedExternProxyMethodCall = struct {

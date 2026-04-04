@@ -192,15 +192,17 @@ const Resolver = struct {
             .Switch => |switch_stmt| {
                 try self.resolveExpr(switch_stmt.condition, env);
                 for (switch_stmt.arms) |arm| {
+                    var arm_env = try Env.init(self.arena, env);
                     switch (arm.pattern) {
                         .Expr => |expr_id| try self.resolveExpr(expr_id, env),
                         .Range => |range_pattern| {
                             try self.resolveExpr(range_pattern.start, env);
                             try self.resolveExpr(range_pattern.end, env);
                         },
+                        .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
                         .Else => {},
                     }
-                    try self.resolveBody(arm.body, env);
+                    try self.resolveBody(arm.body, &arm_env);
                 }
                 if (switch_stmt.else_body) |else_body| try self.resolveBody(else_body, env);
             },
@@ -278,15 +280,17 @@ const Resolver = struct {
             .Switch => |switch_expr| {
                 try self.resolveExpr(switch_expr.condition, env);
                 for (switch_expr.arms) |arm| {
+                    var arm_env = try Env.init(self.arena, env);
                     switch (arm.pattern) {
                         .Expr => |pattern_expr| try self.resolveExpr(pattern_expr, env),
                         .Range => |range_pattern| {
                             try self.resolveExpr(range_pattern.start, env);
                             try self.resolveExpr(range_pattern.end, env);
                         },
+                        .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
                         .Else => {},
                     }
-                    try self.resolveExpr(arm.value, env);
+                    try self.resolveExpr(arm.value, &arm_env);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.resolveExpr(else_expr, env);
             },
@@ -387,7 +391,9 @@ const Resolver = struct {
             std.mem.eql(u8, trimmed, "bool") or
             std.mem.eql(u8, trimmed, "string") or
             std.mem.eql(u8, trimmed, "address") or
-            std.mem.eql(u8, trimmed, "bytes"))
+            std.mem.eql(u8, trimmed, "bytes") or
+            std.mem.eql(u8, trimmed, "Ok") or
+            std.mem.eql(u8, trimmed, "Err"))
         {
             return true;
         }

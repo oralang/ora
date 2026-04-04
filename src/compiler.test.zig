@@ -540,6 +540,236 @@ test "compiler syntax parses statement-level bodies" {
     try testing.expect(firstChildNodeOfKind(catch_body.?, .AssertStmt) != null);
 }
 
+test "compiler syntax parses match statements through switch-shaped syntax nodes" {
+    const source_text =
+        \\pub fn run(value: u256) -> u256 {
+        \\    match (value) {
+        \\        0 => return 0;
+        \\        else => {
+        \\            return value;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const function = firstChildNodeOfKind(root, .FunctionItem);
+    try testing.expect(function != null);
+
+    const body = firstChildNodeOfKind(function.?, .Body);
+    try testing.expect(body != null);
+    const switch_stmt = nthChildNodeOfKind(body.?, .SwitchStmt, 0);
+    try testing.expect(switch_stmt != null);
+    try testing.expect(nthChildNodeOfKind(switch_stmt.?, .SwitchArm, 0) != null);
+    try testing.expect(nthChildNodeOfKind(switch_stmt.?, .SwitchArm, 1) != null);
+}
+
+test "compiler lowers match expressions through existing switch expression path" {
+    const source_text =
+        \\pub fn run(flag: bool) -> u256 {
+        \\    let value = match (flag) {
+        \\        true => 1,
+        \\        else => 0,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+}
+
+test "compiler syntax parses match constructor-style arm patterns" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    match (value) {
+        \\        Ok(inner) => return inner;
+        \\        Err(err) => return 0;
+        \\        else => return 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const function = firstChildNodeOfKind(root, .FunctionItem).?;
+    const body = firstChildNodeOfKind(function, .Body).?;
+    const match_stmt = nthChildNodeOfKind(body, .SwitchStmt, 0).?;
+    const ok_arm = nthChildNodeOfKind(match_stmt, .SwitchArm, 0).?;
+    const err_arm = nthChildNodeOfKind(match_stmt, .SwitchArm, 1).?;
+
+    try testing.expect(containsNodeOfKind(ok_arm, .CallExpr));
+    try testing.expect(containsNodeOfKind(err_arm, .CallExpr));
+}
+
+test "compiler AST lowers match constructor-style arm patterns as binding patterns" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    match (value) {
+        \\        Ok(inner) => return inner;
+        \\        Err(err) => return 0;
+        \\        else => return 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const match_stmt = ast_file.statement(body.statements[0]).Switch;
+
+    try testing.expectEqual(@as(usize, 2), match_stmt.arms.len);
+    try testing.expect(match_stmt.else_body != null);
+
+    switch (match_stmt.arms[0].pattern) {
+        .Ok => |pattern_id| try testing.expect(ast_file.pattern(pattern_id).* == .Name),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (match_stmt.arms[1].pattern) {
+        .Err => |pattern_id| try testing.expect(ast_file.pattern(pattern_id).* == .Name),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler lowers error-union match statements with ok and err bindings" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    match (value) {
+        \\        Ok(inner) => {
+        \\            return inner;
+        \\        }
+        \\        Err(err) => {
+        \\            return 0;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch") == null);
+}
+
+test "compiler lowers error-union match expressions with ok and err bindings" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    let out = match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(err) => 0,
+        \\    };
+        \\    return out;
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch_expr") == null);
+}
+
+test "compiler rejects err binding match on multi-error unions for now" {
+    const source_text =
+        \\error A;
+        \\error B;
+        \\pub fn run(value: !u256 | A | B) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(err) => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diags = try compilation.db.typeCheckDiagnostics(module.file_id, .module);
+    try testing.expect(diags.items.len != 0);
+    var found = false;
+    for (diags.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "Err(binding) currently requires an error union with exactly one error type") != null) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "compiler resolves Result<T, E> as an error-union-compatible type" {
+    const source_text =
+        \\error Failure;
+        \\pub fn lift(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return value;
+        \\    }
+        \\    return error.Failure();
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.return") != null);
+}
+
+test "compiler lowers Result constructors in declaration and return position" {
+    const source_text =
+        \\error Failure;
+        \\pub fn make_ok() -> Result<u256, Failure> {
+        \\    return Ok(7);
+        \\}
+        \\
+        \\pub fn make_err(flag: bool) -> Result<u256, Failure> {
+        \\    let value: Result<u256, Failure> = if (flag) Ok(1) else Err(Failure());
+        \\    return value;
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.err") != null);
+}
+
+test "compiler keeps plain match expressions on booleans on the switch path" {
+    const source_text =
+        \\pub fn run(flag: bool) -> u256 {
+        \\    let value = match (flag) {
+        \\        true => 1,
+        \\        else => 0,
+        \\    };
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+}
+
 test "compiler syntax bounds spec clauses loop invariants and item members" {
     const source_text =
         \\struct Pair {

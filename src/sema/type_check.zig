@@ -1144,6 +1144,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.visitExpr(switch_stmt.condition);
+                const condition_type = self.expr_types[switch_stmt.condition.index()];
                 for (switch_stmt.arms) |arm| {
                     switch (arm.pattern) {
                         .Expr => |expr_id| try self.visitExpr(expr_id),
@@ -1151,6 +1152,8 @@ const TypeChecker = struct {
                             try self.visitExpr(range_pattern.start);
                             try self.visitExpr(range_pattern.end);
                         },
+                        .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
+                        .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
                         .Else => {},
                     }
                     try self.visitBody(arm.body);
@@ -1292,6 +1295,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_expr| {
                 try self.visitExpr(switch_expr.condition);
+                const condition_type = self.expr_types[switch_expr.condition.index()];
                 var result_type: Type = .{ .unknown = {} };
                 var saw_mismatch = false;
                 for (switch_expr.arms) |arm| {
@@ -1301,6 +1305,8 @@ const TypeChecker = struct {
                             try self.visitExpr(range_pattern.start);
                             try self.visitExpr(range_pattern.end);
                         },
+                        .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
+                        .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
                         .Else => {},
                     }
                     try self.visitExpr(arm.value);
@@ -2276,6 +2282,31 @@ const TypeChecker = struct {
             } };
         }
 
+        if (std.mem.eql(u8, generic.name, "Result")) {
+            if (generic.args.len != 2) {
+                try self.emitGenericArityError(generic.range, "type", "Result", 2, generic.args.len);
+                return .{ .unknown = {} };
+            }
+            if (generic.args[0] != .Type or generic.args[1] != .Type) {
+                try self.emitRangeError(generic.range, "Result<T, E> expects type arguments", .{});
+                return .{ .unknown = {} };
+            }
+
+            const payload_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+            const error_type = try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings);
+            if (error_type.kind() != .unknown and error_type.kind() != .named) {
+                try self.emitRangeError(generic.range, "Result<T, E> currently requires a named error type for E", .{});
+                return .{ .unknown = {} };
+            }
+
+            const error_types = try self.arena.alloc(Type, 1);
+            error_types[0] = error_type;
+            return .{ .error_union = .{
+                .payload_type = try self.storeType(payload_type),
+                .error_types = error_types,
+            } };
+        }
+
         if (std.mem.eql(u8, generic.name, "MinValue") or
             std.mem.eql(u8, generic.name, "MaxValue") or
             std.mem.eql(u8, generic.name, "InRange") or
@@ -2349,6 +2380,28 @@ const TypeChecker = struct {
         const expr = self.file.expression(expr_id).*;
         switch (expr) {
             .Group => |group| return self.contextualizeLiteral(group.expr, expected_type),
+            .Call => |call| {
+                if (!self.isResultConstructorCall(call, "Ok")) {
+                    if (!self.isResultConstructorCall(call, "Err")) return;
+                }
+                if (expected_type.kind() != .error_union or call.args.len != 1) return;
+
+                if (self.isResultConstructorCall(call, "Ok")) {
+                    const payload_type = expected_type.payloadType().?.*;
+                    try self.contextualizeLiteral(call.args[0], payload_type);
+                    const actual_type = self.expr_types[call.args[0].index()];
+                    if (!typesAssignable(payload_type, actual_type)) return;
+                    self.expr_types[expr_id.index()] = expected_type;
+                    return;
+                }
+
+                const error_types = expected_type.errorTypes();
+                if (error_types.len != 1) return;
+                try self.contextualizeLiteral(call.args[0], error_types[0]);
+                const actual_type = self.expr_types[call.args[0].index()];
+                if (!typesAssignable(error_types[0], actual_type)) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
             .Tuple => |tuple| {
                 if (expected_type.kind() != .tuple) return;
                 if (tuple.elements.len != expected_type.tuple.len) return;
@@ -2376,6 +2429,17 @@ const TypeChecker = struct {
             },
             else => {},
         }
+    }
+
+    fn isResultConstructorCall(self: *const TypeChecker, call: ast.CallExpr, name: []const u8) bool {
+        return switch (self.file.expression(call.callee).*) {
+            .Name => |callee_name| std.mem.eql(u8, callee_name.name, name),
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Name => |callee_name| std.mem.eql(u8, callee_name.name, name),
+                else => false,
+            },
+            else => false,
+        };
     }
 
     fn instantiateGenericStruct(
@@ -2865,6 +2929,7 @@ const TypeChecker = struct {
                             try self.validateExprExternalCalls(range_pattern.start, state);
                             try self.validateExprExternalCalls(range_pattern.end, state);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     var case_state = try self.cloneExternalCallValidationState(state.*);
@@ -2951,6 +3016,7 @@ const TypeChecker = struct {
                             try self.validateExprExternalCalls(range_pattern.start, state);
                             try self.validateExprExternalCalls(range_pattern.end, state);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.validateExprExternalCalls(arm.value, state);
@@ -3010,6 +3076,7 @@ const TypeChecker = struct {
                             try self.validateExprLocks(range_pattern.start, locked_slots);
                             try self.validateExprLocks(range_pattern.end, locked_slots);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     var case_locked = try self.cloneEffectSlots(locked_slots.items);
@@ -3106,6 +3173,7 @@ const TypeChecker = struct {
                             try self.validateExprLocks(range_pattern.start, locked_slots);
                             try self.validateExprLocks(range_pattern.end, locked_slots);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.validateExprLocks(arm.value, locked_slots);
@@ -3401,6 +3469,7 @@ const TypeChecker = struct {
                             try self.collectExprEffects(range_pattern.start, state);
                             try self.collectExprEffects(range_pattern.end, state);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectBodyEffects(arm.body, state);
@@ -3449,6 +3518,7 @@ const TypeChecker = struct {
                             try self.collectExprEffects(range_pattern.start, &expr_state);
                             try self.collectExprEffects(range_pattern.end, &expr_state);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectExprEffects(arm.value, &expr_state);
@@ -3776,6 +3846,7 @@ const TypeChecker = struct {
                             try self.collectExprDirectCallees(range_pattern.start, callees);
                             try self.collectExprDirectCallees(range_pattern.end, callees);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectBodyDirectCallees(arm.body, callees);
@@ -3819,6 +3890,7 @@ const TypeChecker = struct {
                             try self.collectExprDirectCallees(range_pattern.start, callees);
                             try self.collectExprDirectCallees(range_pattern.end, callees);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectExprDirectCallees(arm.value, callees);
@@ -4564,6 +4636,7 @@ const TypeChecker = struct {
                             try self.collectExprErrorTypes(range_pattern.start, error_types);
                             try self.collectExprErrorTypes(range_pattern.end, error_types);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectBodyErrorTypes(arm.body, error_types);
@@ -4621,6 +4694,7 @@ const TypeChecker = struct {
                             try self.collectExprErrorTypes(range_pattern.start, error_types);
                             try self.collectExprErrorTypes(range_pattern.end, error_types);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     try self.collectExprErrorTypes(arm.value, error_types);
@@ -4763,6 +4837,28 @@ const TypeChecker = struct {
         }
 
         return .{ .named = .{ .name = error_decl.name } };
+    }
+
+    fn assignMatchPatternType(self: *TypeChecker, pattern_id: ast.PatternId, condition_type: Type, is_ok: bool, range: source.TextRange) !void {
+        if (condition_type.kind() != .error_union) {
+            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+            try self.emitRangeError(range, "Ok(...) and Err(...) match patterns require an error union condition", .{});
+            return;
+        }
+
+        if (is_ok) {
+            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(condition_type.payloadType().?.*);
+            return;
+        }
+
+        const error_types = condition_type.errorTypes();
+        if (error_types.len == 1) {
+            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(error_types[0]);
+            return;
+        }
+
+        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+        try self.emitRangeError(range, "Err(binding) currently requires an error union with exactly one error type", .{});
     }
 
     fn integerValueText(self: *TypeChecker, value: BigInt) ![]const u8 {

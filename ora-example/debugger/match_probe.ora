@@ -1,0 +1,35 @@
+error Failure;
+
+pub contract MatchProbe {
+    pub storage last_ok: u256;
+    pub storage last_status: u256;
+
+    pub fn load(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+
+    pub fn process(flag: bool, value: u256) -> u256 {
+        let maybe = load(flag, value);
+
+        let observed = match (maybe) {
+            Ok(inner) => inner + 1,
+            Err(err) => 0,
+        };
+
+        match (maybe) {
+            Ok(inner) => {
+                last_ok = inner;
+                last_status = 1;
+            }
+            Err(err) => {
+                last_ok = 0;
+                last_status = 0;
+            }
+        }
+
+        return observed;
+    }
+}

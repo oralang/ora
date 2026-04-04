@@ -226,6 +226,7 @@ const ConstEvaluator = struct {
                                 _ = self.evalExpr(range_pattern.start) catch null;
                                 _ = self.evalExpr(range_pattern.end) catch null;
                             },
+                            .Ok, .Err => {},
                             .Else => {},
                         }
                         self.visitBody(arm.body);
@@ -312,6 +313,7 @@ const ConstEvaluator = struct {
                                 _ = try self.evalExprImpl(range_pattern.start, use_cache);
                                 _ = try self.evalExprImpl(range_pattern.end, use_cache);
                             },
+                            .Ok, .Err => {},
                             .Else => {},
                         }
                         _ = try self.evalExprImpl(arm.value, use_cache);
@@ -327,6 +329,7 @@ const ConstEvaluator = struct {
                             _ = try self.evalExprImpl(range_pattern.start, use_cache);
                             _ = try self.evalExprImpl(range_pattern.end, use_cache);
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                 }
@@ -1227,6 +1230,7 @@ const ConstEvaluator = struct {
                     else => false,
                 };
             },
+            .Ok, .Err => false,
             .Else => true,
         };
     }
@@ -1620,6 +1624,7 @@ const ConstEvaluator = struct {
                             self.exprStage(range_pattern.start),
                             self.exprStage(range_pattern.end),
                         }),
+                        .Ok, .Err => .runtime_only,
                         .Else => .comptime_ok,
                     };
                     if (pattern_stage == .runtime_only or self.bodyStage(arm.body) == .runtime_only) break :blk .runtime_only;
@@ -1690,6 +1695,7 @@ const ConstEvaluator = struct {
                             self.exprStage(range_pattern.start),
                             self.exprStage(range_pattern.end),
                         }),
+                        .Ok, .Err => .runtime_only,
                         .Else => .comptime_ok,
                     };
                     if (pattern_stage == .runtime_only or self.exprStage(arm.value) == .runtime_only) break :blk .runtime_only;
@@ -2761,6 +2767,7 @@ const ConstEvaluator = struct {
                             _ = self.evalExpr(range_pattern.start) catch null;
                             _ = self.evalExpr(range_pattern.end) catch null;
                         },
+                        .Ok, .Err => {},
                         .Else => {},
                     }
                     self.visitBody(arm.body);

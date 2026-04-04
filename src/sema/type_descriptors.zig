@@ -109,6 +109,20 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
         }
     }
 
+    if (std.mem.eql(u8, generic.name, "Result")) {
+        if (generic.args.len != 2) return .{ .unknown = {} };
+        if (generic.args[0] != .Type or generic.args[1] != .Type) return .{ .unknown = {} };
+
+        const payload_type = try descriptorFromTypeExpr(allocator, file, item_index, generic.args[0].Type);
+        const error_type = try descriptorFromTypeExpr(allocator, file, item_index, generic.args[1].Type);
+        const error_types = try allocator.alloc(Type, 1);
+        error_types[0] = error_type;
+        return .{ .error_union = .{
+            .payload_type = try storeType(allocator, payload_type),
+            .error_types = error_types,
+        } };
+    }
+
     return descriptorFromPathName(file, item_index, generic.name);
 }
 

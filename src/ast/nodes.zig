@@ -403,6 +403,8 @@ pub const ForStmt = struct {
 pub const SwitchPattern = union(enum) {
     Expr: ExprId,
     Range: RangeSwitchPattern,
+    Ok: PatternId,
+    Err: PatternId,
     Else: source.TextRange,
 };
 

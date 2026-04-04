@@ -1,0 +1,37 @@
+error Failure;
+
+pub contract MatchExample {
+    pub fn make(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+
+    pub fn unwrapOrZero(value: Result<u256, Failure>) -> u256 {
+        match (value) {
+            Ok(inner) => {
+                return inner;
+            }
+            Err(err) => {
+                return 0;
+            }
+        }
+    }
+
+    pub fn classify(value: Result<u256, Failure>) -> u256 {
+        let out = match (value) {
+            Ok(inner) => inner + 1,
+            Err(err) => 0,
+        };
+        return out;
+    }
+
+    pub fn probe(flag: bool, value: u256) -> u256 {
+        let maybe = make(flag, value);
+        return match (maybe) {
+            Ok(inner) => inner,
+            Err(err) => 0,
+        };
+    }
+}

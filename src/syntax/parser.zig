@@ -1140,7 +1140,7 @@ const Parser = struct {
             .If => self.parseIfStmtNode(),
             .While => self.parseWhileStmtNode(),
             .For => self.parseForStmtNode(),
-            .Switch => self.parseSwitchStmtNode(),
+            .Switch, .Match => self.parseSwitchStmtNode(),
             .Try => if (self.peekKind(1) == .LeftBrace) self.parseTryStmtNode() else self.parseExprOrAssignStmtNode(),
             .Return => self.parseReturnStmtNode(),
             .Log => self.parseLogStmtNode(),
@@ -1880,7 +1880,7 @@ const Parser = struct {
             .Old => self.parseOldExprNode(),
             .Forall, .Exists => self.parseQuantifiedExprNode(),
             .At => self.parseBuiltinExprNode(),
-            .Switch => self.parseSwitchExprNode(),
+            .Switch, .Match => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
     }

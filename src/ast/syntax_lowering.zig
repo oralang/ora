@@ -828,6 +828,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerSwitchPatternNode(self: *Builder, node: SyntaxNode) !SwitchPattern {
+            if (try Lowering.lowerMatchConstructorPatternNode(self, node)) |pattern| return pattern;
             return switch (node.kind()) {
                 .RangeExpr => .{ .Range = try Lowering.lowerRangePatternNode(self, node) },
                 .ErrorExpr => blk: {
@@ -837,6 +838,31 @@ pub fn mixin(Builder: type) type {
                 },
                 else => .{ .Expr = try Lowering.lowerExpressionNode(self, node) },
             };
+        }
+
+        fn lowerMatchConstructorPatternNode(self: *Builder, node: SyntaxNode) !?SwitchPattern {
+            if (node.kind() != .CallExpr) return null;
+
+            const callee_node = nthDirectNode(node, 0) orelse return null;
+            const callee_expr = try Lowering.lowerExpressionNode(self, callee_node);
+            const ctor_name = switch (Support.exprRef(self, callee_expr).*) {
+                .Name => |name| name.name,
+                else => return null,
+            };
+
+            const binding_node = nthDirectNode(node, 1) orelse return null;
+            if (nthDirectNode(node, 2) != null) return null;
+            if (binding_node.kind() != .NameExpr) return null;
+
+            const token = firstDirectToken(binding_node) orelse return null;
+            const binding = try Support.pushPattern(self, .{ .Name = .{
+                .range = binding_node.range(),
+                .name = tokenText(token),
+            } });
+
+            if (std.mem.eql(u8, ctor_name, "Ok")) return .{ .Ok = binding };
+            if (std.mem.eql(u8, ctor_name, "Err")) return .{ .Err = binding };
+            return null;
         }
 
         fn lowerRangePatternNode(self: *Builder, node: SyntaxNode) !nodes.RangeSwitchPattern {
