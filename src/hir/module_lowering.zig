@@ -500,7 +500,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             for (parameters) |parameter| {
                 const param_type = self.typecheck.pattern_types[parameter.pattern.index()].type;
-                const abi_type = try @This().abiLayoutForType(self, param_type);
+                const abi_type = @This().abiLayoutForType(self, param_type) catch |err| switch (err) {
+                    error.UnsupportedAbiType => try @This().abiLayoutForTypeExpr(self, parameter.type_expr),
+                    else => return err,
+                };
                 defer self.allocator.free(abi_type);
                 try signature_parts.append(self.allocator, try self.allocator.dupe(u8, abi_type));
                 abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
@@ -552,10 +555,23 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .error_union => |error_union| error_union.payload_type.*,
                     else => body_type,
                 };
-                const abi_return = try abi_support.externReturnAbiType(self.allocator, abi_return_type);
+                const abi_return = abi_support.externReturnAbiType(self.allocator, abi_return_type) catch |err| switch (err) {
+                    error.UnsupportedAbiType => blk: {
+                        const return_type_id = function.return_type.?;
+                        const layout = try @This().abiLayoutForTypeExpr(self, return_type_id);
+                        break :blk layout;
+                    },
+                    else => return err,
+                };
                 defer self.allocator.free(abi_return);
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
-                if (@This().abiLayoutForType(self, abi_return_type)) |layout| {
+                if (@This().abiLayoutForType(self, abi_return_type) catch |err| switch (err) {
+                    error.UnsupportedAbiType => if (function.return_type) |return_type_id|
+                        @This().abiLayoutForTypeExpr(self, return_type_id)
+                    else
+                        return err,
+                    else => return err,
+                }) |layout| {
                     defer self.allocator.free(layout);
                     try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return_layout", layout));
                 } else |_| {}
@@ -1282,6 +1298,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (size_text.len == 0) break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
                     break :blk std.fmt.allocPrint(self.allocator, "{s}[{s}]", .{ element, size_text });
                 },
+                .Slice => |slice| blk: {
+                    const element = try @This().abiLayoutForTypeExpr(self, slice.element);
+                    defer self.allocator.free(element);
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
+                },
                 else => error.UnsupportedAbiType,
             };
         }
@@ -1350,6 +1371,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     const element_words = @This().staticAbiWordCountForTypeExpr(self, array.element) orelse return null;
                     break :blk element_words * len;
                 },
+                .Slice => null,
                 else => null,
             };
         }

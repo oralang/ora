@@ -871,7 +871,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const arm = switch_stmt.arms[arm_index];
             const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, condition, arm.pattern, arm.range)) orelse return false;
-            const prebound_value = try @This().precomputeErrorUnionMatchPatternValue(self, condition, arm.pattern, arm.range);
             const result_types = if (carried_locals.len == 0)
                 std.ArrayList(mlir.MlirType){}
             else
@@ -900,7 +899,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 then_lowerer.deferred_return_carried_locals = carried_locals;
             }
             var then_locals = try self.cloneLocals(locals);
-            try @This().bindPrecomputedErrorUnionMatchPatternValue(&then_lowerer, arm.pattern, prebound_value, &then_locals);
+            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, arm.range, &then_locals);
             const then_terminated = try then_lowerer.lowerBody(arm.body, &then_locals);
             if (!blockEndsWithTerminator(then_block)) {
                 try then_lowerer.appendScfYieldFromLocals(then_block, arm.range, &then_locals, carried_locals);
@@ -1395,8 +1394,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const op = try self.createAggregatePlaceholder("ora.match_expr", arm.range, &.{condition}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
             };
-            const prebound_value = try @This().precomputeErrorUnionMatchPatternValue(self, condition, arm.pattern, arm.range);
-
             const result_type = self.parent.lowerExprType(expr_id);
             const op = mlir.oraScfIfOpCreate(self.parent.context, self.parent.location(arm.range), branch_condition, &[_]mlir.MlirType{result_type}, 1, true);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -1409,7 +1406,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var then_lowerer = self.*;
             then_lowerer.block = then_block;
             var then_locals = try self.cloneLocals(locals);
-            try @This().bindPrecomputedErrorUnionMatchPatternValue(&then_lowerer, arm.pattern, prebound_value, &then_locals);
+            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, arm.range, &then_locals);
             const then_value = try then_lowerer.lowerExpr(arm.value, &then_locals);
             try appendScfYieldValues(self.parent.context, then_block, self.parent.location(arm.range), &[_]mlir.MlirValue{then_value});
 
@@ -1482,41 +1479,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
-        fn precomputeErrorUnionMatchPatternValue(
+        fn bindErrorUnionMatchPatternValue(
             self: *FunctionLowerer,
             condition: mlir.MlirValue,
             pattern: ast.SwitchPattern,
             range: source.TextRange,
-        ) anyerror!?mlir.MlirValue {
+            locals: *LocalEnv,
+        ) anyerror!void {
             switch (pattern) {
                 .Ok => |pattern_id| {
-                    if (!@This().patternHasUses(self, pattern_id)) return null;
+                    if (!@This().patternHasUses(self, pattern_id)) return;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
-                    return appendValueOp(self.block, unwrap);
+                    const value = appendValueOp(self.block, unwrap);
+                    try self.bindPatternValue(pattern_id, value, locals);
                 },
                 .Err => |pattern_id| {
-                    if (!@This().patternHasUses(self, pattern_id)) return null;
+                    if (!@This().patternHasUses(self, pattern_id)) return;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
-                    return appendValueOp(self.block, get_error);
+                    const value = appendValueOp(self.block, get_error);
+                    try self.bindPatternValue(pattern_id, value, locals);
                 },
-                else => return null,
-            }
-        }
-
-        fn bindPrecomputedErrorUnionMatchPatternValue(
-            self: *FunctionLowerer,
-            pattern: ast.SwitchPattern,
-            prebound_value: ?mlir.MlirValue,
-            locals: *LocalEnv,
-        ) anyerror!void {
-            const value = prebound_value orelse return;
-            switch (pattern) {
-                .Ok => |pattern_id| try self.bindPatternValue(pattern_id, value, locals),
-                .Err => |pattern_id| try self.bindPatternValue(pattern_id, value, locals),
                 else => {},
             }
         }

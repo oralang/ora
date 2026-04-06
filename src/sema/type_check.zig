@@ -342,6 +342,7 @@ pub fn typeCheck(
     var body_types = try arena.alloc(Type, file.bodies.len);
     const effect_states = try arena.alloc(EffectSummaryState, file.items.len);
     const catch_error_tag_patterns = try arena.alloc(bool, file.patterns.len);
+    const opaque_multi_error_patterns = try arena.alloc(bool, file.patterns.len);
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
@@ -351,6 +352,7 @@ pub fn typeCheck(
     @memset(body_types, .{ .void = {} });
     @memset(effect_states, .unvisited);
     @memset(catch_error_tag_patterns, false);
+    @memset(opaque_multi_error_patterns, false);
 
     for (file.items, 0..) |item, index| {
         item_types[index] = try inferItemType(arena, file, item_index, item);
@@ -402,6 +404,7 @@ pub fn typeCheck(
         .trait_interfaces = .{},
         .impl_interfaces = .{},
         .catch_error_tag_patterns = catch_error_tag_patterns,
+        .opaque_multi_error_patterns = opaque_multi_error_patterns,
         .diagnostics = &result.diagnostics,
     };
 
@@ -514,6 +517,7 @@ const TypeChecker = struct {
     trait_interfaces: std.ArrayList(TraitInterface),
     impl_interfaces: std.ArrayList(ImplInterface),
     catch_error_tag_patterns: []bool = &.{},
+    opaque_multi_error_patterns: []bool = &.{},
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
@@ -1357,6 +1361,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.visitExpr(switch_stmt.condition);
                 const condition_type = self.expr_types[switch_stmt.condition.index()];
+                try self.validateMatchPatternFamily(switch_stmt.arms, switch_stmt.range);
                 for (switch_stmt.arms) |arm| {
                     switch (arm.pattern) {
                         .Expr => |expr_id| try self.visitExpr(expr_id),
@@ -1371,6 +1376,7 @@ const TypeChecker = struct {
                     try self.visitBody(arm.body);
                 }
                 if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
+                try self.requireExhaustiveErrorUnionMatch(condition_type, switch_stmt.arms, switch_stmt.else_body != null, switch_stmt.range);
             },
             .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
@@ -1378,9 +1384,12 @@ const TypeChecker = struct {
                 try self.visitBody(try_stmt.try_body);
                 if (try_stmt.catch_clause) |catch_clause| {
                     if (catch_clause.error_pattern) |pattern_id| {
-                        const catch_type = try self.inferCatchPatternType(try_stmt.try_body);
-                        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(catch_type);
-                        self.catch_error_tag_patterns[pattern_id.index()] = catch_type.kind() == .integer;
+                        const inferred = try self.inferCatchPatternType(try_stmt.try_body);
+                        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(inferred.ty);
+                        self.catch_error_tag_patterns[pattern_id.index()] = inferred.ty.kind() == .integer;
+                        if (inferred.multiple_error_types) {
+                            try self.emitRangeError(catch_clause.range, "catch binding represents multiple possible error types; field access is not supported", .{});
+                        }
                     }
                     try self.visitBody(catch_clause.body);
                 }
@@ -1508,6 +1517,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.visitExpr(switch_expr.condition);
                 const condition_type = self.expr_types[switch_expr.condition.index()];
+                try self.validateMatchPatternFamily(switch_expr.arms, switch_expr.range);
                 var result_type: Type = .{ .unknown = {} };
                 var saw_mismatch = false;
                 for (switch_expr.arms) |arm| {
@@ -1550,6 +1560,7 @@ const TypeChecker = struct {
                 }
                 if (saw_mismatch) result_type = .{ .unknown = {} };
                 self.expr_types[expr_id.index()] = result_type;
+                try self.requireExhaustiveErrorUnionMatch(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
             },
             .Comptime => |comptime_expr| {
                 try self.visitBody(comptime_expr.body);
@@ -1586,6 +1597,9 @@ const TypeChecker = struct {
                 const operand_type = self.expr_types[unary.operand.index()];
                 const result_type = self.unaryResultType(unary.op, operand_type);
                 self.expr_types[expr_id.index()] = result_type;
+                if (unary.op == .try_ and operand_type.kind() == .error_union) {
+                    try self.validateTryUnary(expr_id, operand_type);
+                }
                 if (result_type.kind() == .unknown and operand_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "invalid unary operator '{s}' for type '{s}'", .{
                         unaryOpName(unary.op),
@@ -4409,6 +4423,7 @@ const TypeChecker = struct {
 
     fn emitTraitMethodFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr, base_type: Type) !bool {
         if (try self.emitCatchErrorTagFieldError(expr_id, field)) return true;
+        if (try self.emitOpaqueMultiErrorPatternFieldError(expr_id, field)) return true;
         if (try self.emitTraitBoundMethodFieldError(expr_id, field, base_type)) return true;
         if (try self.emitConcreteAssociatedMethodFieldError(expr_id, field)) return true;
         if (try self.emitConcreteImplMethodFieldError(expr_id, field)) return true;
@@ -4427,6 +4442,21 @@ const TypeChecker = struct {
         if (binding != .pattern) return false;
         if (!self.catch_error_tag_patterns[binding.pattern.index()]) return false;
         try self.emitExprError(expr_id, "catch binding represents multiple possible error types; field access is not supported", .{});
+        return true;
+    }
+
+    fn emitOpaqueMultiErrorPatternFieldError(self: *TypeChecker, expr_id: ast.ExprId, field: ast.FieldExpr) !bool {
+        const binding = switch (self.file.expression(field.base).*) {
+            .Name => self.resolution.expr_bindings[field.base.index()],
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Name => self.resolution.expr_bindings[group.expr.index()],
+                else => null,
+            },
+            else => null,
+        } orelse return false;
+        if (binding != .pattern) return false;
+        if (!self.opaque_multi_error_patterns[binding.pattern.index()]) return false;
+        try self.emitExprError(expr_id, "Err(binding) over multiple possible error types is opaque; field access is not supported", .{});
         return true;
     }
 
@@ -4808,11 +4838,14 @@ const TypeChecker = struct {
         return self.item_index.lookup(name);
     }
 
-    fn inferCatchPatternType(self: *TypeChecker, body_id: ast.BodyId) anyerror!Type {
+    fn inferCatchPatternType(self: *TypeChecker, body_id: ast.BodyId) anyerror!struct { ty: Type, multiple_error_types: bool } {
         var error_types: std.ArrayList(Type) = .{};
         try self.collectBodyErrorTypes(body_id, &error_types);
-        if (error_types.items.len == 1) return error_types.items[0];
-        return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+        if (error_types.items.len == 1) return .{ .ty = error_types.items[0], .multiple_error_types = false };
+        return .{
+            .ty = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
+            .multiple_error_types = error_types.items.len > 1,
+        };
     }
 
     fn collectBodyErrorTypes(self: *TypeChecker, body_id: ast.BodyId, error_types: *std.ArrayList(Type)) anyerror!void {
@@ -5072,8 +5105,73 @@ const TypeChecker = struct {
             return;
         }
 
-        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
-        try self.emitRangeError(range, "Err(binding) currently requires an error union with exactly one error type", .{});
+        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } });
+        self.opaque_multi_error_patterns[pattern_id.index()] = true;
+    }
+
+    fn requireExhaustiveErrorUnionMatch(
+        self: *TypeChecker,
+        condition_type: Type,
+        arms: anytype,
+        has_else: bool,
+        range: source.TextRange,
+    ) !void {
+        if (condition_type.kind() != .error_union) return;
+        if (has_else) return;
+
+        var seen_ok = false;
+        var seen_err = false;
+        for (arms) |arm| switch (arm.pattern) {
+            .Ok => seen_ok = true,
+            .Err => seen_err = true,
+            else => {},
+        };
+
+        if (!(seen_ok and seen_err)) {
+            try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{});
+        }
+    }
+
+    fn validateMatchPatternFamily(self: *TypeChecker, arms: anytype, range: source.TextRange) !void {
+        var saw_error_union_pattern = false;
+        var saw_regular_pattern = false;
+        for (arms) |arm| {
+            switch (arm.pattern) {
+                .Ok, .Err => saw_error_union_pattern = true,
+                .Expr, .Range => saw_regular_pattern = true,
+                .Else => {},
+            }
+        }
+        if (saw_error_union_pattern and saw_regular_pattern) {
+            try self.emitRangeError(range, "cannot mix Ok(...)/Err(...) match arms with ordinary value/range patterns", .{});
+        }
+    }
+
+    fn validateTryUnary(self: *TypeChecker, expr_id: ast.ExprId, operand_type: Type) !void {
+        const return_type = self.current_return_type orelse {
+            try self.emitExprError(expr_id, "try expression requires a function that returns Result/error union", .{});
+            return;
+        };
+        if (return_type.kind() != .error_union) {
+            try self.emitExprError(expr_id, "try expression requires a function that returns Result/error union", .{});
+            return;
+        }
+
+        for (operand_type.errorTypes()) |operand_error| {
+            var allowed = false;
+            for (return_type.errorTypes()) |return_error| {
+                if (typeEql(operand_error, return_error)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) {
+                try self.emitExprError(expr_id, "try expression error type '{s}' is not in function return error set", .{
+                    diagnosticTypeDisplayName(self, operand_error),
+                });
+                return;
+            }
+        }
     }
 
     fn matchErrBindingType(self: *TypeChecker, error_type: Type) !Type {

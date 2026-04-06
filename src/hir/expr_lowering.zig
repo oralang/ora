@@ -664,27 +664,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
 
-            const try_stmt = mlir.oraTryStmtOpCreate(self.parent.context, loc, &[_]mlir.MlirType{result_type}, 1);
-            if (mlir.oraOperationIsNull(try_stmt)) return operand;
-            appendOp(self.block, try_stmt);
-
-            const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
-            const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
-            if (mlir.oraBlockIsNull(try_block) or mlir.oraBlockIsNull(catch_block)) {
-                return error.MlirOperationCreationFailed;
-            }
-
-            const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
-            if (mlir.oraOperationIsNull(unwrap)) return operand;
-            appendOp(try_block, unwrap);
-            try support.appendOraYieldValues(self.parent.context, try_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap, 0)});
-
-            var catch_lowerer = self.*;
-            catch_lowerer.block = catch_block;
-            const fallback = try catch_lowerer.defaultValue(result_type, range);
-            try support.appendOraYieldValues(self.parent.context, catch_block, loc, &[_]mlir.MlirValue{fallback});
-
-            return mlir.oraOperationGetResult(try_stmt, 0);
+            const placeholder = try self.createAggregatePlaceholder("ora.try_expr", range, &[_]mlir.MlirValue{operand}, result_type);
+            return appendValueOp(self.block, placeholder);
         }
 
         pub fn lowerBinary(self: *FunctionLowerer, expr_id: ast.ExprId, binary: ast.BinaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {

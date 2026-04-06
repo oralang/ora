@@ -1,0 +1,18 @@
+error Failure(code: u256);
+
+contract MatchDynamicSliceInput {
+    pub fn consume(value: Result<slice[u256], Failure>) -> u256 {
+        let total = 0;
+        match (value) {
+            Ok(inner) => {
+                for (inner) |item| {
+                    total = total + item;
+                }
+            },
+            Err(err) => {
+                total = err.code;
+            }
+        }
+        return total;
+    }
+}

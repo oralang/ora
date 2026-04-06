@@ -418,3 +418,37 @@ test "abi exposes dynamic bytes public Result input with payload error as tagged
     try testing.expect(input_type.wire_type != null);
     try testing.expectEqualStrings("(bool,bytes,uint256)", input_type.wire_type.?);
 }
+
+test "abi exposes dynamic slice public Result input with payload error as tagged triple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure(code: u256);
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<slice[u256], Failure>) -> u256 {
+        \\        let total = 0;
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                for (inner) |item| {
+        \\                    total = total + item;
+        \\                }
+        \\            },
+        \\            Err(err) => {
+        \\                total = err.code;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,uint256[],uint256)", input_type.wire_type.?);
+}

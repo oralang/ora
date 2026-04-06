@@ -1,0 +1,21 @@
+error Failure(code: u256);
+error Denied(owner: address);
+
+pub contract ResultMultiErrorMatch {
+    fn decide(flag: bool, value: u256) -> !u256 | Failure | Denied {
+        if (flag) {
+            return value;
+        }
+        if (value == 0) {
+            return Failure(9);
+        }
+        return Denied(0x0000000000000000000000000000000000000000);
+    }
+
+    pub fn project(flag: bool, value: u256, fallback: u256) -> u256 {
+        return match (decide(flag, value)) {
+            Ok(inner) => inner,
+            Err(err) => fallback + err,
+        };
+    }
+}

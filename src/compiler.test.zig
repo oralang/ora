@@ -704,6 +704,103 @@ test "compiler lowers error-union match expressions with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch_expr") == null);
 }
 
+test "compiler rejects non-exhaustive error-union match expressions without else" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match on Result/error union must cover both Ok(...) and Err(...), or provide else"));
+}
+
+test "compiler rejects mixed Result match patterns and ordinary value patterns" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        0 => 0,
+        \\        Err(err) => 1,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot mix Ok(...)/Err(...) match arms with ordinary value/range patterns"));
+}
+
+test "compiler allows Err(binding) on multi-error Result as opaque binding" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\error Denied(owner: address);
+        \\pub fn run(flag: bool, value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(err) => if (flag) err else 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+}
+
+test "compiler rejects field access on opaque multi-error Err binding" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\error Denied(owner: address);
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(err) => err.code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "Err(binding) over multiple possible error types is opaque; field access is not supported"));
+}
+
+test "compiler rejects try expressions in non-Result-returning functions" {
+    const source_text =
+        \\error Failure;
+        \\fn helper(flag: bool) -> Result<u256, Failure> {
+        \\    if (flag) return Ok(1);
+        \\    return Err(Failure());
+        \\}
+        \\fn consume(flag: bool) -> u256 {
+        \\    return try helper(flag);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "try expression requires a function that returns Result/error union"));
+}
+
 test "compiler rejects err binding match on multi-error unions for now" {
     const source_text =
         \\error A;
@@ -14761,6 +14858,72 @@ test "compiler lowers dynamic bytes public Result inputs with payload errors thr
         \\            Ok(inner) => 1,
         \\            Err(err) => err.code,
         \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+}
+
+test "compiler emits dispatcher metadata for dynamic slice public Result inputs with payload errors" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<slice[u256], Failure>) -> u256 {
+        \\        let total = 0;
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                for (inner) |item| {
+        \\                    total = total + item;
+        \\                }
+        \\            },
+        \\            Err(err) => {
+        \\                total = err.code;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(bool,uint256[],uint256)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "wide_single_error"));
+}
+
+test "compiler lowers dynamic slice public Result inputs with payload errors through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<slice[u256], Failure>) -> u256 {
+        \\        let total = 0;
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                for (inner) |item| {
+        \\                    total = total + item;
+        \\                }
+        \\            },
+        \\            Err(err) => {
+        \\                total = err.code;
+        \\            }
+        \\        }
+        \\        return total;
         \\    }
         \\}
     ;
