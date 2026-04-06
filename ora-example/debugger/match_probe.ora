@@ -1,21 +1,25 @@
+comptime const std = @import("std");
+
 error Failure;
 
 pub contract MatchProbe {
-    pub storage last_ok: u256;
-    pub storage last_status: u256;
+    storage var last_ok: u256;
+    storage var last_status: u256;
 
-    pub fn load(flag: bool, value: u256) -> Result<u256, Failure> {
+    fn load(flag: bool, value: u256) -> Result<u256, Failure> {
         if (flag) {
             return Ok(value);
         }
         return Err(Failure());
     }
 
-    pub fn process(flag: bool, value: u256) -> u256 {
+    pub fn process(flag: bool, value: u256) -> u256
+        requires(value < std.constants.U256_MAX)
+    {
         let maybe = load(flag, value);
 
         let observed = match (maybe) {
-            Ok(inner) => inner + 1,
+            Ok(inner) => inner,
             Err(err) => 0,
         };
 
@@ -31,5 +35,12 @@ pub contract MatchProbe {
         }
 
         return observed;
+    }
+
+    pub fn inspect(value: Result<u256, Failure>) -> u256 {
+        return match (value) {
+            Ok(inner) => inner,
+            Err(err) => 0,
+        };
     }
 }

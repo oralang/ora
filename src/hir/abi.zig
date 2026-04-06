@@ -43,7 +43,51 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
             defer allocator.free(element);
             break :blk std.fmt.allocPrint(allocator, "{s}[]", .{element});
         },
+        .error_union => |error_union| blk: {
+            if (error_union.error_types.len != 1) break :blk error.UnsupportedAbiType;
+            const payload = try canonicalAbiType(allocator, error_union.payload_type.*);
+            defer allocator.free(payload);
+            if (!errorTypeHasPayload(error_union.error_types[0])) {
+                break :blk std.fmt.allocPrint(allocator, "(bool,{s})", .{payload});
+            }
+            if (!resultCarrierShapeSupported(error_union.error_types[0])) break :blk error.UnsupportedAbiType;
+            if (staticAbiWordCount(error_union.payload_type.*) == 1) {
+                const err_words = staticAbiWordCount(error_union.error_types[0]) orelse break :blk error.UnsupportedAbiType;
+                if (err_words > 1) break :blk error.UnsupportedAbiType;
+            }
+            const err_payload = try canonicalAbiType(allocator, error_union.error_types[0]);
+            defer allocator.free(err_payload);
+            break :blk std.fmt.allocPrint(allocator, "(bool,{s},{s})", .{ payload, err_payload });
+        },
         else => error.UnsupportedAbiType,
+    };
+}
+
+fn errorTypeHasPayload(ty: sema.Type) bool {
+    return switch (ty) {
+        .named, .anonymous_struct, .tuple, .bytes, .string, .slice, .array, .struct_, .contract => true,
+        .bool, .address, .integer, .enum_, .bitfield => true,
+        .refinement => |refinement| errorTypeHasPayload(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn resultDynamicArrayElementSupported(ty: sema.Type) bool {
+    return switch (ty) {
+        .bool, .address, .integer, .enum_, .bitfield => true,
+        .refinement => |refinement| resultDynamicArrayElementSupported(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn resultCarrierShapeSupported(ty: sema.Type) bool {
+    if (staticAbiWordCount(ty) != null) return true;
+    return switch (ty) {
+        .bytes, .string => true,
+        .slice => |slice| resultDynamicArrayElementSupported(slice.element_type.*),
+        .array => |array| array.len == null and resultDynamicArrayElementSupported(array.element_type.*),
+        .refinement => |refinement| resultCarrierShapeSupported(refinement.base_type.*),
+        else => false,
     };
 }
 

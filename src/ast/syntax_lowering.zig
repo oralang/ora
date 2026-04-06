@@ -615,6 +615,7 @@ pub fn mixin(Builder: type) type {
                 .WhileStmt => Lowering.lowerWhileStmtNode(self, node),
                 .ForStmt => Lowering.lowerForStmtNode(self, node),
                 .SwitchStmt => Lowering.lowerSwitchStmtNode(self, node),
+                .MatchStmt => Lowering.lowerSwitchStmtNode(self, node),
                 .TryStmt => Lowering.lowerTryStmtNode(self, node),
                 .LogStmt => Lowering.lowerLogStmtNode(self, node),
                 .LockStmt => Lowering.lowerLockStmtNode(self, node),
@@ -1129,6 +1130,9 @@ pub fn mixin(Builder: type) type {
             if (firstDirectChildOfKind(node, .SwitchStmt)) |switch_node| {
                 return Lowering.lowerSwitchStmtNodeWithLabel(self, switch_node, tokenText(label_token));
             }
+            if (firstDirectChildOfKind(node, .MatchStmt)) |match_node| {
+                return Lowering.lowerSwitchStmtNodeWithLabel(self, match_node, tokenText(label_token));
+            }
             const body_node = firstDirectChildOfKind(node, .Body) orelse return Lowering.malformedStmt(self, node, "missing labeled block body");
             return Support.pushStmt(self, .{ .LabeledBlock = .{
                 .range = node.range(),
@@ -1152,6 +1156,7 @@ pub fn mixin(Builder: type) type {
                 .ArrayLiteral => Lowering.lowerArrayLiteralExprNode(self, node),
                 .StructLiteral => Lowering.lowerStructLiteralExprNode(self, node),
                 .SwitchExpr => Lowering.lowerSwitchExprNode(self, node),
+                .MatchExpr => Lowering.lowerSwitchExprNode(self, node),
                 .ExternalProxyExpr => Lowering.lowerExternalProxyExprNode(self, node),
                 .QuantifiedExpr => Lowering.lowerQuantifiedExprNode(self, node),
                 .OldExpr => Lowering.lowerOldExprNode(self, node),
@@ -1948,6 +1953,7 @@ fn isExprKind(kind: SyntaxKind) bool {
         .ArrayLiteral,
         .StructLiteral,
         .SwitchExpr,
+        .MatchExpr,
         .ExternalProxyExpr,
         .QuantifiedExpr,
         .OldExpr,

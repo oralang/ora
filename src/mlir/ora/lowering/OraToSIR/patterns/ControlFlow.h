@@ -483,6 +483,11 @@ namespace mlir
                 ora::ErrorUnwrapOp op,
                 typename ora::ErrorUnwrapOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorUnwrapOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
         };
 
         class ConvertErrorGetErrorOp : public OpConversionPattern<ora::ErrorGetErrorOp>
@@ -493,6 +498,11 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::ErrorGetErrorOp op,
                 typename ora::ErrorGetErrorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorGetErrorOp op,
+                OneToNOpAdaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

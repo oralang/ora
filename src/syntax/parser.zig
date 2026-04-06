@@ -143,6 +143,9 @@ const Parser = struct {
         if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
             return self.parseFunctionItem();
         }
+        if (self.at(.Pub) and self.peekKind(1) == .Contract) {
+            return self.parseContractItem();
+        }
         if (self.startsTypeAliasItem()) {
             return self.parseTypeAliasItem();
         }
@@ -184,6 +187,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         try children.append(self.allocator, .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
@@ -1360,7 +1366,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchStmt else .SwitchStmt;
+        const keyword = self.bump();
+        try children.append(self.allocator, .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
@@ -1369,7 +1377,7 @@ const Parser = struct {
 
         if (!self.at(.LeftBrace)) {
             try self.reportHere("expected '{' after switch condition");
-            return self.finishNode(SyntaxKind.SwitchStmt, children.items);
+            return self.finishNode(node_kind, children.items);
         }
 
         try children.append(self.allocator, .{ .token = self.bump() });
@@ -1385,7 +1393,7 @@ const Parser = struct {
             try self.reportUnterminated("unterminated switch body", children.items);
         }
 
-        return self.finishNode(SyntaxKind.SwitchStmt, children.items);
+        return self.finishNode(node_kind, children.items);
     }
 
     fn parseTryStmtNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -2394,7 +2402,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchExpr else .SwitchExpr;
+        const keyword = self.bump();
+        try children.append(self.allocator, .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
@@ -2403,7 +2413,7 @@ const Parser = struct {
 
         if (!self.at(.LeftBrace)) {
             try self.reportHere("expected '{' after switch condition");
-            return self.finishNode(SyntaxKind.SwitchExpr, children.items);
+            return self.finishNode(node_kind, children.items);
         }
 
         try children.append(self.allocator, .{ .token = self.bump() });
@@ -2418,7 +2428,7 @@ const Parser = struct {
         } else {
             try self.reportUnterminated("unterminated switch expression", children.items);
         }
-        return self.finishNode(SyntaxKind.SwitchExpr, children.items);
+        return self.finishNode(node_kind, children.items);
     }
 
     fn parseSwitchExprArmNode(self: *Parser) anyerror!green.GreenNodeId {

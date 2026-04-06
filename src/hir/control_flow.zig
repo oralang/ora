@@ -19,6 +19,7 @@ const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
 const appendEmptyYield = support.appendEmptyYield;
+const appendScfYieldValues = support.appendScfYieldValues;
 const appendOraYieldValues = support.appendOraYieldValues;
 const appendOp = support.appendOp;
 const appendValueOp = support.appendValueOp;
@@ -870,6 +871,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const arm = switch_stmt.arms[arm_index];
             const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, condition, arm.pattern, arm.range)) orelse return false;
+            const prebound_value = try @This().precomputeErrorUnionMatchPatternValue(self, condition, arm.pattern, arm.range);
             const result_types = if (carried_locals.len == 0)
                 std.ArrayList(mlir.MlirType){}
             else
@@ -898,7 +900,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 then_lowerer.deferred_return_carried_locals = carried_locals;
             }
             var then_locals = try self.cloneLocals(locals);
-            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, &then_locals, arm.range);
+            try @This().bindPrecomputedErrorUnionMatchPatternValue(&then_lowerer, arm.pattern, prebound_value, &then_locals);
             const then_terminated = try then_lowerer.lowerBody(arm.body, &then_locals);
             if (!blockEndsWithTerminator(then_block)) {
                 try then_lowerer.appendScfYieldFromLocals(then_block, arm.range, &then_locals, carried_locals);
@@ -1381,6 +1383,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             if (arm_index >= switch_expr.arms.len) {
                 if (switch_expr.else_expr) |else_expr| return self.lowerExpr(else_expr, locals);
+                if (@This().switchExprHasExhaustiveErrorUnionPatterns(switch_expr)) {
+                    return self.defaultValue(self.parent.lowerExprType(expr_id), switch_expr.range);
+                }
                 const op = try self.createAggregatePlaceholder("ora.match_expr", switch_expr.range, &.{condition}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
             }
@@ -1390,6 +1395,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const op = try self.createAggregatePlaceholder("ora.match_expr", arm.range, &.{condition}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
             };
+            const prebound_value = try @This().precomputeErrorUnionMatchPatternValue(self, condition, arm.pattern, arm.range);
 
             const result_type = self.parent.lowerExprType(expr_id);
             const op = mlir.oraScfIfOpCreate(self.parent.context, self.parent.location(arm.range), branch_condition, &[_]mlir.MlirType{result_type}, 1, true);
@@ -1403,15 +1409,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var then_lowerer = self.*;
             then_lowerer.block = then_block;
             var then_locals = try self.cloneLocals(locals);
-            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, &then_locals, arm.range);
+            try @This().bindPrecomputedErrorUnionMatchPatternValue(&then_lowerer, arm.pattern, prebound_value, &then_locals);
             const then_value = try then_lowerer.lowerExpr(arm.value, &then_locals);
-            try appendOraYieldValues(self.parent.context, then_block, self.parent.location(arm.range), &[_]mlir.MlirValue{then_value});
+            try appendScfYieldValues(self.parent.context, then_block, self.parent.location(arm.range), &[_]mlir.MlirValue{then_value});
 
             var else_lowerer = self.*;
             else_lowerer.block = else_block;
             var else_locals = try self.cloneLocals(locals);
             const else_value = try @This().lowerErrorUnionMatchExprChain(&else_lowerer, expr_id, switch_expr, arm_index + 1, condition, &else_locals);
-            try appendOraYieldValues(self.parent.context, else_block, self.parent.location(arm.range), &[_]mlir.MlirValue{else_value});
+            try appendScfYieldValues(self.parent.context, else_block, self.parent.location(arm.range), &[_]mlir.MlirValue{else_value});
 
             return mlir.oraOperationGetResult(op, 0);
         }
@@ -1434,6 +1440,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return false;
+        }
+
+        fn switchExprHasExhaustiveErrorUnionPatterns(switch_expr: ast.SwitchExpr) bool {
+            if (switch_expr.else_expr != null) return true;
+
+            var seen_ok = false;
+            var seen_err = false;
+            for (switch_expr.arms) |arm| {
+                switch (arm.pattern) {
+                    .Ok => seen_ok = true,
+                    .Err => seen_err = true,
+                    else => {},
+                }
+            }
+            return seen_ok and seen_err;
         }
 
         fn lowerErrorUnionMatchCondition(
@@ -1461,30 +1482,53 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
-        fn bindErrorUnionMatchPatternValue(
+        fn precomputeErrorUnionMatchPatternValue(
             self: *FunctionLowerer,
             condition: mlir.MlirValue,
             pattern: ast.SwitchPattern,
-            locals: *LocalEnv,
             range: source.TextRange,
-        ) anyerror!void {
+        ) anyerror!?mlir.MlirValue {
             switch (pattern) {
                 .Ok => |pattern_id| {
+                    if (!@This().patternHasUses(self, pattern_id)) return null;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
-                    const value = appendValueOp(self.block, unwrap);
-                    try self.bindPatternValue(pattern_id, value, locals);
+                    return appendValueOp(self.block, unwrap);
                 },
                 .Err => |pattern_id| {
+                    if (!@This().patternHasUses(self, pattern_id)) return null;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
-                    const value = appendValueOp(self.block, get_error);
-                    try self.bindPatternValue(pattern_id, value, locals);
+                    return appendValueOp(self.block, get_error);
                 },
+                else => return null,
+            }
+        }
+
+        fn bindPrecomputedErrorUnionMatchPatternValue(
+            self: *FunctionLowerer,
+            pattern: ast.SwitchPattern,
+            prebound_value: ?mlir.MlirValue,
+            locals: *LocalEnv,
+        ) anyerror!void {
+            const value = prebound_value orelse return;
+            switch (pattern) {
+                .Ok => |pattern_id| try self.bindPatternValue(pattern_id, value, locals),
+                .Err => |pattern_id| try self.bindPatternValue(pattern_id, value, locals),
                 else => {},
             }
+        }
+
+        fn patternHasUses(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            for (self.parent.resolution.expr_bindings) |binding| {
+                if (binding) |resolved| switch (resolved) {
+                    .pattern => |bound_pattern_id| if (bound_pattern_id == pattern_id) return true,
+                    else => {},
+                };
+            }
+            return false;
         }
 
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {

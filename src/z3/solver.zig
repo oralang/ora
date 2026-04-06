@@ -135,7 +135,7 @@ test "loadFromSmtlib rejects malformed smtlib" {
     var solver = try Solver.init(&context, testing.allocator);
     defer solver.deinit();
 
-    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert (= x))"));
+    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert"));
 }
 
 test "setTimeoutMs configures solver without Z3 error" {

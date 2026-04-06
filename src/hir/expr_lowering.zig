@@ -1025,7 +1025,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var args: std.ArrayList(mlir.MlirValue) = .{};
             for (call.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
 
-            const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
+            const result_type = self.parent.lowerExprType(expr_id);
             const op = mlir.oraErrorReturnOpCreate(
                 self.parent.context,
                 self.parent.location(call.range),
@@ -1058,15 +1058,48 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const loc = self.parent.location(call.range);
             const result_type = self.parent.lowerExprType(expr_id);
-            const operand = try self.lowerExpr(call.args[0], locals);
 
             if (std.mem.eql(u8, callee_name, "Ok")) {
+                const operand = try self.lowerExpr(call.args[0], locals);
                 const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, operand, result_type);
                 if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
                 if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
                     mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
                 }
                 return appendValueOp(self.block, ok_op);
+            }
+
+            if (self.parent.file.expression(call.args[0]).* == .Call) {
+                const inner_call = self.parent.file.expression(call.args[0]).Call;
+                const inner_name = @This().calleeName(self, inner_call.callee);
+                if (inner_name) |name| {
+                    if (self.parent.item_index.lookup(name)) |item_id| {
+                        if (self.parent.file.item(item_id).* == .ErrorDecl) {
+                            const error_decl = self.parent.file.item(item_id).ErrorDecl;
+                            var args: std.ArrayList(mlir.MlirValue) = .{};
+                            for (inner_call.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
+
+                            const op = mlir.oraErrorReturnOpCreate(
+                                self.parent.context,
+                                self.parent.location(inner_call.range),
+                                strRef(error_decl.name),
+                                if (args.items.len == 0) null else args.items.ptr,
+                                args.items.len,
+                                result_type,
+                            );
+                            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            if (args.items.len != 0 or self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                                mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                            }
+                            return appendValueOp(self.block, op);
+                        }
+                    }
+                }
+            }
+
+            const operand = try self.lowerExpr(call.args[0], locals);
+            if (mlir.oraTypeEqual(mlir.oraValueGetType(operand), result_type)) {
+                return operand;
             }
 
             const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, operand, result_type);

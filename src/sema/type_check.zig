@@ -558,6 +558,7 @@ const TypeChecker = struct {
                 self.current_function_item = item_id;
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
+                try self.validatePublicFunctionAbi(function);
                 for (function.clauses) |clause| try self.visitExpr(clause.expr);
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
@@ -696,6 +697,217 @@ const TypeChecker = struct {
         if (function.return_type != null) {
             try self.emitRangeError(function.range, "constructor init() must not return values", .{});
         }
+    }
+
+    const PublicAbiPosition = enum {
+        input,
+        output,
+    };
+
+    fn validatePublicFunctionAbi(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {
+        if (self.current_contract == null) return;
+        if (function.visibility != .public) return;
+
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            if (self.parameterIsBareSelf(parameter)) continue;
+            const param_type = self.pattern_types[parameter.pattern.index()].type;
+            if (self.publicAbiSupportsType(param_type, .input)) continue;
+            const name = self.patternName(parameter.pattern) orelse "<param>";
+            if (param_type.kind() == .error_union) {
+                try self.emitRangeError(
+                    parameter.range,
+                    "public function parameter '{s}' uses unsupported ABI type '{s}'; public Result inputs currently require Result<carrier-compatible payload, single error>; supported payloads are static values plus bytes/string and dynamic arrays of static base types; if the success payload is one word, the error payload must also fit in one word",
+                    .{ name, diagnosticTypeDisplayName(self, param_type) },
+                );
+                continue;
+            }
+            try self.emitRangeError(parameter.range, "public function parameter '{s}' uses unsupported ABI type '{s}'", .{
+                name,
+                diagnosticTypeDisplayName(self, param_type),
+            });
+        }
+
+        if (function.return_type != null and !self.publicAbiSupportsType(self.current_return_type.?, .output)) {
+            try self.emitRangeError(function.range, "public function '{s}' uses unsupported return ABI type '{s}'", .{
+                function.name,
+                diagnosticTypeDisplayName(self, self.current_return_type.?),
+            });
+        }
+    }
+
+    fn publicAbiSupportsType(self: *const TypeChecker, ty: Type, position: PublicAbiPosition) bool {
+        return switch (ty) {
+            .unknown => true,
+            .void => position == .output,
+            .bool, .address, .string, .bytes, .integer, .enum_, .bitfield => true,
+            .refinement => |refinement| self.publicAbiSupportsType(refinement.base_type.*, position),
+            .array => |array| self.publicAbiSupportsType(array.element_type.*, position),
+            .slice => |slice| self.publicAbiSupportsType(slice.element_type.*, position),
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (!self.publicAbiSupportsType(element, position)) break :blk false;
+                }
+                break :blk true;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (!self.publicAbiSupportsType(field.ty, position)) break :blk false;
+                }
+                break :blk true;
+            },
+            .struct_, .contract, .named => true,
+            .error_union => |error_union| switch (position) {
+                .input => self.publicAbiSupportsResultInput(ty),
+                .output => self.publicAbiSupportsType(error_union.payload_type.*, .output),
+            },
+            else => false,
+        };
+    }
+
+    fn publicAbiSupportsResultInput(self: *const TypeChecker, ty: Type) bool {
+        const error_union = switch (ty) {
+            .error_union => |error_union| error_union,
+            else => return false,
+        };
+        if (error_union.error_types.len != 1) return false;
+        if (!self.publicAbiSupportsResultCarrierType(error_union.payload_type.*)) return false;
+        const payload_words = self.publicAbiStaticWordCount(error_union.payload_type.*);
+        if (!self.publicAbiErrorTypeHasPayload(error_union.error_types[0])) return true;
+        if (!self.publicAbiSupportsResultCarrierType(error_union.error_types[0])) return false;
+        const error_words = self.publicAbiStaticWordCount(error_union.error_types[0]);
+        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return false;
+        return true;
+    }
+
+    fn publicAbiSupportsResultCarrierType(self: *const TypeChecker, ty: Type) bool {
+        if (self.publicAbiStaticWordCount(ty) != null) return true;
+        return switch (ty) {
+            .bytes, .string => true,
+            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(slice.element_type.*),
+            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(array.element_type.*),
+            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(refinement.base_type.*),
+            else => false,
+        };
+    }
+
+    fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .bool, .address, .integer, .enum_, .bitfield => true,
+            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .Enum, .Bitfield => true,
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn publicAbiStaticWordCount(self: *const TypeChecker, ty: Type) ?usize {
+        return switch (ty) {
+            .bool, .address, .integer, .enum_, .bitfield => 1,
+            .refinement => |refinement| self.publicAbiStaticWordCount(refinement.base_type.*),
+            .tuple => |elements| blk: {
+                var total: usize = 0;
+                for (elements) |element| {
+                    total += self.publicAbiStaticWordCount(element) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .array => |array| blk: {
+                const len = array.len orelse break :blk null;
+                const element_words = self.publicAbiStaticWordCount(array.element_type.*) orelse break :blk null;
+                break :blk element_words * len;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                var total: usize = 0;
+                for (struct_type.fields) |field| {
+                    total += self.publicAbiStaticWordCount(field.ty) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
+            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
+                if (parseIntegerSpelling(named.name) != null) break :blk 1;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk null;
+                break :blk switch (self.file.item(item_id).*) {
+                    .Enum, .Bitfield => 1,
+                    .Struct => self.publicAbiStaticWordCountForStructDecl(named.name),
+                    .Contract => self.publicAbiStaticWordCountForContractDecl(named.name),
+                    .ErrorDecl => |error_decl| blk2: {
+                        var total: usize = 0;
+                        for (error_decl.parameters) |parameter| {
+                            total += self.publicAbiStaticWordCount(self.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
+                        }
+                        break :blk2 total;
+                    },
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn publicAbiStaticWordCountForNamedStruct(self: *const TypeChecker, name: []const u8) ?usize {
+        const item_id = self.item_index.lookup(name) orelse return null;
+        return switch (self.file.item(item_id).*) {
+            .Struct => self.publicAbiStaticWordCountForStructDecl(name),
+            .Contract => self.publicAbiStaticWordCountForContractDecl(name),
+            else => null,
+        };
+    }
+
+    fn publicAbiStaticWordCountForStructDecl(self: *const TypeChecker, name: []const u8) ?usize {
+        const item_id = self.item_index.lookup(name) orelse return null;
+        const struct_item = switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return null,
+        };
+        var total: usize = 0;
+        for (struct_item.fields) |field| {
+            total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return null) orelse return null;
+        }
+        return total;
+    }
+
+    fn publicAbiStaticWordCountForContractDecl(self: *const TypeChecker, name: []const u8) ?usize {
+        const item_id = self.item_index.lookup(name) orelse return null;
+        const contract_item = switch (self.file.item(item_id).*) {
+            .Contract => |contract_item| contract_item,
+            else => return null,
+        };
+        var total: usize = 0;
+        for (contract_item.members) |member_id| {
+            switch (self.file.item(member_id).*) {
+                .Field => |field| {
+                    if (field.type_expr) |type_expr| {
+                        total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch return null) orelse return null;
+                    } else return null;
+                },
+                else => {},
+            }
+        }
+        return total;
+    }
+
+    fn publicAbiErrorTypeHasPayload(self: *const TypeChecker, ty: Type) bool {
+        const name = ty.name() orelse return true;
+        const item_id = self.item_index.lookup(name) orelse return true;
+        return switch (self.file.item(item_id).*) {
+            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
+            else => true,
+        };
+    }
+
+    fn parseIntegerSpelling(name: []const u8) ?void {
+        if (name.len < 2) return null;
+        if (name[0] != 'u' and name[0] != 'i') return null;
+        _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
     }
 
     fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
@@ -1798,6 +2010,7 @@ const TypeChecker = struct {
                     self.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch Type{ .unknown = {} }
                 else
                     self.pattern_types[parameter.pattern.index()].type;
+                try self.contextualizeLiteral(arg, param_type);
                 if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
                 const arg_type = self.expr_types[arg.index()];
                 if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
@@ -1816,6 +2029,7 @@ const TypeChecker = struct {
         const param_types = callee_type.paramTypes();
         if (param_types.len != call.args.len) return;
         for (call.args, param_types) |arg, param_type| {
+            try self.contextualizeLiteral(arg, param_type);
             if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
@@ -1832,6 +2046,7 @@ const TypeChecker = struct {
         if (error_decl.parameters.len != call.args.len) return;
         for (call.args, error_decl.parameters) |arg, parameter| {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
+            try self.contextualizeLiteral(arg, param_type);
             if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
@@ -4853,12 +5068,35 @@ const TypeChecker = struct {
 
         const error_types = condition_type.errorTypes();
         if (error_types.len == 1) {
-            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(error_types[0]);
+            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(try self.matchErrBindingType(error_types[0]));
             return;
         }
 
         self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
         try self.emitRangeError(range, "Err(binding) currently requires an error union with exactly one error type", .{});
+    }
+
+    fn matchErrBindingType(self: *TypeChecker, error_type: Type) !Type {
+        const error_name = error_type.name() orelse return error_type;
+        const item_id = self.item_index.lookup(error_name) orelse return error_type;
+        const item = self.file.item(item_id).*;
+        if (item != .ErrorDecl) return error_type;
+
+        const error_decl = item.ErrorDecl;
+        if (error_decl.parameters.len == 0) return error_type;
+
+        const fields = try self.arena.alloc(model.AnonymousStructField, error_decl.parameters.len);
+        for (error_decl.parameters, 0..) |param, index| {
+            const pattern = self.file.pattern(param.pattern).*;
+            fields[index] = .{
+                .name = switch (pattern) {
+                    .Name => |name| name.name,
+                    else => "",
+                },
+                .ty = self.pattern_types[param.pattern.index()].type,
+            };
+        }
+        return .{ .anonymous_struct = .{ .fields = fields } };
     }
 
     fn integerValueText(self: *TypeChecker, value: BigInt) ![]const u8 {

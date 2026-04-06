@@ -238,25 +238,64 @@ namespace
         {
             SmallVector<Value> newOperands;
             newOperands.reserve(op.getNumOperands());
+            bool changed = false;
             for (auto it : llvm::enumerate(adaptor.getOperands()))
             {
                 Value operand = it.value();
                 Type origType = op.getOperand(it.index()).getType();
-                Type newType = typeConverter->convertType(origType);
-                if (newType && newType != operand.getType())
+                SmallVector<Type> convertedOperandTypes;
+                if (failed(typeConverter->convertType(origType, convertedOperandTypes)) || convertedOperandTypes.empty())
                 {
-                    operand = rewriter
-                                  .create<UnrealizedConversionCastOp>(op.getLoc(), newType, operand)
-                                  .getResult(0);
+                    if (Type converted = typeConverter->convertType(origType))
+                        convertedOperandTypes.push_back(converted);
                 }
-                newOperands.push_back(operand);
+
+                if (convertedOperandTypes.empty())
+                    return failure();
+
+                if (convertedOperandTypes.size() == 1)
+                {
+                    Type newType = convertedOperandTypes[0];
+                    if (newType != origType)
+                        changed = true;
+                    if (newType != operand.getType())
+                    {
+                        changed = true;
+                        operand = rewriter
+                                      .create<UnrealizedConversionCastOp>(op.getLoc(), newType, operand)
+                                      .getResult(0);
+                    }
+                    newOperands.push_back(operand);
+                    continue;
+                }
+
+                if (!llvm::isa<ora::ErrorUnionType>(origType))
+                    return failure();
+
+                changed = true;
+                auto cast = rewriter.create<UnrealizedConversionCastOp>(op.getLoc(), convertedOperandTypes, operand);
+                for (Value split : cast.getResults())
+                    newOperands.push_back(split);
             }
 
             SmallVector<Type> newResultTypes;
-            if (failed(typeConverter->convertTypes(op.getResultTypes(), newResultTypes)))
-                return failure();
+            for (Type resultType : op.getResultTypes())
+            {
+                SmallVector<Type> convertedResultTypes;
+                if (failed(typeConverter->convertType(resultType, convertedResultTypes)) || convertedResultTypes.empty())
+                {
+                    if (Type converted = typeConverter->convertType(resultType))
+                        convertedResultTypes.push_back(converted);
+                }
+                if (convertedResultTypes.empty())
+                    return failure();
+                newResultTypes.append(convertedResultTypes.begin(), convertedResultTypes.end());
+            }
 
-            if (llvm::equal(op.getResultTypes(), newResultTypes))
+            if (!llvm::equal(op.getResultTypes(), newResultTypes))
+                changed = true;
+
+            if (!changed)
                 return failure();
 
             auto newCall = rewriter.create<mlir::func::CallOp>(
@@ -371,7 +410,11 @@ static void logModuleOps(ModuleOp module, StringRef tag)
         return;
     llvm::errs() << "[OraToSIR] " << tag << " (per-op log)\n";
     module.walk([&](Operation *op)
-                { llvm::errs() << "[OraToSIR]   op=" << op->getName() << " loc=" << op->getLoc() << "\n"; });
+                {
+                    llvm::errs() << "[OraToSIR]   ";
+                    op->print(llvm::errs());
+                    llvm::errs() << "\n";
+                });
     llvm::errs().flush();
 }
 
@@ -850,8 +893,6 @@ public:
         if (enable_func)
             patterns.add<ConvertFuncOp>(typeConverter, ctx);
         if (enable_func)
-            patterns.add<ConvertCallOp>(typeConverter, ctx);
-        if (enable_func)
         {
             patterns.add<ConvertAbiEncodeOp>(typeConverter, ctx);
             patterns.add<ConvertExternalCallOp>(typeConverter, ctx);
@@ -922,6 +963,10 @@ public:
         }
         patterns.add<ConvertErrorDeclOp>(typeConverter, ctx);
         patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
+        patterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
+        patterns.add<ConvertFuncOp>(typeConverter, ctx);
+        patterns.add<ConvertCallTypeOp>(typeConverter, ctx);
+        patterns.add<ConvertFuncTypeAttrsOp>(typeConverter, ctx);
         patterns.add<ConvertLogOp>(typeConverter, ctx);
         patterns.add<EraseOpByName>("ora.enum.decl", ctx);
         patterns.add<EraseOpByName>("ora.bitfield_decl", ctx);
@@ -1022,16 +1067,9 @@ public:
                 }
                 if (auto callOp = dyn_cast<mlir::func::CallOp>(op))
                 {
-                    for (Type operandType : callOp.getOperandTypes())
-                    {
-                        if (!typeConverter.isLegal(operandType))
-                            return false;
-                    }
-                    for (Type resultType : callOp.getResultTypes())
-                    {
-                        if (!typeConverter.isLegal(resultType))
-                            return false;
-                    }
+                    (void)callOp;
+                    // Calls are legalized in the later control-flow phase, where
+                    // we can lower them with callee-aware result/ABI handling.
                     return true;
                 }
                 return true;
@@ -1146,6 +1184,7 @@ public:
         logModuleOps(module, "Before Phase1 conversion");
         if (failed(applyFullConversion(module, target, std::move(patterns))))
         {
+            logModuleOps(module, "Phase1 failure state");
             dumpModuleOnFailure(module, "Phase1 conversion");
             module.emitError("[OraToSIR] Phase 1: main conversion failed (illegal ops remain)");
             signalPassFailure();
@@ -1228,11 +1267,21 @@ public:
 
         // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.conditional_return + returns.
         {
+            RewritePatternSet phase2bPrePatterns(ctx);
+            phase2bPrePatterns.add<NormalizeErrorIsErrorOp>(ctx);
+            phase2bPrePatterns.add<NormalizeErrorUnwrapOp>(ctx);
+            phase2bPrePatterns.add<NormalizeErrorGetErrorOp>(ctx);
+            if (failed(applyPatternsGreedily(module, std::move(phase2bPrePatterns))))
+            {
+                module.emitError("[OraToSIR] Phase 2b pre-pass: error.is_error normalization failed");
+                signalPassFailure();
+                return;
+            }
+
             RewritePatternSet phase2bPatterns(ctx);
             phase2bPatterns.add<ConvertTryStmtOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorOkOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorErrOp>(typeConverter, ctx);
-            phase2bPatterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
@@ -1256,9 +1305,9 @@ public:
             phase2bTarget.addIllegalOp<ora::TryStmtOp>();
             phase2bTarget.addIllegalOp<ora::ErrorOkOp>();
             phase2bTarget.addIllegalOp<ora::ErrorErrOp>();
-            phase2bTarget.addIllegalOp<ora::ErrorIsErrorOp>();
-            phase2bTarget.addIllegalOp<ora::ErrorUnwrapOp>();
-            phase2bTarget.addIllegalOp<ora::ErrorGetErrorOp>();
+            phase2bTarget.addLegalOp<ora::ErrorIsErrorOp>();
+            phase2bTarget.addLegalOp<ora::ErrorUnwrapOp>();
+            phase2bTarget.addLegalOp<ora::ErrorGetErrorOp>();
             phase2bTarget.addIllegalOp<ora::IfOp>();
             // ora.return stays legal — lowered in Phase 3a/3b.
             phase2bTarget.addLegalOp<ora::ReturnOp>();
@@ -1346,6 +1395,17 @@ public:
         // Phase 4: lower scf.for, scf.while, memref ops (stack temps) to SIR.
         typeConverter.setEnableMemRefLowering(true);
         {
+            RewritePatternSet finalErrorCleanup(ctx);
+            finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
+            finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
+            finalErrorCleanup.add<NormalizeErrorGetErrorOp>(ctx);
+            if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
+            {
+                module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
+                signalPassFailure();
+                return;
+            }
+
             RewritePatternSet phase3PrePatterns(ctx);
             phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefLoadOp>(ctx);
             phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefStoreOp>(ctx);
@@ -1646,8 +1706,14 @@ public:
             }
 
             RewritePatternSet castCleanupPatterns(ctx);
+            castCleanupPatterns.add<NormalizeErrorIsErrorOp>(ctx);
+            castCleanupPatterns.add<NormalizeErrorUnwrapOp>(ctx);
+            castCleanupPatterns.add<NormalizeErrorGetErrorOp>(ctx);
             castCleanupPatterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
             castCleanupPatterns.add<StripNormalizedErrorUnionCastOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithShlIOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithShrUIOp>(typeConverter, ctx);
+            castCleanupPatterns.add<ConvertArithShrSIOp>(typeConverter, ctx);
             castCleanupPatterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             castCleanupPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
 
@@ -1657,7 +1723,11 @@ public:
             castCleanupTarget.addLegalDialect<mlir::func::FuncDialect>();
             castCleanupTarget.addLegalDialect<mlir::scf::SCFDialect>();
             castCleanupTarget.addLegalDialect<ora::OraDialect>();
-            castCleanupTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            castCleanupTarget.addDynamicallyLegalOp<mlir::UnrealizedConversionCastOp>(
+                [](mlir::UnrealizedConversionCastOp op)
+                {
+                    return op->hasAttr("ora.normalized_error_union");
+                });
 
             if (failed(applyFullConversion(module, castCleanupTarget, std::move(castCleanupPatterns))))
             {
@@ -1679,6 +1749,24 @@ public:
                     return;
                 normalizedCasts.push_back(op); });
             for (auto castOp : normalizedCasts)
+            {
+                castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
+                castOp.erase();
+            }
+
+            // Cleanup: strip remaining trivial ptr-backed aggregate view casts.
+            SmallVector<mlir::UnrealizedConversionCastOp, 16> aggregateViewCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
+                if (op->hasAttr("ora.normalized_error_union"))
+                    return;
+                if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+                    return;
+                if (!llvm::isa<sir::PtrType>(op.getOperand(0).getType()))
+                    return;
+                if (llvm::isa<ora::StructType, ora::TupleType, ora::StringType, ora::BytesType>(op.getResult(0).getType()))
+                    aggregateViewCasts.push_back(op); });
+            for (auto castOp : aggregateViewCasts)
             {
                 castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
                 castOp.erase();
@@ -1839,6 +1927,8 @@ public:
                         {
                 if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
                 {
+                    if (op->hasAttr("ora.normalized_error_union"))
+                        return;
                     ++unrealizedByName;
                     if (mlir::ora::isDebugEnabled())
                     {
@@ -1860,6 +1950,52 @@ public:
             if (unrealizedByName > 0)
             {
                 module.emitError("[OraToSIR] Phase4 name-scan: unrealized casts remain");
+                signalPassFailure();
+                return;
+            }
+        }
+
+        {
+            RewritePatternSet finalErrorCleanup(ctx);
+            finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
+            finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
+            finalErrorCleanup.add<NormalizeErrorGetErrorOp>(ctx);
+            if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
+            {
+                module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
+                signalPassFailure();
+                return;
+            }
+
+            SmallVector<mlir::UnrealizedConversionCastOp, 8> deadNormalizedFinalCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
+                            if (!op->hasAttr("ora.normalized_error_union"))
+                                return;
+                            if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
+                                deadNormalizedFinalCasts.push_back(op);
+                        });
+            for (auto op : deadNormalizedFinalCasts)
+                op.erase();
+
+            RewritePatternSet finalResidualPatterns(ctx);
+            finalResidualPatterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertArithConstantOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertArithAndIOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
+
+            ConversionTarget finalResidualTarget(*ctx);
+            finalResidualTarget.addLegalDialect<mlir::BuiltinDialect>();
+            finalResidualTarget.addLegalDialect<sir::SIRDialect>();
+            finalResidualTarget.addLegalDialect<mlir::func::FuncDialect>();
+            finalResidualTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            finalResidualTarget.addIllegalDialect<mlir::arith::ArithDialect>();
+            finalResidualTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            finalResidualTarget.addLegalDialect<ora::OraDialect>();
+
+            if (failed(applyFullConversion(module, finalResidualTarget, std::move(finalResidualPatterns))))
+            {
+                module.emitError("[OraToSIR] final cleanup: residual arith/cast lowering failed");
                 signalPassFailure();
                 return;
             }

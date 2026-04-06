@@ -355,7 +355,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             if (function.visibility == .public and function.parent_contract != null) {
                 @This().attachPublicAbiAttrs(self, &attrs, function, parameters) catch |err| switch (err) {
-                    error.UnsupportedAbiType => {},
+                    error.UnsupportedAbiType => return err,
                     else => return err,
                 };
             }
@@ -397,9 +397,18 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
 
             for (parameters, 0..) |parameter, index| {
-                try self.attachBitfieldParamMetadataForType(op, self.typecheck.pattern_types[parameter.pattern.index()].type, @intCast(index));
-                if (self.errorUnionRequiresWideCarrier(self.typecheck.pattern_types[parameter.pattern.index()].type)) {
+                const param_type = self.typecheck.pattern_types[parameter.pattern.index()].type;
+                try self.attachBitfieldParamMetadataForType(op, param_type, @intCast(index));
+                if (self.errorUnionRequiresWideCarrier(param_type)) {
                     _ = mlir.oraFuncSetArgAttr(op, @intCast(index), strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
+                }
+                if (@This().publicResultInputErrorId(self, param_type)) |error_id| {
+                    _ = mlir.oraFuncSetArgAttr(
+                        op,
+                        @intCast(index),
+                        strRef("ora.result_input_error_id"),
+                        mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), error_id),
+                    );
                 }
             }
 
@@ -484,12 +493,30 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
             defer abi_param_attrs.deinit(self.allocator);
+            var result_input_mode_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer result_input_mode_attrs.deinit(self.allocator);
+            var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer result_input_error_id_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
-                const abi_type = try @This().abiLayoutForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type);
+                const param_type = self.typecheck.pattern_types[parameter.pattern.index()].type;
+                const abi_type = try @This().abiLayoutForType(self, param_type);
                 defer self.allocator.free(abi_type);
                 try signature_parts.append(self.allocator, try self.allocator.dupe(u8, abi_type));
                 abi_param_attrs.append(self.allocator, mlir.oraStringAttrCreate(self.context, strRef(abi_type))) catch return error.OutOfMemory;
+                result_input_mode_attrs.append(
+                    self.allocator,
+                    mlir.oraStringAttrCreate(self.context, strRef(switch (@This().publicResultInputMode(self, param_type)) {
+                        .none => "",
+                        .narrow_payloadless => "narrow_payloadless",
+                        .wide_payloadless => "wide_payloadless",
+                        .wide_single_error => "wide_single_error",
+                    })),
+                ) catch return error.OutOfMemory;
+                result_input_error_id_attrs.append(
+                    self.allocator,
+                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().publicResultInputErrorId(self, param_type) orelse 0)),
+                ) catch return error.OutOfMemory;
             }
 
             if (abi_param_attrs.items.len != 0) {
@@ -497,6 +524,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try attrs.append(self.allocator, .{
                     .name = identifier(self.context, "ora.abi_params"),
                     .attribute = abi_params_attr,
+                });
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.result_input_modes"),
+                    .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(result_input_mode_attrs.items.len), result_input_mode_attrs.items.ptr),
+                });
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.result_input_error_ids"),
+                    .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(result_input_error_id_attrs.items.len), result_input_error_id_attrs.items.ptr),
                 });
             }
 
@@ -926,6 +961,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (ty) {
                 .bool, .address, .integer, .enum_, .bitfield => 1,
                 .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
+                .error_union => |error_union| blk: {
+                    const payload_words = @This().staticAbiWordCountForType(self, error_union.payload_type.*) orelse break :blk null;
+                    break :blk switch (@This().publicResultInputMode(self, ty)) {
+                        .narrow_payloadless => 1 + payload_words,
+                        .wide_payloadless => 1 + payload_words,
+                        .wide_single_error => 1 + payload_words + (@This().resultInputPayloadAbiWordCount(self, error_union.error_types[0]) orelse break :blk null),
+                        .none => null,
+                    };
+                },
                 .tuple => |elements| blk: {
                     var total: usize = 0;
                     for (elements) |element| {
@@ -962,6 +1006,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .bool, .address, .string, .bytes, .integer, .enum_ => abi_support.canonicalAbiType(self.allocator, ty),
                 .bitfield => |named| @This().abiLayoutForNamedBitfield(self, named.name),
                 .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
+                .error_union => |error_union| blk: {
+                    const payload = try @This().abiLayoutForType(self, error_union.payload_type.*);
+                    defer self.allocator.free(payload);
+                    break :blk switch (@This().publicResultInputMode(self, ty)) {
+                        .narrow_payloadless => std.fmt.allocPrint(self.allocator, "(bool,{s})", .{payload}),
+                        .wide_payloadless => std.fmt.allocPrint(self.allocator, "(bool,{s})", .{payload}),
+                        .wide_single_error => blk2: {
+                            const err_payload = try @This().abiLayoutForType(self, error_union.error_types[0]);
+                            defer self.allocator.free(err_payload);
+                            break :blk2 std.fmt.allocPrint(self.allocator, "(bool,{s},{s})", .{ payload, err_payload });
+                        },
+                        .none => error.UnsupportedAbiType,
+                    };
+                },
                 .array => |array| blk: {
                     const element = try @This().abiLayoutForType(self, array.element_type.*);
                     defer self.allocator.free(element);
@@ -991,6 +1049,96 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
         }
 
+        fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) ?i64 {
+            const error_union = switch (ty) {
+                .error_union => |error_union| error_union,
+                else => return null,
+            };
+            if (error_union.error_types.len != 1) return null;
+            if (@This().resultInputPayloadAbiWordCount(self, error_union.payload_type.*) != 1) return null;
+            if (self.errorTypeHasPayload(error_union.error_types[0])) return null;
+
+            const error_name = error_union.error_types[0].name() orelse return null;
+            const item_id = self.item_index.lookup(error_name) orelse return null;
+            if (self.file.item(item_id).* != .ErrorDecl) return null;
+            return @intCast(item_id.index() + 1);
+        }
+
+        fn publicResultInputMode(self: *Lowerer, ty: sema.Type) enum { none, narrow_payloadless, wide_payloadless, wide_single_error } {
+            const error_union = switch (ty) {
+                .error_union => |error_union| error_union,
+                else => return .none,
+            };
+            if (error_union.error_types.len != 1) return .none;
+            if (!@This().resultInputCarrierShapeSupported(self, error_union.payload_type.*)) return .none;
+            const payload_words = @This().staticAbiWordCountForType(self, error_union.payload_type.*);
+            if (!self.errorTypeHasPayload(error_union.error_types[0])) {
+                if (payload_words == 1 and @This().resultInputPayloadFitsNarrowCarrier(self, error_union.payload_type.*) and @This().publicResultInputErrorId(self, ty) != null) {
+                    return .narrow_payloadless;
+                }
+                return .wide_payloadless;
+            }
+            if (!@This().resultInputCarrierShapeSupported(self, error_union.error_types[0])) return .none;
+            const error_words = @This().staticAbiWordCountForType(self, error_union.error_types[0]);
+            if (payload_words == 1 and (error_words == null or error_words.? > 1)) return .none;
+            return .wide_single_error;
+        }
+
+        fn resultInputCarrierShapeSupported(self: *Lowerer, ty: sema.Type) bool {
+            if (@This().staticAbiWordCountForType(self, ty) != null) return true;
+            return switch (ty) {
+                .bytes, .string => true,
+                .slice => |slice| @This().resultInputDynamicArrayElementSupported(self, slice.element_type.*),
+                .array => |array| array.len == null and @This().resultInputDynamicArrayElementSupported(self, array.element_type.*),
+                .refinement => |refinement| @This().resultInputCarrierShapeSupported(self, refinement.base_type.*),
+                else => false,
+            };
+        }
+
+        fn resultInputDynamicArrayElementSupported(self: *Lowerer, ty: sema.Type) bool {
+            return switch (ty) {
+                .bool, .address, .integer, .enum_, .bitfield => true,
+                .refinement => |refinement| @This().resultInputDynamicArrayElementSupported(self, refinement.base_type.*),
+                .named => |named| blk: {
+                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                    break :blk switch (self.file.item(item_id).*) {
+                        .Enum, .Bitfield => true,
+                        else => false,
+                    };
+                },
+                else => false,
+            };
+        }
+
+        fn resultInputPayloadFitsNarrowCarrier(self: *Lowerer, ty: sema.Type) bool {
+            return switch (ty) {
+                .bool => true,
+                .address => true,
+                .integer => |integer| (integer.bits orelse 256) <= 255,
+                .refinement => |refinement| @This().resultInputPayloadFitsNarrowCarrier(self, refinement.base_type.*),
+                else => false,
+            };
+        }
+
+        fn resultInputPayloadAbiWordCount(self: *Lowerer, ty: sema.Type) ?usize {
+            return switch (ty) {
+                .bool, .address, .integer, .enum_, .bitfield => 1,
+                .refinement => |refinement| @This().resultInputPayloadAbiWordCount(self, refinement.base_type.*),
+                .named => |named| blk: {
+                    const item_id = self.item_index.lookup(named.name) orelse break :blk null;
+                    break :blk switch (self.file.item(item_id).*) {
+                        .Enum, .Bitfield => 1,
+                        .ErrorDecl => |error_decl| if (error_decl.parameters.len == 1)
+                            @This().resultInputPayloadAbiWordCount(self, self.typecheck.pattern_types[error_decl.parameters[0].pattern.index()].type)
+                        else
+                            null,
+                        else => null,
+                    };
+                },
+                else => null,
+            };
+        }
+
         fn abiLayoutForNamedType(self: *Lowerer, name: []const u8) anyerror![]const u8 {
             if (self.typecheck.instantiatedEnumByName(name)) |_| {
                 return self.allocator.dupe(u8, "uint32");
@@ -1002,6 +1150,23 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (self.file.item(item_id).*) {
                 .Enum => self.allocator.dupe(u8, "uint32"),
                 .Bitfield => |bitfield| @This().abiLayoutForBitfieldBaseTypeExpr(self, bitfield.base_type),
+                .ErrorDecl => |error_decl| blk: {
+                    if (error_decl.parameters.len == 0) break :blk self.allocator.dupe(u8, "uint256");
+                    if (error_decl.parameters.len == 1) {
+                        break :blk @This().abiLayoutForType(self, self.typecheck.pattern_types[error_decl.parameters[0].pattern.index()].type);
+                    }
+                    var parts: std.ArrayList([]const u8) = .{};
+                    defer {
+                        for (parts.items) |part| self.allocator.free(part);
+                        parts.deinit(self.allocator);
+                    }
+                    for (error_decl.parameters) |parameter| {
+                        try parts.append(self.allocator, try @This().abiLayoutForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type));
+                    }
+                    const joined = try std.mem.join(self.allocator, ",", parts.items);
+                    defer self.allocator.free(joined);
+                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+                },
                 else => @This().abiLayoutForNamedStruct(self, name),
             };
         }
@@ -1057,6 +1222,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (self.file.item(item_id).*) {
                 .Enum => 1,
                 .Bitfield => 1,
+                .ErrorDecl => |error_decl| blk: {
+                    if (error_decl.parameters.len == 0) break :blk 1;
+                    var total: usize = 0;
+                    for (error_decl.parameters) |parameter| {
+                        const words = @This().staticAbiWordCountForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type) orelse break :blk null;
+                        total += words;
+                    }
+                    break :blk total;
+                },
                 else => @This().staticAbiWordCountForNamedStruct(self, name),
             };
         }

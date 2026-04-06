@@ -1,6 +1,9 @@
+comptime const std = @import("std");
+
 error Failure;
 
 pub contract MatchExample {
+
     pub fn make(flag: bool, value: u256) -> Result<u256, Failure> {
         if (flag) {
             return Ok(value);
@@ -8,7 +11,7 @@ pub contract MatchExample {
         return Err(Failure());
     }
 
-    pub fn unwrapOrZero(value: Result<u256, Failure>) -> u256 {
+    fn unwrapOrZero(value: Result<u256, Failure>) -> u256 {
         match (value) {
             Ok(inner) => {
                 return inner;
@@ -19,7 +22,9 @@ pub contract MatchExample {
         }
     }
 
-    pub fn classify(value: Result<u256, Failure>) -> u256 {
+    fn classify(value: Result<u256, Failure>) -> u256
+        requires(unwrapOrZero(value) < std.constants.U256_MAX)
+    {
         let out = match (value) {
             Ok(inner) => inner + 1,
             Err(err) => 0,
@@ -27,9 +32,26 @@ pub contract MatchExample {
         return out;
     }
 
-    pub fn probe(flag: bool, value: u256) -> u256 {
+    pub fn probe(flag: bool, value: u256) -> u256
+        requires(value < std.constants.U256_MAX)
+    {
         let maybe = make(flag, value);
-        return match (maybe) {
+        let base = unwrapOrZero(maybe);
+        return match (make(flag, value)) {
+            Ok(inner) => classify(Ok(inner)),
+            Err(err) => classify(Err(Failure())),
+        };
+    }
+
+    pub fn fallback(flag: bool, value: u256) -> u256 {
+        return match (make(flag, value)) {
+            Ok(inner) => inner,
+            Err(err) => 0,
+        };
+    }
+
+    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        return match (value) {
             Ok(inner) => inner,
             Err(err) => 0,
         };
