@@ -32,7 +32,15 @@ contract Staking {
         }
 
         let elapsed: u256 = currentTime - lastTime;
-        let reward: u256 = (staked * rewardRate * elapsed) / (10000 * 86400);
+        let scaledRate: struct { value: u256, overflow: bool } = @mulWithOverflow(staked, rewardRate);
+        if (scaledRate.overflow) {
+            return std.constants.U256_MAX;
+        }
+        let accrued: struct { value: u256, overflow: bool } = @mulWithOverflow(scaledRate.value, elapsed);
+        if (accrued.overflow) {
+            return std.constants.U256_MAX;
+        }
+        let reward: u256 = accrued.value / (10000 * 86400);
         return reward;
     }
 
@@ -45,7 +53,12 @@ contract Staking {
 
         // Accrue pending rewards before changing stake
         let reward: u256 = calculateReward(sender);
-        pendingRewards[sender] += reward;
+        let pendingTotal: struct { value: u256, overflow: bool } = @addWithOverflow(pendingRewards[sender], reward);
+        var nextPending: u256 = pendingTotal.value;
+        if (pendingTotal.overflow) {
+            nextPending = std.constants.U256_MAX;
+        }
+        pendingRewards[sender] = nextPending;
 
         stakes[sender] += amount;
         stakeTimestamps[sender] = std.block.timestamp;
@@ -56,6 +69,7 @@ contract Staking {
 
     pub fn unstake(amount: u256) -> bool
         requires(amount > 0)
+        requires(totalStaked >= amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
         let currentStake: u256 = stakes[sender];
@@ -66,7 +80,12 @@ contract Staking {
 
         // Accrue pending rewards before changing stake
         let reward: u256 = calculateReward(sender);
-        pendingRewards[sender] += reward;
+        let pendingTotal: struct { value: u256, overflow: bool } = @addWithOverflow(pendingRewards[sender], reward);
+        var nextPending: u256 = pendingTotal.value;
+        if (pendingTotal.overflow) {
+            nextPending = std.constants.U256_MAX;
+        }
+        pendingRewards[sender] = nextPending;
 
         stakes[sender] = currentStake - amount;
         stakeTimestamps[sender] = std.block.timestamp;
@@ -80,7 +99,11 @@ contract Staking {
         let sender: NonZeroAddress = std.msg.sender();
 
         let newReward: u256 = calculateReward(sender);
-        let totalReward: u256 = pendingRewards[sender] + newReward;
+        let totalRewardWithOverflow: struct { value: u256, overflow: bool } = @addWithOverflow(pendingRewards[sender], newReward);
+        var totalReward: u256 = totalRewardWithOverflow.value;
+        if (totalRewardWithOverflow.overflow) {
+            totalReward = std.constants.U256_MAX;
+        }
 
         pendingRewards[sender] = 0;
         stakeTimestamps[sender] = std.block.timestamp;
@@ -95,7 +118,11 @@ contract Staking {
 
     pub fn getPendingReward(user: address) -> u256 {
         let accrued: u256 = calculateReward(user);
-        return pendingRewards[user] + accrued;
+        let pendingTotal: struct { value: u256, overflow: bool } = @addWithOverflow(pendingRewards[user], accrued);
+        if (pendingTotal.overflow) {
+            return std.constants.U256_MAX;
+        }
+        return pendingTotal.value;
     }
 
     pub fn getTotalStaked() -> u256 {
