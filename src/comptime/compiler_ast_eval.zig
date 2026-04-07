@@ -846,6 +846,11 @@ const ConstEvaluator = struct {
         return try type_query.module_typecheck(type_query.context, module_id);
     }
 
+    fn callableFunctionIsPure(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return true;
+        return typecheck.itemEffect(item_id) == .pure;
+    }
+
     fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {
         const item_id = self.lookupNamedItem(name) orelse return;
         try self.ensureTypeChecked(.{ .item = item_id });
@@ -1377,6 +1382,9 @@ const ConstEvaluator = struct {
             self.current_contract = previous_contract;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
+        if (!(try self.callableFunctionIsPure(callable.item_id))) {
+            return null;
+        }
 
         if (self.functionStage(function) == .runtime_only) {
             self.recordCtError(error_mod.CtError.stageViolation(
@@ -1444,6 +1452,9 @@ const ConstEvaluator = struct {
             self.current_contract = previous_contract;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
+        if (!(try self.callableFunctionIsPure(callable.item_id))) {
+            return null;
+        }
 
         if (self.functionStage(function) == .runtime_only) {
             self.recordCtError(error_mod.CtError.stageViolation(

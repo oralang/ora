@@ -1605,12 +1605,6 @@ namespace mlir
                                 signalPassFailure();
                                 return;
                             }
-                            if (!info.hasAbiReturn)
-                            {
-                                info.func.emitError("public error-union dispatcher missing ABI return metadata");
-                                signalPassFailure();
-                                return;
-                            }
 
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
@@ -1631,7 +1625,12 @@ namespace mlir
                             builder.setInsertionPointToEnd(successBlock);
                             Value retPtr = nullptr;
                             Value size = nullptr;
-                            if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            if (!info.hasAbiReturn)
+                            {
+                                size = getConst(builder, caseReturnLoc, u256Type, i64Type, 0, constCache, successBlock, "zero");
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, size);
+                            }
+                            else if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
                                 retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);

@@ -392,6 +392,26 @@ pub const Encoder = struct {
             return elements;
         }
 
+        if (std.mem.eql(u8, name, "ora.error.get_error")) {
+            const source_union = mlir.oraOperationGetOperand(owner, 0);
+            if (mlir.oraValueIsAOpResult(source_union)) {
+                const source_owner = mlir.oraOpResultGetOwner(source_union);
+                if (!mlir.oraOperationIsNull(source_owner) and self.operationNameEq(source_owner, "ora.error.err")) {
+                    if (mlir.oraOperationGetNumOperands(source_owner) >= 1) {
+                        const original_error_value = mlir.oraOperationGetOperand(source_owner, 0);
+                        if (try self.tryResolveTupleElementsFromValue(original_error_value, mode)) |elements| {
+                            return elements;
+                        }
+                    }
+                }
+            }
+
+            const tuple_type = mlir.oraValueGetType(value);
+            if (try self.tupleTypeArity(tuple_type)) |arity| {
+                return try self.materializeSymbolicTupleElementsForValue(value, tuple_type, arity, mode);
+            }
+        }
+
         if ((std.mem.eql(u8, name, "func.call") or std.mem.eql(u8, name, "call")) and self.verify_calls) {
             const operands = try self.encodeOperationOperandsWithMode(owner, mode);
             defer self.allocator.free(operands);
@@ -404,6 +424,147 @@ pub const Encoder = struct {
         }
 
         return null;
+    }
+
+    fn tupleTypeArity(self: *Encoder, ty: mlir.MlirType) !?usize {
+        const text = try self.printMlirTypeOwned(ty);
+        defer self.allocator.free(text);
+        const trimmed = std.mem.trim(u8, text, " \t\n\r");
+        const prefix = "!ora.tuple<";
+        if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
+            return null;
+        }
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        if (body.len == 0) return @as(usize, 0);
+
+        var arity: usize = 1;
+        var angle_depth: usize = 0;
+        var square_depth: usize = 0;
+        var paren_depth: usize = 0;
+        for (body) |ch| {
+            switch (ch) {
+                '<' => angle_depth += 1,
+                '>' => {
+                    if (angle_depth > 0) angle_depth -= 1;
+                },
+                '[' => square_depth += 1,
+                ']' => {
+                    if (square_depth > 0) square_depth -= 1;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth > 0) paren_depth -= 1;
+                },
+                ',' => {
+                    if (angle_depth == 0 and square_depth == 0 and paren_depth == 0) arity += 1;
+                },
+                else => {},
+            }
+        }
+        return arity;
+    }
+
+    fn materializeSymbolicTupleElementsForValue(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        tuple_type: mlir.MlirType,
+        arity: usize,
+        mode: EncodeMode,
+    ) ![]z3.Z3_ast {
+        _ = mode;
+        const type_text = try self.printMlirTypeOwned(tuple_type);
+        defer self.allocator.free(type_text);
+
+        const element_types = try self.parseTupleElementTypeTexts(type_text);
+        defer {
+            for (element_types) |entry| self.allocator.free(entry);
+            self.allocator.free(element_types);
+        }
+        if (element_types.len != arity) return error.UnsupportedOperation;
+
+        const value_id = @intFromPtr(value.ptr);
+        var elements = try self.allocator.alloc(z3.Z3_ast, arity);
+        for (element_types, 0..) |element_type_text, index| {
+            const sort = try self.sortFromPrintedType(element_type_text);
+            const name = try std.fmt.allocPrint(self.allocator, "tuple_{d}_{d}", .{ value_id, index });
+            defer self.allocator.free(name);
+            elements[index] = try self.mkVariable(name, sort);
+        }
+        return elements;
+    }
+
+    fn parseTupleElementTypeTexts(self: *Encoder, tuple_type_text: []const u8) ![][]u8 {
+        const trimmed = std.mem.trim(u8, tuple_type_text, " \t\n\r");
+        const prefix = "!ora.tuple<";
+        if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
+            return &.{};
+        }
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        if (body.len == 0) return &.{};
+
+        var elements = std.ArrayList([]u8){};
+        errdefer {
+            for (elements.items) |entry| self.allocator.free(entry);
+            elements.deinit(self.allocator);
+        }
+
+        var start: usize = 0;
+        var angle_depth: usize = 0;
+        var square_depth: usize = 0;
+        var paren_depth: usize = 0;
+        var index: usize = 0;
+        while (index < body.len) : (index += 1) {
+            switch (body[index]) {
+                '<' => angle_depth += 1,
+                '>' => {
+                    if (angle_depth > 0) angle_depth -= 1;
+                },
+                '[' => square_depth += 1,
+                ']' => {
+                    if (square_depth > 0) square_depth -= 1;
+                },
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth > 0) paren_depth -= 1;
+                },
+                ',' => {
+                    if (angle_depth == 0 and square_depth == 0 and paren_depth == 0) {
+                        const part = std.mem.trim(u8, body[start..index], " \t\n\r");
+                        try elements.append(self.allocator, try self.allocator.dupe(u8, part));
+                        start = index + 1;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        const tail = std.mem.trim(u8, body[start..], " \t\n\r");
+        if (tail.len > 0) {
+            try elements.append(self.allocator, try self.allocator.dupe(u8, tail));
+        }
+        return elements.toOwnedSlice(self.allocator);
+    }
+
+    fn sortFromPrintedType(self: *Encoder, type_text: []const u8) !z3.Z3_sort {
+        const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
+        if (trimmed.len == 0) return error.UnsupportedOperation;
+        if (std.mem.eql(u8, trimmed, "i1") or std.mem.eql(u8, trimmed, "bool")) return z3.Z3_mk_bool_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "!ora.address") or std.mem.eql(u8, trimmed, "address")) return self.mkBitVectorSort(160);
+        if (std.mem.eql(u8, trimmed, "!ora.bytes") or std.mem.eql(u8, trimmed, "bytes")) return z3.Z3_mk_string_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "!ora.string") or std.mem.eql(u8, trimmed, "string")) return z3.Z3_mk_string_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "none") or std.mem.eql(u8, trimmed, "!ora.none")) return z3.Z3_mk_bool_sort(self.context.ctx);
+        if (trimmed[0] == 'i' or trimmed[0] == 'u') {
+            const width = std.fmt.parseInt(u32, trimmed[1..], 10) catch 256;
+            if (width == 1) return z3.Z3_mk_bool_sort(self.context.ctx);
+            return self.mkBitVectorSort(width);
+        }
+        if (std.mem.startsWith(u8, trimmed, "!ora.int<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.tuple<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.struct<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "memref<") or std.mem.startsWith(u8, trimmed, "tensor<") or std.mem.startsWith(u8, trimmed, "!ora.slice<")) {
+            return self.mkBitVectorSort(256);
+        }
+        return self.mkBitVectorSort(256);
     }
 
     fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
@@ -2816,8 +2977,8 @@ pub const Encoder = struct {
         const result_type = mlir.oraValueGetType(result_value);
         const result_sort = try self.encodeMLIRType(result_type);
         const op_id = @intFromPtr(mlir_op.ptr);
-        const then_expr = try self.extractRegionYield(mlir_op, 0, result_index, mode);
-        const else_expr = try self.extractRegionYield(mlir_op, 1, result_index, mode);
+        const then_expr = try self.extractRegionYieldGuarded(mlir_op, 0, result_index, mode, condition);
+        const else_expr = try self.extractRegionYieldGuarded(mlir_op, 1, result_index, mode, self.encodeNot(condition));
         if (then_expr == null or else_expr == null) {
             return try self.degradeToUndef(result_sort, "scf_if_result", op_id, "scf.if result missing branch yield");
         }
@@ -2848,21 +3009,23 @@ pub const Encoder = struct {
         var branch_predicates = try self.allocator.alloc(z3.Z3_ast, num_regions);
         defer self.allocator.free(branch_predicates);
 
+        var remaining = self.encodeBoolConstant(true);
         var default_expr: ?z3.Z3_ast = null;
         if (metadata.default_case_index) |default_case_index| {
             if (default_case_index >= 0) {
-                default_expr = try self.extractRegionYield(mlir_op, @intCast(default_case_index), result_index, mode);
+                default_expr = try self.extractRegionYieldGuarded(
+                    mlir_op,
+                    @intCast(default_case_index),
+                    result_index,
+                    mode,
+                    self.encodeBoolConstant(true),
+                );
             }
         }
-
-        var remaining = self.encodeBoolConstant(true);
 
         var region_index = num_regions;
         while (region_index > 0) {
             region_index -= 1;
-
-            const branch_expr = (try self.extractRegionYield(mlir_op, @intCast(region_index), result_index, mode)) orelse default_expr orelse
-                try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
             const raw_predicate = try self.buildOraSwitchCasePredicate(
                 scrutinee,
                 metadata.case_kinds,
@@ -2875,6 +3038,8 @@ pub const Encoder = struct {
                 remaining
             else
                 self.encodeAnd(&.{ remaining, raw_predicate });
+            const branch_expr = (try self.extractRegionYieldGuarded(mlir_op, @intCast(region_index), result_index, mode, effective_predicate)) orelse default_expr orelse
+                try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
             branch_exprs[region_index] = branch_expr;
             branch_predicates[region_index] = effective_predicate;
 
@@ -3969,16 +4134,17 @@ pub const Encoder = struct {
         err_sort: z3.Z3_sort,
     };
 
-    fn getErrorUnionSort(self: *Encoder, mlir_type: mlir.MlirType, success_type: mlir.MlirType) EncodeError!ErrorUnionSort {
-        const key = @intFromPtr(mlir_type.ptr);
+    fn getErrorUnionSort(self: *Encoder, _: mlir.MlirType, success_type: mlir.MlirType) EncodeError!ErrorUnionSort {
+        const ok_sort = try self.encodeMLIRType(success_type);
+        const err_sort = self.mkBitVectorSort(256);
+        const ok_key = @as(u64, @intFromPtr(ok_sort));
+        const err_key = @as(u64, @intFromPtr(err_sort));
+        const key = (ok_key *% 0x9E3779B185EBCA87) ^ (err_key *% 0xC2B2AE3D27D4EB4F) ^ 0x4555;
         if (self.error_union_sorts.get(key)) |cached| {
             return cached;
         }
 
-        const ok_sort = try self.encodeMLIRType(success_type);
-        const err_sort = self.mkBitVectorSort(256);
-
-        const tuple_name = try std.fmt.allocPrint(self.allocator, "ora.error_union.{d}", .{key});
+        const tuple_name = try std.fmt.allocPrint(self.allocator, "ora.error_union.{d}.{d}", .{ ok_key, err_key });
         defer self.allocator.free(tuple_name);
         const tuple_symbol = try self.mkSymbol(tuple_name);
 
@@ -4029,8 +4195,9 @@ pub const Encoder = struct {
             if (mlir.oraTypeIsNull(success_type)) return error.UnsupportedOperation;
             const eu = try self.getErrorUnionSort(result_type, success_type);
             const is_err = self.encodeBoolConstant(false);
+            const ok_val = try self.coerceAstToSortOrUndef(operands[0], eu.ok_sort, "error_ok", op_id);
             const err_val = try self.mkUndefValue(eu.err_sort, "err", op_id);
-            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, operands[0], err_val });
+            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, err_val });
         }
 
         if (std.mem.eql(u8, op_name, "ora.error.err")) {
@@ -4041,7 +4208,8 @@ pub const Encoder = struct {
             const eu = try self.getErrorUnionSort(result_type, success_type);
             const is_err = self.encodeBoolConstant(true);
             const ok_val = try self.mkUndefValue(eu.ok_sort, "ok", op_id);
-            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, operands[0] });
+            const err_val = try self.coerceAstToSortOrUndef(operands[0], eu.err_sort, "error_err", op_id);
+            return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, err_val });
         }
 
         const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -4101,6 +4269,8 @@ pub const Encoder = struct {
     fn coerceAstToSortOrUndef(self: *Encoder, value: z3.Z3_ast, target_sort: z3.Z3_sort, prefix: []const u8, op_id: usize) EncodeError!z3.Z3_ast {
         const value_sort = z3.Z3_get_sort(self.context.ctx, value);
         if (value_sort == target_sort) return value;
+        const coerced = self.coerceAstToSort(value, target_sort);
+        if (z3.Z3_get_sort(self.context.ctx, coerced) == target_sort) return coerced;
         return try self.degradeToUndef(target_sort, prefix, op_id, "failed to coerce AST to target sort");
     }
 
@@ -4217,6 +4387,10 @@ pub const Encoder = struct {
         const callee = try self.getOpaqueCalleeKey(mlir_op);
         defer self.allocator.free(callee);
         if (mode == .Old) {
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(result_type);
+            if (!mlir.oraTypeIsNull(success_type)) {
+                return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
+            }
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
                     return inlined;
@@ -4347,11 +4521,30 @@ pub const Encoder = struct {
         try self.collectFunctionWriteInfoRecursive(func_op, write_slots, writes_unknown, &visited_funcs);
     }
 
+    fn collectFunctionReadInfo(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        read_slots: *std.ArrayList([]u8),
+        reads_unknown: *bool,
+    ) EncodeError!void {
+        reads_unknown.* = false;
+        var visited_funcs = std.AutoHashMap(u64, void).init(self.allocator);
+        defer visited_funcs.deinit();
+        try self.collectFunctionReadInfoRecursive(func_op, read_slots, reads_unknown, &visited_funcs);
+    }
+
     fn appendWriteSlotUnique(self: *Encoder, write_slots: *std.ArrayList([]u8), slot_name: []const u8) EncodeError!void {
         for (write_slots.items) |existing| {
             if (std.mem.eql(u8, existing, slot_name)) return;
         }
         try write_slots.append(self.allocator, try self.allocator.dupe(u8, slot_name));
+    }
+
+    fn appendReadSlotUnique(self: *Encoder, read_slots: *std.ArrayList([]u8), slot_name: []const u8) EncodeError!void {
+        for (read_slots.items) |existing| {
+            if (std.mem.eql(u8, existing, slot_name)) return;
+        }
+        try read_slots.append(self.allocator, try self.allocator.dupe(u8, slot_name));
     }
 
     fn transientSlotName(self: *Encoder, key: []const u8) EncodeError![]u8 {
@@ -4480,6 +4673,91 @@ pub const Encoder = struct {
         }
     }
 
+    fn collectFunctionReadInfoRecursive(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        read_slots: *std.ArrayList([]u8),
+        reads_unknown: *bool,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        const func_id = @intFromPtr(func_op.ptr);
+        if (visited_funcs.contains(func_id)) return;
+        try visited_funcs.put(func_id, {});
+        try self.collectReadInfoFromOperation(func_op, read_slots, reads_unknown, visited_funcs);
+    }
+
+    fn collectReadInfoFromOperation(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        read_slots: *std.ArrayList([]u8),
+        reads_unknown: *bool,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.sload")) {
+            const global_name = self.getStringAttr(op, "global") orelse {
+                reads_unknown.* = true;
+                return;
+            };
+            try self.appendReadSlotUnique(read_slots, global_name);
+        } else if (std.mem.eql(u8, op_name, "ora.tload")) {
+            const key = self.getStringAttr(op, "key") orelse {
+                reads_unknown.* = true;
+                return;
+            };
+            const transient_name = try self.transientSlotName(key);
+            defer self.allocator.free(transient_name);
+            try self.appendReadSlotUnique(read_slots, transient_name);
+        } else if (std.mem.eql(u8, op_name, "ora.map_get")) {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands < 1) {
+                reads_unknown.* = true;
+            } else {
+                const map_operand = mlir.oraOperationGetOperand(op, 0);
+                if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
+                    try self.appendReadSlotUnique(read_slots, global_name);
+                } else {
+                    reads_unknown.* = true;
+                }
+            }
+        } else if (self.verify_calls and
+            (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")))
+        {
+            const owned_callee = try self.resolveCalleeName(op);
+            defer if (owned_callee) |name| self.allocator.free(name);
+            if (owned_callee) |callee| {
+                if (self.function_ops.get(callee)) |callee_op| {
+                    try self.collectFunctionReadInfoRecursive(callee_op, read_slots, reads_unknown, visited_funcs);
+                } else {
+                    reads_unknown.* = true;
+                }
+            } else {
+                reads_unknown.* = true;
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectReadInfoFromOperation(nested, read_slots, reads_unknown, visited_funcs);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
     fn operationMayWriteTrackedState(self: *Encoder, op: mlir.MlirOperation) EncodeError!bool {
         var write_slots = std.ArrayList([]u8){};
         defer {
@@ -4494,17 +4772,37 @@ pub const Encoder = struct {
     }
 
     fn inferGlobalSortFromFunction(self: *Encoder, func_op: mlir.MlirOperation, slot_name: []const u8) ?z3.Z3_sort {
+        var visited_funcs = std.AutoHashMap(u64, void).init(self.allocator);
+        defer visited_funcs.deinit();
+
         var found: ?z3.Z3_sort = null;
-        self.findGlobalSortInOperation(func_op, slot_name, &found);
+        self.findGlobalSortInFunctionRecursive(func_op, slot_name, &found, &visited_funcs) catch return null;
         return found;
     }
 
-    fn findGlobalSortInOperation(
+    fn findGlobalSortInFunctionRecursive(
+        self: *Encoder,
+        func_op: mlir.MlirOperation,
+        slot_name: []const u8,
+        out: *?z3.Z3_sort,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        if (out.* != null) return;
+
+        const func_id = @intFromPtr(func_op.ptr);
+        if (visited_funcs.contains(func_id)) return;
+        try visited_funcs.put(func_id, {});
+
+        try self.findGlobalSortInOperationRecursive(func_op, slot_name, out, visited_funcs);
+    }
+
+    fn findGlobalSortInOperationRecursive(
         self: *Encoder,
         op: mlir.MlirOperation,
         slot_name: []const u8,
         out: *?z3.Z3_sort,
-    ) void {
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
         if (out.* != null) return;
 
         const name_ref = mlir.oraOperationGetName(op);
@@ -4564,6 +4862,18 @@ pub const Encoder = struct {
                     }
                 }
             }
+            if (self.verify_calls and
+                (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")))
+            {
+                const owned_callee = try self.resolveCalleeName(op);
+                defer if (owned_callee) |name| self.allocator.free(name);
+                if (owned_callee) |callee| {
+                    if (self.function_ops.get(callee)) |callee_op| {
+                        try self.findGlobalSortInFunctionRecursive(callee_op, slot_name, out, visited_funcs);
+                        if (out.* != null) return;
+                    }
+                }
+            }
         }
 
         const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
@@ -4574,7 +4884,7 @@ pub const Encoder = struct {
             while (!mlir.oraBlockIsNull(block)) {
                 var nested = mlir.oraBlockGetFirstOperation(block);
                 while (!mlir.oraOperationIsNull(nested)) {
-                    self.findGlobalSortInOperation(nested, slot_name, out);
+                    try self.findGlobalSortInOperationRecursive(nested, slot_name, out, visited_funcs);
                     if (out.* != null) return;
                     nested = mlir.oraOperationGetNextInBlock(nested);
                 }
@@ -4655,7 +4965,14 @@ pub const Encoder = struct {
             else
                 null;
             sort = inferred_sort orelse blk: {
-                self.recordDegradation("failed to infer global sort for call summary slot");
+                const message = std.fmt.allocPrint(self.allocator, "failed to infer global sort for call summary slot '{s}'", .{slot_name}) catch null;
+                if (message) |owned| {
+                    defer self.allocator.free(owned);
+                    const persistent = self.allocPersistentMessage(owned) catch null;
+                    self.recordDegradation(persistent orelse "failed to infer global sort for call summary slot");
+                } else {
+                    self.recordDegradation("failed to infer global sort for call summary slot");
+                }
                 break :blk self.mkBitVectorSort(256);
             };
             pre = try self.getOrCreateGlobal(slot_name, sort);
@@ -9282,12 +9599,22 @@ pub const Encoder = struct {
             for (write_slots.items) |slot_name| self.allocator.free(slot_name);
             write_slots.deinit(self.allocator);
         }
+        var read_slots = std.ArrayList([]u8){};
+        defer {
+            for (read_slots.items) |slot_name| self.allocator.free(slot_name);
+            read_slots.deinit(self.allocator);
+        }
         var writes_unknown = false;
+        var reads_unknown = false;
         if (self.verify_state) {
             if (func_op) |fop| {
                 try self.collectFunctionWriteInfo(fop, &write_slots, &writes_unknown);
+                try self.collectFunctionReadInfo(fop, &read_slots, &reads_unknown);
                 if (writes_unknown) {
                     self.recordDegradation("failed to recover known callee write set exactly");
+                }
+                if (reads_unknown) {
+                    self.recordDegradation("failed to recover known callee read set exactly");
                 }
             }
         }
@@ -9302,6 +9629,10 @@ pub const Encoder = struct {
             var g_it = self.global_map.iterator();
             while (g_it.next()) |entry| {
                 try self.appendSlotState(&slots, entry.key_ptr.*, false, func_op);
+            }
+
+            for (read_slots.items) |slot_name| {
+                try self.appendSlotState(&slots, slot_name, false, func_op);
             }
 
             for (write_slots.items) |slot_name| {
@@ -9323,7 +9654,27 @@ pub const Encoder = struct {
         for (0..num_results) |i| result_exprs[i] = null;
 
         if (func_op) |fop| {
-            const summarized = try self.tryInlineFunctionCallSummary(mlir_op, callee, fop, operands, slots.items, result_exprs);
+            var summarized = false;
+            var has_error_union_result = false;
+            if (num_results > 0) {
+                for (0..num_results) |i| {
+                    const result_value = mlir.oraOperationGetResult(mlir_op, i);
+                    const result_type = mlir.oraValueGetType(result_value);
+                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(result_type))) {
+                        has_error_union_result = true;
+                        break;
+                    }
+                }
+            }
+            if (!has_error_union_result and !self.functionHasWriteEffect(fop) and slots.items.len == 0 and num_results > 0) {
+                for (0..num_results) |i| {
+                    result_exprs[i] = try self.tryInlinePureCallResult(mlir_op, callee, fop, operands, @intCast(i), .Current);
+                    summarized = summarized or (result_exprs[i] != null);
+                }
+            }
+            if (!summarized) {
+                summarized = try self.tryInlineFunctionCallSummary(mlir_op, callee, fop, operands, slots.items, result_exprs);
+            }
             if (!summarized) {
                 if (num_results > 0) {
                     self.recordCalleeResultDegradation(mlir_op, callee, "failed to encode known callee results exactly");
@@ -9689,6 +10040,20 @@ pub const Encoder = struct {
 
         try self.parseSwitchCaseMetadataFromPrint(op, &metadata);
         return metadata;
+    }
+
+    fn extractRegionYieldGuarded(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        region_index: u32,
+        result_index: u32,
+        mode: EncodeMode,
+        guard: z3.Z3_ast,
+    ) EncodeError!?z3.Z3_ast {
+        const saved_len = self.return_path_assumptions.items.len;
+        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+        try self.return_path_assumptions.append(self.allocator, guard);
+        return try self.extractRegionYield(mlir_op, region_index, result_index, mode);
     }
 
     fn parseSwitchCaseMetadataFromPrint(self: *Encoder, op: mlir.MlirOperation, metadata: *SwitchCaseMetadata) EncodeError!void {

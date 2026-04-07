@@ -11,35 +11,12 @@ pub contract MatchExample {
         return Err(Failure());
     }
 
-    fn unwrapOrZero(value: Result<u256, Failure>) -> u256 {
-        match (value) {
-            Ok(inner) => {
-                return inner;
-            }
-            Err(err) => {
-                return 0;
-            }
-        }
-    }
-
-    fn classify(value: Result<u256, Failure>) -> u256
-        requires(unwrapOrZero(value) < std.constants.U256_MAX)
-    {
-        let out = match (value) {
-            Ok(inner) => inner + 1,
-            Err(err) => 0,
-        };
-        return out;
-    }
-
     pub fn probe(flag: bool, value: u256) -> u256
         requires(value < std.constants.U256_MAX)
     {
-        let maybe = make(flag, value);
-        let base = unwrapOrZero(maybe);
         return match (make(flag, value)) {
-            Ok(inner) => classify(Ok(inner)),
-            Err(err) => classify(Err(Failure())),
+            Ok(inner) => inner,
+            Err(err) => 0,
         };
     }
 

@@ -337,6 +337,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(init_continue)) return error.MlirOperationCreationFailed;
             appendOp(self.block, init_continue);
 
+            const exit_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
+            if (mlir.oraOperationIsNull(exit_flag_alloc)) return error.MlirOperationCreationFailed;
+            const exit_flag = appendValueOp(self.block, exit_flag_alloc);
+            const exit_false = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const init_exit = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, exit_false, exit_flag, null, 0);
+            if (mlir.oraOperationIsNull(init_exit)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, init_exit);
+
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, block_stmt.body, locals, &carried_locals, &carried_seen)) {
@@ -431,6 +439,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .parent = self.block_context,
                 .label = block_stmt.label,
                 .continue_flag = continue_flag,
+                .exit_flag = exit_flag,
                 .carried_locals = carried_locals.items,
             };
             body_lowerer.block_context = &block_context;
@@ -442,6 +451,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue, continue_flag, null, 0);
             if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
             appendOp(after_block, clear_continue_store);
+            const clear_exit = appendValueOp(after_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const clear_exit_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_exit, exit_flag, null, 0);
+            if (mlir.oraOperationIsNull(clear_exit_store)) return error.MlirOperationCreationFailed;
+            appendOp(after_block, clear_exit_store);
             const terminated = try body_lowerer.lowerBody(block_stmt.body, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, block_stmt.range, &body_locals, carried_locals.items);

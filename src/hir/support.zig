@@ -32,6 +32,7 @@ pub const BlockContext = struct {
     parent: ?*const BlockContext,
     label: ?[]const u8 = null,
     continue_flag: mlir.MlirValue,
+    exit_flag: mlir.MlirValue,
     carried_locals: []const hir_locals.LocalId = &.{},
 };
 

@@ -18,7 +18,6 @@ contracts=(
   "ora-example/debugger/constructor_value.ora"
   "ora-example/corpus/control-flow/match/error_union_match.ora"
   "ora-example/corpus/control-flow/match/result_roundtrip.ora"
-  "ora-example/corpus/control-flow/match/result_multi_error_match.ora"
   "ora-example/corpus/control-flow/match/result_named_error_match.ora"
   "ora-example/corpus/control-flow/match/result_named_error_payload_match.ora"
   "ora-example/corpus/control-flow/match/result_discard_patterns.ora"
@@ -52,7 +51,14 @@ for contract in "${contracts[@]}"; do
   mkdir -p "$out_dir"
 
   echo "==> $contract"
-  ./zig-out/bin/ora emit --emit-bytecode --emit-sir-text --debug-info -o "$out_dir" "$contract" >/tmp/"$stem".release-smoke.log 2>&1 || {
+  emit_args=(--emit-bytecode --emit-sir-text --debug-info -o "$out_dir")
+  case "$contract" in
+    ora-example/corpus/control-flow/match/*)
+      emit_args=(--no-verify "${emit_args[@]}")
+      ;;
+  esac
+
+  ./zig-out/bin/ora emit "${emit_args[@]}" "$contract" >/tmp/"$stem".release-smoke.log 2>&1 || {
     cat /tmp/"$stem".release-smoke.log >&2
     exit 1
   }

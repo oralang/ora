@@ -248,6 +248,8 @@ namespace
                 {
                     if (Type converted = typeConverter->convertType(origType))
                         convertedOperandTypes.push_back(converted);
+                    else if (llvm::isa<mlir::IntegerType>(origType))
+                        convertedOperandTypes.push_back(origType);
                 }
 
                 if (convertedOperandTypes.empty())
@@ -286,6 +288,8 @@ namespace
                 {
                     if (Type converted = typeConverter->convertType(resultType))
                         convertedResultTypes.push_back(converted);
+                    else if (llvm::isa<mlir::IntegerType>(resultType))
+                        convertedResultTypes.push_back(resultType);
                 }
                 if (convertedResultTypes.empty())
                     return failure();

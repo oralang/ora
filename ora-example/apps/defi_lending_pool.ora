@@ -140,7 +140,7 @@ contract LendingPool {
     // Get risk level based on health factor - uses if-else chain
     // Returns u8 due to compiler limitation with enum return types
     pub fn get_risk_level(user: address) -> u8
-    requires(user != std.constants.ZERO_ADDRESS)
+        requires user != std.constants.ZERO_ADDRESS
     {
         let health: u256 = calculate_health_factor(user);
         // 0=Low, 1=Medium, 2=High, 3=Critical
@@ -174,8 +174,8 @@ contract LendingPool {
     // Each case with a block adds its internal statements to the count
     // Process operation with tier benefits - uses switch for operation type
     pub fn process_operation_with_tier(operation: OperationType, user: address, amount: u256) -> u256
-    requires(user != std.constants.ZERO_ADDRESS)
-    requires(amount>0)
+    requires user != std.constants.ZERO_ADDRESS
+    requires amount>0
     {
         // Work around: use u8 directly since enum maps have a bug
         let tier_u8: u8 = user_tiers[user];
@@ -372,11 +372,11 @@ contract LendingPool {
     }
     // Borrow function - ~80 statements
     pub fn borrow(amount: u256) -> bool
-    requires(amount>0)
-    requires(when_not_paused())
-    requires(amount <= get_available_liquidity())
-    requires(borrows[std.transaction.sender] <= std.constants.U256_MAX - amount)
-    requires(total_borrows <= std.constants.U256_MAX - amount)
+    requires amount>0
+    requires when_not_paused()
+    requires amount <= get_available_liquidity()
+    requires borrows[std.transaction.sender] <= std.constants.U256_MAX - amount
+    requires total_borrows <= std.constants.U256_MAX - amount
     {
         let user: address = std.transaction.sender;
         if (!is_valid_amount(amount)) {
@@ -389,8 +389,8 @@ contract LendingPool {
     }
     // Repay function - ~70 statements  
     pub fn repay(amount: u256) -> bool
-    requires(amount>0)
-    requires(borrows[std.transaction.sender]>0)
+    requires amount>0
+    requires borrows[std.transaction.sender]>0
     {
         let user: address = std.transaction.sender;
         if (!is_valid_amount(amount)) {

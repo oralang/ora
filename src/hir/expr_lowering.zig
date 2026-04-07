@@ -3088,11 +3088,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn constTupleIndex(self: *FunctionLowerer, expr_id: ast.ExprId) ?usize {
-            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
-            return switch (value) {
-                .integer => |integer| const_bridge.positiveShiftAmount(integer),
+            if (self.parent.const_eval.values[expr_id.index()]) |value| {
+                return switch (value) {
+                    .integer => |integer| const_bridge.positiveShiftAmount(integer),
+                    else => null,
+                };
+            }
+            return switch (self.parent.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| parseTupleIndexLiteral(literal.text),
+                .Group => |group| @This().constTupleIndex(self, group.expr),
                 else => null,
             };
+        }
+
+        fn parseTupleIndexLiteral(text: []const u8) ?usize {
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) {
+                return std.fmt.parseInt(usize, trimmed[2..], 16) catch null;
+            }
+            if (std.mem.startsWith(u8, trimmed, "0b") or std.mem.startsWith(u8, trimmed, "0B")) {
+                return std.fmt.parseInt(usize, trimmed[2..], 2) catch null;
+            }
+            return std.fmt.parseInt(usize, trimmed, 10) catch null;
         }
 
         pub fn createValuePlaceholder(self: *FunctionLowerer, op_name: []const u8, text: []const u8, range: source.TextRange, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {

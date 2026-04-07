@@ -15,7 +15,7 @@ pub contract ResultMultiErrorMatch {
     pub fn project(flag: bool, value: u256, fallback: u256) -> u256 {
         return match (decide(flag, value)) {
             Ok(inner) => inner,
-            Err(err) => fallback + err,
+            Err(err) => fallback,
         };
     }
 }

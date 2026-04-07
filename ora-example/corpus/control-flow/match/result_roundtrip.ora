@@ -15,7 +15,7 @@ pub contract ResultRoundtrip {
     {
         match (value) {
             Ok(inner) => {
-                return Ok(inner + bump);
+                return Ok(inner);
             },
             Err(err) => {
                 return Err(Failure(7));

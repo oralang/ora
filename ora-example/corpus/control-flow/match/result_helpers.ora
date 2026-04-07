@@ -2,6 +2,9 @@ error Failure();
 error Denied();
 pub contract ResultHelpers {
     fn bump(value: u256) -> u256 {
+        if (value == std.constants.U256_MAX) {
+            return value;
+        }
         return value + 1;
     }
 

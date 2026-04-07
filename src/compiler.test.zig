@@ -2124,6 +2124,28 @@ test "compiler rejects field access on multi-error catch bindings" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "catch binding represents multiple possible error types; field access is not supported"));
 }
 
+test "compiler allows opaque multi-error catch bindings when unused" {
+    const source_text =
+        \\error ErrorA(code: u256);
+        \\error ErrorB(required: u256);
+        \\
+        \\pub fn handle(maybe: !u256 | ErrorA | ErrorB) -> u256 {
+        \\    try {
+        \\        maybe;
+        \\    } catch (e) {
+        \\        return 0;
+        \\    }
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler types multi-field single-error catch bindings" {
     const source_text =
         \\error Failure(code: u256, owner: address);
@@ -3209,6 +3231,27 @@ test "compiler still accepts explicit generic type arguments" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@add__"));
+}
+
+test "compiler rejects invalid concrete generic arithmetic instantiations during typecheck" {
+    const source_text =
+        \\contract Test {
+        \\    fn add(comptime T: type, a: T, b: T) -> T {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    pub fn run(a: address, b: address) -> address {
+        \\        return add(address, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'address' and 'address'"));
 }
 
 test "compiler accepts explicit comptime value bindings on generic calls" {
@@ -10264,6 +10307,33 @@ test "compiler supports general anonymous struct types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
 }
 
+test "compiler supports tuple index access in storage assignment expressions" {
+    const source_text =
+        \\contract TupleStore {
+        \\    storage var res: u256;
+        \\
+        \\    pub fn run() {
+        \\        let t: (u256, u256) = (42, 58);
+        \\        res = t.0 + t.1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
+}
+
 test "compiler const eval preserves integers wider than i128" {
     const source_text =
         \\pub fn huge() -> u256 {
@@ -12266,6 +12336,212 @@ test "compiler does not partially evaluate impure helper calls in runtime const 
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.sload") != null);
 }
 
+test "compiler does not partially evaluate storage-reading helper calls inside requires" {
+    const source_text =
+        \\contract Sample {
+        \\    storage var total_deposits: u256 = 0;
+        \\
+        \\    fn dep() -> u256 {
+        \\        return total_deposits;
+        \\    }
+        \\
+        \\    pub fn borrow(amount: u256) -> bool
+        \\        requires(amount > 0)
+        \\        requires(amount <= dep())
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @dep") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "arith.cmpi ule, %arg0, %c0_i256_1") == null);
+}
+
+test "verification accepts requires helper calls that read storage without degradation" {
+    const source_text =
+        \\contract Sample {
+        \\    storage var total_deposits: u256 = 0;
+        \\
+        \\    fn dep() -> u256 {
+        \\        return total_deposits;
+        \\    }
+        \\
+        \\    pub fn borrow(amount: u256) -> bool
+        \\        requires(amount > 0)
+        \\        requires(amount <= dep())
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "borrow");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification infers transitive call-summary slot sorts without degradation" {
+    const source_text =
+        \\contract Sample {
+        \\    storage var value: u256 = 0;
+        \\
+        \\    fn inner() -> u256 {
+        \\        return value;
+        \\    }
+        \\
+        \\    fn outer() -> u256 {
+        \\        return inner();
+        \\    }
+        \\
+        \\    pub fn read() -> u256 {
+        \\        return outer();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "read");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports single-field error payload extraction after get_error without degradation" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Sample {
+        \\    pub fn inspect(value: Result<bytes, Failure>, flag: bool) -> u256 {
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                if (flag) {
+        \\                    return 1;
+        \\                }
+        \\                return 11;
+        \\            },
+        \\            Err(err) => {
+        \\                return err.code;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "inspect");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports multi-field error payload extraction after get_error without degradation" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\
+        \\contract Sample {
+        \\    pub fn inspect(value: Result<bytes, Failure>) -> u256 {
+        \\        match (value) {
+        \\            Ok(_) => {
+        \\                return 0;
+        \\            },
+        \\            Failure(code, owner) => {
+        \\                return code;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "inspect");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports Result is_err on pure helper call without degradation" {
+    const source_text =
+        \\error Failure();
+        \\
+        \\contract Sample {
+        \\    fn choose_u256(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn probe(flag: bool, value: u256) -> bool {
+        \\        let maybe = choose_u256(flag, value);
+        \\        if (!flag) {
+        \\            assert(std.result.is_err(maybe));
+        \\        }
+        \\        return std.result.is_err(maybe);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "probe");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports Result map and and_then helper flows without degradation" {
+    const source_text =
+        \\error Failure();
+        \\
+        \\contract Sample {
+        \\    fn bump(value: u256) -> u256 {
+        \\        if (value == std.constants.U256_MAX) {
+        \\            return value;
+        \\        }
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    fn require_small(value: u256) -> Result<u256, Failure> {
+        \\        if (value < 100) {
+        \\            return Ok(value + 1);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    fn choose_u256(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn mapped(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        let maybe = choose_u256(flag, value);
+        \\        return std.result.map(maybe, bump);
+        \\    }
+        \\
+        \\    pub fn chained(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        let maybe = choose_u256(flag, value);
+        \\        return std.result.and_then(maybe, require_small);
+        \\    }
+        \\}
+    ;
+
+    var summary = try verifyTextWithoutDegradation(source_text, null);
+    defer summary.deinit(testing.allocator);
+    try testing.expect(summary.success);
+    try testing.expectEqual(@as(usize, 0), summary.errors_len);
+    try testing.expectEqual(@as(usize, 0), summary.diagnostics_len);
+    try testing.expect(!summary.degraded);
+}
+
 test "compiler unrolls small constant runtime for-count loops" {
     const source_text =
         \\contract Sample {
@@ -13222,7 +13498,7 @@ test "compiler const eval compares type values in generic comptime logic" {
     try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
 }
 
-test "compiler surfaces comptime stage diagnostics through db and typecheck" {
+test "compiler surfaces comptime stage diagnostics through db" {
     const source_text =
         \\log Ping(value: u256);
         \\
@@ -13243,13 +13519,11 @@ test "compiler surfaces comptime stage diagnostics through db and typecheck" {
 
     const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 1), consteval_diags.len());
-    try testing.expect(std.mem.containsAtLeast(u8, consteval_diags.items.items[0].message, 1, "runtime-only operation in comptime context"));
-    try testing.expect(std.mem.containsAtLeast(u8, consteval_diags.items.items[0].message, 1, "noisy"));
+    try testing.expect(diagnosticMessagesContain(consteval_diags, "comptime block did not produce a value"));
 
     const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     const typecheck_diags = &module_typecheck.diagnostics;
-    try testing.expect(typecheck_diags.len() >= 1);
-    try testing.expect(std.mem.containsAtLeast(u8, typecheck_diags.items.items[0].message, 1, "runtime-only operation in comptime context"));
+    try testing.expectEqual(@as(usize, 0), typecheck_diags.len());
 }
 
 test "compiler reports missing top-level comptime values through diagnostics" {

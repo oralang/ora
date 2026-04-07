@@ -1,10 +1,10 @@
 contract FailGenericPlusStringSameType {
     fn add(comptime T: type, a: T, b: T) -> T {
-        // INVALID: instantiated as string + string.
+        // INVALID: instantiated as address + address.
         return a + b;
     }
 
-    pub fn bad() -> string {
-        return add(string, "ora", "lang");
+    pub fn bad(a: address, b: address) -> address {
+        return add(address, a, b);
     }
 }

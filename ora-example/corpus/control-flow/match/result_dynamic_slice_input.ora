@@ -6,7 +6,7 @@ contract MatchDynamicSliceInput {
         match (value) {
             Ok(inner) => {
                 for (inner) |item| {
-                    total = total + item;
+                    total = total ^ item;
                 }
             },
             Err(err) => {

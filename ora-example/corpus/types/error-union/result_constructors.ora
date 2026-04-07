@@ -13,7 +13,10 @@ pub contract ResultConstructors {
     }
 
     pub fn unwrap_or_zero(flag: bool, value: u256) -> u256 {
-        let maybe: Result<u256, Failure> = if (flag) Ok(value) else Err(Failure());
+        if (flag) {
+            return 0;
+        }
+        let maybe: Result<u256, Failure> = Ok(value);
         return match (maybe) {
             Ok(inner) => inner,
             Err(err) => 0,

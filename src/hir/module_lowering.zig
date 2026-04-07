@@ -555,31 +555,33 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .error_union => |error_union| error_union.payload_type.*,
                     else => body_type,
                 };
-                const abi_return = abi_support.externReturnAbiType(self.allocator, abi_return_type) catch |err| switch (err) {
-                    error.UnsupportedAbiType => blk: {
-                        const return_type_id = function.return_type.?;
-                        const layout = try @This().abiLayoutForTypeExpr(self, return_type_id);
-                        break :blk layout;
-                    },
-                    else => return err,
-                };
-                defer self.allocator.free(abi_return);
-                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
-                if (@This().abiLayoutForType(self, abi_return_type) catch |err| switch (err) {
-                    error.UnsupportedAbiType => if (function.return_type) |return_type_id|
-                        @This().abiLayoutForTypeExpr(self, return_type_id)
-                    else
-                        return err,
-                    else => return err,
-                }) |layout| {
-                    defer self.allocator.free(layout);
-                    try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return_layout", layout));
-                } else |_| {}
-                if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
-                    try attrs.append(self.allocator, .{
-                        .name = identifier(self.context, "ora.abi_return_words"),
-                        .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
-                    });
+                if (abi_return_type.kind() != .void) {
+                    const abi_return = abi_support.externReturnAbiType(self.allocator, abi_return_type) catch |err| switch (err) {
+                        error.UnsupportedAbiType => blk: {
+                            const return_type_id = function.return_type.?;
+                            const layout = @This().abiLayoutForType(self, abi_return_type) catch try @This().abiLayoutForTypeExpr(self, return_type_id);
+                            break :blk layout;
+                        },
+                        else => return err,
+                    };
+                    defer self.allocator.free(abi_return);
+                    try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return", abi_return));
+                    if (@This().abiLayoutForType(self, abi_return_type) catch |err| switch (err) {
+                        error.UnsupportedAbiType => if (function.return_type) |return_type_id|
+                            @This().abiLayoutForTypeExpr(self, return_type_id)
+                        else
+                            return err,
+                        else => return err,
+                    }) |layout| {
+                        defer self.allocator.free(layout);
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_return_layout", layout));
+                    } else |_| {}
+                    if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
+                        try attrs.append(self.allocator, .{
+                            .name = identifier(self.context, "ora.abi_return_words"),
+                            .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
+                        });
+                    }
                 }
 
                 if (function.return_type) |return_type_id| {

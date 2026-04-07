@@ -494,11 +494,17 @@ pub const VerificationPass = struct {
     const EncoderBranchState = struct {
         global_map: std.StringHashMap(z3.Z3_ast),
         memref_map: std.AutoHashMap(u64, Encoder.TrackedMemrefState),
+        value_map: std.AutoHashMap(u64, z3.Z3_ast),
+        value_map_old: std.AutoHashMap(u64, z3.Z3_ast),
+        value_bindings: std.AutoHashMap(u64, z3.Z3_ast),
 
         fn init(allocator: std.mem.Allocator) EncoderBranchState {
             return .{
                 .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
                 .memref_map = std.AutoHashMap(u64, Encoder.TrackedMemrefState).init(allocator),
+                .value_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+                .value_map_old = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+                .value_bindings = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
             };
         }
 
@@ -509,6 +515,9 @@ pub const VerificationPass = struct {
             }
             self.global_map.deinit();
             self.memref_map.deinit();
+            self.value_map.deinit();
+            self.value_map_old.deinit();
+            self.value_bindings.deinit();
         }
     };
 
@@ -527,6 +536,21 @@ pub const VerificationPass = struct {
             try snap.memref_map.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        var v_it = self.encoder.value_map.iterator();
+        while (v_it.next()) |entry| {
+            try snap.value_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var v_old_it = self.encoder.value_map_old.iterator();
+        while (v_old_it.next()) |entry| {
+            try snap.value_map_old.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var bind_it = self.encoder.value_bindings.iterator();
+        while (bind_it.next()) |entry| {
+            try snap.value_bindings.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
         return snap;
     }
 
@@ -541,6 +565,9 @@ pub const VerificationPass = struct {
     fn restoreEncoderBranchState(self: *VerificationPass, snap: *const EncoderBranchState) !void {
         self.clearEncoderGlobalMap();
         self.encoder.memref_map.clearRetainingCapacity();
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.value_bindings.clearRetainingCapacity();
 
         var g_it = snap.global_map.iterator();
         while (g_it.next()) |entry| {
@@ -551,6 +578,21 @@ pub const VerificationPass = struct {
         var m_it = snap.memref_map.iterator();
         while (m_it.next()) |entry| {
             try self.encoder.memref_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var v_it = snap.value_map.iterator();
+        while (v_it.next()) |entry| {
+            try self.encoder.value_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var v_old_it = snap.value_map_old.iterator();
+        while (v_old_it.next()) |entry| {
+            try self.encoder.value_map_old.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var bind_it = snap.value_bindings.iterator();
+        while (bind_it.next()) |entry| {
+            try self.encoder.value_bindings.put(entry.key_ptr.*, entry.value_ptr.*);
         }
     }
 
@@ -1303,6 +1345,17 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "call");
         if (!should_observe) return;
 
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const num_results: usize = @intCast(mlir.oraOperationGetNumResults(op));
+            for (0..num_results) |result_index| {
+                const result_value = mlir.oraOperationGetResult(op, @intCast(result_index));
+                const result_type = mlir.oraValueGetType(result_value);
+                if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(result_type))) {
+                    return;
+                }
+            }
+        }
+
         _ = try self.encoder.encodeOperation(op);
 
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -1319,12 +1372,20 @@ pub const VerificationPass = struct {
             const path_constraints = try self.captureActivePathConstraints();
             const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
             defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
+            const path_guard = if (path_constraints.len > 0)
+                self.encoder.encodeAnd(path_constraints)
+            else
+                null;
 
             for (leaked_obligations) |obligation| {
+                const guarded_obligation = if (path_guard) |guard|
+                    self.encoder.encodeImplies(guard, obligation)
+                else
+                    obligation;
                 try self.encoded_annotations.append(.{
                     .function_name = function_name,
                     .kind = .ContractInvariant,
-                    .condition = obligation,
+                    .condition = guarded_obligation,
                     .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
@@ -1420,6 +1481,10 @@ pub const VerificationPass = struct {
         const safety_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
         const path_constraints = try self.captureActivePathConstraints();
+        const path_guard = if (path_constraints.len > 0)
+            self.encoder.encodeAnd(path_constraints)
+        else
+            null;
 
         var old_condition: ?z3.Z3_ast = null;
         var old_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
@@ -1541,10 +1606,14 @@ pub const VerificationPass = struct {
         // multiplication overflow checks) are tracked as contract invariants.
         for (safety_obligations) |obligation| {
             const obligation_extra_constraints = try self.cloneConstraintSlice(extra_constraints);
+            const guarded_obligation = if (path_guard) |guard|
+                self.encoder.encodeImplies(guard, obligation)
+            else
+                obligation;
             try self.encoded_annotations.append(.{
                 .function_name = function_name,
                 .kind = .ContractInvariant,
-                .condition = obligation,
+                .condition = guarded_obligation,
                 .extra_constraints = obligation_extra_constraints,
                 .path_constraints = try self.cloneConstraintSlice(path_constraints),
                 .old_condition = null,

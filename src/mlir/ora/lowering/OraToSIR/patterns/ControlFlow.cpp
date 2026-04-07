@@ -1930,7 +1930,6 @@ LogicalResult ConvertCallOp::matchAndRewrite(
                          llvm::isa<mlir::NoneType>(oldResultTypes.front()));
     bool hasLogicalResult = !(oldResultTypes.empty() || isNoneResult);
     auto u256Type = sir::U256Type::get(op.getContext());
-    auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
 
     SmallVector<Type> newResultTypes;
 
@@ -2019,12 +2018,44 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         }
     }
 
+    SmallVector<Type> convertedTypes;
     if (hasLogicalResult)
     {
-        // sir.icall results are always EVM words. For non-void returns we use
-        // the ABI pair [ret_ptr_word, ret_len].
-        newResultTypes.push_back(u256Type);
-        newResultTypes.push_back(u256Type);
+        Type oldResultType = oldResultTypes.front();
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(oldResultType))
+        {
+            const bool useWideCarrier = (calleeFunc && funcResultForcesWideErrorUnion(calleeFunc, 0)) || !isNarrowErrorUnion(errType);
+            newResultTypes.push_back(u256Type);
+            convertedTypes.push_back(u256Type);
+            if (useWideCarrier)
+            {
+                newResultTypes.push_back(u256Type);
+                convertedTypes.push_back(getWideErrorUnionCarrierType(op.getContext(), errType.getSuccessType()));
+            }
+        }
+        else if (isPayloadlessErrorStruct(oldResultType, op))
+        {
+            newResultTypes.push_back(u256Type);
+            convertedTypes.push_back(u256Type);
+        }
+        else if (failed(typeConverter->convertType(oldResultType, convertedTypes)) || convertedTypes.empty())
+        {
+            if (Type converted = typeConverter->convertType(oldResultType))
+                convertedTypes.push_back(converted);
+            else if (llvm::isa<mlir::IntegerType>(oldResultType))
+                convertedTypes.push_back(oldResultType);
+        }
+
+        if (convertedTypes.empty())
+        {
+            return rewriter.notifyMatchFailure(op, "unable to convert call result type");
+        }
+
+        for (auto convertedType : convertedTypes)
+        {
+            (void)convertedType;
+            newResultTypes.push_back(u256Type);
+        }
     }
 
     SmallVector<Value> newOperands;
@@ -2077,76 +2108,33 @@ LogicalResult ConvertCallOp::matchAndRewrite(
         return success();
     }
 
-    if (newCall.getNumResults() < 2)
+    if (newCall.getNumResults() < static_cast<int>(newResultTypes.size()))
     {
-        return rewriter.notifyMatchFailure(op, "expected [ptr_word,len] return for non-void call");
+        return rewriter.notifyMatchFailure(op, "internal call returned fewer words than expected");
     }
 
-    SmallVector<Type> convertedTypes;
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(oldResultTypes.front()))
-    {
-        auto ctx = op.getContext();
-        auto u256Type = sir::U256Type::get(ctx);
-        const bool useWideCarrier = (calleeFunc && funcResultForcesWideErrorUnion(calleeFunc, 0)) || !isNarrowErrorUnion(errType);
-        if (!useWideCarrier)
-        {
-            convertedTypes.push_back(u256Type);
-        }
-        else
-        {
-            convertedTypes.push_back(u256Type);
-            convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
-        }
-    }
-    else if (isPayloadlessErrorStruct(oldResultTypes.front(), op))
-    {
-        convertedTypes.push_back(u256Type);
-    }
-    else if (failed(typeConverter->convertType(oldResultTypes.front(), convertedTypes)) || convertedTypes.empty())
-    {
-        if (Type converted = typeConverter->convertType(oldResultTypes.front()))
-            convertedTypes.push_back(converted);
-    }
-    if (convertedTypes.empty())
-    {
-        return rewriter.notifyMatchFailure(op, "unable to convert call result type");
-    }
-
-    Value ptrWord = ensureU256(rewriter, op.getLoc(), newCall.getResult(0));
-    Value ptr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, ptrWord);
     if (convertedTypes.size() == 1)
     {
-        if (llvm::isa<ora::BytesType>(oldResultTypes.front()) ||
-            llvm::isa<ora::StringType>(oldResultTypes.front()) ||
-            (llvm::isa<ora::StructType>(oldResultTypes.front()) &&
-             !isPayloadlessErrorStruct(oldResultTypes.front(), op)) ||
-            llvm::isa<sir::PtrType>(convertedTypes.front()))
+        Value result = ensureU256(rewriter, op.getLoc(), newCall.getResult(0));
+        if (convertedTypes.front() != u256Type)
         {
-            op->replaceAllUsesWith(ValueRange{ptr});
+            result = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedTypes.front(), result);
         }
-        else
-        {
-            auto loadedU256 = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, ptr);
-            Value loaded = loadedU256.getResult();
-            if (convertedTypes.front() != u256Type)
-            {
-                loaded = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedTypes.front(), loaded);
-            }
-            op->replaceAllUsesWith(ValueRange{loaded});
-        }
+        op->replaceAllUsesWith(ValueRange{result});
         rewriter.eraseOp(op);
         return success();
     }
 
-    auto ctx = op.getContext();
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    Value offset = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 32));
-    Value ptr2 = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptr.getType(), ptr, offset);
-    auto tag = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, ptr);
-    auto payload = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, ptr2);
-    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, mlir::IntegerAttr::get(u256IntType, 1));
-    Value maskedTag = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, tag.getResult(), one);
-    op->replaceAllUsesWith(ValueRange{maskedTag, payload.getResult()});
+    SmallVector<Value> replaced;
+    replaced.reserve(convertedTypes.size());
+    for (auto [index, convertedType] : llvm::enumerate(convertedTypes))
+    {
+        Value result = ensureU256(rewriter, op.getLoc(), newCall.getResult(index));
+        if (convertedType != u256Type)
+            result = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedType, result);
+        replaced.push_back(result);
+    }
+    op->replaceAllUsesWith(replaced);
     rewriter.eraseOp(op);
     return success();
 }

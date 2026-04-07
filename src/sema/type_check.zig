@@ -1391,9 +1391,6 @@ const TypeChecker = struct {
                         const inferred = try self.inferCatchPatternType(try_stmt.try_body);
                         self.pattern_types[pattern_id.index()] = LocatedType.unlocated(inferred.ty);
                         self.catch_error_tag_patterns[pattern_id.index()] = inferred.ty.kind() == .integer;
-                        if (inferred.multiple_error_types) {
-                            try self.emitRangeError(catch_clause.range, "catch binding represents multiple possible error types; field access is not supported", .{});
-                        }
                     }
                     try self.visitBody(catch_clause.body);
                 }
@@ -1665,8 +1662,13 @@ const TypeChecker = struct {
                                 else => null,
                             };
                             if (function) |resolved_function| {
-                                if (resolved_function.is_generic and self.genericTypeBindingsForCall(resolved_function, call) == null) {
-                                    try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
+                                if (resolved_function.is_generic) {
+                                    const bindings = self.genericTypeBindingsForCall(resolved_function, call);
+                                    if (bindings == null) {
+                                        try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
+                                    } else {
+                                        try self.validateGenericFunctionInstantiation(resolved_function, bindings.?);
+                                    }
                                 } else if (self.expectedCallArgCount(call)) |expected_args| {
                                     if (expected_args != call.args.len) {
                                         try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
@@ -2059,6 +2061,180 @@ const TypeChecker = struct {
         return bindings;
     }
 
+    fn validateGenericFunctionInstantiation(self: *TypeChecker, function: ast.FunctionItem, bindings: []const GenericTypeBinding) anyerror!void {
+        try self.validateGenericBodyInstantiation(function.body, bindings);
+    }
+
+    fn validateGenericBodyInstantiation(self: *TypeChecker, body_id: ast.BodyId, bindings: []const GenericTypeBinding) anyerror!void {
+        const body = self.file.body(body_id).*;
+        for (body.statements) |statement_id| try self.validateGenericStmtInstantiation(statement_id, bindings);
+    }
+
+    fn validateGenericStmtInstantiation(self: *TypeChecker, statement_id: ast.StmtId, bindings: []const GenericTypeBinding) anyerror!void {
+        switch (self.file.statement(statement_id).*) {
+            .VariableDecl => |decl| if (decl.value) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+            .Return => |ret| if (ret.value) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+            .If => |if_stmt| {
+                try self.validateGenericExprInstantiation(if_stmt.condition, bindings);
+                try self.validateGenericBodyInstantiation(if_stmt.then_body, bindings);
+                if (if_stmt.else_body) |else_body| try self.validateGenericBodyInstantiation(else_body, bindings);
+            },
+            .While => |while_stmt| {
+                try self.validateGenericExprInstantiation(while_stmt.condition, bindings);
+                for (while_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
+                try self.validateGenericBodyInstantiation(while_stmt.body, bindings);
+            },
+            .For => |for_stmt| {
+                try self.validateGenericExprInstantiation(for_stmt.iterable, bindings);
+                if (for_stmt.range_end) |end_expr| try self.validateGenericExprInstantiation(end_expr, bindings);
+                for (for_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
+                try self.validateGenericBodyInstantiation(for_stmt.body, bindings);
+            },
+            .Switch => |switch_stmt| {
+                try self.validateGenericExprInstantiation(switch_stmt.condition, bindings);
+                for (switch_stmt.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+                        .Range => |range_pattern| {
+                            try self.validateGenericExprInstantiation(range_pattern.start, bindings);
+                            try self.validateGenericExprInstantiation(range_pattern.end, bindings);
+                        },
+                        .NamedError => |named_error| try self.validateGenericExprInstantiation(named_error.callee, bindings),
+                        .Ok, .Err, .Else => {},
+                    }
+                    try self.validateGenericBodyInstantiation(arm.body, bindings);
+                }
+                if (switch_stmt.else_body) |else_body| try self.validateGenericBodyInstantiation(else_body, bindings);
+            },
+            .Try => |try_stmt| {
+                try self.validateGenericBodyInstantiation(try_stmt.try_body, bindings);
+                if (try_stmt.catch_clause) |catch_clause| try self.validateGenericBodyInstantiation(catch_clause.body, bindings);
+            },
+            .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateGenericExprInstantiation(arg, bindings),
+            .Lock => |lock_stmt| try self.validateGenericExprInstantiation(lock_stmt.path, bindings),
+            .Unlock => |unlock_stmt| try self.validateGenericExprInstantiation(unlock_stmt.path, bindings),
+            .Assert => |assert_stmt| try self.validateGenericExprInstantiation(assert_stmt.condition, bindings),
+            .Assume => |assume_stmt| try self.validateGenericExprInstantiation(assume_stmt.condition, bindings),
+            .Assign => |assign| {
+                try self.validateGenericExprInstantiation(assign.value, bindings);
+                try self.validateGenericPatternInstantiation(assign.target, bindings);
+            },
+            .Expr => |expr_stmt| try self.validateGenericExprInstantiation(expr_stmt.expr, bindings),
+            .Block => |block| try self.validateGenericBodyInstantiation(block.body, bindings),
+            .LabeledBlock => |block| try self.validateGenericBodyInstantiation(block.body, bindings),
+            .Break => |jump| if (jump.value) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+            .Continue => |jump| if (jump.value) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+            .Havoc, .Error => {},
+        }
+    }
+
+    fn validateGenericPatternInstantiation(self: *TypeChecker, pattern_id: ast.PatternId, bindings: []const GenericTypeBinding) anyerror!void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| try self.validateGenericPatternInstantiation(field.base, bindings),
+            .Index => |index| {
+                try self.validateGenericPatternInstantiation(index.base, bindings);
+                try self.validateGenericExprInstantiation(index.index, bindings);
+            },
+            .StructDestructure => |struct_pattern| for (struct_pattern.fields) |field| try self.validateGenericPatternInstantiation(field.binding, bindings),
+            .Name, .Error => {},
+        }
+    }
+
+    fn validateGenericExprInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) anyerror!void {
+        switch (self.file.expression(expr_id).*) {
+            .TypeValue, .Comptime, .ExternalProxy, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+            .Tuple => |tuple| for (tuple.elements) |element| try self.validateGenericExprInstantiation(element, bindings),
+            .ArrayLiteral => |array| for (array.elements) |element| try self.validateGenericExprInstantiation(element, bindings),
+            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateGenericExprInstantiation(field.value, bindings),
+            .Group => |group| try self.validateGenericExprInstantiation(group.expr, bindings),
+            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.validateGenericExprInstantiation(arg, bindings),
+            .Unary => |unary| try self.validateGenericExprInstantiation(unary.operand, bindings),
+            .Field => |field| try self.validateGenericExprInstantiation(field.base, bindings),
+            .Index => |index| {
+                try self.validateGenericExprInstantiation(index.base, bindings);
+                try self.validateGenericExprInstantiation(index.index, bindings);
+            },
+            .Call => |call| {
+                try self.validateGenericExprInstantiation(call.callee, bindings);
+                for (call.args) |arg| try self.validateGenericExprInstantiation(arg, bindings);
+            },
+            .Builtin => |builtin| for (builtin.args) |arg| try self.validateGenericExprInstantiation(arg, bindings),
+            .Switch => |switch_expr| {
+                try self.validateGenericExprInstantiation(switch_expr.condition, bindings);
+                for (switch_expr.arms) |arm| {
+                    switch (arm.pattern) {
+                        .Expr => |pattern_expr| try self.validateGenericExprInstantiation(pattern_expr, bindings),
+                        .Range => |range_pattern| {
+                            try self.validateGenericExprInstantiation(range_pattern.start, bindings);
+                            try self.validateGenericExprInstantiation(range_pattern.end, bindings);
+                        },
+                        .NamedError => |named_error| try self.validateGenericExprInstantiation(named_error.callee, bindings),
+                        .Ok, .Err, .Else => {},
+                    }
+                    try self.validateGenericExprInstantiation(arm.value, bindings);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.validateGenericExprInstantiation(else_expr, bindings);
+            },
+            .Binary => |binary| {
+                try self.validateGenericExprInstantiation(binary.lhs, bindings);
+                try self.validateGenericExprInstantiation(binary.rhs, bindings);
+
+                const lhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.lhs, bindings), bindings);
+                const rhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.rhs, bindings), bindings);
+                const instantiated_result = self.binaryResultType(binary.op, lhs_type, rhs_type);
+                if (instantiated_result.kind() == .unknown and lhs_type.kind() != .unknown and rhs_type.kind() != .unknown) {
+                    try self.emitExprError(expr_id, "invalid binary operator '{s}' for types '{s}' and '{s}'", .{
+                        binaryOpName(binary.op),
+                        diagnosticTypeDisplayName(self, lhs_type),
+                        diagnosticTypeDisplayName(self, rhs_type),
+                    });
+                }
+            },
+        }
+    }
+
+    fn templateExprTypeForInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) Type {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => self.instantiatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()], bindings),
+            .Group => |group| self.templateExprTypeForInstantiation(group.expr, bindings),
+            else => self.expr_types[expr_id.index()],
+        };
+    }
+
+    fn instantiatedTypeForBinding(self: *TypeChecker, binding: ?ResolvedBinding, bindings: []const GenericTypeBinding) Type {
+        const template_type = self.typeForBinding(binding);
+        if (template_type.kind() != .unknown) {
+            return self.substituteGenericType(template_type, bindings) catch template_type;
+        }
+        const resolved = binding orelse return .{ .unknown = {} };
+        return switch (resolved) {
+            .item => |item_id| blk: {
+                const item_type = self.item_types[item_id.index()];
+                break :blk self.substituteGenericType(item_type, bindings) catch item_type;
+            },
+            .pattern => |pattern_id| blk: {
+                if (self.parameterTypeExprForPattern(pattern_id)) |type_expr_id| {
+                    break :blk self.resolveTypeExprWithBindings(type_expr_id, bindings) catch .{ .unknown = {} };
+                }
+                break :blk .{ .unknown = {} };
+            },
+        };
+    }
+
+    fn parameterTypeExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.TypeExprId {
+        for (self.file.items) |item| {
+            switch (item) {
+                .Function => |function| {
+                    for (function.parameters) |parameter| {
+                        if (parameter.pattern.index() == pattern_id.index()) return parameter.type_expr;
+                    }
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
     fn runtimeFunctionParameters(self: *const TypeChecker, function: ast.FunctionItem) ![]ast.Parameter {
         var parameters: std.ArrayList(ast.Parameter) = .{};
         for (function.parameters) |parameter| {
@@ -2124,6 +2300,9 @@ const TypeChecker = struct {
                 self.genericTypeBindingsForCall(function, call) orelse return
             else
                 &.{};
+            if (function.is_generic) {
+                try self.validateGenericFunctionInstantiation(function, bindings);
+            }
             const explicit_generics = call.args.len >= comptime_count + runtime_parameters.len;
             const runtime_args = if (explicit_generics)
                 call.args[comptime_count..]
@@ -5075,11 +5254,28 @@ const TypeChecker = struct {
     }
 
     fn constTupleIndex(self: *const TypeChecker, expr_id: ast.ExprId) ?usize {
-        const value = self.const_eval.values[expr_id.index()] orelse return null;
-        return switch (value) {
-            .integer => |integer| const_bridge.positiveShiftAmount(integer),
+        if (self.const_eval.values[expr_id.index()]) |value| {
+            return switch (value) {
+                .integer => |integer| const_bridge.positiveShiftAmount(integer),
+                else => null,
+            };
+        }
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| parseTupleIndexLiteral(literal.text),
+            .Group => |group| self.constTupleIndex(group.expr),
             else => null,
         };
+    }
+
+    fn parseTupleIndexLiteral(text: []const u8) ?usize {
+        const trimmed = std.mem.trim(u8, text, " \t\n\r");
+        if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) {
+            return std.fmt.parseInt(usize, trimmed[2..], 16) catch null;
+        }
+        if (std.mem.startsWith(u8, trimmed, "0b") or std.mem.startsWith(u8, trimmed, "0B")) {
+            return std.fmt.parseInt(usize, trimmed[2..], 2) catch null;
+        }
+        return std.fmt.parseInt(usize, trimmed, 10) catch null;
     }
 
     fn itemIdForType(self: *const TypeChecker, ty: Type) ?ast.ItemId {
