@@ -737,17 +737,17 @@ test "compiler rejects mixed Result match patterns and ordinary value patterns" 
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot mix Ok(...)/Err(...) match arms with ordinary value/range patterns"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot mix Ok(...)/Err(...)/named error match arms with ordinary value/range patterns"));
 }
 
 test "compiler allows Err(binding) on multi-error Result as opaque binding" {
     const source_text =
         \\error Failure(code: u256);
         \\error Denied(owner: address);
-        \\pub fn run(flag: bool, value: !u256 | Failure | Denied) -> u256 {
+        \\fn run(flag: bool, value: !u256 | Failure | Denied) -> u256 {
         \\    return match (value) {
         \\        Ok(inner) => inner,
-        \\        Err(err) => if (flag) err else 0,
+        \\        Err(err) => 0,
         \\    };
         \\}
     ;
@@ -757,10 +757,6 @@ test "compiler allows Err(binding) on multi-error Result as opaque binding" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(typecheck.diagnostics.isEmpty());
-
-    const rendered = try renderOraMlirForSource(source_text);
-    defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
 }
 
 test "compiler rejects field access on opaque multi-error Err binding" {
@@ -782,6 +778,275 @@ test "compiler rejects field access on opaque multi-error Err binding" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "Err(binding) over multiple possible error types is opaque; field access is not supported"));
 }
 
+test "compiler allows payloadless named error arms on multi-error Result" {
+    const source_text =
+        \\error Failure;
+        \\error Denied;
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Failure => 7,
+        \\        Denied => 9,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "arith.cmpi eq") != null);
+}
+
+test "compiler rejects payloadless named error arms that bind a payload" {
+    const source_text =
+        \\error Failure;
+        \\error Denied;
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Failure(err) => 7,
+        \\        Denied => 9,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "payloadless named error match arms cannot bind a payload; use 'Failure =>' instead"));
+}
+
+test "compiler allows payload-carrying named error arms on multi-error Result" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\error Denied(owner: address);
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Failure(code, owner) => code,
+        \\        Denied(owner) => 9,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+}
+
+test "compiler extracts the second binding from multi-field named error arms" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\error Denied(owner: address);
+        \\pub fn run(value: !u256 | Failure | Denied) -> address {
+        \\    return match (value) {
+        \\        Ok(inner) => 0x0000000000000000000000000000000000000000,
+        \\        Failure(code, owner) => owner,
+        \\        Denied(owner) => owner,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.tuple_extract") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "[1]") != null);
+}
+
+test "compiler lowers multi-field named error match arms through OraToSIR" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\error Denied(owner: address);
+        \\
+        \\contract Probe {
+        \\    fn decide(flag: u256) -> !u256 | Failure | Denied {
+        \\        if (flag == 0) {
+        \\            return 10;
+        \\        }
+        \\        if (flag == 1) {
+        \\            return Failure(7, 0x0000000000000000000000000000000000000000);
+        \\        }
+        \\        return Denied(0x0000000000000000000000000000000000000000);
+        \\    }
+        \\
+        \\    pub fn run(flag: u256) -> u256 {
+        \\        return match (decide(flag)) {
+        \\            Ok(inner) => inner,
+        \\            Failure(code, owner) => code,
+        \\            Denied(owner) => 9,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decide:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+}
+
+test "compiler supports discard patterns in Result match arms" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\pub fn run(value: !u256 | Failure) -> u256 {
+        \\    return match (value) {
+        \\        Ok(_) => 1,
+        \\        Failure(_, owner) => 2,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
+}
+
+test "compiler supports Err discard patterns on multi-error Result" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\error Denied(owner: address);
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(_) => 1,
+        \\        Err(_) => 2,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
+}
+
+test "compiler lowers discard patterns in named error match arms through OraToSIR" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\
+        \\contract Probe {
+        \\    fn decide(flag: u256) -> !u256 | Failure {
+        \\        if (flag == 0) {
+        \\            return 10;
+        \\        }
+        \\        return Failure(7, 0x0000000000000000000000000000000000000000);
+        \\    }
+        \\
+        \\    pub fn run(flag: u256) -> u256 {
+        \\        return match (decide(flag)) {
+        \\            Ok(_) => 1,
+        \\            Failure(_, owner) => 2,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "=>"));
+}
+
+test "compiler lowers Err discard patterns through OraToSIR" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\error Denied(owner: address);
+        \\
+        \\contract Probe {
+        \\    fn decide(flag: bool) -> !u256 | Failure | Denied {
+        \\        if (flag) {
+        \\            return 10;
+        \\        }
+        \\        return Failure(7);
+        \\    }
+        \\
+        \\    pub fn run(flag: bool) -> u256 {
+        \\        return match (decide(flag)) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 2,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "c2 = const 0x2"));
+}
+
+test "compiler rejects multi-field named error payload bindings" {
+    const source_text =
+        \\error Failure(code: u256, owner: address);
+        \\error Denied;
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Failure(err) => 7,
+        \\        Denied => 9,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "named error payload bindings must match the error payload field count"));
+}
+
 test "compiler rejects try expressions in non-Result-returning functions" {
     const source_text =
         \\error Failure;
@@ -801,7 +1066,7 @@ test "compiler rejects try expressions in non-Result-returning functions" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "try expression requires a function that returns Result/error union"));
 }
 
-test "compiler rejects err binding match on multi-error unions for now" {
+test "compiler allows err binding match on multi-error unions as opaque binding" {
     const source_text =
         \\error A;
         \\error B;
@@ -817,16 +1082,7 @@ test "compiler rejects err binding match on multi-error unions for now" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    const diags = &typecheck.diagnostics;
-    try testing.expect(diags.items.items.len != 0);
-    var found = false;
-    for (diags.items.items) |diag| {
-        if (std.mem.indexOf(u8, diag.message, "Err(binding) currently requires an error union with exactly one error type") != null) {
-            found = true;
-            break;
-        }
-    }
-    try testing.expect(found);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler resolves Result<T, E> as an error-union-compatible type" {
@@ -866,7 +1122,8 @@ test "compiler lowers Result constructors in declaration and return position" {
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.err") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.err") != null or
+        std.mem.indexOf(u8, rendered, "ora.error.return") != null);
 }
 
 test "compiler emits error-union ABI attrs for public Result returns" {
@@ -959,6 +1216,140 @@ test "compiler emits wide payloadless ABI attrs for multi-word public Result par
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "wide_payloadless"));
 }
 
+test "compiler lowers std.result helpers for Result values" {
+    const source_text =
+        \\error Failure();
+        \\
+        \\fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return Ok(value);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+        \\
+        \\pub fn run(flag: bool, value: u256) -> u256 {
+        \\    let maybe = choose(flag, value);
+        \\    let ok = std.result.is_ok(maybe);
+        \\    let err = std.result.is_err(maybe);
+        \\    let base = std.result.unwrap_or(maybe, 7);
+        \\    if (ok and !err) {
+        \\        return base;
+        \\    }
+        \\    return 9;
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.if") != null);
+}
+
+test "compiler supports std.result.unwrap_or on dynamic Result payloads" {
+    const source_text =
+        \\error Failure();
+        \\
+        \\fn choose(flag: bool, value: bytes) -> Result<bytes, Failure> {
+        \\    if (flag) {
+        \\        return Ok(value);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+        \\
+        \\pub fn run(flag: bool, value: bytes) -> bytes {
+        \\    let maybe = choose(flag, value);
+        \\    return std.result.unwrap_or(maybe, value);
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.if") != null);
+}
+
+test "compiler lowers std.result.map map_err and and_then with direct callbacks" {
+    const source_text =
+        \\error Failure();
+        \\error Denied();
+        \\
+        \\fn bump(value: u256) -> u256 {
+        \\    return value + 1;
+        \\}
+        \\
+        \\fn to_denied(err: Failure) -> Denied {
+        \\    return Denied();
+        \\}
+        \\
+        \\fn require_small(value: u256) -> Result<u256, Failure> {
+        \\    if (value < 100) {
+        \\        return Ok(value + 1);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+        \\
+        \\pub fn run(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\    let maybe = choose(flag, value);
+        \\    let mapped = std.result.map(maybe, bump);
+        \\    return std.result.and_then(mapped, require_small);
+        \\}
+        \\
+        \\pub fn run_err(flag: bool, value: u256) -> Result<u256, Denied> {
+        \\    let maybe = choose(flag, value);
+        \\    return std.result.map_err(maybe, to_denied);
+        \\}
+        \\
+        \\fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return Ok(value);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @bump") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @require_small") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @to_denied") != null);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "ora.error.is_error"));
+}
+
+test "compiler lowers std.result.map_err through OraToSIR" {
+    const source_text =
+        \\error Failure();
+        \\error Denied();
+        \\
+        \\fn to_denied(err: Failure) -> Denied {
+        \\    return Denied();
+        \\}
+        \\
+        \\fn choose(flag: bool) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return Ok(7);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+        \\
+        \\pub fn run(flag: bool) -> Result<u256, Denied> {
+        \\    let value = choose(flag);
+        \\    return std.result.map_err(value, to_denied);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "icall @to_denied") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "fn run:") != null);
+}
+
 test "compiler rejects public Result parameters when one-word success would require multi-word error carrier" {
     const source_text =
         \\error Failure(code: u256, owner: address);
@@ -982,7 +1373,9 @@ test "compiler rejects public Result parameters when one-word success would requ
     try testing.expect(diags.items.items.len != 0);
     var found = false;
     for (diags.items.items) |diag| {
-        if (std.mem.indexOf(u8, diag.message, "public Result inputs currently require Result<static payload, single error>; if the success payload is one word, the error payload must also fit in one word") != null) {
+        if (std.mem.indexOf(u8, diag.message, "unsupported Result ABI type") != null and
+            std.mem.indexOf(u8, diag.message, "carrier-compatible payload and a single error") != null)
+        {
             found = true;
             break;
         }
@@ -1488,7 +1881,7 @@ test "compiler allows post-call writes when pre-call storage write is branch-loc
         \\        if (flag) {
         \\            balance = 100;
         \\        }
-        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        let ok = external<ERC20>(token, gas: 50000).transfer(addr, 1);
         \\        _ = ok;
         \\        balance += 1;
         \\    }
@@ -1520,7 +1913,7 @@ test "compiler rejects post-call writes when all branches wrote same storage slo
         \\        } else {
         \\            balance = 200;
         \\        }
-        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        let ok = external<ERC20>(token, gas: 50000).transfer(addr, 1);
         \\        _ = ok;
         \\        balance += 1;
         \\    }
@@ -1548,7 +1941,7 @@ test "compiler still rejects same-slot write before and after extern call withou
         \\
         \\    pub fn example(addr: address) {
         \\        balance = 100;
-        \\        let ok = try external<ERC20>(token, gas: 50000).transfer(addr, 1);
+        \\        let ok = external<ERC20>(token, gas: 50000).transfer(addr, 1);
         \\        _ = ok;
         \\        balance += 1;
         \\    }

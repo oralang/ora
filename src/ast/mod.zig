@@ -73,6 +73,7 @@ pub const IfStmt = nodes.IfStmt;
 pub const WhileStmt = nodes.WhileStmt;
 pub const ForStmt = nodes.ForStmt;
 pub const SwitchPattern = nodes.SwitchPattern;
+pub const NamedErrorSwitchPattern = nodes.NamedErrorSwitchPattern;
 pub const RangeSwitchPattern = nodes.RangeSwitchPattern;
 pub const SwitchArm = nodes.SwitchArm;
 pub const SwitchStmt = nodes.SwitchStmt;

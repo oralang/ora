@@ -31,7 +31,14 @@ namespace mlir
         class ConvertReturnOp : public OpConversionPattern<ora::ReturnOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertReturnOp(const TypeConverter &typeConverter, MLIRContext *ctx, bool payloadless_only = false)
+                : OpConversionPattern<ora::ReturnOp>(typeConverter, ctx), payloadless_only(payloadless_only)
+            {
+            }
+            ConvertReturnOp(const TypeConverter &typeConverter, MLIRContext *ctx, PatternBenefit benefit, bool payloadless_only = false)
+                : OpConversionPattern<ora::ReturnOp>(typeConverter, ctx, benefit), payloadless_only(payloadless_only)
+            {
+            }
 
             LogicalResult matchAndRewrite(
                 ora::ReturnOp op,
@@ -42,6 +49,9 @@ namespace mlir
                 ora::ReturnOp op,
                 OneToNOpAdaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            bool payloadless_only = false;
         };
 
         /// Pre-pass pattern (greedy, not conversion-framework).  Lowers
@@ -190,12 +200,22 @@ namespace mlir
         class ConvertCallOp : public OpConversionPattern<mlir::func::CallOp>
         {
         public:
-            using OpConversionPattern<mlir::func::CallOp>::OpConversionPattern;
+            ConvertCallOp(const TypeConverter &typeConverter, MLIRContext *ctx, bool payloadless_only = false)
+                : OpConversionPattern<mlir::func::CallOp>(typeConverter, ctx), payloadless_only(payloadless_only)
+            {
+            }
+            ConvertCallOp(const TypeConverter &typeConverter, MLIRContext *ctx, PatternBenefit benefit, bool payloadless_only = false)
+                : OpConversionPattern<mlir::func::CallOp>(typeConverter, ctx, benefit), payloadless_only(payloadless_only)
+            {
+            }
 
             LogicalResult matchAndRewrite(
                 mlir::func::CallOp op,
                 typename mlir::func::CallOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            bool payloadless_only = false;
         };
 
         class ConvertAbiEncodeOp : public OpConversionPattern<ora::AbiEncodeOp>

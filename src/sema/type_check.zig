@@ -518,6 +518,7 @@ const TypeChecker = struct {
     impl_interfaces: std.ArrayList(ImplInterface),
     catch_error_tag_patterns: []bool = &.{},
     opaque_multi_error_patterns: []bool = &.{},
+    try_scope_depth: usize = 0,
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
     current_contract: ?ast.ItemId = null,
@@ -721,7 +722,7 @@ const TypeChecker = struct {
             if (param_type.kind() == .error_union) {
                 try self.emitRangeError(
                     parameter.range,
-                    "public function parameter '{s}' uses unsupported ABI type '{s}'; public Result inputs currently require Result<carrier-compatible payload, single error>; supported payloads are static values plus bytes/string and dynamic arrays of static base types; if the success payload is one word, the error payload must also fit in one word",
+                    "public function parameter '{s}' uses unsupported Result ABI type '{s}'; supported public Result inputs require a carrier-compatible payload and a single error",
                     .{ name, diagnosticTypeDisplayName(self, param_type) },
                 );
                 continue;
@@ -1361,7 +1362,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.visitExpr(switch_stmt.condition);
                 const condition_type = self.expr_types[switch_stmt.condition.index()];
-                try self.validateMatchPatternFamily(switch_stmt.arms, switch_stmt.range);
+                try self.validateMatchPatternFamily(condition_type, switch_stmt.arms, switch_stmt.range);
                 for (switch_stmt.arms) |arm| {
                     switch (arm.pattern) {
                         .Expr => |expr_id| try self.visitExpr(expr_id),
@@ -1371,6 +1372,7 @@ const TypeChecker = struct {
                         },
                         .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
                         .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
+                        .NamedError => |named_error| try self.assignNamedErrorMatchPatternType(named_error, condition_type, arm.range),
                         .Else => {},
                     }
                     try self.visitBody(arm.body);
@@ -1381,6 +1383,8 @@ const TypeChecker = struct {
             .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Try => |try_stmt| {
+                self.try_scope_depth += 1;
+                defer self.try_scope_depth -= 1;
                 try self.visitBody(try_stmt.try_body);
                 if (try_stmt.catch_clause) |catch_clause| {
                     if (catch_clause.error_pattern) |pattern_id| {
@@ -1517,7 +1521,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.visitExpr(switch_expr.condition);
                 const condition_type = self.expr_types[switch_expr.condition.index()];
-                try self.validateMatchPatternFamily(switch_expr.arms, switch_expr.range);
+                try self.validateMatchPatternFamily(condition_type, switch_expr.arms, switch_expr.range);
                 var result_type: Type = .{ .unknown = {} };
                 var saw_mismatch = false;
                 for (switch_expr.arms) |arm| {
@@ -1529,6 +1533,7 @@ const TypeChecker = struct {
                         },
                         .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
                         .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
+                        .NamedError => |named_error| try self.assignNamedErrorMatchPatternType(named_error, condition_type, arm.range),
                         .Else => {},
                     }
                     try self.visitExpr(arm.value);
@@ -1807,6 +1812,7 @@ const TypeChecker = struct {
     }
 
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
+        if (self.resultBuiltinCallReturnType(call)) |result| return result;
         if (self.genericCallReturnType(call)) |result| return result;
         if (self.externProxyCallReturnType(call)) |result| return result;
         if (self.calleeErrorDeclItem(call.callee)) |item_id| {
@@ -1821,6 +1827,110 @@ const TypeChecker = struct {
         const return_types = callee_type.returnTypes();
         if (return_types.len > 0) return return_types[0];
         return .{ .void = {} };
+    }
+
+    fn resultBuiltinCallName(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resultBuiltinCallName(group.expr),
+            .Field => |field| blk: {
+                if (!std.mem.eql(u8, field.name, "is_ok") and
+                    !std.mem.eql(u8, field.name, "is_err") and
+                    !std.mem.eql(u8, field.name, "unwrap_or") and
+                    !std.mem.eql(u8, field.name, "map") and
+                    !std.mem.eql(u8, field.name, "map_err") and
+                    !std.mem.eql(u8, field.name, "and_then"))
+                {
+                    break :blk null;
+                }
+                const mid = switch (self.file.expression(field.base).*) {
+                    .Field => |mid| mid,
+                    .Group => |group| switch (self.file.expression(group.expr).*) {
+                        .Field => |mid| mid,
+                        else => break :blk null,
+                    },
+                    else => break :blk null,
+                };
+                if (!std.mem.eql(u8, mid.name, "result")) break :blk null;
+                const root_name = switch (self.file.expression(mid.base).*) {
+                    .Name => |name| name.name,
+                    .Group => |group| switch (self.file.expression(group.expr).*) {
+                        .Name => |name| name.name,
+                        else => break :blk null,
+                    },
+                    else => break :blk null,
+                };
+                if (!std.mem.eql(u8, root_name, "std")) break :blk null;
+                break :blk field.name;
+            },
+            else => null,
+        };
+    }
+
+    fn resultBuiltinCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+        const builtin_name = self.resultBuiltinCallName(call.callee) orelse return null;
+        if (std.mem.eql(u8, builtin_name, "is_ok") or std.mem.eql(u8, builtin_name, "is_err")) {
+            if (call.args.len != 1) return .{ .unknown = {} };
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) return .{ .unknown = {} };
+            return .{ .bool = {} };
+        }
+        if (std.mem.eql(u8, builtin_name, "unwrap_or")) {
+            if (call.args.len != 2) return .{ .unknown = {} };
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) return .{ .unknown = {} };
+            return result_type.error_union.payload_type.*;
+        }
+        if (std.mem.eql(u8, builtin_name, "map")) {
+            const callback = self.resultBuiltinDirectCallback(call) orelse return .{ .unknown = {} };
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) return .{ .unknown = {} };
+            const callback_result = callback.item_type.function.return_types[0];
+            const errors = self.arena.alloc(Type, result_type.error_union.error_types.len) catch return .{ .unknown = {} };
+            @memcpy(errors, result_type.error_union.error_types);
+            return .{ .error_union = .{
+                .payload_type = self.storeType(callback_result) catch return .{ .unknown = {} },
+                .error_types = errors,
+            } };
+        }
+        if (std.mem.eql(u8, builtin_name, "map_err")) {
+            const callback = self.resultBuiltinDirectCallback(call) orelse return .{ .unknown = {} };
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) return .{ .unknown = {} };
+            const callback_result = callback.item_type.function.return_types[0];
+            const errors = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+            errors[0] = callback_result;
+            return .{ .error_union = .{
+                .payload_type = self.storeType(result_type.error_union.payload_type.*) catch return .{ .unknown = {} },
+                .error_types = errors,
+            } };
+        }
+        if (std.mem.eql(u8, builtin_name, "and_then")) {
+            const callback = self.resultBuiltinDirectCallback(call) orelse return .{ .unknown = {} };
+            const callback_result = callback.item_type.function.return_types[0];
+            if (callback_result.kind() != .error_union) return .{ .unknown = {} };
+            return callback_result;
+        }
+        return null;
+    }
+
+    const ResultBuiltinCallback = struct {
+        item_id: ast.ItemId,
+        function: ast.FunctionItem,
+        item_type: Type,
+    };
+
+    fn resultBuiltinDirectCallback(self: *TypeChecker, call: ast.CallExpr) ?ResultBuiltinCallback {
+        if (call.args.len < 2) return null;
+        const item_id = self.calleeFunctionItem(call.args[1]) orelse return null;
+        const function = switch (self.file.item(item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        return .{
+            .item_id = item_id,
+            .function = function,
+            .item_type = self.item_types[item_id.index()],
+        };
     }
 
     fn callableType(self: *const TypeChecker, expr_id: ast.ExprId) Type {
@@ -2001,6 +2111,7 @@ const TypeChecker = struct {
     }
 
     fn checkCallArguments(self: *TypeChecker, call: ast.CallExpr, callee_type: Type) !void {
+        if (try self.checkResultBuiltinCallArguments(call)) return;
         const callee_id = self.calleeFunctionItem(call.callee);
         if (callee_id) |item_id| {
             const function = switch (self.file.item(item_id).*) {
@@ -2054,6 +2165,139 @@ const TypeChecker = struct {
                 });
             }
         }
+    }
+
+    fn checkResultBuiltinCallArguments(self: *TypeChecker, call: ast.CallExpr) !bool {
+        const builtin_name = self.resultBuiltinCallName(call.callee) orelse return false;
+        if (std.mem.eql(u8, builtin_name, "is_ok") or std.mem.eql(u8, builtin_name, "is_err")) {
+            if (call.args.len != 1) {
+                try self.emitExprError(call.callee, "std.result.{s} expects 1 argument", .{builtin_name});
+                return true;
+            }
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) {
+                try self.emitExprError(call.args[0], "std.result.{s} expects Result<T, E> / error union input", .{builtin_name});
+            }
+            return true;
+        }
+        if (std.mem.eql(u8, builtin_name, "unwrap_or")) {
+            if (call.args.len != 2) {
+                try self.emitExprError(call.callee, "std.result.unwrap_or expects 2 arguments", .{});
+                return true;
+            }
+            const result_type = self.expr_types[call.args[0].index()];
+            if (result_type.kind() != .error_union) {
+                try self.emitExprError(call.args[0], "std.result.unwrap_or expects Result<T, E> / error union input", .{});
+                return true;
+            }
+            const payload_type = result_type.error_union.payload_type.*;
+            try self.contextualizeLiteral(call.args[1], payload_type);
+            if (!(try self.emitIntegerOverflowIfNeeded(self.exprRange(call.args[1]), call.args[1], payload_type))) {
+                const fallback_type = self.expr_types[call.args[1].index()];
+                if (fallback_type.kind() != .unknown and !typesFlowCompatible(payload_type, fallback_type)) {
+                    try self.emitExprError(call.args[1], "std.result.unwrap_or fallback expects type '{s}', found '{s}'", .{
+                        diagnosticTypeDisplayName(self, payload_type),
+                        diagnosticTypeDisplayName(self, fallback_type),
+                    });
+                }
+            }
+            return true;
+        }
+        if (std.mem.eql(u8, builtin_name, "map")) {
+            return try self.checkResultMapLikeCall(call, .map);
+        }
+        if (std.mem.eql(u8, builtin_name, "map_err")) {
+            return try self.checkResultMapLikeCall(call, .map_err);
+        }
+        if (std.mem.eql(u8, builtin_name, "and_then")) {
+            return try self.checkResultMapLikeCall(call, .and_then);
+        }
+        return false;
+    }
+
+    const ResultMapLikeKind = enum { map, map_err, and_then };
+
+    fn checkResultMapLikeCall(self: *TypeChecker, call: ast.CallExpr, kind: ResultMapLikeKind) !bool {
+        const name = switch (kind) {
+            .map => "map",
+            .map_err => "map_err",
+            .and_then => "and_then",
+        };
+        if (call.args.len != 2) {
+            try self.emitExprError(call.callee, "std.result.{s} expects 2 arguments", .{name});
+            return true;
+        }
+        const input_type = self.expr_types[call.args[0].index()];
+        if (input_type.kind() != .error_union) {
+            try self.emitExprError(call.args[0], "std.result.{s} expects Result<T, E> / error union input", .{name});
+            return true;
+        }
+        if (input_type.error_union.error_types.len != 1) {
+            try self.emitExprError(call.args[0], "std.result.{s} currently requires a single-error Result", .{name});
+            return true;
+        }
+
+        const callback = self.resultBuiltinDirectCallback(call) orelse {
+            try self.emitExprError(call.args[1], "std.result.{s} currently requires a direct named function callback", .{name});
+            return true;
+        };
+        if (callback.function.is_generic) {
+            try self.emitExprError(call.args[1], "std.result.{s} does not yet support generic callbacks", .{name});
+            return true;
+        }
+        const runtime_params = try self.runtimeFunctionParameters(callback.function);
+        if (runtime_params.len != 1) {
+            try self.emitExprError(call.args[1], "std.result.{s} callback must take exactly 1 runtime argument", .{name});
+            return true;
+        }
+        if (callback.item_type.function.return_types.len != 1) {
+            try self.emitExprError(call.args[1], "std.result.{s} callback must return exactly 1 value", .{name});
+            return true;
+        }
+
+        const callback_param_type = self.pattern_types[runtime_params[0].pattern.index()].type;
+        const callback_return_type = callback.item_type.function.return_types[0];
+        switch (kind) {
+            .map => {
+                if (!typesFlowCompatible(callback_param_type, input_type.error_union.payload_type.*)) {
+                    try self.emitExprError(call.args[1], "std.result.map callback expects '{s}', but Result payload is '{s}'", .{
+                        diagnosticTypeDisplayName(self, callback_param_type),
+                        diagnosticTypeDisplayName(self, input_type.error_union.payload_type.*),
+                    });
+                }
+                if (callback_return_type.kind() == .error_union) {
+                    try self.emitExprError(call.args[1], "std.result.map callback must return a plain value, not Result", .{});
+                }
+            },
+            .map_err => {
+                const error_type = input_type.error_union.error_types[0];
+                if (!typesFlowCompatible(callback_param_type, error_type)) {
+                    try self.emitExprError(call.args[1], "std.result.map_err callback expects '{s}', but Result error is '{s}'", .{
+                        diagnosticTypeDisplayName(self, callback_param_type),
+                        diagnosticTypeDisplayName(self, error_type),
+                    });
+                }
+                if (callback_return_type.kind() != .named) {
+                    try self.emitExprError(call.args[1], "std.result.map_err callback must return a named error type", .{});
+                }
+            },
+            .and_then => {
+                if (!typesFlowCompatible(callback_param_type, input_type.error_union.payload_type.*)) {
+                    try self.emitExprError(call.args[1], "std.result.and_then callback expects '{s}', but Result payload is '{s}'", .{
+                        diagnosticTypeDisplayName(self, callback_param_type),
+                        diagnosticTypeDisplayName(self, input_type.error_union.payload_type.*),
+                    });
+                }
+                if (callback_return_type.kind() != .error_union) {
+                    try self.emitExprError(call.args[1], "std.result.and_then callback must return Result<U, E>", .{});
+                } else if (callback_return_type.error_union.error_types.len != 1 or
+                    !typeEql(callback_return_type.error_union.error_types[0], input_type.error_union.error_types[0]))
+                {
+                    try self.emitExprError(call.args[1], "std.result.and_then currently requires the callback to preserve the same single error type", .{});
+                }
+            },
+        }
+        return true;
     }
 
     fn checkErrorDeclCallArguments(self: *TypeChecker, call: ast.CallExpr, error_decl: ast.ErrorDeclItem) !void {
@@ -3158,6 +3402,7 @@ const TypeChecker = struct {
                             try self.validateExprExternalCalls(range_pattern.start, state);
                             try self.validateExprExternalCalls(range_pattern.end, state);
                         },
+                        .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -3245,6 +3490,7 @@ const TypeChecker = struct {
                             try self.validateExprExternalCalls(range_pattern.start, state);
                             try self.validateExprExternalCalls(range_pattern.end, state);
                         },
+                        .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -3305,6 +3551,7 @@ const TypeChecker = struct {
                             try self.validateExprLocks(range_pattern.start, locked_slots);
                             try self.validateExprLocks(range_pattern.end, locked_slots);
                         },
+                        .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -3402,6 +3649,7 @@ const TypeChecker = struct {
                             try self.validateExprLocks(range_pattern.start, locked_slots);
                             try self.validateExprLocks(range_pattern.end, locked_slots);
                         },
+                        .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -3698,6 +3946,7 @@ const TypeChecker = struct {
                             try self.collectExprEffects(range_pattern.start, state);
                             try self.collectExprEffects(range_pattern.end, state);
                         },
+                        .NamedError => |named_error| try self.collectExprEffects(named_error.callee, state),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -3747,6 +3996,7 @@ const TypeChecker = struct {
                             try self.collectExprEffects(range_pattern.start, &expr_state);
                             try self.collectExprEffects(range_pattern.end, &expr_state);
                         },
+                        .NamedError => |named_error| try self.collectExprEffects(named_error.callee, &expr_state),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -4075,6 +4325,7 @@ const TypeChecker = struct {
                             try self.collectExprDirectCallees(range_pattern.start, callees);
                             try self.collectExprDirectCallees(range_pattern.end, callees);
                         },
+                        .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -4119,6 +4370,7 @@ const TypeChecker = struct {
                             try self.collectExprDirectCallees(range_pattern.start, callees);
                             try self.collectExprDirectCallees(range_pattern.end, callees);
                         },
+                        .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -4884,6 +5136,7 @@ const TypeChecker = struct {
                             try self.collectExprErrorTypes(range_pattern.start, error_types);
                             try self.collectExprErrorTypes(range_pattern.end, error_types);
                         },
+                        .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -4942,6 +5195,7 @@ const TypeChecker = struct {
                             try self.collectExprErrorTypes(range_pattern.start, error_types);
                             try self.collectExprErrorTypes(range_pattern.end, error_types);
                         },
+                        .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -5109,6 +5363,78 @@ const TypeChecker = struct {
         self.opaque_multi_error_patterns[pattern_id.index()] = true;
     }
 
+    fn assignNamedErrorMatchPatternType(
+        self: *TypeChecker,
+        named_error: ast.NamedErrorSwitchPattern,
+        condition_type: Type,
+        range: source.TextRange,
+    ) !void {
+        const info = self.matchPatternNamedErrorDeclInfo(condition_type, .{ .NamedError = named_error }) orelse {
+            for (named_error.bindings) |pattern_id| {
+                self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+            }
+            try self.emitRangeError(range, "named error match pattern requires an error declaration from the matched Result/error union", .{});
+            return;
+        };
+
+        if (!info.has_payload) {
+            for (named_error.bindings) |pattern_id| {
+                self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .void = {} });
+            }
+            try self.emitRangeError(range, "payloadless named error match arms cannot bind a payload; use 'Failure =>' instead", .{});
+            return;
+        }
+
+        const item = self.file.item(info.item_id).*;
+        if (item.ErrorDecl.parameters.len != named_error.bindings.len) {
+            for (named_error.bindings) |pattern_id| {
+                self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+            }
+            try self.emitRangeError(range, "named error payload bindings must match the error payload field count", .{});
+            return;
+        }
+
+        for (item.ErrorDecl.parameters, named_error.bindings) |param, pattern_id| {
+            self.pattern_types[pattern_id.index()] = self.pattern_types[param.pattern.index()];
+        }
+    }
+
+    const NamedErrorPatternInfo = struct {
+        item_id: ast.ItemId,
+        has_payload: bool,
+    };
+
+    fn matchPatternNamedErrorDeclInfo(
+        self: *const TypeChecker,
+        condition_type: Type,
+        pattern: ast.SwitchPattern,
+    ) ?NamedErrorPatternInfo {
+        if (condition_type.kind() != .error_union) return null;
+        const expr_id = switch (pattern) {
+            .Expr => |expr_id| expr_id,
+            .NamedError => |named_error| named_error.callee,
+            else => return null,
+        };
+
+        const item_id = switch (self.resolution.expr_bindings[expr_id.index()] orelse return null) {
+            .item => |item_id| item_id,
+            else => return null,
+        };
+        const item = self.file.item(item_id).*;
+        if (item != .ErrorDecl) return null;
+        const error_decl = item.ErrorDecl;
+
+        for (condition_type.errorTypes()) |error_type| {
+            if (std.mem.eql(u8, error_type.name() orelse "", error_decl.name)) {
+                return .{
+                    .item_id = item_id,
+                    .has_payload = error_decl.parameters.len != 0,
+                };
+            }
+        }
+        return null;
+    }
+
     fn requireExhaustiveErrorUnionMatch(
         self: *TypeChecker,
         condition_type: Type,
@@ -5121,33 +5447,74 @@ const TypeChecker = struct {
 
         var seen_ok = false;
         var seen_err = false;
+        var all_named_errors_covered = true;
         for (arms) |arm| switch (arm.pattern) {
             .Ok => seen_ok = true,
             .Err => seen_err = true,
+            .Expr => if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
+                if (named_error.has_payload) {
+                    all_named_errors_covered = false;
+                }
+            },
+            .NamedError => {},
             else => {},
         };
 
-        if (!(seen_ok and seen_err)) {
+        if (!seen_err) {
+            for (condition_type.errorTypes()) |error_type| {
+                const error_name = error_type.name() orelse {
+                    all_named_errors_covered = false;
+                    continue;
+                };
+                var found = false;
+                for (arms) |arm| {
+                    const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern) orelse continue;
+                    if (named_error.has_payload and arm.pattern != .NamedError) continue;
+                    const item = self.file.item(named_error.item_id).*;
+                    if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    all_named_errors_covered = false;
+                    break;
+                }
+            }
+        }
+
+        if (!(seen_ok and (seen_err or all_named_errors_covered))) {
             try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{});
         }
     }
 
-    fn validateMatchPatternFamily(self: *TypeChecker, arms: anytype, range: source.TextRange) !void {
+    fn validateMatchPatternFamily(self: *TypeChecker, condition_type: Type, arms: anytype, range: source.TextRange) !void {
         var saw_error_union_pattern = false;
         var saw_regular_pattern = false;
         for (arms) |arm| {
             switch (arm.pattern) {
-                .Ok, .Err => saw_error_union_pattern = true,
-                .Expr, .Range => saw_regular_pattern = true,
+                .Ok, .Err, .NamedError => saw_error_union_pattern = true,
+                .Expr => {
+                    if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
+                        saw_error_union_pattern = true;
+                        if (named_error.has_payload) {
+                            try self.emitRangeError(range, "named error match arms currently require payloadless error declarations; use Err(binding) for payload-carrying errors", .{});
+                        }
+                    } else {
+                        saw_regular_pattern = true;
+                    }
+                },
+                .Range => saw_regular_pattern = true,
                 .Else => {},
             }
         }
         if (saw_error_union_pattern and saw_regular_pattern) {
-            try self.emitRangeError(range, "cannot mix Ok(...)/Err(...) match arms with ordinary value/range patterns", .{});
+            try self.emitRangeError(range, "cannot mix Ok(...)/Err(...)/named error match arms with ordinary value/range patterns", .{});
         }
     }
 
     fn validateTryUnary(self: *TypeChecker, expr_id: ast.ExprId, operand_type: Type) !void {
+        if (self.try_scope_depth != 0) return;
         const return_type = self.current_return_type orelse {
             try self.emitExprError(expr_id, "try expression requires a function that returns Result/error union", .{});
             return;

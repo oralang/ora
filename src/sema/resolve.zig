@@ -200,6 +200,10 @@ const Resolver = struct {
                             try self.resolveExpr(range_pattern.end, env);
                         },
                         .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
+                        .NamedError => |named_error| {
+                            try self.resolveExpr(named_error.callee, env);
+                            for (named_error.bindings) |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id);
+                        },
                         .Else => {},
                     }
                     try self.resolveBody(arm.body, &arm_env);
@@ -288,6 +292,10 @@ const Resolver = struct {
                             try self.resolveExpr(range_pattern.end, env);
                         },
                         .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
+                        .NamedError => |named_error| {
+                            try self.resolveExpr(named_error.callee, env);
+                            for (named_error.bindings) |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id);
+                        },
                         .Else => {},
                     }
                     try self.resolveExpr(arm.value, &arm_env);
@@ -327,7 +335,10 @@ const Resolver = struct {
 
     fn bindPatternIfName(self: *Resolver, env: *Env, pattern_id: ast.PatternId) !void {
         switch (self.file.pattern(pattern_id).*) {
-            .Name => |name| try env.bindings.put(name.name, .{ .pattern = pattern_id }),
+            .Name => |name| {
+                if (std.mem.eql(u8, name.name, "_")) return;
+                try env.bindings.put(name.name, .{ .pattern = pattern_id });
+            },
             .StructDestructure => |destructure| {
                 for (destructure.fields) |field| try self.bindPatternIfName(env, field.binding);
             },
@@ -392,6 +403,7 @@ const Resolver = struct {
             std.mem.eql(u8, trimmed, "string") or
             std.mem.eql(u8, trimmed, "address") or
             std.mem.eql(u8, trimmed, "bytes") or
+            std.mem.eql(u8, trimmed, "std") or
             std.mem.eql(u8, trimmed, "Ok") or
             std.mem.eql(u8, trimmed, "Err"))
         {

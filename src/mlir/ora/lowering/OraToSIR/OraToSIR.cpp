@@ -426,6 +426,33 @@ static void dumpModuleOnFailure(ModuleOp module, StringRef phase)
     // inconsistent, so we skip it.
 }
 
+static bool isPayloadlessErrorStructType(Type type, Operation *contextOp)
+{
+    auto structType = llvm::dyn_cast<ora::StructType>(type);
+    if (!structType || !contextOp)
+        return false;
+
+    ModuleOp module = contextOp->getParentOfType<ModuleOp>();
+    if (!module)
+        return false;
+
+    bool matched = false;
+    module.walk([&](Operation *op) {
+        if (matched)
+            return;
+        auto sym = op->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || sym.getValue() != structType.getName())
+            return;
+        if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
+            return;
+        auto params = op->getAttrOfType<ArrayAttr>("ora.param_types");
+        if (!params || params.empty())
+            matched = true;
+    });
+
+    return matched;
+}
+
 static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
 {
     mlir::IRRewriter rewriter(funcOp.getContext());
@@ -919,8 +946,9 @@ public:
             patterns.add<ConvertHavocOp>(typeConverter, ctx);
             patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
         }
-        patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
-        patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
+        // Defer tuple lowering until the later struct/error-payload phase.
+        // This avoids forcing tuple->ptr materializations before wide
+        // error_union accessors have been normalized.
         if (enable_struct)
         {
             patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
@@ -964,6 +992,8 @@ public:
         patterns.add<ConvertErrorDeclOp>(typeConverter, ctx);
         patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
         patterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
+        patterns.add<ConvertReturnOp>(typeConverter, ctx, true);
+        patterns.add<ConvertCallOp>(typeConverter, ctx, true);
         patterns.add<ConvertFuncOp>(typeConverter, ctx);
         patterns.add<ConvertCallTypeOp>(typeConverter, ctx);
         patterns.add<ConvertFuncTypeAttrsOp>(typeConverter, ctx);
@@ -1007,7 +1037,16 @@ public:
             target.addIllegalOp<mlir::tensor::InsertOp, mlir::tensor::ExtractOp, mlir::tensor::DimOp>();
         }
         target.addIllegalOp<ora::ContractOp>();
-        target.addLegalOp<ora::ReturnOp>();
+        target.addDynamicallyLegalOp<ora::ReturnOp>(
+            [&](ora::ReturnOp op)
+            {
+                for (Value operand : op.getOperands())
+                {
+                    if (isPayloadlessErrorStructType(operand.getType(), op))
+                        return false;
+                }
+                return true;
+            });
         target.addLegalOp<ora::ErrorOkOp>();
         target.addLegalOp<ora::ErrorErrOp>();
         target.addLegalOp<ora::ErrorIsErrorOp>();
@@ -1019,6 +1058,8 @@ public:
         target.addLegalOp<ora::ContinueOp>();
         target.addLegalOp<ora::TryStmtOp>();
         target.addLegalOp<ora::SwitchOp>();
+        target.addLegalOp<ora::TupleCreateOp>();
+        target.addLegalOp<ora::TupleExtractOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
         if (!enable_struct)
         {
@@ -1067,9 +1108,18 @@ public:
                 }
                 if (auto callOp = dyn_cast<mlir::func::CallOp>(op))
                 {
-                    (void)callOp;
                     // Calls are legalized in the later control-flow phase, where
                     // we can lower them with callee-aware result/ABI handling.
+                    for (Value operand : callOp.getOperands())
+                    {
+                        if (isPayloadlessErrorStructType(operand.getType(), callOp))
+                            return false;
+                    }
+                    for (Type resultType : callOp.getResultTypes())
+                    {
+                        if (isPayloadlessErrorStructType(resultType, callOp))
+                            return false;
+                    }
                     return true;
                 }
                 return true;
@@ -1398,7 +1448,6 @@ public:
             RewritePatternSet finalErrorCleanup(ctx);
             finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
             finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
-            finalErrorCleanup.add<NormalizeErrorGetErrorOp>(ctx);
             if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
             {
                 module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
@@ -1482,6 +1531,9 @@ public:
             phase4Patterns.add<ConvertTryStmtOp>(typeConverter, ctx);
             phase4Patterns.add<NormalizeOraYieldOp>(ctx);
             phase4Patterns.add<NormalizeErrorUnionCastOp>(ctx);
+            phase4Patterns.add<ConvertErrorIsErrorOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertUnrealizedConversionCastOp>(typeConverter, ctx);
             phase4Patterns.add<StripNormalizedErrorUnionCastOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertCfBrOp>(typeConverter, ctx);
@@ -1540,6 +1592,9 @@ public:
             phase4Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
             phase4Target.addIllegalOp<mlir::func::CallOp>();
             phase4Target.addIllegalOp<ora::ReturnOp>();
+            phase4Target.addIllegalOp<ora::ErrorIsErrorOp>();
+            phase4Target.addIllegalOp<ora::ErrorUnwrapOp>();
+            phase4Target.addIllegalOp<ora::ErrorGetErrorOp>();
             phase4Target.addDynamicallyLegalOp<mlir::func::FuncOp>(
                 [&](mlir::func::FuncOp funcOp)
                 {
@@ -1735,6 +1790,17 @@ public:
                 module.emitError("[OraToSIR] Phase 5: unrealized cast cleanup failed");
                 signalPassFailure();
                 return;
+            }
+
+            {
+                RewritePatternSet lateTuplePatterns(ctx);
+                lateTuplePatterns.add<LateLowerTupleExtractOp>(&typeConverter, ctx);
+                if (failed(applyPatternsGreedily(module, std::move(lateTuplePatterns))))
+                {
+                    module.emitError("[OraToSIR] Phase 5: late tuple extract lowering failed");
+                    signalPassFailure();
+                    return;
+                }
             }
 
             // Cleanup: strip any remaining normalized error_union casts.
@@ -1959,7 +2025,6 @@ public:
             RewritePatternSet finalErrorCleanup(ctx);
             finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
             finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
-            finalErrorCleanup.add<NormalizeErrorGetErrorOp>(ctx);
             if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
             {
                 module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
@@ -1983,6 +2048,8 @@ public:
             finalResidualPatterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertArithAndIOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
 
             ConversionTarget finalResidualTarget(*ctx);
             finalResidualTarget.addLegalDialect<mlir::BuiltinDialect>();
@@ -1991,6 +2058,8 @@ public:
             finalResidualTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
             finalResidualTarget.addIllegalDialect<mlir::arith::ArithDialect>();
             finalResidualTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            finalResidualTarget.addIllegalOp<ora::TupleCreateOp>();
+            finalResidualTarget.addIllegalOp<ora::TupleExtractOp>();
             finalResidualTarget.addLegalDialect<ora::OraDialect>();
 
             if (failed(applyFullConversion(module, finalResidualTarget, std::move(finalResidualPatterns))))

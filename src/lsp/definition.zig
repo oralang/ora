@@ -266,6 +266,12 @@ const Resolver = struct {
                             if (try self.visitExpr(range_pattern.start)) return true;
                             if (try self.visitExpr(range_pattern.end)) return true;
                         },
+                        .NamedError => |named_error| {
+                            if (try self.visitExpr(named_error.callee)) return true;
+                            for (named_error.bindings) |pattern_id| {
+                                if (self.matchPatternDeclaration(pattern_id)) return true;
+                            }
+                        },
                         .Ok, .Err => |pattern_id| if (self.matchPatternDeclaration(pattern_id)) return true,
                         .Else => {},
                     }
@@ -369,6 +375,12 @@ const Resolver = struct {
                         .Range => |range_pattern| {
                             if (try self.visitExpr(range_pattern.start)) return true;
                             if (try self.visitExpr(range_pattern.end)) return true;
+                        },
+                        .NamedError => |named_error| {
+                            if (try self.visitExpr(named_error.callee)) return true;
+                            for (named_error.bindings) |pattern_id| {
+                                if (self.matchPatternDeclaration(pattern_id)) return true;
+                            }
                         },
                         .Ok, .Err => |pattern_id| if (self.matchPatternDeclaration(pattern_id)) return true,
                         .Else => {},

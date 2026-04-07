@@ -259,6 +259,79 @@ LogicalResult ConvertTupleExtractOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult LateLowerTupleExtractOp::matchAndRewrite(
+    ora::TupleExtractOp op,
+    PatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value basePtr = op.getTupleValue();
+    if (llvm::isa<sir::U256Type>(basePtr.getType()))
+    {
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    }
+    else if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (castOp.getNumOperands() == 1)
+        {
+            Value src = castOp.getOperand(0);
+            if (llvm::isa<sir::PtrType>(src.getType()))
+            {
+                basePtr = src;
+            }
+            else if (llvm::isa<sir::U256Type>(src.getType()))
+            {
+                basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+            }
+        }
+    }
+
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        return failure();
+
+    Value slotPtr = basePtr;
+    const uint64_t fieldIndex = static_cast<uint64_t>(op.getIndex());
+    if (fieldIndex != 0)
+    {
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL));
+        slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
+    Type resultType = op.getResult().getType();
+    if (typeConverter)
+    {
+        if (Type converted = typeConverter->convertType(resultType))
+            resultType = converted;
+    }
+
+    Value loaded = rewriter.create<sir::LoadOp>(loc, u256Type, slotPtr);
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, loaded);
+        return success();
+    }
+    if (llvm::isa<mlir::IntegerType>(resultType))
+    {
+        rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+    if (llvm::isa<sir::PtrType>(resultType))
+    {
+        rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+
+    rewriter.replaceOpWithNewOp<mlir::UnrealizedConversionCastOp>(op, resultType, loaded);
+    return success();
+}
+
 LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     ora::StructFieldExtractOp op,
     typename ora::StructFieldExtractOp::Adaptor adaptor,

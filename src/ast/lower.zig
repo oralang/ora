@@ -489,6 +489,12 @@ const Validator = struct {
                 _ = try self.expectExpr(range_pattern.end, range_pattern.range, "switch range pattern references invalid end expression id");
             },
             .Ok, .Err => |pattern_id| _ = try self.expectPattern(pattern_id, owner_range, "switch match pattern references invalid binding pattern id"),
+            .NamedError => |named_error| {
+                _ = try self.expectExpr(named_error.callee, owner_range, "switch named error pattern references invalid callee expression id");
+                for (named_error.bindings) |pattern_id| {
+                    _ = try self.expectPattern(pattern_id, owner_range, "switch named error pattern references invalid binding pattern id");
+                }
+            },
             .Else => {},
         }
     }

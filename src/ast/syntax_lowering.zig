@@ -851,19 +851,33 @@ pub fn mixin(Builder: type) type {
                 else => return null,
             };
 
-            const binding_node = nthDirectNode(node, 1) orelse return null;
-            if (nthDirectNode(node, 2) != null) return null;
-            if (binding_node.kind() != .NameExpr) return null;
+            var bindings: std.ArrayList(PatternId) = .{};
+            defer bindings.deinit(self.allocator);
 
-            const token = firstDirectToken(binding_node) orelse return null;
-            const binding = try Support.pushPattern(self, .{ .Name = .{
-                .range = binding_node.range(),
-                .name = tokenText(token),
-            } });
+            var arg_index: usize = 1;
+            while (nthDirectNode(node, arg_index)) |binding_node| : (arg_index += 1) {
+                if (binding_node.kind() != .NameExpr) return null;
+                const token = firstDirectToken(binding_node) orelse return null;
+                try bindings.append(self.allocator, try Support.pushPattern(self, .{ .Name = .{
+                    .range = binding_node.range(),
+                    .name = tokenText(token),
+                } }));
+            }
 
-            if (std.mem.eql(u8, ctor_name, "Ok")) return .{ .Ok = binding };
-            if (std.mem.eql(u8, ctor_name, "Err")) return .{ .Err = binding };
-            return null;
+            if (std.mem.eql(u8, ctor_name, "Ok")) {
+                if (bindings.items.len != 1) return null;
+                return .{ .Ok = bindings.items[0] };
+            }
+            if (std.mem.eql(u8, ctor_name, "Err")) {
+                if (bindings.items.len != 1) return null;
+                return .{ .Err = bindings.items[0] };
+            }
+            if (bindings.items.len == 0) return null;
+            return .{ .NamedError = .{
+                .range = node.range(),
+                .callee = callee_expr,
+                .bindings = try self.allocator.dupe(PatternId, bindings.items),
+            } };
         }
 
         fn lowerRangePatternNode(self: *Builder, node: SyntaxNode) !nodes.RangeSwitchPattern {
@@ -2273,7 +2287,7 @@ fn tokenText(token: SyntaxToken) []const u8 {
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

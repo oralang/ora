@@ -93,7 +93,10 @@ namespace
                 return;
             auto params = op->getAttrOfType<mlir::ArrayAttr>("ora.param_types");
             if (!params || params.empty())
+            {
                 matched = true;
+                return;
+            }
         });
         return matched;
     }
@@ -344,6 +347,13 @@ namespace mlir
                                              }
                                              if (auto tupleType = llvm::dyn_cast<ora::TupleType>(input.getType()))
                                              {
+                                                 if (auto castOp = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                                                 {
+                                                     if (castOp.getNumOperands() == 1 && llvm::isa<sir::PtrType>(castOp.getOperand(0).getType()))
+                                                     {
+                                                         return castOp.getOperand(0);
+                                                     }
+                                                 }
                                                  if (auto getError = input.getDefiningOp<ora::ErrorGetErrorOp>())
                                                  {
                                                      if (auto errCast = getError.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
@@ -367,6 +377,35 @@ namespace mlir
                                                              }
                                                          }
                                                      }
+                                                 }
+                                                 if (auto tupleCreate = input.getDefiningOp<ora::TupleCreateOp>())
+                                                 {
+                                                     auto u256Type = sir::U256Type::get(builder.getContext());
+                                                     auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                                     Value size = builder.create<sir::ConstOp>(
+                                                         loc,
+                                                         u256Type,
+                                                         mlir::IntegerAttr::get(
+                                                             ui64Type,
+                                                             static_cast<uint64_t>(tupleCreate.getNumOperands()) * 32ULL));
+                                                     Value ptr = builder.create<sir::MallocOp>(loc, type, size);
+                                                     for (auto [index, element] : llvm::enumerate(tupleCreate.getOperands()))
+                                                     {
+                                                         Value slotPtr = ptr;
+                                                         if (index != 0)
+                                                         {
+                                                             Value offset = builder.create<sir::ConstOp>(
+                                                                 loc,
+                                                                 u256Type,
+                                                                 mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                                                             slotPtr = builder.create<sir::AddPtrOp>(loc, type, ptr, offset);
+                                                         }
+                                                         Value stored = element;
+                                                         if (!llvm::isa<sir::U256Type>(stored.getType()))
+                                                             stored = builder.create<sir::BitcastOp>(loc, u256Type, stored);
+                                                         builder.create<sir::StoreOp>(loc, slotPtr, stored);
+                                                     }
+                                                     return ptr;
                                                  }
                                                  if (tupleType.getElementTypes().size() == 1)
                                                  {
@@ -800,12 +839,15 @@ namespace mlir
                                             }
                                         }
 
-                                        if (enableStructLowering && llvm::isa<ora::StructType>(type))
+                                        if (llvm::isa<ora::StructType>(type))
                                         {
-                                            if (llvm::isa<sir::U256Type>(input.getType()) &&
-                                                isPayloadlessErrorStruct(type, builder.getInsertionBlock() ? builder.getInsertionBlock()->getParentOp() : nullptr))
+                                            if (llvm::isa<sir::U256Type>(input.getType()))
                                             {
                                                 return input;
+                                            }
+                                            if (!enableStructLowering)
+                                            {
+                                                return Value();
                                             }
                                             if (llvm::isa<sir::PtrType>(input.getType()))
                                             {

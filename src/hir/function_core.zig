@@ -2999,11 +2999,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn annotatePatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue) void {
             const name = patternName(self.parent.file, pattern_id) orelse return;
+            if (std.mem.eql(u8, name, "_")) return;
             @This().annotateValueName(self, name, value);
         }
 
         fn annotateLocalValue(self: *FunctionLowerer, local_id: LocalId, value: mlir.MlirValue) void {
             const name = patternName(self.parent.file, local_id) orelse return;
+            if (std.mem.eql(u8, name, "_")) return;
             @This().annotateValueName(self, name, value);
         }
 

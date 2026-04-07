@@ -171,7 +171,7 @@ pub const LocalEnv = struct {
 
     fn bindingRefFromPattern(file: *const ast.AstFile, pattern_id: ast.PatternId) ?BindingRef {
         return switch (file.pattern(pattern_id).*) {
-            .Name => |name| .{ .id = pattern_id, .name = name.name },
+            .Name => |name| if (std.mem.eql(u8, name.name, "_")) null else .{ .id = pattern_id, .name = name.name },
             else => null,
         };
     }

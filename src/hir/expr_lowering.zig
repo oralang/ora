@@ -923,6 +923,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (try @This().lowerResultBuiltinCall(self, expr_id, call, locals)) |value| return value;
             if (call.args.len == 0) {
                 const callee_expr = self.parent.file.expression(call.callee).*;
                 if (callee_expr == .Field) {
@@ -1089,6 +1090,226 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             return appendValueOp(self.block, err_op);
+        }
+
+        fn lowerResultBuiltinCall(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            call: ast.CallExpr,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            const callee_expr = self.parent.file.expression(call.callee).*;
+            if (callee_expr != .Field) return null;
+            const path = try @This().fieldExprPath(self, call.callee);
+            defer self.parent.allocator.free(path);
+
+            if (!std.mem.eql(u8, path, "std.result.is_ok") and
+                !std.mem.eql(u8, path, "std.result.is_err") and
+                !std.mem.eql(u8, path, "std.result.unwrap_or") and
+                !std.mem.eql(u8, path, "std.result.map") and
+                !std.mem.eql(u8, path, "std.result.map_err") and
+                !std.mem.eql(u8, path, "std.result.and_then"))
+            {
+                return null;
+            }
+
+            const loc = self.parent.location(call.range);
+            if (std.mem.eql(u8, path, "std.result.is_ok") or std.mem.eql(u8, path, "std.result.is_err")) {
+                if (call.args.len != 1) return try self.defaultValue(self.parent.lowerExprType(expr_id), call.range);
+                const operand = try self.lowerExpr(call.args[0], locals);
+                const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, operand);
+                if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+                const is_error_value = appendValueOp(self.block, is_error);
+                if (std.mem.eql(u8, path, "std.result.is_err")) return is_error_value;
+
+                const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                const not_op = mlir.oraArithXorIOpCreate(self.parent.context, loc, is_error_value, true_value);
+                if (mlir.oraOperationIsNull(not_op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, not_op);
+            }
+
+            if (call.args.len != 2) return try self.defaultValue(self.parent.lowerExprType(expr_id), call.range);
+            const operand = try self.lowerExpr(call.args[0], locals);
+            const result_type = self.parent.lowerExprType(expr_id);
+            const result_sema_type = self.parent.typecheck.exprType(expr_id);
+            var fallback = try self.lowerExpr(call.args[1], locals);
+            fallback = try self.convertValueForFlow(fallback, result_type, exprRange(self.parent.file, call.args[1]));
+
+            if (std.mem.eql(u8, path, "std.result.map") or
+                std.mem.eql(u8, path, "std.result.map_err") or
+                std.mem.eql(u8, path, "std.result.and_then"))
+            {
+                const callback_item_id = @This().calleeFunctionItemId(self, call.args[1]) orelse
+                    return try self.defaultValue(result_type, call.range);
+                const callback_function = switch (self.parent.file.item(callback_item_id).*) {
+                    .Function => |function| function,
+                    else => return try self.defaultValue(result_type, call.range),
+                };
+                return try @This().lowerResultTransformCall(
+                    self,
+                    call,
+                    locals,
+                    path,
+                    operand,
+                    result_type,
+                    result_sema_type,
+                    callback_item_id,
+                    callback_function,
+                );
+            }
+
+            const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, operand);
+            if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+            const is_error_value = appendValueOp(self.block, is_error);
+
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, is_error_value, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{fallback});
+
+            const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
+            if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+            appendOp(else_block, unwrap);
+            try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap, 0)});
+
+            return mlir.oraOperationGetResult(if_op, 0);
+        }
+
+        fn lowerResultTransformCall(
+            self: *FunctionLowerer,
+            call: ast.CallExpr,
+            locals: *LocalEnv,
+            path: []const u8,
+            operand: mlir.MlirValue,
+            result_type: mlir.MlirType,
+            result_sema_type: sema.Type,
+            callback_item_id: ast.ItemId,
+            callback_function: ast.FunctionItem,
+        ) anyerror!mlir.MlirValue {
+            _ = locals;
+            const loc = self.parent.location(call.range);
+            const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, operand);
+            if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+            const is_error_value = appendValueOp(self.block, is_error);
+
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, is_error_value, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            const callback_name = callback_function.name;
+            const callback_type = self.parent.typecheck.item_types[callback_item_id.index()];
+
+            if (std.mem.eql(u8, path, "std.result.map")) {
+                const error_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.error_types[0], exprRange(self.parent.file, call.args[0]));
+                const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
+                if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
+                appendOp(then_block, raw_error);
+                const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(raw_error, 0), result_type);
+                if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                    mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                appendOp(then_block, err_op);
+                try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(err_op, 0)});
+
+                const payload_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.payload_type.*, exprRange(self.parent.file, call.args[0]));
+                const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, payload_type);
+                if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+                appendOp(else_block, unwrap);
+                const mapped = try @This().lowerDirectFunctionItemCall(self, else_block, callback_name, callback_type, call.range, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap, 0)});
+                const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, mapped, result_type);
+                if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                    mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                appendOp(else_block, ok_op);
+                try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+                return mlir.oraOperationGetResult(if_op, 0);
+            }
+
+            if (std.mem.eql(u8, path, "std.result.map_err")) {
+                const payload_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.payload_type.*, exprRange(self.parent.file, call.args[0]));
+                try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{blk: {
+                    const error_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.error_types[0], exprRange(self.parent.file, call.args[0]));
+                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
+                    if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
+                    appendOp(then_block, raw_error);
+                    const mapped_error = try @This().lowerDirectFunctionItemCall(self, then_block, callback_name, callback_type, call.range, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(raw_error, 0)});
+                    const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mapped_error, result_type);
+                    if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+                    if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                        mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                    }
+                    appendOp(then_block, err_op);
+                    break :blk mlir.oraOperationGetResult(err_op, 0);
+                }});
+
+                const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, payload_type);
+                if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+                appendOp(else_block, unwrap);
+                const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(unwrap, 0), result_type);
+                if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                    mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                appendOp(else_block, ok_op);
+                try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+                return mlir.oraOperationGetResult(if_op, 0);
+            }
+
+            const error_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.error_types[0], exprRange(self.parent.file, call.args[0]));
+            const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
+            if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
+            appendOp(then_block, raw_error);
+            const err_op = mlir.oraErrorErrOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(raw_error, 0), result_type);
+            if (mlir.oraOperationIsNull(err_op)) return error.MlirOperationCreationFailed;
+            if (self.parent.errorUnionRequiresWideCarrier(result_sema_type)) {
+                mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
+            appendOp(then_block, err_op);
+            try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(err_op, 0)});
+
+            const payload_type = self.parent.lowerSemaType(self.parent.typecheck.exprType(call.args[0]).error_union.payload_type.*, exprRange(self.parent.file, call.args[0]));
+            const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, payload_type);
+            if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+            appendOp(else_block, unwrap);
+            const chained = try @This().lowerDirectFunctionItemCall(self, else_block, callback_name, callback_type, call.range, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap, 0)});
+            try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{chained});
+            return mlir.oraOperationGetResult(if_op, 0);
+        }
+
+        fn lowerDirectFunctionItemCall(
+            self: *FunctionLowerer,
+            block: mlir.MlirBlock,
+            callee_name: []const u8,
+            callee_type: sema.Type,
+            range: source.TextRange,
+            loc: mlir.MlirLocation,
+            args: []const mlir.MlirValue,
+        ) anyerror!mlir.MlirValue {
+            const return_types = callee_type.function.return_types;
+            const result_type = self.parent.lowerSemaType(return_types[0], range);
+            var result_types: [1]mlir.MlirType = .{result_type};
+            const op = mlir.oraFuncCallOpCreate(
+                self.parent.context,
+                loc,
+                strRef(callee_name),
+                if (args.len == 0) null else args.ptr,
+                args.len,
+                &result_types,
+                1,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(block, op);
         }
 
         const ResolvedExternProxyMethodCall = struct {

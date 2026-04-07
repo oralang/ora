@@ -2504,7 +2504,7 @@ const Parser = struct {
             try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Literal, &literal) });
             return try self.finishNode(SyntaxKind.IndexExpr, children.items);
         }
-        if (self.at(.Identifier) or self.at(.Error) or self.at(.From) or self.at(.To)) {
+        if (tokenIsIdentifierLike(self.current().kind)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name after '.'");
@@ -2684,7 +2684,7 @@ const Parser = struct {
 
     fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
             else => false,
         };
     }

@@ -122,6 +122,7 @@ fn collectSwitchCarriedLocalsFromEnv(
         var arm_env = try current_env.clone();
         switch (arm.pattern) {
             .Ok, .Err => |pattern_id| try arm_env.bindPatternWithoutValue(file, pattern_id),
+            .NamedError => |named_error| for (named_error.bindings) |pattern_id| try arm_env.bindPatternWithoutValue(file, pattern_id),
             else => {},
         }
         if (!try collectCarriedLocalsInEnv(allocator, file, arm.body, outer_env, &arm_env, carried_locals, carried_seen)) {

@@ -56,6 +56,20 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class LateLowerTupleExtractOp : public OpRewritePattern<ora::TupleExtractOp>
+        {
+        public:
+            LateLowerTupleExtractOp(const TypeConverter *typeConverter, MLIRContext *context, PatternBenefit benefit = 1)
+                : OpRewritePattern<ora::TupleExtractOp>(context, benefit), typeConverter(typeConverter) {}
+
+            LogicalResult matchAndRewrite(
+                ora::TupleExtractOp op,
+                PatternRewriter &rewriter) const override;
+
+        private:
+            const TypeConverter *typeConverter;
+        };
+
         class ConvertStructFieldExtractOp : public OpConversionPattern<ora::StructFieldExtractOp>
         {
         public:

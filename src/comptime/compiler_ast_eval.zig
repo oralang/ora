@@ -226,6 +226,7 @@ const ConstEvaluator = struct {
                                 _ = self.evalExpr(range_pattern.start) catch null;
                                 _ = self.evalExpr(range_pattern.end) catch null;
                             },
+                            .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
                             .Ok, .Err => {},
                             .Else => {},
                         }
@@ -313,6 +314,7 @@ const ConstEvaluator = struct {
                                 _ = try self.evalExprImpl(range_pattern.start, use_cache);
                                 _ = try self.evalExprImpl(range_pattern.end, use_cache);
                             },
+                            .NamedError => |named_error| _ = try self.evalExprImpl(named_error.callee, use_cache),
                             .Ok, .Err => {},
                             .Else => {},
                         }
@@ -329,6 +331,7 @@ const ConstEvaluator = struct {
                             _ = try self.evalExprImpl(range_pattern.start, use_cache);
                             _ = try self.evalExprImpl(range_pattern.end, use_cache);
                         },
+                        .NamedError => |named_error| _ = try self.evalExprImpl(named_error.callee, use_cache),
                         .Ok, .Err => {},
                         .Else => {},
                     }
@@ -1213,6 +1216,7 @@ const ConstEvaluator = struct {
     fn patternMatches(self: *ConstEvaluator, condition: ConstValue, pattern: ast.SwitchPattern) bool {
         return switch (pattern) {
             .Expr => |expr_id| if (self.evalExpr(expr_id) catch null) |value| constEquals(condition, value) else false,
+            .NamedError => false,
             .Range => |range_pattern| blk: {
                 const start = (self.evalExpr(range_pattern.start) catch null) orelse break :blk false;
                 const finish = (self.evalExpr(range_pattern.end) catch null) orelse break :blk false;
@@ -1624,6 +1628,7 @@ const ConstEvaluator = struct {
                             self.exprStage(range_pattern.start),
                             self.exprStage(range_pattern.end),
                         }),
+                        .NamedError => .runtime_only,
                         .Ok, .Err => .runtime_only,
                         .Else => .comptime_ok,
                     };
@@ -1695,6 +1700,7 @@ const ConstEvaluator = struct {
                             self.exprStage(range_pattern.start),
                             self.exprStage(range_pattern.end),
                         }),
+                        .NamedError => .runtime_only,
                         .Ok, .Err => .runtime_only,
                         .Else => .comptime_ok,
                     };
@@ -2767,6 +2773,7 @@ const ConstEvaluator = struct {
                             _ = self.evalExpr(range_pattern.start) catch null;
                             _ = self.evalExpr(range_pattern.end) catch null;
                         },
+                        .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
                         .Ok, .Err => {},
                         .Else => {},
                     }

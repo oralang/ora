@@ -405,7 +405,14 @@ pub const SwitchPattern = union(enum) {
     Range: RangeSwitchPattern,
     Ok: PatternId,
     Err: PatternId,
+    NamedError: NamedErrorSwitchPattern,
     Else: source.TextRange,
+};
+
+pub const NamedErrorSwitchPattern = struct {
+    range: source.TextRange,
+    callee: ExprId,
+    bindings: []const PatternId,
 };
 
 pub const RangeSwitchPattern = struct {
