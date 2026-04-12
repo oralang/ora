@@ -6479,7 +6479,7 @@ fn buildGuardOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const cond_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
     const cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, cond_attr);
     const cond = mlir.oraOperationGetResult(cond_op, 0);
-    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("guard failed: cond"));
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("guard violation path: cond"));
     mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_type"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard")));
     mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard_clause")));
     mlir.oraOperationSetAttributeByName(assert_op, testStringRef("ora.guard_id"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("guard:test:clause")));
@@ -7307,7 +7307,6 @@ test "invariant-post query conjoins loop invariants from same loop" {
         if (q.kind != .LoopInvariantPost) continue;
         found_post_query = true;
         pass.solver.reset();
-        std.debug.print("\n[loop-invariant-post-smt]\n{s}\n[/loop-invariant-post-smt]\n", .{q.smtlib_z});
         try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
@@ -8328,7 +8327,6 @@ test "contract invariants from loop body obligations use loop constraints" {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        std.debug.print("\n[contract-invariant-smt]\n{s}\n[/contract-invariant-smt]\n", .{q.smtlib_z});
         try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
@@ -8363,7 +8361,6 @@ test "contract invariants inside ora.conditional_return use path constraints" {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        std.debug.print("\n[conditional-return-map-store-smt]\n{s}\n[/conditional-return-map-store-smt]\n", .{q.smtlib_z});
         try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
@@ -8398,7 +8395,6 @@ test "contract invariants after ora.conditional_return use fallthrough path cons
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        std.debug.print("\n[conditional-return-map-get-div-smt]\n{s}\n[/conditional-return-map-get-div-smt]\n", .{q.smtlib_z});
         try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);

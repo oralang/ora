@@ -328,7 +328,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const start: usize = @intCast(range.start);
             const end: usize = @intCast(range.end);
             const expr_text = if (end <= source_text.len and start <= end) source_text[start..end] else "guard";
-            return std.fmt.allocPrint(self.parent.allocator, "guard failed: {s}", .{expr_text});
+            return std.fmt.allocPrint(self.parent.allocator, "guard violation path: {s}", .{expr_text});
         }
 
         fn insertParameterRefinementGuards(self: *FunctionLowerer, function: ast.FunctionItem) anyerror!void {

@@ -8,6 +8,7 @@ Usage: python3 scripts/test_ora_features.py [--output docs/ORA_FEATURE_TEST_REPO
 
 import subprocess
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 import argparse
@@ -125,7 +126,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     # Exclude false positives like "ErrorCode" in enum names or "error" in MLIR attributes
     error_patterns = [
         "error:", "Error:", "ERROR:",
-        "failed to", "Failed to", "FAILED",
+        "failed to", "Failed to",
         "syntax error", "Syntax error",
         "parse error", "Parse error",
         "type error", "Type error",
@@ -184,13 +185,32 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     # Extract MLIR output (last 100 lines)
     mlir_output = mlir_stdout.split("\n")[-100:] if mlir_stdout else []
     
+    error_output = None
+    if has_error:
+        stderr_lines = [line for line in stderr.splitlines() if line.strip()]
+        stdout_lines = [line for line in stdout.splitlines() if line.strip()]
+        parts = []
+        if timed_out:
+            parts.append(f"timeout: {timeout_s}s")
+        if return_code is not None:
+            parts.append(f"exit_code: {return_code}")
+        if stderr_lines:
+            tail = "\n".join(stderr_lines[-40:])
+            parts.append(f"stderr (tail):\n{tail}")
+        elif stdout_lines:
+            tail = "\n".join(stdout_lines[-40:])
+            parts.append(f"stdout (tail):\n{tail}")
+        error_output = "\n\n".join(parts) if parts else None
+
     return {
         "file": str(file_path),
         "status": status,
-        "error": stderr[:500] if has_error else None,
+        "error": error_output,
         "mlir": "\n".join(mlir_output) if not has_error else None,
         "stdout": stdout,
         "stderr": stderr,
+        "return_code": return_code,
+        "timed_out": timed_out,
         "expected_failure": expected_failure
     }
 
@@ -407,18 +427,23 @@ Examples:
   # Test with custom compiler and timeout
   python3 scripts/test_ora_features.py --subdir type-system --compiler ./zig-out/bin/ora --timeout 120
 
+  # Test one file and print exactly what the script captured
+  python3 scripts/test_ora_features.py --file ora-example/apps/erc20_bitfield_comptime_generics.ora
+
   # List available subdirectories
   python3 scripts/test_ora_features.py --list-subdirs
         """
     )
     parser.add_argument("--output", default="docs/ORA_FEATURE_TEST_REPORT.md",
                        help="Output file for the test report")
-    parser.add_argument("--compiler", default="./zig-out/bin/ora",
+    parser.add_argument("--compiler", default=os.environ.get("ora", "./zig-out/bin/ora"),
                        help="Path to the Ora compiler binary")
     parser.add_argument("--timeout", type=int, default=30,
                        help="Per-file timeout in seconds")
     parser.add_argument("--base-dir", default="ora-example",
                        help="Base directory containing .ora files")
+    parser.add_argument("--file",
+                       help="Test exactly one .ora file and print captured stdout/stderr")
     parser.add_argument("--subdir", action="append", dest="subdirs",
                        metavar="SUBDIR",
                        help="Test only files in specified subdirectory (use --subdir SUBDIR or --subdir=SUBDIR, can be used multiple times)")
@@ -435,6 +460,22 @@ Examples:
         subdirs = list_subdirectories(args.base_dir)
         for subdir, count in sorted(subdirs.items()):
             print(f"  {subdir}/ ({count} files)")
+        return
+
+    if args.file:
+        result = test_file(args.file, args.compiler, args.timeout)
+        print(f"File: {result['file']}")
+        print(f"Status: {result['status']}")
+        print(f"Return code: {result['return_code']}")
+        print(f"Timed out: {result['timed_out']}")
+        print("\n[stdout]")
+        print(result["stdout"], end="" if result["stdout"].endswith("\n") else "\n")
+        print("[/stdout]")
+        print("\n[stderr]")
+        print(result["stderr"], end="" if result["stderr"].endswith("\n") else "\n")
+        print("[/stderr]")
+        if result["status"].startswith("❌"):
+            sys.exit(1)
         return
     
     print(f"Finding .ora files in {args.base_dir}...")

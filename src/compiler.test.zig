@@ -4212,7 +4212,7 @@ test "compiler does not duplicate guard lowering when function already starts wi
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard failed: amount < 10\""));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard violation path: amount < 10\""));
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
