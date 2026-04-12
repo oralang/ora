@@ -86,7 +86,12 @@ fn resolveImportTargetModuleId(
     inputs: []const ModuleGraphInput,
     file_paths: *const std.StringHashMap(source.ModuleId),
 ) !?source.ModuleId {
-    if (std.mem.eql(u8, import_path, "std")) return null;
+    if (std.mem.eql(u8, import_path, "std")) {
+        for (inputs) |input| {
+            if (std.mem.eql(u8, input.path, "std")) return input.module_id;
+        }
+        return null;
+    }
 
     if (std.mem.startsWith(u8, import_path, "./") or std.mem.startsWith(u8, import_path, "../")) {
         const importer_dir = std.fs.path.dirname(importer_file_path) orelse ".";

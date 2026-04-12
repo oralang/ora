@@ -380,6 +380,41 @@ def Ora_BytesConstantOp : Ora_PureOp<"bytes.constant"> {
   let assemblyFormat = "$value attr-dict `:` type($result)";
 }
 
+def Ora_LengthOp : Ora_PureOp<"length"> {
+  let summary = "Length of a dynamic string or bytes value";
+  let description = [{
+    Reads the runtime length header of an Ora `string` or `bytes` value.
+
+    Example:
+    ```mlir
+    %len = ora.length %value : !ora.bytes -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
+def Ora_ByteAtOp : Ora_PureOp<"byte_at"> {
+  let summary = "Byte access for dynamic string or bytes";
+  let description = [{
+    Reads the byte at the given runtime index from an Ora `string` or `bytes`
+    value. The result is a raw integer byte value.
+
+    Example:
+    ```mlir
+    %byte = ora.byte_at %value, %index : (!ora.bytes, i256) -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value, AnyType:$index);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value `,` $index attr-dict `:` type($value) `,` type($index) `->` type($result)";
+}
+
 
 def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
   let summary = "Hexadecimal constant";

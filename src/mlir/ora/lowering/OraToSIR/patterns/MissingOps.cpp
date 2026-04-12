@@ -236,7 +236,9 @@ LogicalResult ConvertMLoad8Op::matchAndRewrite(
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
     Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
-    Value result = rewriter.create<sir::Load8Op>(loc, u256Type, base, offset);
+    Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    Value result = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
     rewriter.replaceOp(op, result);
     return success();
 }
@@ -257,7 +259,9 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
     Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
     Value val = ensureU256(rewriter, loc, adaptor.getValue());
-    rewriter.create<sir::Store8Op>(loc, base, offset, val);
+    Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
+    Value zero = rewriter.create<sir::ConstOp>(loc, val.getType(), mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    rewriter.create<sir::Store8Op>(loc, addr, zero, val);
     rewriter.eraseOp(op);
     return success();
 }

@@ -2091,7 +2091,27 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.Cons
     return switch (value) {
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
+        .address => |address| try std.fmt.allocPrint(allocator, "0x{x:0>40}", .{address}),
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+        .tuple => |elements| blk: {
+            var parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (parts.items) |part| allocator.free(part);
+                parts.deinit(allocator);
+            }
+            for (elements) |element| {
+                try parts.append(allocator, try formatConstDebugValue(allocator, element));
+            }
+            var out = std.ArrayList(u8){};
+            errdefer out.deinit(allocator);
+            try out.append(allocator, '(');
+            for (parts.items, 0..) |part, index| {
+                if (index != 0) try out.appendSlice(allocator, ", ");
+                try out.appendSlice(allocator, part);
+            }
+            try out.append(allocator, ')');
+            break :blk try out.toOwnedSlice(allocator);
+        },
     };
 }
 

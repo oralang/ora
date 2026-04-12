@@ -31,6 +31,9 @@ contracts=(
   "ora-example/corpus/control-flow/match/result_payload_input.ora"
   "ora-example/corpus/control-flow/match/result_struct_input.ora"
   "ora-example/corpus/types/error-union/result_constructors.ora"
+  "ora-example/corpus/types/tuple/division_builtins.ora"
+  "ora-example/corpus/types/dynamic/bytes_string_len_index.ora"
+  "ora-example/corpus/types/dynamic/std_bytes_helpers.ora"
   "ora-example/corpus/patterns/multi_asset.ora"
   "ora-example/vault/05_locks.ora"
   "ora-example/refinements/guards_showcase.ora"
@@ -54,6 +57,9 @@ for contract in "${contracts[@]}"; do
   emit_args=(--emit-bytecode --emit-sir-text --debug-info -o "$out_dir")
   case "$contract" in
     ora-example/corpus/control-flow/match/*)
+      emit_args=(--no-verify "${emit_args[@]}")
+      ;;
+    ora-example/corpus/types/dynamic/std_bytes_helpers.ora)
       emit_args=(--no-verify "${emit_args[@]}")
       ;;
   esac

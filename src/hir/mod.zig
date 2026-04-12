@@ -14,6 +14,17 @@ const support = @import("support.zig");
 
 pub const abi = @import("abi.zig");
 
+pub const ModuleQuery = struct {
+    context: *anyopaque,
+    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
+    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult,
+    resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult,
+    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult,
+    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult,
+    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
+    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
+};
+
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
 
@@ -106,6 +117,7 @@ pub fn lowerModule(
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    module_query: ?ModuleQuery,
 ) !LoweringResult {
     var result = LoweringResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -130,12 +142,14 @@ pub fn lowerModule(
     var lowerer = Lowerer{
         .allocator = result.arena.allocator(),
         .context = result.context,
+        .module_id = module_id,
         .sources = sources,
         .file = file,
         .item_index = item_index,
         .resolution = resolution,
         .const_eval = const_eval,
         .typecheck = typecheck,
+        .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
@@ -189,12 +203,14 @@ const Lowerer = struct {
 
     allocator: std.mem.Allocator,
     context: mlir.MlirContext,
+    module_id: source.ModuleId,
     sources: *const source.SourceStore,
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    module_query: ?ModuleQuery,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
@@ -227,6 +243,7 @@ const Lowerer = struct {
     pub const appendItemHandle = ModuleLowering.appendItemHandle;
     pub const enclosingContractForItem = ModuleLowering.enclosingContractForItem;
     pub const ensureMonomorphizedFunction = ModuleLowering.ensureMonomorphizedFunction;
+    pub const ensureImportedFunctionSymbol = ModuleLowering.ensureImportedFunctionSymbol;
     pub const ensureLoweredImplMethod = ModuleLowering.ensureLoweredImplMethod;
     pub const attachBitfieldParamMetadata = ModuleLowering.attachBitfieldParamMetadata;
     pub const attachBitfieldParamMetadataForType = ModuleLowering.attachBitfieldParamMetadataForType;
@@ -706,6 +723,7 @@ const Lowerer = struct {
     }
 
     pub fn callSuppliesMethodReceiver(self: *const Lowerer, expr_id: ast.ExprId) bool {
+        if (expr_id.index() >= self.file.expressions.len) return false;
         return switch (self.file.expression(expr_id).*) {
             .Field => true,
             .Group => |group| self.callSuppliesMethodReceiver(group.expr),
@@ -801,31 +819,61 @@ const Lowerer = struct {
         arg_type: sema.Type,
         bindings: []GenericTypeBinding,
     ) !void {
-        const type_expr_node = self.file.typeExpr(param.type_expr).*;
-        const name = switch (type_expr_node) {
-            .Path => |path| path.name,
-            else => return,
-        };
+        try self.inferHirBindingsFromTypeExpr(function, generic_count, param.type_expr, arg_type, bindings);
+    }
 
-        for (function.parameters[0..generic_count], 0..) |generic_param, index| {
-            const param_name = self.patternName(generic_param.pattern) orelse continue;
-            if (!std.mem.eql(u8, name, param_name)) continue;
-            if (!self.isGenericTypeParameter(generic_param)) continue;
+    fn inferHirBindingsFromTypeExpr(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        type_expr_id: ast.TypeExprId,
+        arg_type: sema.Type,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| {
+                const name = path.name;
+                for (function.parameters[0..generic_count], 0..) |generic_param, index| {
+                    const param_name = self.patternName(generic_param.pattern) orelse continue;
+                    if (!std.mem.eql(u8, name, param_name)) continue;
+                    if (!self.isGenericTypeParameter(generic_param)) continue;
 
-            if (bindings[index].mangle_name.len > 0) {
-                const existing = hirGenericBindingType(bindings[index]) orelse return;
-                const existing_mangle = try self.typeMangleName(existing);
-                const arg_mangle = try self.typeMangleName(arg_type);
-                if (!std.mem.eql(u8, existing_mangle, arg_mangle)) {
-                    bindings[index].mangle_name = "";
-                    bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                    if (bindings[index].mangle_name.len > 0) {
+                        const existing = hirGenericBindingType(bindings[index]) orelse return;
+                        if (shouldDeferLiteralMangleBinding(existing, arg_type)) return;
+                        const existing_mangle = try self.typeMangleName(existing);
+                        const arg_mangle = try self.typeMangleName(arg_type);
+                        if (!std.mem.eql(u8, existing_mangle, arg_mangle)) {
+                            bindings[index].mangle_name = "";
+                            bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                        }
+                        return;
+                    }
+
+                    bindings[index].value = .{ .ty = arg_type };
+                    bindings[index].mangle_name = try self.typeMangleName(arg_type);
+                    return;
                 }
-                return;
-            }
-
-            bindings[index].value = .{ .ty = arg_type };
-            bindings[index].mangle_name = try self.typeMangleName(arg_type);
-            return;
+            },
+            .Generic => |generic| {
+                const base_name = std.mem.trim(u8, generic.name, " \t\n\r");
+                if (std.mem.eql(u8, base_name, "Result") and generic.args.len == 2 and arg_type.kind() == .error_union) {
+                    if (generic.args[0] == .Type) {
+                        try self.inferHirBindingsFromTypeExpr(function, generic_count, generic.args[0].Type, arg_type.error_union.payload_type.*, bindings);
+                    }
+                    if (generic.args[1] == .Type and arg_type.error_union.error_types.len == 1) {
+                        try self.inferHirBindingsFromTypeExpr(function, generic_count, generic.args[1].Type, arg_type.error_union.error_types[0], bindings);
+                    }
+                }
+            },
+            .ErrorUnion => |error_union| {
+                if (arg_type.kind() != .error_union) return;
+                try self.inferHirBindingsFromTypeExpr(function, generic_count, error_union.payload, arg_type.error_union.payload_type.*, bindings);
+                if (error_union.errors.len == 1 and arg_type.error_union.error_types.len == 1) {
+                    try self.inferHirBindingsFromTypeExpr(function, generic_count, error_union.errors[0], arg_type.error_union.error_types[0], bindings);
+                }
+            },
+            else => {},
         }
     }
 
@@ -836,7 +884,12 @@ const Lowerer = struct {
         };
     }
 
-    fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
+    fn shouldDeferLiteralMangleBinding(existing: sema.Type, candidate: sema.Type) bool {
+        if (existing.kind() != .integer or candidate.kind() != .integer) return false;
+        return candidate.integer.spelling == null;
+    }
+
+    pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
         var name = std.ArrayList(u8){};
         try appendSemaTypeMangleName(self.allocator, &name, ty);
         return name.toOwnedSlice(self.allocator);
@@ -981,6 +1034,13 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             else => lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
         return mlir.oraMapTypeGet(lowerer.context, key_type, value_type);
+    }
+    if (std.mem.eql(u8, generic.name, "Result") and generic.args.len == 2) {
+        const payload_type = switch (generic.args[0]) {
+            .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
+            else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
+        };
+        return mlir.oraErrorUnionTypeGet(lowerer.context, payload_type);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
         const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;

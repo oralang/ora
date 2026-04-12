@@ -638,7 +638,7 @@ const Parser = struct {
         }
         if (self.at(.Const)) {
             try children.append(self.allocator, .{ .token = self.bump() });
-            if (self.at(.Identifier)) {
+            if (tokenIsIdentifierLike(self.current().kind)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected import alias");
@@ -2171,6 +2171,10 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (self.at(.Dot) and isIdentifierLike(self.peekKind(1))) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         if (self.at(.Less)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.typeAtGreaterToken()) {
@@ -3005,6 +3009,13 @@ fn binaryOpPrecedence(kind: green.TokenKind) ?u8 {
 fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
     return switch (kind) {
         .StarStar, .StarStarPercent => true,
+        else => false,
+    };
+}
+
+fn isIdentifierLike(kind: green.TokenKind) bool {
+    return switch (kind) {
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

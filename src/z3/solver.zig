@@ -75,10 +75,31 @@ pub const Solver = struct {
         try self.context.checkNoError();
     }
 
-    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) !void {
+    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8, decl_symbols: []const c.Z3_symbol, decls: []const c.Z3_func_decl) !void {
         self.context.clearLastError();
-        c.Z3_solver_from_string(self.context.ctx, self.solver, smtlib.ptr);
+        const parsed = c.Z3_parse_smtlib2_string(
+            self.context.ctx,
+            smtlib.ptr,
+            0,
+            null,
+            null,
+            @intCast(decl_symbols.len),
+            if (decl_symbols.len == 0) null else decl_symbols.ptr,
+            if (decls.len == 0) null else decls.ptr,
+        ) orelse return error.Z3ApiError;
+        c.Z3_ast_vector_inc_ref(self.context.ctx, parsed);
+        defer c.Z3_ast_vector_dec_ref(self.context.ctx, parsed);
+        const count = c.Z3_ast_vector_size(self.context.ctx, parsed);
+        if (count == 0 and smtlib.len != 0) {
+            return error.Z3ApiError;
+        }
         try self.context.checkNoError();
+        var idx: u32 = 0;
+        while (idx < count) : (idx += 1) {
+            const formula = c.Z3_ast_vector_get(self.context.ctx, parsed, idx);
+            c.Z3_solver_assert(self.context.ctx, self.solver, formula);
+            try self.context.checkNoError();
+        }
     }
 
     pub fn push(self: *Solver) void {
@@ -135,7 +156,7 @@ test "loadFromSmtlib rejects malformed smtlib" {
     var solver = try Solver.init(&context, testing.allocator);
     defer solver.deinit();
 
-    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert"));
+    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert", &.{}, &.{}));
 }
 
 test "setTimeoutMs configures solver without Z3 error" {

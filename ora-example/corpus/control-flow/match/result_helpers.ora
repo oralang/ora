@@ -1,24 +1,7 @@
+comptime const std = @import("std");
+
 error Failure();
-error Denied();
 pub contract ResultHelpers {
-    fn bump(value: u256) -> u256 {
-        if (value == std.constants.U256_MAX) {
-            return value;
-        }
-        return value + 1;
-    }
-
-    fn to_denied(err: Failure) -> Denied {
-        return Denied();
-    }
-
-    fn require_small(value: u256) -> Result<u256, Failure> {
-        if (value < 100) {
-            return Ok(value + 1);
-        }
-        return Err(Failure());
-    }
-
     fn choose_u256(flag: bool, value: u256) -> Result<u256, Failure> {
         if (flag) {
             return Ok(value);
@@ -47,20 +30,5 @@ pub contract ResultHelpers {
     pub fn bytes_or_self(flag: bool, value: bytes) -> bytes {
         let maybe = choose_bytes(flag, value);
         return std.result.unwrap_or(maybe, value);
-    }
-
-    pub fn mapped(flag: bool, value: u256) -> Result<u256, Failure> {
-        let maybe = choose_u256(flag, value);
-        return std.result.map(maybe, bump);
-    }
-
-    pub fn chained(flag: bool, value: u256) -> Result<u256, Failure> {
-        let maybe = choose_u256(flag, value);
-        return std.result.and_then(maybe, require_small);
-    }
-
-    pub fn mapped_error(flag: bool, value: u256) -> Result<u256, Denied> {
-        let maybe = choose_u256(flag, value);
-        return std.result.map_err(maybe, to_denied);
     }
 }

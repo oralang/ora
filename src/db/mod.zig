@@ -272,12 +272,21 @@ pub const CompilerDb = struct {
         errdefer self.allocator.destroy(result);
         result.* = try sema.typeCheck(
             self.allocator,
+            module_id,
             module.file_id,
             try self.astFile(module.file_id),
             try self.itemIndex(module_id),
             try self.resolveNames(module_id),
             try self.constEval(module_id),
             key,
+            .{
+                .context = self,
+                .ast_file = astFileForComptime,
+                .item_index = itemIndexForComptime,
+                .module_typecheck = moduleTypeCheckForComptime,
+                .lookup_item = lookupItemForComptime,
+                .resolve_import_alias = resolveImportAliasForComptime,
+            },
         );
         errdefer result.deinit();
         if (self.consteval_tainted_slots.items[module_id.index()]) {
@@ -337,6 +346,7 @@ pub const CompilerDb = struct {
                 .context = self,
                 .ensure_typecheck = ensureTypeCheckedForComptime,
                 .module_typecheck = moduleTypeCheckForComptime,
+                .const_eval = constEvalForComptime,
                 .ast_file = astFileForComptime,
                 .lookup_item = lookupItemForComptime,
                 .resolve_import_alias = resolveImportAliasForComptime,
@@ -421,7 +431,16 @@ pub const CompilerDb = struct {
             compilerPhaseLog("lower-to-hir {s} consteval", .{module.name});
             const result = try self.allocator.create(hir.LoweringResult);
             errdefer self.allocator.destroy(result);
-            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck);
+            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck, .{
+                .context = self,
+                .ast_file = astFileForComptime,
+                .item_index = itemIndexForComptime,
+                .resolution = resolveNamesForComptime,
+                .module_typecheck = moduleTypeCheckForComptime,
+                .const_eval = constEvalForComptime,
+                .lookup_item = lookupItemForComptime,
+                .resolve_import_alias = resolveImportAliasForComptime,
+            });
             compilerPhaseLog("lower-to-hir {s} done", .{module.name});
             slot.* = result;
         }
@@ -534,6 +553,7 @@ pub const CompilerDb = struct {
         const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
         const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
         const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
+        const call_resolutions = try arena_allocator.alloc(?sema.ResolvedCall, ast_file.expressions.len);
         const expr_effects = try arena_allocator.alloc(sema.Effect, ast_file.expressions.len);
         const body_types = try arena_allocator.alloc(sema.Type, ast_file.bodies.len);
 
@@ -542,6 +562,7 @@ pub const CompilerDb = struct {
         for (item_effects) |*effect| effect.* = .pure;
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
+        @memset(call_resolutions, null);
         for (expr_effects) |*effect| effect.* = .pure;
         for (body_types) |*body_type| body_type.* = .{ .unknown = {} };
 
@@ -553,6 +574,7 @@ pub const CompilerDb = struct {
             .item_effects = item_effects,
             .pattern_types = pattern_types,
             .expr_types = expr_types,
+            .call_resolutions = call_resolutions,
             .expr_effects = expr_effects,
             .body_types = body_types,
             .instantiated_structs = &.{},
@@ -604,9 +626,24 @@ fn moduleTypeCheckForComptime(context: *anyopaque, module_id: source.ModuleId) a
     return self.moduleTypeCheck(module_id);
 }
 
+fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.constEval(module_id);
+}
+
 fn astFileForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.astFile(self.sources.module(module_id).file_id);
+}
+
+fn itemIndexForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.itemIndex(module_id);
+}
+
+fn resolveNamesForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.resolveNames(module_id);
 }
 
 fn lookupItemForComptime(context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId {

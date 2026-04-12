@@ -1461,6 +1461,14 @@ extern "C"
         MlirValue value,
         MlirType resultType);
 
+    /// Create an ora.byte_at operation
+    MLIR_CAPI_EXPORTED MlirOperation oraByteAtOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirValue index,
+        MlirType resultType);
+
     /// Create an ora.expression_capture operation
     MLIR_CAPI_EXPORTED MlirOperation oraExpressionCaptureOpCreate(
         MlirContext ctx,

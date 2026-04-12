@@ -2911,13 +2911,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerLoopInvariants(self: *FunctionLowerer, invariants: []const ast.ExprId, locals: *LocalEnv) anyerror!void {
             for (invariants) |expr_id| {
-                const value = try self.lowerExpr(expr_id, locals);
+                const InvariantInfo = struct {
+                    expr_id: ast.ExprId,
+                    label: ?[]const u8,
+                };
+                const invariant_info: InvariantInfo = switch (self.parent.file.expression(expr_id).*) {
+                    .Call => |call| blk: {
+                        if (call.args.len == 1) {
+                            const label = switch (self.parent.file.expression(call.callee).*) {
+                                .Name => |name| name.name,
+                                else => null,
+                            };
+                            break :blk .{ .expr_id = call.args[0], .label = label };
+                        }
+                        break :blk .{ .expr_id = expr_id, .label = null };
+                    },
+                    else => .{ .expr_id = expr_id, .label = null },
+                };
+                const value = try self.lowerExpr(invariant_info.expr_id, locals);
                 const op = mlir.oraInvariantOpCreate(
                     self.parent.context,
                     self.parent.location(support.exprRange(self.parent.file, expr_id)),
                     value,
                 );
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                if (invariant_info.label) |label| {
+                    mlir.oraOperationSetAttributeByName(op, strRef("ora.label"), namedStringAttr(self.parent.context, "ora.label", label).attribute);
+                }
                 appendOp(self.block, op);
             }
         }

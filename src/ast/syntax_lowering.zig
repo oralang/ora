@@ -739,11 +739,7 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |child_node| {
                         if (child_node.kind() != .InvariantClause) continue;
-                        if (firstDirectExprChild(child_node)) |expr_node| {
-                            try invariants.append(self.allocator, try Lowering.lowerExpressionNode(self, expr_node));
-                        } else {
-                            try invariants.append(self.allocator, try Lowering.malformedExpr(self, child_node, "missing invariant expression"));
-                        }
+                        try invariants.append(self.allocator, try Lowering.lowerInvariantExprNode(self, child_node));
                     },
                 }
             }
@@ -1639,15 +1635,15 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerPathTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            const token = firstToken(node) orelse return Lowering.malformedType(self, node, "missing type name");
+            const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing type name");
             return Support.pushTypeExpr(self, .{ .Path = .{
                 .range = node.range(),
-                .name = tokenText(token),
+                .name = name,
             } });
         }
 
         fn lowerGenericTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            const name_token = firstToken(node) orelse return Lowering.malformedType(self, node, "missing generic type name");
+            const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing generic type name");
             var args: std.ArrayList(TypeArg) = .{};
             var it = node.children();
             while (it.next()) |child| {
@@ -1666,7 +1662,7 @@ pub fn mixin(Builder: type) type {
             }
             return Support.pushTypeExpr(self, .{ .Generic = .{
                 .range = node.range(),
-                .name = tokenText(name_token),
+                .name = name,
                 .args = try args.toOwnedSlice(self.allocator),
             } });
         }
@@ -1838,16 +1834,28 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerContractInvariantNode(self: *Builder, node: SyntaxNode) !ExprId {
-            const expr_node = firstDirectExprChild(node) orelse return Lowering.malformedExpr(self, node, "missing contract invariant expression");
-            if (expr_node.kind() == .CallExpr) {
-                const callee_node = nthDirectNode(expr_node, 0);
-                const arg0 = nthDirectNode(expr_node, 1);
-                const arg1 = nthDirectNode(expr_node, 2);
+            return Lowering.lowerInvariantExprNode(self, node);
+        }
+
+        fn lowerInvariantExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            const expr0 = nthDirectExprChild(node, 0) orelse return Lowering.malformedExpr(self, node, "missing invariant expression");
+            const expr1 = nthDirectExprChild(node, 1);
+            const expr2 = nthDirectExprChild(node, 2);
+
+            if (expr0.kind() == .CallExpr) {
+                const callee_node = nthDirectNode(expr0, 0);
+                const arg0 = nthDirectNode(expr0, 1);
+                const arg1 = nthDirectNode(expr0, 2);
                 if (callee_node != null and callee_node.?.kind() == .NameExpr and arg0 != null and arg1 == null) {
                     return Lowering.lowerExpressionNode(self, arg0.?);
                 }
             }
-            return Lowering.lowerExpressionNode(self, expr_node);
+
+            if (expr0.kind() == .NameExpr and expr1 != null and expr2 == null) {
+                return Lowering.lowerExpressionNode(self, expr1.?);
+            }
+
+            return Lowering.lowerExpressionNode(self, expr0);
         }
 
         fn lowerSpecClauseNode(self: *Builder, node: SyntaxNode) !nodes.SpecClause {
@@ -2283,6 +2291,28 @@ fn firstDirectAssignmentToken(node: SyntaxNode) ?SyntaxToken {
 
 fn tokenText(token: SyntaxToken) []const u8 {
     return token.text();
+}
+
+fn qualifiedTypeName(self: anytype, node: SyntaxNode) ?[]const u8 {
+    var parts: std.ArrayList([]const u8) = .{};
+    defer parts.deinit(self.allocator);
+
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .node => break,
+            .token => |token| switch (token.kind()) {
+                .Dot => {},
+                .Less, .LeftParen => break,
+                else => if (isIdentifierLike(token.kind())) {
+                    parts.append(self.allocator, tokenText(token)) catch return null;
+                },
+            },
+        }
+    }
+
+    if (parts.items.len == 0) return null;
+    return std.mem.join(self.allocator, ".", parts.items) catch null;
 }
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {

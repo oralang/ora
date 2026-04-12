@@ -54,7 +54,10 @@ test "encodeMLIRType maps bool and i32" {
 
     const ty_bytes = mlir.oraBytesTypeGet(mlir_ctx);
     const bytes_sort = try encoder.encodeMLIRType(ty_bytes);
-    try testing.expect(z3.Z3_is_string_sort(z3_ctx.ctx, bytes_sort));
+    try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, bytes_sort));
+    const basis = z3.Z3_get_seq_sort_basis(z3_ctx.ctx, bytes_sort);
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, basis))));
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, basis))));
 }
 
 test "ora.bytes.constant encodes canonical hex string" {

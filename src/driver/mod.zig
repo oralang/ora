@@ -4,6 +4,7 @@ const ast = @import("../ast/mod.zig");
 const db = @import("../db/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
+const embedded_stdlib = @import("../stdlib_embedded.zig");
 
 fn compilerPhaseDebugEnabled() bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
@@ -75,8 +76,9 @@ pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, text: []con
     var compiler_db = db.CompilerDb.init(allocator);
     errdefer compiler_db.deinit();
 
-    const file_id = try compiler_db.addSourceFile(path, text);
     const package_id = try compiler_db.addPackage("main");
+    try addEmbeddedStdModules(&compiler_db, package_id);
+    const file_id = try compiler_db.addSourceFile(path, text);
     const module_name = std.fs.path.stem(path);
     const module_id = try compiler_db.addModule(package_id, file_id, module_name);
 
@@ -102,11 +104,46 @@ fn loadPackageSources(
     var root_module_id: ?source.ModuleId = null;
 
     for (graph.modules) |module_info| {
-        const source_text = try std.fs.cwd().readFileAlloc(allocator, module_info.resolved_path, 1024 * 1024);
-        defer allocator.free(source_text);
+        const embedded_source = embedded_stdlib.sourceForResolvedPath(module_info.resolved_path);
+        const source_text = if (embedded_source) |text|
+            text
+        else
+            try std.fs.cwd().readFileAlloc(allocator, module_info.resolved_path, 1024 * 1024);
+        defer if (embedded_source == null) allocator.free(source_text);
 
         const file_id = try compiler_db.addSourceFile(module_info.resolved_path, source_text);
-        const module_name = std.fs.path.stem(module_info.resolved_path);
+        const module_name = if (embedded_stdlib.byLogicalPath("std")) |std_module|
+            if (std.mem.eql(u8, module_info.resolved_path, std_module.resolved_path))
+                std_module.logical_path
+            else if (embedded_stdlib.byLogicalPath("std/bytes")) |bytes_module|
+                if (std.mem.eql(u8, module_info.resolved_path, bytes_module.resolved_path))
+                    bytes_module.logical_path
+                else if (embedded_stdlib.byLogicalPath("std/constants")) |constants_module|
+                    if (std.mem.eql(u8, module_info.resolved_path, constants_module.resolved_path))
+                        constants_module.logical_path
+                    else if (embedded_stdlib.byLogicalPath("std/result")) |result_module|
+                        if (std.mem.eql(u8, module_info.resolved_path, result_module.resolved_path))
+                            result_module.logical_path
+                        else
+                            std.fs.path.stem(module_info.resolved_path)
+                    else
+                        std.fs.path.stem(module_info.resolved_path)
+                else
+                    std.fs.path.stem(module_info.resolved_path)
+            else if (embedded_stdlib.byLogicalPath("std/constants")) |constants_module|
+                if (std.mem.eql(u8, module_info.resolved_path, constants_module.resolved_path))
+                    constants_module.logical_path
+                else if (embedded_stdlib.byLogicalPath("std/result")) |result_module|
+                    if (std.mem.eql(u8, module_info.resolved_path, result_module.resolved_path))
+                        result_module.logical_path
+                    else
+                        std.fs.path.stem(module_info.resolved_path)
+                else
+                    std.fs.path.stem(module_info.resolved_path)
+            else
+                std.fs.path.stem(module_info.resolved_path)
+        else
+            std.fs.path.stem(module_info.resolved_path);
         const module_id = try compiler_db.addModule(package_id, file_id, module_name);
         if (std.mem.eql(u8, module_info.canonical_id, graph.entry_canonical_id)) {
             root_module_id = module_id;
@@ -118,4 +155,11 @@ fn loadPackageSources(
         .package_id = package_id,
         .root_module_id = root_module_id orelse return error.ModuleNotFound,
     };
+}
+
+fn addEmbeddedStdModules(compiler_db: *db.CompilerDb, package_id: source.PackageId) !void {
+    for (embedded_stdlib.all()) |module| {
+        const file_id = try compiler_db.addSourceFile(module.resolved_path, module.source);
+        _ = try compiler_db.addModule(package_id, file_id, module.logical_path);
+    }
 }

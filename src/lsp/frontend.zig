@@ -122,12 +122,14 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
 
         var typecheck_result = try compiler.sema.typeCheck(
             allocator,
+            compiler.ModuleId.fromIndex(0),
             file_id,
             &lower_result.file,
             &item_index,
             &resolution,
             &const_eval_result,
             .{ .body = compiler.ast.BodyId.fromIndex(0) },
+            null,
         );
         defer typecheck_result.deinit();
 

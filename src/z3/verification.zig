@@ -99,6 +99,8 @@ pub const VerificationPass = struct {
     location_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated guard ids
     guard_id_storage: ManagedArrayList([]const u8),
+    /// Storage for duplicated annotation labels/messages
+    label_storage: ManagedArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !VerificationPass {
         var context = try allocator.create(Context);
@@ -213,6 +215,7 @@ pub const VerificationPass = struct {
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
             .location_storage = ManagedArrayList([]const u8).init(allocator),
             .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
+            .label_storage = ManagedArrayList([]const u8).init(allocator),
         };
         return pass;
     }
@@ -248,6 +251,10 @@ pub const VerificationPass = struct {
             self.allocator.free(name);
         }
         self.guard_id_storage.deinit();
+        for (self.label_storage.items) |label| {
+            self.allocator.free(label);
+        }
+        self.label_storage.deinit();
         for (self.encoded_annotations.items) |ann| {
             if (ann.extra_constraints.len > 0) {
                 self.allocator.free(ann.extra_constraints);
@@ -565,9 +572,7 @@ pub const VerificationPass = struct {
     fn restoreEncoderBranchState(self: *VerificationPass, snap: *const EncoderBranchState) !void {
         self.clearEncoderGlobalMap();
         self.encoder.memref_map.clearRetainingCapacity();
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
-        self.encoder.value_bindings.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
 
         var g_it = snap.global_map.iterator();
         while (g_it.next()) |entry| {
@@ -828,8 +833,7 @@ pub const VerificationPass = struct {
         }
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
         const raw_condition = try self.encoder.encodeValue(condition_value);
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -901,8 +905,7 @@ pub const VerificationPass = struct {
         }
 
         const condition_value = mlir.oraOperationGetOperand(if_op, 0);
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
         const raw_condition = try self.encoder.encodeValue(condition_value);
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -966,8 +969,7 @@ pub const VerificationPass = struct {
         // enclosing function, so carrying an ite-merged state/path forward is
         // unsound for later obligations.
         try self.restoreEncoderBranchState(&else_state);
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
         const fallthrough_raw_condition = try self.encoder.encodeValue(condition_value);
         const fallthrough_condition = self.encoder.coerceBoolean(fallthrough_raw_condition);
         const fallthrough_leaked_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -1009,8 +1011,7 @@ pub const VerificationPass = struct {
         }
 
         const scrutinee_value = mlir.oraOperationGetOperand(switch_op, 0);
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
         const scrutinee = try self.encoder.encodeValue(scrutinee_value);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
@@ -1275,19 +1276,19 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                const guard_id = try self.getStringAttr(op, "ora.guard_id");
+                const guard_id = try self.getStringAttr(op, "ora.guard_id", &self.guard_id_storage);
                 _ = try self.recordEncodedAnnotation(op, .RefinementGuard, condition_value, guard_id);
             }
         } else if (std.mem.eql(u8, op_name, "ora.assume")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                const origin_attr = try self.getStringAttr(op, "ora.assume_origin");
+                const origin_attr = try self.getStringAttr(op, "ora.assume_origin", &self.guard_id_storage);
                 const assume_kind: AnnotationKind = if (origin_attr) |origin| blk: {
                     if (std.mem.eql(u8, origin, "path")) break :blk .PathAssume;
                     break :blk .Assume;
                 } else blk: {
-                    const context_attr = try self.getStringAttr(op, "ora.verification_context");
+                    const context_attr = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
                     if (context_attr) |context_str| {
                         if (std.mem.eql(u8, context_str, "path_assumption")) break :blk .PathAssume;
                     }
@@ -1306,7 +1307,7 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                const guard_id = try self.getStringAttr(op, "ora.guard_id");
+                const guard_id = try self.getStringAttr(op, "ora.guard_id", &self.guard_id_storage);
                 var tagged_assert = false;
                 const requires_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.requires", 12));
                 if (!mlir.oraAttributeIsNull(requires_attr)) {
@@ -1409,9 +1410,7 @@ pub const VerificationPass = struct {
         // ora.struct_init) whose defining constraints were just discarded.
         // Clear expression caches so later annotation encoding re-materializes
         // those constraints instead of reusing under-constrained ASTs.
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
-        self.encoder.value_bindings.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
     }
 
     /// Get MLIR operation name as string
@@ -1430,14 +1429,14 @@ pub const VerificationPass = struct {
         return dup;
     }
 
-    fn getStringAttr(self: *VerificationPass, op: mlir.MlirOperation, name: []const u8) !?[]const u8 {
+    fn getStringAttr(self: *VerificationPass, op: mlir.MlirOperation, name: []const u8, storage: *ManagedArrayList([]const u8)) !?[]const u8 {
         const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
         if (mlir.oraAttributeIsNull(attr)) return null;
         const value_ref = mlir.oraStringAttrGetValue(attr);
         if (value_ref.data == null or value_ref.length == 0) return null;
         const value_slice = value_ref.data[0..value_ref.length];
         const dup = try self.allocator.dupe(u8, value_slice);
-        try self.guard_id_storage.append(dup);
+        try storage.append(dup);
         return dup;
     }
 
@@ -1581,6 +1580,7 @@ pub const VerificationPass = struct {
         }
 
         const loc = try self.getLocationInfo(op);
+        const annotation_label = try self.annotationLabelForOp(op, kind);
         const annotation_index = self.encoded_annotations.items.len;
         try self.encoded_annotations.append(.{
             .function_name = function_name,
@@ -1598,6 +1598,7 @@ pub const VerificationPass = struct {
             .file = loc.file,
             .line = loc.line,
             .column = loc.column,
+            .label = annotation_label,
             .guard_id = guard_id,
             .loop_owner = loop_owner,
         });
@@ -1625,6 +1626,7 @@ pub const VerificationPass = struct {
                 .file = loc.file,
                 .line = loc.line,
                 .column = loc.column,
+                .label = annotation_label,
                 .guard_id = null,
                 .loop_owner = loop_owner,
             });
@@ -1634,8 +1636,7 @@ pub const VerificationPass = struct {
         // side-constraints were already consumed by takeConstraints() above.
         // This is especially important for old(...) encodings in postconditions:
         // each annotation query must re-materialize the old/current linkage.
-        self.encoder.value_map.clearRetainingCapacity();
-        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.invalidateValueCaches();
 
         return annotation_index;
     }
@@ -1996,8 +1997,8 @@ pub const VerificationPass = struct {
 
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
         if (self.parallel) {
-            self.phaseLog("runVerificationPass -> parallel", .{});
-            return try self.runVerificationPassParallel(mlir_module);
+            self.phaseLog("runVerificationPass -> parallel (temporary prepared-sequential fallback)", .{});
+            return try self.runVerificationPassPreparedSequential(mlir_module);
         }
 
         self.encoder.clearDegradation();
@@ -2117,12 +2118,21 @@ pub const VerificationPass = struct {
                 try obligation_annotations.append(ann);
             }
 
+            var assumption_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer assumption_constraints.deinit();
+
             try self.solver.resetChecked();
             for (assumption_annotations.items) |ann| {
                 for (ann.extra_constraints) |cst| {
-                    try self.solver.assertChecked(cst);
+                    try assumption_constraints.append(cst);
                 }
-                try self.solver.assertChecked(ann.condition);
+                try assumption_constraints.append(ann.condition);
+            }
+            const base_metadata = try buildQueryMetadata(self, assumption_constraints.items);
+            const base_tag = try formatQueryTag(self.allocator, base_metadata.constraint_count, base_metadata.smtlib_hash);
+            defer self.allocator.free(base_tag);
+            for (assumption_constraints.items) |cst| {
+                try self.solver.assertChecked(cst);
             }
             if (self.debug_z3) {
                 var major: u32 = 0;
@@ -2137,7 +2147,7 @@ pub const VerificationPass = struct {
 
             self.traceSmt("{s} [base] check-start", .{fn_name});
             self.traceCurrentSolverState("query");
-            std.debug.print("verification: {s} [base] start\n", .{fn_name});
+            std.debug.print("{s} [base]{s} start\n", .{ fn_name, base_tag });
             timer.reset();
             const assumption_status = try self.solver.checkChecked();
             const elapsed_ms = timer.read() / std.time.ns_per_ms;
@@ -2150,10 +2160,10 @@ pub const VerificationPass = struct {
             }
             switch (assumption_status) {
                 z3.Z3_L_TRUE => {
-                    std.debug.print("verification: {s} [base] -> SAT ({d}ms)\n", .{ fn_name, elapsed_ms });
+                    std.debug.print("{s} [base]{s} -> SAT ({d}ms)\n", .{ fn_name, base_tag, elapsed_ms });
                 },
                 z3.Z3_L_FALSE => {
-                    std.debug.print("verification: {s} [base] -> UNSAT ({d}ms)\n", .{ fn_name, elapsed_ms });
+                    std.debug.print("{s} [base]{s} -> UNSAT ({d}ms)\n", .{ fn_name, base_tag, elapsed_ms });
                     try result.addError(.{
                         .error_type = .PreconditionViolation,
                         .message = try std.fmt.allocPrint(self.allocator, "verification assumptions are inconsistent in {s}", .{fn_name}),
@@ -2166,7 +2176,7 @@ pub const VerificationPass = struct {
                     return result;
                 },
                 else => {
-                    std.debug.print("verification: {s} [base] -> UNKNOWN ({d}ms)\n", .{ fn_name, elapsed_ms });
+                    std.debug.print("{s} [base]{s} -> UNKNOWN ({d}ms)\n", .{ fn_name, base_tag, elapsed_ms });
                     try self.addUnknownVerificationError(
                         &result,
                         try std.fmt.allocPrint(self.allocator, "verification assumptions are unknown in {s}", .{fn_name}),
@@ -2182,6 +2192,29 @@ pub const VerificationPass = struct {
             for (obligation_annotations.items) |ann| {
                 var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
                 defer relevant_symbols.deinit();
+                var obligation_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                defer obligation_constraints.deinit();
+                try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
+                try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann, &relevant_symbols);
+                try addConstraintSlice(&obligation_constraints, ann.path_constraints);
+                try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                if (ann.kind == .LoopInvariant) {
+                    try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
+                }
+                if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    for (loop_post_invariant_annotations.items) |peer_inv_ann| {
+                        if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
+                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
+                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
+                        try obligation_constraints.append(peer_inv_ann.condition);
+                    }
+                }
+                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
+                try obligation_constraints.append(negated);
+                const obligation_metadata = try buildQueryMetadata(self, obligation_constraints.items);
+                const obligation_tag = try formatQueryTag(self.allocator, obligation_metadata.constraint_count, obligation_metadata.smtlib_hash);
+                defer self.allocator.free(obligation_tag);
+
                 try self.solver.pushChecked();
                 defer self.solver.pop();
                 try addApplicablePathAssumptionsToSolver(self, path_assumption_annotations.items, ann, &relevant_symbols);
@@ -2210,7 +2243,6 @@ pub const VerificationPass = struct {
                         try self.solver.assertChecked(peer_inv_ann.condition);
                     }
                 }
-                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try self.solver.assertChecked(negated);
                 if (self.encoder.isDegraded()) {
                     try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
@@ -2218,9 +2250,11 @@ pub const VerificationPass = struct {
                 }
 
                 const obligation_label = obligationKindLabel(ann.kind);
+                const obligation_log_suffix = try self.annotationLogSuffix(ann);
+                defer self.allocator.free(obligation_log_suffix);
                 self.traceSmt("{s} [{s}] check-start", .{ fn_name, obligation_label });
                 self.traceCurrentSolverState("query");
-                std.debug.print("verification: {s} [{s}] start\n", .{ fn_name, obligation_label });
+                std.debug.print("{s} [{s}]{s}{s} start\n", .{ fn_name, obligation_label, obligation_log_suffix, obligation_tag });
                 timer.reset();
                 const obligation_status = try self.solver.checkChecked();
                 const obligation_ms = timer.read() / std.time.ns_per_ms;
@@ -2231,9 +2265,11 @@ pub const VerificationPass = struct {
                     z3.Z3_L_FALSE => stats_unsat += 1,
                     else => stats_unknown += 1,
                 }
-                std.debug.print("verification: {s} [{s}] -> {s} ({d}ms)\n", .{
+                std.debug.print("{s} [{s}]{s}{s} -> {s} ({d}ms)\n", .{
                     fn_name,
                     obligation_label,
+                    obligation_log_suffix,
+                    obligation_tag,
                     switch (obligation_status) {
                         z3.Z3_L_FALSE => "UNSAT",
                         z3.Z3_L_TRUE => "SAT",
@@ -2316,7 +2352,7 @@ pub const VerificationPass = struct {
 
                         self.traceSmt("{s} [invariant-step] check-start", .{fn_name});
                         self.traceCurrentSolverState("query");
-                        std.debug.print("verification: {s} [invariant-step] start\n", .{fn_name});
+                        std.debug.print("{s} [invariant-step] start\n", .{fn_name});
                         timer.reset();
                         const step_status = try self.solver.checkChecked();
                         const step_ms = timer.read() / std.time.ns_per_ms;
@@ -2327,7 +2363,7 @@ pub const VerificationPass = struct {
                             z3.Z3_L_FALSE => stats_unsat += 1,
                             else => stats_unknown += 1,
                         }
-                        std.debug.print("verification: {s} [invariant-step] -> {s} ({d}ms)\n", .{
+                        std.debug.print("{s} [invariant-step] -> {s} ({d}ms)\n", .{
                             fn_name,
                             switch (step_status) {
                                 z3.Z3_L_FALSE => "UNSAT",
@@ -2404,7 +2440,7 @@ pub const VerificationPass = struct {
 
                     self.traceSmt("{s} [invariant-post] check-start", .{fn_name});
                     self.traceCurrentSolverState("query");
-                    std.debug.print("verification: {s} [invariant-post] start\n", .{fn_name});
+                    std.debug.print("{s} [invariant-post] start\n", .{fn_name});
                     timer.reset();
                     const post_status = try self.solver.checkChecked();
                     const post_ms = timer.read() / std.time.ns_per_ms;
@@ -2415,7 +2451,7 @@ pub const VerificationPass = struct {
                         z3.Z3_L_FALSE => stats_unsat += 1,
                         else => stats_unknown += 1,
                     }
-                    std.debug.print("verification: {s} [invariant-post] -> {s} ({d}ms)\n", .{
+                    std.debug.print("{s} [invariant-post] -> {s} ({d}ms)\n", .{
                         fn_name,
                         switch (post_status) {
                             z3.Z3_L_FALSE => "UNSAT",
@@ -2501,7 +2537,7 @@ pub const VerificationPass = struct {
                 }
                 self.traceSmt("{s} guard {s} [satisfy] check-start", .{ fn_name, ann.guard_id.? });
                 self.traceCurrentSolverState("query");
-                std.debug.print("verification: {s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
+                std.debug.print("{s} guard {s} [satisfy] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
                 const satisfy_status = try self.solver.checkChecked();
                 const satisfy_ms = timer.read() / std.time.ns_per_ms;
@@ -2520,7 +2556,7 @@ pub const VerificationPass = struct {
 
                 if (satisfy_status == z3.Z3_L_FALSE) {
                     // Guard can NEVER be satisfied given previous constraints - error!
-                    std.debug.print("verification: {s} guard {s} [satisfy] -> UNSATISFIABLE ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                    std.debug.print("{s} guard {s} [satisfy] -> UNSATISFIABLE ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
                     // No counterexample for UNSAT - there's no satisfying assignment
                     try result.addError(.{
                         .error_type = .RefinementViolation,
@@ -2534,9 +2570,9 @@ pub const VerificationPass = struct {
                     return result;
                 }
                 if (satisfy_status == z3.Z3_L_TRUE) {
-                    std.debug.print("verification: {s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                    std.debug.print("{s} guard {s} [satisfy] -> SAT ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
                 } else {
-                    std.debug.print("verification: {s} guard {s} [satisfy] -> UNKNOWN ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
+                    std.debug.print("{s} guard {s} [satisfy] -> UNKNOWN ({d}ms)\n", .{ fn_name, ann.guard_id.?, satisfy_ms });
                     try self.addUnknownVerificationError(
                         &result,
                         try std.fmt.allocPrint(self.allocator, "could not prove refinement guard satisfiable in {s}: {s}", .{ fn_name, ann.guard_id.? }),
@@ -2583,7 +2619,7 @@ pub const VerificationPass = struct {
                 }
                 self.traceSmt("{s} guard {s} [violate] check-start", .{ fn_name, ann.guard_id.? });
                 self.traceCurrentSolverState("query");
-                std.debug.print("verification: {s} guard {s} [violate] start\n", .{ fn_name, ann.guard_id.? });
+                std.debug.print("{s} guard {s} [violate] start\n", .{ fn_name, ann.guard_id.? });
                 timer.reset();
                 const guard_status = try self.solver.checkChecked();
                 const violate_ms = timer.read() / std.time.ns_per_ms;
@@ -2601,7 +2637,7 @@ pub const VerificationPass = struct {
                         else => "UNKNOWN",
                     }});
                 }
-                std.debug.print("verification: {s} guard {s} [violate] -> {s} ({d}ms)\n", .{
+                std.debug.print("{s} guard {s} [violate] -> {s} ({d}ms)\n", .{
                     fn_name,
                     ann.guard_id.?,
                     switch (guard_status) {
@@ -2699,7 +2735,7 @@ pub const VerificationPass = struct {
             }
 
             try self.solver.resetChecked();
-            try self.solver.loadFromSmtlib(query.smtlib_z);
+            try assertPreparedQueryConstraints(&self.solver, query.constraints);
             if (self.timeout_ms) |ms| {
                 try self.solver.setTimeoutMs(ms);
             }
@@ -2875,7 +2911,7 @@ pub const VerificationPass = struct {
                             std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                         }
                     }
-                    solver.loadFromSmtlib(query.smtlib_z) catch |err| {
+                    solver.loadFromSmtlib(query.smtlib_z, query.decl_symbols, query.decls) catch |err| {
                         ctx.results[idx].err = err;
                         continue;
                     };
@@ -3270,7 +3306,7 @@ pub const VerificationPass = struct {
                     std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                 }
             }
-            try self.solver.loadFromSmtlib(query.smtlib_z);
+            try assertPreparedQueryConstraints(&self.solver, query.constraints);
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report check-start", .{idx + 1});
             }
@@ -4009,18 +4045,25 @@ pub const VerificationPass = struct {
                 try assumption_constraints.append(ann.condition);
             }
 
-            const base_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items);
-            const base_log_prefix = try std.fmt.allocPrint(self.allocator, "verification: {s} [base]", .{fn_name});
+            const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items);
+            const base_smtlib = base_query.smtlib_z;
+            const base_hash = std.hash.Wyhash.hash(0, base_smtlib);
+            const base_tag = try formatQueryTag(self.allocator, assumption_constraints.items.len, base_hash);
+            defer self.allocator.free(base_tag);
+            const base_log_prefix = try std.fmt.allocPrint(self.allocator, "{s} [base]{s}", .{ fn_name, base_tag });
             try queries.append(.{
                 .kind = .Base,
                 .function_name = fn_name,
                 .file = self.firstLocationFile(annotations),
                 .line = self.firstLocationLine(annotations),
                 .column = self.firstLocationColumn(annotations),
+                .constraints = try cloneConstraintAstSlice(self.allocator, assumption_constraints.items),
                 .smtlib_z = base_smtlib,
+                .decl_symbols = base_query.decl_symbols,
+                .decls = base_query.decls,
                 .constraint_count = assumption_constraints.items.len,
                 .smtlib_bytes = base_smtlib.len,
-                .smtlib_hash = std.hash.Wyhash.hash(0, base_smtlib),
+                .smtlib_hash = base_hash,
                 .log_prefix = base_log_prefix,
             });
 
@@ -4047,11 +4090,17 @@ pub const VerificationPass = struct {
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try obligation_constraints.append(negated);
 
-                const obligation_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items);
+                const obligation_query = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items);
+                const obligation_smtlib = obligation_query.smtlib_z;
+                const obligation_hash = std.hash.Wyhash.hash(0, obligation_smtlib);
+                const obligation_tag = try formatQueryTag(self.allocator, obligation_constraints.items.len, obligation_hash);
+                defer self.allocator.free(obligation_tag);
+                const obligation_log_suffix = try self.annotationLogSuffix(ann);
+                defer self.allocator.free(obligation_log_suffix);
                 const obligation_log_prefix = try std.fmt.allocPrint(
                     self.allocator,
-                    "verification: {s} [{s}]",
-                    .{ fn_name, obligationKindLabel(ann.kind) },
+                    "{s} [{s}]{s}{s}",
+                    .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
                 try queries.append(.{
                     .kind = .Obligation,
@@ -4061,10 +4110,13 @@ pub const VerificationPass = struct {
                     .file = ann.file,
                     .line = ann.line,
                     .column = ann.column,
+                    .constraints = try cloneConstraintAstSlice(self.allocator, obligation_constraints.items),
                     .smtlib_z = obligation_smtlib,
+                    .decl_symbols = obligation_query.decl_symbols,
+                    .decls = obligation_query.decls,
                     .constraint_count = obligation_constraints.items.len,
                     .smtlib_bytes = obligation_smtlib.len,
-                    .smtlib_hash = std.hash.Wyhash.hash(0, obligation_smtlib),
+                    .smtlib_hash = obligation_hash,
                     .log_prefix = obligation_log_prefix,
                 });
 
@@ -4092,11 +4144,15 @@ pub const VerificationPass = struct {
                         }
                         try step_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
 
-                        const step_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
+                        const step_query = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
+                        const step_smtlib = step_query.smtlib_z;
+                        const step_hash = std.hash.Wyhash.hash(0, step_smtlib);
+                        const step_tag = try formatQueryTag(self.allocator, step_constraints.items.len, step_hash);
+                        defer self.allocator.free(step_tag);
                         const step_log_prefix = try std.fmt.allocPrint(
                             self.allocator,
-                            "verification: {s} [invariant-step]",
-                            .{fn_name},
+                            "{s} [invariant-step]{s}",
+                            .{ fn_name, step_tag },
                         );
                         try queries.append(.{
                             .kind = .LoopInvariantStep,
@@ -4105,10 +4161,13 @@ pub const VerificationPass = struct {
                             .file = ann.file,
                             .line = ann.line,
                             .column = ann.column,
+                            .constraints = try cloneConstraintAstSlice(self.allocator, step_constraints.items),
                             .smtlib_z = step_smtlib,
+                            .decl_symbols = step_query.decl_symbols,
+                            .decls = step_query.decls,
                             .constraint_count = step_constraints.items.len,
                             .smtlib_bytes = step_smtlib.len,
-                            .smtlib_hash = std.hash.Wyhash.hash(0, step_smtlib),
+                            .smtlib_hash = step_hash,
                             .log_prefix = step_log_prefix,
                         });
                     }
@@ -4136,11 +4195,15 @@ pub const VerificationPass = struct {
                     try post_constraints.append(exit_condition);
                     try post_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition)));
 
-                    const post_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items);
+                    const post_query = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items);
+                    const post_smtlib = post_query.smtlib_z;
+                    const post_hash = std.hash.Wyhash.hash(0, post_smtlib);
+                    const post_tag = try formatQueryTag(self.allocator, post_constraints.items.len, post_hash);
+                    defer self.allocator.free(post_tag);
                     const post_log_prefix = try std.fmt.allocPrint(
                         self.allocator,
-                        "verification: {s} [invariant-post]",
-                        .{fn_name},
+                        "{s} [invariant-post]{s}",
+                        .{ fn_name, post_tag },
                     );
                     try queries.append(.{
                         .kind = .LoopInvariantPost,
@@ -4149,10 +4212,13 @@ pub const VerificationPass = struct {
                         .file = ensure_ann.file,
                         .line = ensure_ann.line,
                         .column = ensure_ann.column,
+                        .constraints = try cloneConstraintAstSlice(self.allocator, post_constraints.items),
                         .smtlib_z = post_smtlib,
+                        .decl_symbols = post_query.decl_symbols,
+                        .decls = post_query.decls,
                         .constraint_count = post_constraints.items.len,
                         .smtlib_bytes = post_smtlib.len,
-                        .smtlib_hash = std.hash.Wyhash.hash(0, post_smtlib),
+                        .smtlib_hash = post_hash,
                         .log_prefix = post_log_prefix,
                     });
                 }
@@ -4187,11 +4253,15 @@ pub const VerificationPass = struct {
                 try addRelevantConstraintSlice(self, &satisfy_constraints, ann.extra_constraints, &relevant_symbols);
                 try satisfy_constraints.append(ann.condition);
 
-                const satisfy_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items);
+                const satisfy_query = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items);
+                const satisfy_smtlib = satisfy_query.smtlib_z;
+                const satisfy_hash = std.hash.Wyhash.hash(0, satisfy_smtlib);
+                const satisfy_tag = try formatQueryTag(self.allocator, satisfy_constraints.items.len, satisfy_hash);
+                defer self.allocator.free(satisfy_tag);
                 const satisfy_log_prefix = try std.fmt.allocPrint(
                     self.allocator,
-                    "verification: {s} guard {s} [satisfy]",
-                    .{ fn_name, ann.guard_id.? },
+                    "{s} guard {s} [satisfy]{s}",
+                    .{ fn_name, ann.guard_id.?, satisfy_tag },
                 );
                 try queries.append(.{
                     .kind = .GuardSatisfy,
@@ -4200,10 +4270,13 @@ pub const VerificationPass = struct {
                     .file = ann.file,
                     .line = ann.line,
                     .column = ann.column,
+                    .constraints = try cloneConstraintAstSlice(self.allocator, satisfy_constraints.items),
                     .smtlib_z = satisfy_smtlib,
+                    .decl_symbols = satisfy_query.decl_symbols,
+                    .decls = satisfy_query.decls,
                     .constraint_count = satisfy_constraints.items.len,
                     .smtlib_bytes = satisfy_smtlib.len,
-                    .smtlib_hash = std.hash.Wyhash.hash(0, satisfy_smtlib),
+                    .smtlib_hash = satisfy_hash,
                     .log_prefix = satisfy_log_prefix,
                 });
 
@@ -4215,11 +4288,15 @@ pub const VerificationPass = struct {
                 const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try violate_constraints.append(not_guard);
 
-                const violate_smtlib = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items);
+                const violate_query = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items);
+                const violate_smtlib = violate_query.smtlib_z;
+                const violate_hash = std.hash.Wyhash.hash(0, violate_smtlib);
+                const violate_tag = try formatQueryTag(self.allocator, violate_constraints.items.len, violate_hash);
+                defer self.allocator.free(violate_tag);
                 const violate_log_prefix = try std.fmt.allocPrint(
                     self.allocator,
-                    "verification: {s} guard {s} [violate]",
-                    .{ fn_name, ann.guard_id.? },
+                    "{s} guard {s} [violate]{s}",
+                    .{ fn_name, ann.guard_id.?, violate_tag },
                 );
                 try queries.append(.{
                     .kind = .GuardViolate,
@@ -4228,10 +4305,13 @@ pub const VerificationPass = struct {
                     .file = ann.file,
                     .line = ann.line,
                     .column = ann.column,
+                    .constraints = try cloneConstraintAstSlice(self.allocator, violate_constraints.items),
                     .smtlib_z = violate_smtlib,
+                    .decl_symbols = violate_query.decl_symbols,
+                    .decls = violate_query.decls,
                     .constraint_count = violate_constraints.items.len,
                     .smtlib_bytes = violate_smtlib.len,
-                    .smtlib_hash = std.hash.Wyhash.hash(0, violate_smtlib),
+                    .smtlib_hash = violate_hash,
                     .log_prefix = violate_log_prefix,
                 });
 
@@ -4264,6 +4344,66 @@ pub const VerificationPass = struct {
         const file_copy = try self.allocator.dupe(u8, parsed.file);
         try self.location_storage.append(file_copy);
         return .{ .file = file_copy, .line = parsed.line, .column = parsed.column };
+    }
+
+    fn annotationLabelForOp(self: *VerificationPass, op: mlir.MlirOperation, kind: AnnotationKind) !?[]const u8 {
+        if (kind == .ContractInvariant or kind == .LoopInvariant) {
+            if (try self.getStringAttr(op, "ora.label", &self.label_storage)) |label| return label;
+        }
+        if (kind == .ContractInvariant or kind == .Guard) {
+            if (try self.getStringAttr(op, "message", &self.label_storage)) |message| return message;
+        }
+        return null;
+    }
+
+    fn annotationLogSuffix(self: *VerificationPass, ann: EncodedAnnotation) ![]const u8 {
+        const file_name = if (ann.file.len > 0) std.fs.path.basename(ann.file) else "";
+        const label = ann.label orelse (try self.inferAnnotationLabelFromSource(ann) orelse "");
+        if (file_name.len == 0) {
+            return if (label.len > 0)
+                try std.fmt.allocPrint(self.allocator, " {s}", .{label})
+            else
+                try self.allocator.dupe(u8, "");
+        }
+        if (ann.line > 0 and label.len > 0) {
+            return try std.fmt.allocPrint(self.allocator, " {s}:{d} {s}", .{ file_name, ann.line, label });
+        }
+        if (ann.line > 0) {
+            return try std.fmt.allocPrint(self.allocator, " {s}:{d}", .{ file_name, ann.line });
+        }
+        if (label.len > 0) {
+            return try std.fmt.allocPrint(self.allocator, " {s} {s}", .{ file_name, label });
+        }
+        return try std.fmt.allocPrint(self.allocator, " {s}", .{file_name});
+    }
+
+    fn inferAnnotationLabelFromSource(self: *VerificationPass, ann: EncodedAnnotation) !?[]const u8 {
+        if (ann.file.len == 0 or ann.line == 0) return null;
+        if (ann.kind != .ContractInvariant and ann.kind != .LoopInvariant) return null;
+        if (std.mem.startsWith(u8, ann.file, "embedded://")) return null;
+
+        const source_text = std.fs.cwd().readFileAlloc(self.allocator, ann.file, 1 << 20) catch return null;
+        defer self.allocator.free(source_text);
+
+        var current_line: u32 = 1;
+        var line_start: usize = 0;
+        var idx: usize = 0;
+        while (idx <= source_text.len) : (idx += 1) {
+            const is_end = idx == source_text.len or source_text[idx] == '\n';
+            if (!is_end) continue;
+            if (current_line == ann.line) {
+                const raw_line = std.mem.trim(u8, source_text[line_start..idx], " \t\r");
+                if (inferInvariantLabelFromLine(raw_line)) |label| {
+                    const dup = try self.allocator.dupe(u8, label);
+                    try self.label_storage.append(dup);
+                    return dup;
+                }
+                return null;
+            }
+            current_line += 1;
+            line_start = idx + 1;
+        }
+        return null;
     }
 
     fn firstLocationFile(self: *const VerificationPass, annotations: []const EncodedAnnotation) []const u8 {
@@ -4538,6 +4678,7 @@ const EncodedAnnotation = struct {
     file: []const u8,
     line: u32,
     column: u32,
+    label: ?[]const u8 = null,
     guard_id: ?[]const u8 = null,
     loop_owner: ?u64 = null,
 };
@@ -4579,6 +4720,45 @@ fn obligationKindLabel(kind: AnnotationKind) []const u8 {
         .ContractInvariant => "contract invariant",
         else => "obligation",
     };
+}
+
+fn inferInvariantLabelFromLine(line: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, line, "invariant ")) return null;
+    const rest = std.mem.trimLeft(u8, line["invariant ".len..], " \t");
+    const open_paren = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
+    const candidate = std.mem.trim(u8, rest[0..open_paren], " \t");
+    if (candidate.len == 0) return null;
+    return candidate;
+}
+
+fn shortQueryHash(hash: u64) u32 {
+    return @truncate(hash);
+}
+
+fn formatQueryTag(allocator: std.mem.Allocator, constraint_count: usize, smtlib_hash: u64) ![]u8 {
+    return std.fmt.allocPrint(allocator, " [q={x:0>8} c={d}]", .{ shortQueryHash(smtlib_hash), constraint_count });
+}
+
+fn buildQueryMetadata(self: *VerificationPass, constraints: []const z3.Z3_ast) !struct { constraint_count: usize, smtlib_hash: u64 } {
+    const built = try buildSmtlibForConstraints(self.allocator, &self.solver, constraints);
+    defer self.allocator.free(built.smtlib_z);
+    if (built.decl_symbols.len > 0) self.allocator.free(built.decl_symbols);
+    if (built.decls.len > 0) self.allocator.free(built.decls);
+    return .{
+        .constraint_count = constraints.len,
+        .smtlib_hash = std.hash.Wyhash.hash(0, built.smtlib_z),
+    };
+}
+
+test "verification infers named invariant label from source line" {
+    try std.testing.expectEqualStrings(
+        "value_nonnegative",
+        inferInvariantLabelFromLine("invariant value_nonnegative(value >= 0);").?,
+    );
+}
+
+test "verification ignores unlabeled invariant source line" {
+    try std.testing.expect(inferInvariantLabelFromLine("invariant value >= 0;") == null);
 }
 
 fn astEquivalent(self: *VerificationPass, lhs: z3.Z3_ast, rhs: z3.Z3_ast) bool {
@@ -5274,14 +5454,20 @@ const PreparedQuery = struct {
     file: []const u8,
     line: u32,
     column: u32,
+    constraints: []const z3.Z3_ast = &.{},
     smtlib_z: [:0]const u8,
+    decl_symbols: []const z3.Z3_symbol = &.{},
+    decls: []const z3.Z3_func_decl = &.{},
     constraint_count: usize = 0,
     smtlib_bytes: usize = 0,
     smtlib_hash: u64 = 0,
     log_prefix: []const u8,
 
     fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
+        if (self.constraints.len > 0) allocator.free(self.constraints);
         allocator.free(self.smtlib_z);
+        if (self.decl_symbols.len > 0) allocator.free(self.decl_symbols);
+        if (self.decls.len > 0) allocator.free(self.decls);
         allocator.free(self.log_prefix);
     }
 };
@@ -5452,18 +5638,101 @@ fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z
     }
 }
 
+fn cloneConstraintAstSlice(allocator: std.mem.Allocator, constraints: []const z3.Z3_ast) ![]const z3.Z3_ast {
+    return if (constraints.len == 0) &.{} else try allocator.dupe(z3.Z3_ast, constraints);
+}
+
+fn assertPreparedQueryConstraints(solver: *Solver, constraints: []const z3.Z3_ast) !void {
+    for (constraints) |constraint| {
+        try solver.assertChecked(constraint);
+    }
+}
+
+const SmtSymbolDecl = struct {
+    symbol: z3.Z3_symbol,
+    decl: z3.Z3_func_decl,
+};
+
+fn symbolDeclListContains(symbols: []const SmtSymbolDecl, decl: z3.Z3_func_decl) bool {
+    for (symbols) |symbol| {
+        if (symbol.decl == decl) return true;
+    }
+    return false;
+}
+
+fn collectAstSymbolDecls(
+    ctx: z3.Z3_context,
+    ast: z3.Z3_ast,
+    symbols: *ManagedArrayList(SmtSymbolDecl),
+) !void {
+    if (z3.Z3_get_ast_kind(ctx, ast) != z3.Z3_APP_AST) return;
+
+    const app = z3.Z3_to_app(ctx, ast);
+    const num_args = z3.Z3_get_app_num_args(ctx, app);
+    if (num_args == 0) {
+        const decl = z3.Z3_get_app_decl(ctx, app);
+        if (z3.Z3_get_decl_kind(ctx, decl) == z3.c.Z3_OP_UNINTERPRETED) {
+            const symbol = z3.Z3_get_decl_name(ctx, decl);
+            if (!symbolDeclListContains(symbols.items, decl)) {
+                try symbols.append(.{
+                    .symbol = symbol,
+                    .decl = decl,
+                });
+            }
+        }
+        return;
+    }
+
+    for (0..@intCast(num_args)) |arg_idx| {
+        try collectAstSymbolDecls(ctx, z3.Z3_get_app_arg(ctx, app, @intCast(arg_idx)), symbols);
+    }
+}
+
+const BuiltSmtlibQuery = struct {
+    smtlib_z: [:0]const u8,
+    decl_symbols: []const z3.Z3_symbol,
+    decls: []const z3.Z3_func_decl,
+};
+
 fn buildSmtlibForConstraints(
     allocator: std.mem.Allocator,
     solver: *Solver,
     constraints: []const z3.Z3_ast,
-) ![:0]const u8 {
-    try solver.resetChecked();
-    for (constraints) |cst| {
-        try solver.assertChecked(cst);
+) !BuiltSmtlibQuery {
+    const ctx = solver.context.ctx;
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    var symbols = ManagedArrayList(SmtSymbolDecl).init(allocator);
+    defer symbols.deinit();
+
+    try out.appendSlice(allocator, "(set-logic ALL)\n");
+    for (constraints) |constraint| {
+        try collectAstSymbolDecls(ctx, constraint, &symbols);
     }
-    const raw = z3.Z3_solver_to_string(solver.context.ctx, solver.solver);
-    const smtlib = if (raw == null) "" else std.mem.span(raw);
-    return try allocator.dupeZ(u8, smtlib);
+    for (constraints) |constraint| {
+        const raw = z3.Z3_ast_to_string(ctx, constraint);
+        const text = if (raw == null) "true" else std.mem.span(raw);
+        try out.appendSlice(allocator, "(assert ");
+        try out.appendSlice(allocator, text);
+        try out.appendSlice(allocator, ")\n");
+    }
+    try out.appendSlice(allocator, "(check-sat)\n");
+    const smtlib_z = try out.toOwnedSliceSentinel(allocator, 0);
+    const decl_symbols = if (symbols.items.len == 0) &.{} else blk: {
+        const owned = try allocator.alloc(z3.Z3_symbol, symbols.items.len);
+        for (symbols.items, 0..) |symbol, idx| owned[idx] = symbol.symbol;
+        break :blk owned;
+    };
+    const decls = if (symbols.items.len == 0) &.{} else blk: {
+        const owned = try allocator.alloc(z3.Z3_func_decl, symbols.items.len);
+        for (symbols.items, 0..) |symbol, idx| owned[idx] = symbol.decl;
+        break :blk owned;
+    };
+    return .{
+        .smtlib_z = smtlib_z,
+        .decl_symbols = decl_symbols,
+        .decls = decls,
+    };
 }
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {
@@ -5475,13 +5744,23 @@ fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, co
         }
     }
 
-    const last = std.mem.lastIndexOfScalar(u8, text, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
-    const before_last = text[0..last];
-    const second_last = std.mem.lastIndexOfScalar(u8, before_last, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
+    const last_quote = std.mem.lastIndexOfScalar(u8, text, '"') orelse return .{ .file = "", .line = 0, .column = 0 };
+    const prev_quote = std.mem.lastIndexOfScalar(u8, text[0..last_quote], '"') orelse return .{ .file = "", .line = 0, .column = 0 };
+    const file = text[prev_quote + 1 .. last_quote];
 
-    const file = std.mem.trim(u8, before_last[0..second_last], " \t\n\r\"");
-    const line_str = before_last[second_last + 1 ..];
-    const col_str = text[last + 1 ..];
+    if (last_quote + 1 >= text.len or text[last_quote + 1] != ':')
+        return .{ .file = "", .line = 0, .column = 0 };
+    const tail = text[last_quote + 2 ..];
+    const sep = std.mem.indexOfScalar(u8, tail, ':') orelse return .{ .file = "", .line = 0, .column = 0 };
+
+    const line_tail = tail[0..sep];
+    const col_tail = tail[sep + 1 ..];
+
+    const line_end = std.mem.indexOfNone(u8, line_tail, "0123456789") orelse line_tail.len;
+    const col_end = std.mem.indexOfNone(u8, col_tail, "0123456789") orelse col_tail.len;
+
+    const line_str = line_tail[0..line_end];
+    const col_str = col_tail[0..col_end];
 
     const line = std.fmt.parseInt(u32, line_str, 10) catch 0;
     const column = std.fmt.parseInt(u32, col_str, 10) catch 0;
@@ -7028,7 +7307,8 @@ test "invariant-post query conjoins loop invariants from same loop" {
         if (q.kind != .LoopInvariantPost) continue;
         found_post_query = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        std.debug.print("\n[loop-invariant-post-smt]\n{s}\n[/loop-invariant-post-smt]\n", .{q.smtlib_z});
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -7717,7 +7997,7 @@ test "base query excludes path assumptions" {
         if (q.kind != .Base) continue;
         found_base = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), status);
     }
@@ -7750,7 +8030,7 @@ test "obligation query includes scoped path assumptions" {
         if (q.kind != .Obligation or q.obligation_kind != .Ensures) continue;
         found_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -7783,7 +8063,7 @@ test "guard violate query includes scoped path assumptions" {
         if (q.kind != .GuardViolate) continue;
         found_violate = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -7816,7 +8096,7 @@ test "guard satisfy queries ignore incompatible sibling branch paths" {
         if (q.kind != .GuardSatisfy) continue;
         satisfy_count += 1;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), status);
     }
@@ -8048,7 +8328,8 @@ test "contract invariants from loop body obligations use loop constraints" {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        std.debug.print("\n[contract-invariant-smt]\n{s}\n[/contract-invariant-smt]\n", .{q.smtlib_z});
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8082,7 +8363,8 @@ test "contract invariants inside ora.conditional_return use path constraints" {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        std.debug.print("\n[conditional-return-map-store-smt]\n{s}\n[/conditional-return-map-store-smt]\n", .{q.smtlib_z});
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8116,7 +8398,8 @@ test "contract invariants after ora.conditional_return use fallthrough path cons
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        std.debug.print("\n[conditional-return-map-get-div-smt]\n{s}\n[/conditional-return-map-get-div-smt]\n", .{q.smtlib_z});
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8150,7 +8433,7 @@ test "contract invariants after sequential ora.conditional_return accumulate fal
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8184,7 +8467,7 @@ test "stateful obligations after ora.conditional_return use fallthrough path con
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8218,7 +8501,7 @@ test "tstore obligations after ora.conditional_return use fallthrough path const
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8252,7 +8535,7 @@ test "map_store obligations after ora.conditional_return use fallthrough path co
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8286,7 +8569,7 @@ test "map_get-div-map_store obligations respect conditional_return fallthrough" 
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
         pass.solver.reset();
-        try pass.solver.loadFromSmtlib(q.smtlib_z);
+        try assertPreparedQueryConstraints(&pass.solver, q.constraints);
         const status = pass.solver.check();
         try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), status);
     }
@@ -8575,4 +8858,11 @@ test "parseLocationString strips mlir loc wrapper" {
     try testing.expectEqualStrings("/tmp/example.ora", parsed.file);
     try testing.expectEqual(@as(u32, 42), parsed.line);
     try testing.expectEqual(@as(u32, 7), parsed.column);
+}
+
+test "parseLocationString prefers innermost file location from nested ora tags" {
+    const parsed = parseLocationString("loc(\"ora.stmt.0\"(\"ora.origin_stmt.0\"(\"test.ora\":3:5)))");
+    try testing.expectEqualStrings("test.ora", parsed.file);
+    try testing.expectEqual(@as(u32, 3), parsed.line);
+    try testing.expectEqual(@as(u32, 5), parsed.column);
 }

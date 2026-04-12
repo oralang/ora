@@ -610,6 +610,16 @@ namespace
             os << " " << formatStringAsHex(sc.getValue());
             return;
         }
+        if (auto load8 = dyn_cast<sir::Load8Op>(op))
+        {
+            os << " " << names.nameFor(load8.getPtr());
+            return;
+        }
+        if (auto store8 = dyn_cast<sir::Store8Op>(op))
+        {
+            os << " " << names.nameFor(store8.getPtr()) << " " << names.nameFor(store8.getVal());
+            return;
+        }
         // NOTE: ErrorDeclOp is handled by early-return above (line ~310).
         if (auto ic = dyn_cast<sir::ICallOp>(op))
         {

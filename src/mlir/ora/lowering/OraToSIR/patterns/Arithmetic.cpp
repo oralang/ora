@@ -308,6 +308,65 @@ LogicalResult ConvertConstOp::matchAndRewrite(
     auto resultType = op.getResult().getType();
     auto valueAttr = op.getValueAttr();
 
+    if (auto tupleType = llvm::dyn_cast<ora::TupleType>(resultType))
+    {
+        auto arrayAttr = llvm::dyn_cast<mlir::ArrayAttr>(valueAttr);
+        if (!arrayAttr)
+            return rewriter.notifyMatchFailure(op, "tuple const value is not an array attribute");
+
+        auto elementTypes = tupleType.getElementTypes();
+        if (arrayAttr.size() != elementTypes.size())
+            return rewriter.notifyMatchFailure(op, "tuple const attribute arity does not match tuple type");
+
+        std::function<FailureOr<Value>(Type, Attribute)> buildConstValue = [&](Type type, Attribute attr) -> FailureOr<Value>
+        {
+            if (auto nestedTupleType = llvm::dyn_cast<ora::TupleType>(type))
+            {
+                auto nestedArrayAttr = llvm::dyn_cast<mlir::ArrayAttr>(attr);
+                if (!nestedArrayAttr)
+                    return failure();
+                auto nestedElementTypes = nestedTupleType.getElementTypes();
+                if (nestedArrayAttr.size() != nestedElementTypes.size())
+                    return failure();
+
+                SmallVector<Value, 4> nestedElements;
+                nestedElements.reserve(nestedElementTypes.size());
+                for (auto [nestedType, nestedAttr] : llvm::zip(nestedElementTypes, nestedArrayAttr))
+                {
+                    auto nestedValue = buildConstValue(nestedType, nestedAttr);
+                    if (failed(nestedValue))
+                        return failure();
+                    nestedElements.push_back(*nestedValue);
+                }
+                return rewriter.create<ora::TupleCreateOp>(loc, nestedTupleType, nestedElements).getResult();
+            }
+
+            auto typedAttr = llvm::dyn_cast<mlir::TypedAttr>(attr);
+            if (!typedAttr)
+                return failure();
+
+            auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(typedAttr);
+            if (!intAttr)
+                return failure();
+
+            auto nameAttr = rewriter.getStringAttr(op.getName());
+            return rewriter.create<ora::ConstOp>(loc, type, nameAttr, intAttr).getResult();
+        };
+
+        SmallVector<Value, 4> elements;
+        elements.reserve(elementTypes.size());
+        for (auto [elementType, elementAttr] : llvm::zip(elementTypes, arrayAttr))
+        {
+            auto elementValue = buildConstValue(elementType, elementAttr);
+            if (failed(elementValue))
+                return rewriter.notifyMatchFailure(op, "unsupported tuple const element attribute");
+            elements.push_back(*elementValue);
+        }
+
+        rewriter.replaceOpWithNewOp<ora::TupleCreateOp>(op, tupleType, elements);
+        return success();
+    }
+
     auto typedAttr = llvm::dyn_cast<mlir::TypedAttr>(valueAttr);
     if (!typedAttr)
     {
@@ -346,6 +405,64 @@ LogicalResult ConvertConstOp::matchAndRewrite(
         result = rewriter.create<sir::BitcastOp>(loc, convertedType, result);
 
     rewriter.replaceOp(op, result);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert ora.length → sir.load of dynamic string/bytes length header
+// -----------------------------------------------------------------------------
+LogicalResult ConvertLengthOp::matchAndRewrite(
+    Operation *op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op->getName().getStringRef() != "ora.length")
+        return failure();
+    if (op->getNumResults() != 1 || operands.size() != 1)
+        return rewriter.notifyMatchFailure(op, "ora.length expects one operand and one result");
+
+    Value source = operands[0];
+    if (!llvm::isa<sir::PtrType>(source.getType()))
+        return rewriter.notifyMatchFailure(op, "ora.length source is not a lowered dynamic bytes pointer");
+
+    auto loc = op->getLoc();
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    Value length = rewriter.create<sir::LoadOp>(loc, u256Type, source);
+    rewriter.replaceOp(op, length);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert ora.byte_at → sir.load8 from dynamic string/bytes payload
+// Layout: [len: u256][bytes...]
+// -----------------------------------------------------------------------------
+LogicalResult ConvertByteAtOp::matchAndRewrite(
+    Operation *op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op->getName().getStringRef() != "ora.byte_at")
+        return failure();
+    if (op->getNumResults() != 1 || operands.size() != 2)
+        return rewriter.notifyMatchFailure(op, "ora.byte_at expects two operands and one result");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value source = operands[0];
+    if (!llvm::isa<sir::PtrType>(source.getType()))
+        source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
+
+    Value index = ensureU256(rewriter, loc, operands[1]);
+    Value headerSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value offset = rewriter.create<sir::AddOp>(loc, u256Type, headerSize, index);
+    Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, offset);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+    Value byteValue = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
+    rewriter.replaceOp(op, byteValue);
     return success();
 }
 

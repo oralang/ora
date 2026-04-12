@@ -315,6 +315,24 @@ pub const Type = union(TypeKind) {
     }
 };
 
+pub const GenericBindingValue = union(enum) {
+    ty: Type,
+    integer: []const u8,
+};
+
+pub const GenericTypeBinding = struct {
+    name: []const u8,
+    value: GenericBindingValue,
+};
+
+pub const ResolvedCall = struct {
+    module_id: source.ModuleId,
+    item_id: ast.ItemId,
+    generic_bindings: []const GenericTypeBinding = &.{},
+    runtime_parameter_types: []const Type = &.{},
+    return_type: Type = .{ .unknown = {} },
+};
+
 pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
     switch (ty) {
         .bool => try buffer.appendSlice(allocator, "bool"),
@@ -455,7 +473,9 @@ pub const LocatedType = struct {
 pub const ConstValue = union(enum) {
     integer: BigInt,
     boolean: bool,
+    address: u160,
     string: []const u8,
+    tuple: []const ConstValue,
 };
 
 pub const VerificationFact = struct {
@@ -588,6 +608,7 @@ pub const TypeCheckResult = struct {
     item_effects: []Effect,
     pattern_types: []LocatedType,
     expr_types: []Type,
+    call_resolutions: []?ResolvedCall,
     expr_effects: []Effect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
@@ -604,6 +625,10 @@ pub const TypeCheckResult = struct {
 
     pub fn exprType(self: *const TypeCheckResult, id: ast.ExprId) Type {
         return self.expr_types[id.index()];
+    }
+
+    pub fn exprCallResolution(self: *const TypeCheckResult, id: ast.ExprId) ?ResolvedCall {
+        return self.call_resolutions[id.index()];
     }
 
     pub fn itemLocatedType(self: *const TypeCheckResult, id: ast.ItemId) LocatedType {

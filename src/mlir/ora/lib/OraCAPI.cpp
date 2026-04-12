@@ -5700,6 +5700,29 @@ MlirOperation oraLengthOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraByteAtOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue index, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Value idx = unwrap(index);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.byte_at");
+        state.addOperands(val);
+        state.addOperands(idx);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraExpressionCaptureOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
 {
     try
@@ -6707,25 +6730,11 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
-        const bool enable_pre_sir_passes = false;
-        if (enable_pre_sir_passes)
-        {
-            // 1. Constant deduplication and constant folding (fallback)
-            pm.addPass(mlir::ora::createOraOptimizationPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora optimization pass");
-
-            // 2. Canonicalization on Ora MLIR functions
-            pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize)");
-
-            // 3. Cleanup unused Ora operations
-            pm.addPass(mlir::ora::createOraCleanupPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora cleanup pass");
-
-            // 4. Inline functions marked with ora.inline attribute
-            pm.addPass(mlir::ora::createOraInliningPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
-        }
+        // Inline only as an optimization. Correctness must not depend on this
+        // pass; non-inlined private/imported helper calls are handled by the
+        // normal OraToSIR lowering path.
+        pm.addPass(mlir::ora::createOraInliningPass());
+        ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
 
         // Add the Ora to SIR conversion pass
         // Use addPass instead of addNestedPass since this is a ModuleOp pass

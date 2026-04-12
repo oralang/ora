@@ -550,8 +550,8 @@ pub const Encoder = struct {
         if (trimmed.len == 0) return error.UnsupportedOperation;
         if (std.mem.eql(u8, trimmed, "i1") or std.mem.eql(u8, trimmed, "bool")) return z3.Z3_mk_bool_sort(self.context.ctx);
         if (std.mem.eql(u8, trimmed, "!ora.address") or std.mem.eql(u8, trimmed, "address")) return self.mkBitVectorSort(160);
-        if (std.mem.eql(u8, trimmed, "!ora.bytes") or std.mem.eql(u8, trimmed, "bytes")) return z3.Z3_mk_string_sort(self.context.ctx);
-        if (std.mem.eql(u8, trimmed, "!ora.string") or std.mem.eql(u8, trimmed, "string")) return z3.Z3_mk_string_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "!ora.bytes") or std.mem.eql(u8, trimmed, "bytes")) return self.byteSequenceSort();
+        if (std.mem.eql(u8, trimmed, "!ora.string") or std.mem.eql(u8, trimmed, "string")) return self.byteSequenceSort();
         if (std.mem.eql(u8, trimmed, "none") or std.mem.eql(u8, trimmed, "!ora.none")) return z3.Z3_mk_bool_sort(self.context.ctx);
         if (trimmed[0] == 'i' or trimmed[0] == 'u') {
             const width = std.fmt.parseInt(u32, trimmed[1..], 10) catch 256;
@@ -3161,12 +3161,11 @@ pub const Encoder = struct {
             const type_ctx = mlir.mlirTypeGetContext(mlir_type);
             const string_ty = mlir.oraStringTypeGet(type_ctx);
             if (!mlir.oraTypeIsNull(string_ty) and mlir.oraTypeEqual(mlir_type, string_ty)) {
-                return z3.Z3_mk_string_sort(self.context.ctx);
+                return self.byteSequenceSort();
             }
             const bytes_ty = mlir.oraBytesTypeGet(type_ctx);
             if (!mlir.oraTypeIsNull(bytes_ty) and mlir.oraTypeEqual(mlir_type, bytes_ty)) {
-                // Model dynamic bytes as canonicalized hex strings in SMT.
-                return z3.Z3_mk_string_sort(self.context.ctx);
+                return self.byteSequenceSort();
             }
             const none_ty = mlir.oraNoneTypeCreate(type_ctx);
             if (!mlir.oraTypeIsNull(none_ty) and mlir.oraTypeEqual(mlir_type, none_ty)) {
@@ -3306,18 +3305,40 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.string.constant")) {
             const value = self.getStringAttr(mlir_op, "value") orelse return error.UnsupportedOperation;
-            const value_z = try self.allocator.dupeZ(u8, value);
-            defer self.allocator.free(value_z);
-            return z3.Z3_mk_string(self.context.ctx, value_z.ptr);
+            return try self.encodeByteSequence(value);
         }
 
         if (std.mem.eql(u8, op_name, "ora.bytes.constant")) {
             const value = self.getStringAttr(mlir_op, "value") orelse return error.UnsupportedOperation;
-            const canonical = try self.normalizeBytesHexLiteral(value);
-            defer self.allocator.free(canonical);
-            const value_z = try self.allocator.dupeZ(u8, canonical);
-            defer self.allocator.free(value_z);
-            return z3.Z3_mk_string(self.context.ctx, value_z.ptr);
+            const bytes = try self.decodeBytesHexLiteral(value);
+            defer self.allocator.free(bytes);
+            return try self.encodeByteSequence(bytes);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.length")) {
+            if (operands.len < 1) return error.InvalidOperandCount;
+            const length_int = z3.Z3_mk_seq_length(self.context.ctx, operands[0]);
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results < 1) return length_int;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const result_kind = z3.Z3_get_sort_kind(self.context.ctx, result_sort);
+            if (result_kind == z3.Z3_BV_SORT) {
+                const width = z3.Z3_get_bv_sort_size(self.context.ctx, result_sort);
+                return z3.Z3_mk_int2bv(self.context.ctx, width, length_int);
+            }
+            return self.coerceAstToSort(length_int, result_sort);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.byte_at")) {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            const seq_index = self.coerceAstToSeqIndexInt(operands[1]);
+            const byte_bv = z3.Z3_mk_seq_nth(self.context.ctx, operands[0], seq_index);
+            const num_results = mlir.oraOperationGetNumResults(mlir_op);
+            if (num_results < 1) return byte_bv;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            return self.coerceAstToSort(byte_bv, result_sort);
         }
 
         if (std.mem.eql(u8, op_name, "ora.old")) {
@@ -4387,10 +4408,6 @@ pub const Encoder = struct {
         const callee = try self.getOpaqueCalleeKey(mlir_op);
         defer self.allocator.free(callee);
         if (mode == .Old) {
-            const success_type = mlir.oraErrorUnionTypeGetSuccessType(result_type);
-            if (!mlir.oraTypeIsNull(success_type)) {
-                return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
-            }
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
                     return inlined;
@@ -9655,18 +9672,7 @@ pub const Encoder = struct {
 
         if (func_op) |fop| {
             var summarized = false;
-            var has_error_union_result = false;
-            if (num_results > 0) {
-                for (0..num_results) |i| {
-                    const result_value = mlir.oraOperationGetResult(mlir_op, i);
-                    const result_type = mlir.oraValueGetType(result_value);
-                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(result_type))) {
-                        has_error_union_result = true;
-                        break;
-                    }
-                }
-            }
-            if (!has_error_union_result and !self.functionHasWriteEffect(fop) and slots.items.len == 0 and num_results > 0) {
+            if (!self.functionHasWriteEffect(fop) and slots.items.len == 0 and num_results > 0) {
                 for (0..num_results) |i| {
                     result_exprs[i] = try self.tryInlinePureCallResult(mlir_op, callee, fop, operands, @intCast(i), .Current);
                     summarized = summarized or (result_exprs[i] != null);
@@ -10669,6 +10675,13 @@ pub const Encoder = struct {
         return self.coerceToBool(ast);
     }
 
+    pub fn invalidateValueCaches(self: *Encoder) void {
+        self.value_map.clearRetainingCapacity();
+        self.value_map_old.clearRetainingCapacity();
+        self.value_bindings.clearRetainingCapacity();
+        self.materialized_calls.clearRetainingCapacity();
+    }
+
     pub fn encodeScalarValueForSort(self: *Encoder, value: i64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
         if (kind == z3.Z3_BOOL_SORT) {
@@ -10792,7 +10805,35 @@ pub const Encoder = struct {
         return self.normalizeUnsignedToWidth(parsed, width);
     }
 
-    fn normalizeBytesHexLiteral(self: *Encoder, literal: []const u8) EncodeError![]u8 {
+    fn coerceAstToSeqIndexInt(self: *Encoder, ast: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, ast);
+        return switch (z3.Z3_get_sort_kind(self.context.ctx, sort)) {
+            z3.Z3_BV_SORT => z3.Z3_mk_bv2int(self.context.ctx, ast, false),
+            else => ast,
+        };
+    }
+
+    fn byteSequenceSort(self: *Encoder) z3.Z3_sort {
+        return z3.Z3_mk_seq_sort(self.context.ctx, self.mkBitVectorSort(8));
+    }
+
+    fn encodeByteSequence(self: *Encoder, bytes: []const u8) EncodeError!z3.Z3_ast {
+        const seq_sort = self.byteSequenceSort();
+        var current = z3.Z3_mk_seq_empty(self.context.ctx, seq_sort);
+        const u8_sort = self.mkBitVectorSort(8);
+        var operands: [2]z3.Z3_ast = undefined;
+
+        for (bytes) |byte| {
+            const byte_ast = z3.Z3_mk_unsigned_int64(self.context.ctx, byte, u8_sort);
+            const unit_ast = z3.Z3_mk_seq_unit(self.context.ctx, byte_ast);
+            operands = .{ current, unit_ast };
+            current = z3.Z3_mk_seq_concat(self.context.ctx, 2, &operands);
+        }
+
+        return current;
+    }
+
+    fn decodeBytesHexLiteral(self: *Encoder, literal: []const u8) EncodeError![]u8 {
         var hex = literal;
         if (hex.len >= 2 and hex[0] == '0' and (hex[1] == 'x' or hex[1] == 'X')) {
             hex = hex[2..];
@@ -10800,18 +10841,17 @@ pub const Encoder = struct {
 
         if (hex.len % 2 != 0) return error.UnsupportedOperation;
 
-        const normalized = try self.allocator.alloc(u8, hex.len);
-        errdefer self.allocator.free(normalized);
+        const decoded = try self.allocator.alloc(u8, hex.len / 2);
+        errdefer self.allocator.free(decoded);
 
-        for (hex, 0..) |ch, i| {
-            const lower = std.ascii.toLower(ch);
-            if (!((lower >= '0' and lower <= '9') or (lower >= 'a' and lower <= 'f'))) {
-                return error.UnsupportedOperation;
-            }
-            normalized[i] = lower;
+        var i: usize = 0;
+        while (i < hex.len) : (i += 2) {
+            const hi = std.fmt.charToDigit(hex[i], 16) catch return error.UnsupportedOperation;
+            const lo = std.fmt.charToDigit(hex[i + 1], 16) catch return error.UnsupportedOperation;
+            decoded[i / 2] = @as(u8, @intCast((hi << 4) | lo));
         }
 
-        return normalized;
+        return decoded;
     }
 
     fn parseConstAttrValue(self: *Encoder, attr: mlir.MlirAttribute, width: u32) ?u256 {

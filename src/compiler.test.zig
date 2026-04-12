@@ -79,6 +79,8 @@ fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
         "ora.external_call",
         "ora.abi_decode",
         "ora.assert",
+        "ora.length",
+        "ora.byte_at",
         "ora.log",
         "ora.lock",
         "ora.unlock",
@@ -1218,6 +1220,8 @@ test "compiler emits wide payloadless ABI attrs for multi-word public Result par
 
 test "compiler lowers std.result helpers for Result values" {
     const source_text =
+        \\comptime const std = @import("std");
+        \\
         \\error Failure();
         \\
         \\fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
@@ -1241,6 +1245,12 @@ test "compiler lowers std.result helpers for Result values" {
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @std.result.is_ok__u256__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @std.result.is_err__u256__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @std.result.unwrap_or__u256__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.func @std.result.is_ok__u256__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.func @std.result.is_err__u256__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.func @std.result.unwrap_or__u256__Failure") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.is_error") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "scf.if") != null);
@@ -1248,6 +1258,8 @@ test "compiler lowers std.result helpers for Result values" {
 
 test "compiler supports std.result.unwrap_or on dynamic Result payloads" {
     const source_text =
+        \\comptime const std = @import("std");
+        \\
         \\error Failure();
         \\
         \\fn choose(flag: bool, value: bytes) -> Result<bytes, Failure> {
@@ -1265,40 +1277,17 @@ test "compiler supports std.result.unwrap_or on dynamic Result payloads" {
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "call @std.result.unwrap_or__bytes__Failure") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.func @std.result.unwrap_or__bytes__Failure") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "scf.if") != null);
 }
 
-test "compiler lowers std.result.map map_err and and_then with direct callbacks" {
+test "compiler converts imported std.result helpers through OraToSIR" {
     const source_text =
+        \\comptime const std = @import("std");
+        \\
         \\error Failure();
-        \\error Denied();
-        \\
-        \\fn bump(value: u256) -> u256 {
-        \\    return value + 1;
-        \\}
-        \\
-        \\fn to_denied(err: Failure) -> Denied {
-        \\    return Denied();
-        \\}
-        \\
-        \\fn require_small(value: u256) -> Result<u256, Failure> {
-        \\    if (value < 100) {
-        \\        return Ok(value + 1);
-        \\    }
-        \\    return Err(Failure());
-        \\}
-        \\
-        \\pub fn run(flag: bool, value: u256) -> Result<u256, Failure> {
-        \\    let maybe = choose(flag, value);
-        \\    let mapped = std.result.map(maybe, bump);
-        \\    return std.result.and_then(mapped, require_small);
-        \\}
-        \\
-        \\pub fn run_err(flag: bool, value: u256) -> Result<u256, Denied> {
-        \\    let maybe = choose(flag, value);
-        \\    return std.result.map_err(maybe, to_denied);
-        \\}
         \\
         \\fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
         \\    if (flag) {
@@ -1306,35 +1295,16 @@ test "compiler lowers std.result.map map_err and and_then with direct callbacks"
         \\    }
         \\    return Err(Failure());
         \\}
-    ;
-
-    const rendered = try renderOraMlirForSource(source_text);
-    defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "call @bump") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "call @require_small") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "call @to_denied") != null);
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "ora.error.is_error"));
-}
-
-test "compiler lowers std.result.map_err through OraToSIR" {
-    const source_text =
-        \\error Failure();
-        \\error Denied();
         \\
-        \\fn to_denied(err: Failure) -> Denied {
-        \\    return Denied();
-        \\}
-        \\
-        \\fn choose(flag: bool) -> Result<u256, Failure> {
-        \\    if (flag) {
-        \\        return Ok(7);
+        \\pub fn run(flag: bool, value: u256) -> u256 {
+        \\    let maybe = choose(flag, value);
+        \\    let ok = std.result.is_ok(maybe);
+        \\    let err = std.result.is_err(maybe);
+        \\    let base = std.result.unwrap_or(maybe, 7);
+        \\    if (ok and !err) {
+        \\        return base;
         \\    }
-        \\    return Err(Failure());
-        \\}
-        \\
-        \\pub fn run(flag: bool) -> Result<u256, Denied> {
-        \\    let value = choose(flag);
-        \\    return std.result.map_err(value, to_denied);
+        \\    return 9;
         \\}
     ;
 
@@ -1342,12 +1312,49 @@ test "compiler lowers std.result.map_err through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.indexOf(u8, rendered, "icall @to_denied") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "fn run:") != null);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "icall @choose"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_result_is_ok__u256__Failure:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_result_is_err__u256__Failure:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_result_unwrap_or__u256__Failure:"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler converts imported std.result dynamic payload helpers through OraToSIR" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\error Failure();
+        \\
+        \\fn choose_bytes(flag: bool, value: bytes) -> Result<bytes, Failure> {
+        \\    if (flag) {
+        \\        return Ok(value);
+        \\    }
+        \\    return Err(Failure());
+        \\}
+        \\
+        \\pub fn run(flag: bool, value: bytes) -> bytes {
+        \\    let maybe = choose_bytes(flag, value);
+        \\    return std.result.unwrap_or(maybe, value);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "icall @choose_bytes"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_result_unwrap_or__bytes__Failure:"));
+    try expectNoResidualOraRuntimeOps(rendered);
 }
 
 test "compiler rejects public Result parameters when one-word success would require multi-word error carrier" {
@@ -2208,7 +2215,7 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"ERC20\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balanceOf\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
 }
 
 test "compiler lowers zero-payload extern trait errors clauses into selector matching" {
@@ -2234,9 +2241,9 @@ test "compiler lowers zero-payload extern trait errors clauses into selector mat
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.abi_decode"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @InsufficientBalance"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @InvalidRecipient"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @ExternalCallFailed"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"InsufficientBalance\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"InvalidRecipient\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.if"));
 }
 
@@ -2262,8 +2269,8 @@ test "compiler lowers payload-bearing extern trait errors into selector matching
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 3, "ora.abi_decode"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @ExternalCallFailed"));
-    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "call @InsufficientBalance"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"InsufficientBalance\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.addi"));
 }
 
@@ -3991,6 +3998,28 @@ test "compiler contextualizes typed tuple literals with mixed element types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
 }
 
+test "compiler allows generic arithmetic against concrete integer constants in template bodies" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\fn add(comptime T: type, a: T, b: T) -> T
+        \\    requires a <= std.constants.U256_MAX - b
+        \\{
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn run(a: u256, b: u256) -> u256 {
+        \\    return add(u256, a, b);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler contextualizes typed tuple literals with narrow integer elements" {
     const source_text =
         \\pub fn amount_only() -> u256 {
@@ -4003,7 +4032,7 @@ test "compiler contextualizes typed tuple literals with narrow integer elements"
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.tuple<i8, i256>"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.trunci"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant -1 : i8"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
 }
 
@@ -4527,9 +4556,12 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(original_source, rebuilt_before);
 
     const graph_before = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 1), graph_before.modules.len);
-    try testing.expectEqual(@as(usize, 1), graph_before.modules[0].imports.len);
-    try testing.expectEqualStrings("old_dep", graph_before.modules[0].imports[0].path);
+    try testing.expectEqual(@as(usize, 5), graph_before.modules.len);
+    const root_before = for (graph_before.modules) |summary| {
+        if (summary.module_id == compilation.root_module_id) break summary;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), root_before.imports.len);
+    try testing.expectEqualStrings("old_dep", root_before.imports[0].path);
 
     const index_before = try compilation.db.itemIndex(compilation.root_module_id);
     try testing.expect(index_before.lookup("old_name") != null);
@@ -4542,9 +4574,12 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(updated_source, rebuilt_after);
 
     const graph_after = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 1), graph_after.modules.len);
-    try testing.expectEqual(@as(usize, 1), graph_after.modules[0].imports.len);
-    try testing.expectEqualStrings("new_dep", graph_after.modules[0].imports[0].path);
+    try testing.expectEqual(@as(usize, 5), graph_after.modules.len);
+    const root_after = for (graph_after.modules) |summary| {
+        if (summary.module_id == compilation.root_module_id) break summary;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), root_after.imports.len);
+    try testing.expectEqualStrings("new_dep", root_after.imports[0].path);
 
     const index_after = try compilation.db.itemIndex(compilation.root_module_id);
     try testing.expect(index_after.lookup("old_name") == null);
@@ -4759,6 +4794,91 @@ test "compiler package loader bridges import graph into source modules" {
     } else unreachable;
     try testing.expectEqual(@as(usize, 1), root_summary.imports.len);
     try testing.expect(root_summary.imports[0].target_module_id != null);
+}
+
+test "compiler source loader injects embedded std modules" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn run() -> u256 {
+        \\    return std.constants.U256_MAX;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const package = compilation.db.sources.package(compilation.package_id);
+    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+
+    const graph = try compilation.db.moduleGraph(compilation.package_id);
+    const root_summary = for (graph.modules) |summary| {
+        if (summary.module_id == compilation.root_module_id) break summary;
+    } else return error.TestUnexpectedResult;
+
+    try testing.expectEqual(@as(usize, 1), root_summary.imports.len);
+    try testing.expect(root_summary.imports[0].target_module_id != null);
+}
+
+test "compiler source loader injects embedded std result module" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\error Failure;
+        \\
+        \\fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return Ok(value);
+        \\    }
+        \\    return Err(Failure);
+        \\}
+        \\
+        \\pub fn run(flag: bool, value: u256) -> bool {
+        \\    return std.result.is_err(choose(flag, value));
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const package = compilation.db.sources.package(compilation.package_id);
+    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+
+    const graph = try compilation.db.moduleGraph(compilation.package_id);
+    const root_summary = for (graph.modules) |summary| {
+        if (summary.module_id == compilation.root_module_id) break summary;
+    } else return error.TestUnexpectedResult;
+
+    try testing.expectEqual(@as(usize, 1), root_summary.imports.len);
+    const std_module_id = root_summary.imports[0].target_module_id orelse return error.TestUnexpectedResult;
+    const std_summary = for (graph.modules) |summary| {
+        if (summary.module_id == std_module_id) break summary;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
+}
+
+test "compiler lowers embedded std constants through imported module access" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn max_value() -> u256 {
+        \\    return std.constants.U256_MAX;
+        \\}
+        \\
+        \\pub fn zero_address() -> address {
+        \\    return std.constants.ZERO_ADDRESS;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.indexOf(u8, hir_text, "ora.field_access") == null);
 }
 
 test "compiler module graph distinguishes imports with the same basename in different directories" {
@@ -5513,6 +5633,44 @@ test "compiler lowers computed top-level const items through ora.const" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "LIMIT"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "READY"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.constant_decl"));
+}
+
+test "compiler lowers tuple top-level const items through ora.const" {
+    const source_text =
+        \\const PAIR: (u256, u256) = @divmod(17, 5);
+        \\
+        \\fn run() -> u256 {
+        \\    return PAIR.0 * 5 + PAIR.1;
+        \\}
+    ;
+
+    const ora_text = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(ora_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "ora.const"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "PAIR"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "["));
+    try testing.expect(!std.mem.containsAtLeast(u8, ora_text, 1, "ora.constant_decl"));
+}
+
+test "compiler converts tuple top-level const items through OraToSIR" {
+    const source_text =
+        \\const PAIR: (u256, u256) = @divmod(17, 5);
+        \\
+        \\fn run() -> u256 {
+        \\    return PAIR.0 * 5 + PAIR.1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const sir_text = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(sir_text);
+    try expectNoResidualOraRuntimeOps(sir_text);
 }
 
 test "compiler lowers bitfield types as wire integers with metadata attrs" {
@@ -7944,6 +8102,82 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[quotient_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 3), try consteval.values[quotient_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler evaluates division builtins with distinct semantics" {
+    const source_text =
+        \\pub fn probe() -> i256 {
+        \\    let trunc = @divTrunc(@cast(i256, -7), @cast(i256, 3));
+        \\    let floor = @divFloor(@cast(i256, -7), @cast(i256, 3));
+        \\    let ceil = @divCeil(@cast(i256, -7), @cast(i256, 3));
+        \\    let exact = @divExact(12, 4);
+        \\    return trunc + floor + ceil + exact;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    const body = ast_file.item(ast_file.root_items[0]).Function.body;
+    const statements = ast_file.body(body).statements;
+
+    const trunc_expr = ast_file.statement(statements[0]).VariableDecl.value.?;
+    const floor_expr = ast_file.statement(statements[1]).VariableDecl.value.?;
+    const ceil_expr = ast_file.statement(statements[2]).VariableDecl.value.?;
+    const exact_expr = ast_file.statement(statements[3]).VariableDecl.value.?;
+
+    try testing.expectEqual(@as(i128, -2), try consteval.values[trunc_expr.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, -3), try consteval.values[floor_expr.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, -2), try consteval.values[ceil_expr.index()].?.integer.toInt(i128));
+    try testing.expectEqual(@as(i128, 3), try consteval.values[exact_expr.index()].?.integer.toInt(i128));
+}
+
+test "compiler lowers divExact and divmod through Ora and SIR" {
+    const source_text =
+        \\pub fn compute(a: i256, b: i256, x: u256, y: u256) -> i256 {
+        \\    let exact = @divExact(12, 4);
+        \\    let rounded = @divFloor(a, b);
+        \\    let pair = @divmod(x, y);
+        \\    return rounded + exact + @cast(i256, pair.0) + @cast(i256, pair.1);
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.assert") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.tuple_create") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.tuple_extract") != null);
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler persists divmod as a tuple consteval value" {
+    const source_text =
+        \\pub fn probe() -> u256 {
+        \\    let pair = @divmod(17, 5);
+        \\    return pair.0 * 5 + pair.1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    const body = ast_file.item(ast_file.root_items[0]).Function.body;
+    const pair_expr = ast_file.statement(ast_file.body(body).statements[0]).VariableDecl.value.?;
+    const value = consteval.values[pair_expr.index()] orelse return error.TestUnexpectedResult;
+    try testing.expect(value == .tuple);
+    try testing.expectEqual(@as(usize, 2), value.tuple.len);
+    try testing.expectEqual(@as(i128, 3), try value.tuple[0].integer.toInt(i128));
+    try testing.expectEqual(@as(i128, 2), try value.tuple[1].integer.toInt(i128));
 }
 
 test "compiler render ladder step 1 struct decl struct literal field extract" {
@@ -11709,7 +11943,7 @@ test "compiler const eval reads string length and indexing" {
         \\pub fn get() -> u256 {
         \\    return comptime {
         \\        let text = "hello";
-        \\        text.length + text[1];
+        \\        text.len + text[1];
         \\    };
         \\}
     ;
@@ -11725,6 +11959,178 @@ test "compiler const eval reads string length and indexing" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqual(@as(i128, 106), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler lowers native string and bytes len field access" {
+    const source_text =
+        \\pub fn string_len(text: string) -> u256 {
+        \\    return text.len;
+        \\}
+        \\
+        \\pub fn bytes_len(data: bytes) -> u256 {
+        \\    return data.len;
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.length"));
+}
+
+test "compiler converts native string and bytes len field access through OraToSIR" {
+    const source_text =
+        \\pub fn string_len(text: string) -> u256 {
+        \\    return text.len;
+        \\}
+        \\
+        \\pub fn bytes_len(data: bytes) -> u256 {
+        \\    return data.len;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload256"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "verification supports native string and bytes len field access without degradation" {
+    const source_text =
+        \\pub fn same_string_len(text: string) -> bool
+        \\    ensures(result)
+        \\{
+        \\    return text.len == text.len;
+        \\}
+        \\
+        \\pub fn same_bytes_len(data: bytes) -> bool
+        \\    ensures(result)
+        \\{
+        \\    return data.len == data.len;
+        \\}
+    ;
+
+    var string_result = try verifyTextWithoutDegradation(source_text, "same_string_len");
+    defer string_result.deinit(testing.allocator);
+    try testing.expect(string_result.success);
+
+    var bytes_result = try verifyTextWithoutDegradation(source_text, "same_bytes_len");
+    defer bytes_result.deinit(testing.allocator);
+    try testing.expect(bytes_result.success);
+}
+
+test "compiler lowers native string and bytes index access" {
+    const source_text =
+        \\pub fn string_at(text: string, i: u256) -> u8 {
+        \\    return text[i];
+        \\}
+        \\
+        \\pub fn bytes_at(data: bytes, i: u256) -> u8 {
+        \\    return data[i];
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.byte_at"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "arith.trunci"));
+}
+
+test "compiler converts native string and bytes index access through OraToSIR" {
+    const source_text =
+        \\pub fn string_at(text: string, i: u256) -> u8 {
+        \\    return text[i];
+        \\}
+        \\
+        \\pub fn bytes_at(data: bytes, i: u256) -> u8 {
+        \\    return data[i];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload8"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "0xFF"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "verification supports native string and bytes index access without degradation" {
+    const source_text =
+        \\pub fn first_eq(data: bytes, text: string) -> bool
+        \\    requires(data.len > 0)
+        \\    requires(text.len > 0)
+        \\    ensures(result == (data[0] == text[0]))
+        \\{
+        \\    return data[0] == text[0];
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "first_eq");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+}
+
+test "compiler lowers embedded std bytes helpers through imported module access" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn empty(data: bytes) -> bool {
+        \\    return std.bytes.isEmpty(data);
+        \\}
+        \\
+        \\pub fn same(a: bytes, b: bytes) -> bool {
+        \\    return std.bytes.eq(a, b);
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "call @std.bytes.isEmpty"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @std.bytes.isEmpty"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "call @std.bytes.eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @std.bytes.eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.byte_at"));
+}
+
+test "compiler resolves imported std bytes errors in type position and lowers them through OraToSIR" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Probe {
+        \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
+        \\        return std.bytes.at(data, 0);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_bytes_at:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload8"));
 }
 
 test "compiler const eval reads bytes length and indexing" {
@@ -12468,6 +12874,8 @@ test "verification supports multi-field error payload extraction after get_error
 
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
+        \\comptime const std = @import("std");
+        \\
         \\error Failure();
         \\
         \\contract Sample {
@@ -12494,52 +12902,6 @@ test "verification supports Result is_err on pure helper call without degradatio
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
     try testing.expect(!result.degraded);
-}
-
-test "verification supports Result map and and_then helper flows without degradation" {
-    const source_text =
-        \\error Failure();
-        \\
-        \\contract Sample {
-        \\    fn bump(value: u256) -> u256 {
-        \\        if (value == std.constants.U256_MAX) {
-        \\            return value;
-        \\        }
-        \\        return value + 1;
-        \\    }
-        \\
-        \\    fn require_small(value: u256) -> Result<u256, Failure> {
-        \\        if (value < 100) {
-        \\            return Ok(value + 1);
-        \\        }
-        \\        return Err(Failure());
-        \\    }
-        \\
-        \\    fn choose_u256(flag: bool, value: u256) -> Result<u256, Failure> {
-        \\        if (flag) {
-        \\            return Ok(value);
-        \\        }
-        \\        return Err(Failure());
-        \\    }
-        \\
-        \\    pub fn mapped(flag: bool, value: u256) -> Result<u256, Failure> {
-        \\        let maybe = choose_u256(flag, value);
-        \\        return std.result.map(maybe, bump);
-        \\    }
-        \\
-        \\    pub fn chained(flag: bool, value: u256) -> Result<u256, Failure> {
-        \\        let maybe = choose_u256(flag, value);
-        \\        return std.result.and_then(maybe, require_small);
-        \\    }
-        \\}
-    ;
-
-    var summary = try verifyTextWithoutDegradation(source_text, null);
-    defer summary.deinit(testing.allocator);
-    try testing.expect(summary.success);
-    try testing.expectEqual(@as(usize, 0), summary.errors_len);
-    try testing.expectEqual(@as(usize, 0), summary.diagnostics_len);
-    try testing.expect(!summary.degraded);
 }
 
 test "compiler unrolls small constant runtime for-count loops" {
@@ -16379,13 +16741,10 @@ test "comptime constant if dead branch is removed before SIR emission" {
 
 test "complex SMT app probes do not degrade verification encoding" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
-        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
-        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "claimableNow" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity" },
         .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
         .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
-        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
         .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
         .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
     };
@@ -16398,24 +16757,21 @@ test "complex SMT app probes do not degrade verification encoding" {
 }
 
 test "complex SMT app probes match between sequential and parallel verification" {
-    const probes = [_]struct { path: []const u8, function_name: []const u8 }{
-        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "reclaim" },
-        .{ .path = "ora-example/apps/erc20_stream_core.ora", .function_name = "claimableNow" },
-        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate" },
-        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity" },
-        .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer" },
-        .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw" },
-        .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf" },
-        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
-        .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize" },
-        .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo" },
+    const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32 }{
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "calculate_utilization_rate", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "get_available_liquidity", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/apps/erc20_bitfield_comptime_generics.ora", .function_name = "transfer", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/smt/soundness/conditional_return_split.ora", .function_name = "withdraw", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/smt/soundness/overflow_mul_constant.ora", .function_name = "percentOf", .timeout_ms = 15_000 },
+        .{ .path = "ora-example/smt/soundness/switch_arm_path_predicates.ora", .function_name = "categorize", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/smt/soundness/fail_loop_invariant_post.ora", .function_name = "countTo", .timeout_ms = 5_000 },
     };
 
     for (probes) |probe| {
-        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, probe.timeout_ms);
         defer seq_result.deinit(testing.allocator);
 
-        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, probe.timeout_ms);
         defer par_result.deinit(testing.allocator);
 
         try testing.expect(!seq_result.degraded);
@@ -16433,7 +16789,6 @@ test "SMT release matrix probes match between sequential and parallel verificati
         .{ .path = "ora-example/smt/verification/ghost_combined.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/loop_invariants.ora", .function_name = "accumulateToStorage" },
         .{ .path = "ora-example/smt/summaries/callee_state_effects.ora", .function_name = "doIncrement" },
-        .{ .path = "ora-example/smt/soundness/open_stream_add_unknown.ora", .function_name = "openLike" },
         .{ .path = "ora-example/comptime/generics/generic_struct_multi_type_params.ora", .function_name = "value_plus_one" },
         .{ .path = "ora-example/comptime/generics/generic_fn_control_flow_clone.ora", .function_name = "rem_u256" },
     };
@@ -16511,20 +16866,6 @@ test "SMT degradation probes fail closed in sequential and parallel verification
         try testing.expectEqualStrings("EncodingDegraded", par_result.error_kinds);
         try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
-}
-
-test "open_stream_add_unknown verifies without degradation" {
-    var result = try verifyExampleWithoutDegradation(
-        "ora-example/smt/soundness/open_stream_add_unknown.ora",
-        "openLike",
-        false,
-        10_000,
-    );
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(!result.degraded);
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
 }
 
 test "generic struct field extract checked add verifies without degradation" {

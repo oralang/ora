@@ -1,0 +1,19 @@
+comptime const std = @import("std");
+
+contract StdBytesHelpers {
+    pub fn empty(data: bytes) -> bool {
+        return std.bytes.isEmpty(data);
+    }
+
+    pub fn same(a: bytes, b: bytes) -> bool {
+        return std.bytes.eq(a, b);
+    }
+
+    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
+        return std.bytes.at(data, 0);
+    }
+
+    pub fn decodeWord(data: bytes) -> !u256 | std.bytes.InvalidLength {
+        return std.bytes.decodeU256BE(data);
+    }
+}

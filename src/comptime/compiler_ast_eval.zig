@@ -33,6 +33,7 @@ pub const TypeQuery = struct {
     context: *anyopaque,
     ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
     module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.TypeCheckResult,
+    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ConstEvalResult,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
     lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
     resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
@@ -127,6 +128,7 @@ const ConstEvaluator = struct {
         return_value: ?ConstValue,
         break_loop,
         continue_loop,
+        indeterminate,
     };
 
     const CtBodyControl = union(enum) {
@@ -134,6 +136,7 @@ const ConstEvaluator = struct {
         return_value: ?CtValue,
         break_loop,
         continue_loop,
+        indeterminate,
     };
 
     const ValueConstructionTarget = enum {
@@ -388,6 +391,19 @@ const ConstEvaluator = struct {
             },
             .Field => |field| blk: {
                 _ = try self.evalExprImpl(field.base, use_cache);
+                if ((try self.importedModuleForExpr(field.base))) |target_module_id| {
+                    const target_item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse break :blk null;
+                    const target_file = try self.astFileForModule(target_module_id);
+                    const target_const_eval = (try self.constEvalForModule(target_module_id)) orelse break :blk null;
+                    switch (target_file.item(target_item_id).*) {
+                        .Constant => |constant| break :blk target_const_eval.values[constant.value.index()],
+                        .Field => |decl| {
+                            const value_expr = decl.value orelse break :blk null;
+                            break :blk target_const_eval.values[value_expr.index()];
+                        },
+                        else => {},
+                    }
+                }
                 break :blk null;
             },
             .Index => |index| blk: {
@@ -846,6 +862,11 @@ const ConstEvaluator = struct {
         return try type_query.module_typecheck(type_query.context, module_id);
     }
 
+    fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const model.ConstEvalResult {
+        const type_query = self.type_query orelse return null;
+        return try type_query.const_eval(type_query.context, module_id);
+    }
+
     fn callableFunctionIsPure(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
         const typecheck = (try self.currentModuleTypeCheckResult()) orelse return true;
         return typecheck.itemEffect(item_id) == .pure;
@@ -870,6 +891,19 @@ const ConstEvaluator = struct {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
         return try type_query.resolve_import_alias(type_query.context, module_id, alias);
+    }
+
+    fn importedModuleForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?source.ModuleId {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| try self.resolveImportAlias(name.name),
+            .Field => |field| blk: {
+                const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
+                const type_query = self.type_query orelse break :blk null;
+                break :blk try type_query.resolve_import_alias(type_query.context, base_module_id, field.name);
+            },
+            .Group => |group| self.importedModuleForExpr(group.expr),
+            else => null,
+        };
     }
 
     fn functionRuntimeSelfParameterIndex(self: *ConstEvaluator, function: ast.FunctionItem) ?usize {
@@ -1300,7 +1334,8 @@ const ConstEvaluator = struct {
         if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
             std.mem.eql(u8, builtin.name, "divFloor") or
             std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact")))
+            std.mem.eql(u8, builtin.name, "divExact") or
+            std.mem.eql(u8, builtin.name, "divmod")))
         {
             const lhs = try self.evalExpr(builtin.args[0]);
             const rhs = try self.evalExpr(builtin.args[1]);
@@ -1311,7 +1346,25 @@ const ConstEvaluator = struct {
                         if (b.eqlZero()) break :blk null;
                         var quotient = try std.math.big.int.Managed.init(self.allocator);
                         var remainder = try std.math.big.int.Managed.init(self.allocator);
-                        try std.math.big.int.Managed.divTrunc(&quotient, &remainder, &a, &b);
+                        if (std.mem.eql(u8, builtin.name, "divFloor")) {
+                            try std.math.big.int.Managed.divFloor(&quotient, &remainder, &a, &b);
+                        } else {
+                            try std.math.big.int.Managed.divTrunc(&quotient, &remainder, &a, &b);
+                            if (std.mem.eql(u8, builtin.name, "divCeil") and !remainder.eqlZero()) {
+                                const signs_differ = a.toConst().positive != b.toConst().positive;
+                                if (!signs_differ) {
+                                    try quotient.addScalar(&quotient, 1);
+                                }
+                            } else if (std.mem.eql(u8, builtin.name, "divExact") and !remainder.eqlZero()) {
+                                break :blk null;
+                            }
+                        }
+                        if (std.mem.eql(u8, builtin.name, "divmod")) {
+                            const elems = try self.allocator.alloc(ConstValue, 2);
+                            elems[0] = .{ .integer = quotient };
+                            elems[1] = .{ .integer = remainder };
+                            break :blk .{ .tuple = elems };
+                        }
                         break :blk .{ .integer = quotient };
                     },
                     else => null,
@@ -1916,6 +1969,7 @@ const ConstEvaluator = struct {
             .value => |value| value,
             .return_value => |value| value,
             .break_loop, .continue_loop => null,
+            .indeterminate => null,
         };
     }
 
@@ -1924,6 +1978,7 @@ const ConstEvaluator = struct {
             .value => |value| value,
             .return_value => |value| value,
             .break_loop, .continue_loop => null,
+            .indeterminate => null,
         };
     }
 
@@ -1989,6 +2044,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .LabeledBlock => |labeled| {
@@ -1997,6 +2053,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .If => |if_stmt| {
@@ -2005,6 +2062,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .While => |while_stmt| {
@@ -2013,6 +2071,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .For => |for_stmt| {
@@ -2021,6 +2080,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .Switch => |switch_stmt| {
@@ -2029,6 +2089,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .Assign => |assign| {
@@ -2092,6 +2153,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .LabeledBlock => |labeled| {
@@ -2100,6 +2162,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .If => |if_stmt| {
@@ -2108,6 +2171,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .While => |while_stmt| {
@@ -2116,6 +2180,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .For => |for_stmt| {
@@ -2124,6 +2189,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .Switch => |switch_stmt| {
@@ -2132,6 +2198,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => return .break_loop,
                         .continue_loop => return .continue_loop,
+                        .indeterminate => return .indeterminate,
                     }
                 },
                 .Assign => |assign| {
@@ -2150,41 +2217,41 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeIf(self: *ConstEvaluator, if_stmt: ast.IfStmt) anyerror!BodyControl {
-        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return .{ .value = null };
-        const take_then = self.constConditionTruthy(condition) orelse return .{ .value = null };
+        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return .indeterminate;
+        const take_then = self.constConditionTruthy(condition) orelse return .indeterminate;
         if (take_then) return try self.evalComptimeBodyControl(if_stmt.then_body);
         if (if_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
         return .{ .value = null };
     }
 
     fn evalComptimeIfCtValue(self: *ConstEvaluator, if_stmt: ast.IfStmt, comptime use_cache: bool) anyerror!CtBodyControl {
-        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return .{ .value = null };
-        const take_then = self.constConditionTruthy(condition) orelse return .{ .value = null };
+        const condition = (try self.evalExprUncached(if_stmt.condition)) orelse return .indeterminate;
+        const take_then = self.constConditionTruthy(condition) orelse return .indeterminate;
         if (take_then) return try self.evalComptimeBodyControlCtValue(if_stmt.then_body, use_cache);
         if (if_stmt.else_body) |else_body| return try self.evalComptimeBodyControlCtValue(else_body, use_cache);
         return .{ .value = null };
     }
 
     fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!BodyControl {
-        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .{ .value = null };
+        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .indeterminate;
         for (switch_stmt.arms) |arm| {
             if (self.patternMatches(condition, arm.pattern)) {
                 return try self.evalComptimeBodyControl(arm.body);
             }
         }
         if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
-        return .{ .value = null };
+        return .indeterminate;
     }
 
     fn evalComptimeSwitchStmtCtValue(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt, comptime use_cache: bool) anyerror!CtBodyControl {
-        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .{ .value = null };
+        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .indeterminate;
         for (switch_stmt.arms) |arm| {
             if (self.patternMatches(condition, arm.pattern)) {
                 return try self.evalComptimeBodyControlCtValue(arm.body, use_cache);
             }
         }
         if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControlCtValue(else_body, use_cache);
-        return .{ .value = null };
+        return .indeterminate;
     }
 
     fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!BodyControl {
@@ -2194,11 +2261,11 @@ const ConstEvaluator = struct {
             iterations += 1;
             if (iterations > self.env.config.max_loop_iterations) {
                 self.recordLoopLimitExceeded(while_stmt.range);
-                return .{ .value = null };
+                return .indeterminate;
             }
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
-            const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
+            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
             if (!should_continue) break;
 
             switch (try self.evalComptimeBodyControl(while_stmt.body)) {
@@ -2206,6 +2273,7 @@ const ConstEvaluator = struct {
                 .return_value => |value| return .{ .return_value = value },
                 .break_loop => break,
                 .continue_loop => continue,
+                .indeterminate => return .indeterminate,
             }
         }
         return .{ .value = last_value };
@@ -2218,11 +2286,11 @@ const ConstEvaluator = struct {
             iterations += 1;
             if (iterations > self.env.config.max_loop_iterations) {
                 self.recordLoopLimitExceeded(while_stmt.range);
-                return .{ .value = null };
+                return .indeterminate;
             }
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .{ .value = null };
-            const should_continue = self.constConditionTruthy(condition) orelse return .{ .value = null };
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
+            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
             if (!should_continue) break;
 
             switch (try self.evalComptimeBodyControlCtValue(while_stmt.body, use_cache)) {
@@ -2230,6 +2298,7 @@ const ConstEvaluator = struct {
                 .return_value => |value| return .{ .return_value = value },
                 .break_loop => break,
                 .continue_loop => continue,
+                .indeterminate => return .indeterminate,
             }
         }
         return .{ .value = last_value };
@@ -2263,6 +2332,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2285,6 +2355,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2307,6 +2378,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2329,6 +2401,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2365,6 +2438,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2387,6 +2461,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2409,6 +2484,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2431,6 +2507,7 @@ const ConstEvaluator = struct {
                         .return_value => |value| return .{ .return_value = value },
                         .break_loop => break,
                         .continue_loop => continue,
+                        .indeterminate => return .indeterminate,
                     }
                 }
             },
@@ -2754,7 +2831,9 @@ const ConstEvaluator = struct {
         return switch (value) {
             .boolean => |boolean| boolean,
             .integer => |integer| !integer.eqlZero(),
+            .address => null,
             .string => null,
+            .tuple => null,
         };
     }
 
