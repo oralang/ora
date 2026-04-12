@@ -35,6 +35,29 @@ static bool isNarrowErrorUnionType(Type type)
     return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
 }
 
+static bool hasForceWideErrorUnionAttr(Operation *op)
+{
+    if (!op)
+        return false;
+    if (auto attr = op->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
+        return attr.getValue();
+    if (auto func = op->getParentOfType<mlir::func::FuncOp>())
+    {
+        if (auto attr = func->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
+            return attr.getValue();
+    }
+    return false;
+}
+
+static bool valueHasForceWideErrorUnion(Value value)
+{
+    if (!value)
+        return false;
+    if (Operation *def = value.getDefiningOp())
+        return hasForceWideErrorUnionAttr(def);
+    return false;
+}
+
 static mlir::MemRefType remapMemRefElementType(mlir::MemRefType type, Type elementType)
 {
     return mlir::MemRefType::get(type.getShape(), elementType, type.getLayout(), type.getMemorySpace());
@@ -129,7 +152,11 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
     if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
         return failure();
+    if (valueHasForceWideErrorUnion(op.getMemref()))
+        return failure();
     if (!isNarrowErrorUnionType(op.getType()))
+        return failure();
+    if (hasForceWideErrorUnionAttr(op))
         return failure();
 
     auto loc = op.getLoc();
@@ -155,7 +182,11 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
     if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
         return failure();
+    if (valueHasForceWideErrorUnion(op.getMemref()))
+        return failure();
     if (!isNarrowErrorUnionType(op.getValue().getType()))
+        return failure();
+    if (valueHasForceWideErrorUnion(op.getValue()))
         return failure();
 
     auto loc = op.getLoc();
@@ -192,6 +223,15 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
             consumedCast = cast;
             Value tag = ensureI256(cast.getOperand(0));
             Value payload = ensureI256(cast.getOperand(1));
+            if (!payload)
+            {
+                auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);
+                if (auto materialized = ora::materializePtrCarrierFromOraValue(
+                        rewriter, loc, ptrType, cast.getOperand(1)))
+                {
+                    payload = ensureI256(*materialized);
+                }
+            }
             if (!tag || !payload)
                 return failure();
             Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));

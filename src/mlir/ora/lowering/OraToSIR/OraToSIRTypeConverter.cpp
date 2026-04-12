@@ -204,6 +204,16 @@ namespace mlir
             if (!llvm::isa<sir::PtrType>(ptrType))
                 return std::nullopt;
 
+            if (llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+                          mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+            {
+                if (auto bitcast = input.getDefiningOp<sir::BitcastOp>())
+                {
+                    if (llvm::isa<sir::PtrType>(bitcast.getOperand().getType()))
+                        return bitcast.getOperand();
+                }
+            }
+
             if (auto tupleType = llvm::dyn_cast<ora::TupleType>(input.getType()))
             {
                 if (auto castOp = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
