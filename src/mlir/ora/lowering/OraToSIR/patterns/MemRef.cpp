@@ -58,6 +58,24 @@ static bool valueHasForceWideErrorUnion(Value value)
     return false;
 }
 
+static bool hasMaterializationKind(Operation *op, llvm::StringRef kind)
+{
+    if (!op)
+        return false;
+    if (auto attr = op->getAttrOfType<mlir::StringAttr>("ora.materialization_kind"))
+        return attr.getValue() == kind;
+    return false;
+}
+
+static bool isScalarErrorUnionMemRefCarrier(Type type)
+{
+    auto errType = llvm::dyn_cast<mlir::ora::ErrorUnionType>(type);
+    if (!errType)
+        return false;
+    auto successType = errType.getSuccessType();
+    return llvm::isa<mlir::IntegerType, mlir::ora::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+}
+
 static mlir::MemRefType remapMemRefElementType(mlir::MemRefType type, Type elementType)
 {
     return mlir::MemRefType::get(type.getShape(), elementType, type.getLayout(), type.getMemorySpace());
@@ -150,13 +168,19 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     PatternRewriter &rewriter) const
 {
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-    if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
+    if (!memrefType)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getMemref()))
+    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
+    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    if (!narrowCarrier && !scalarCarrier)
         return failure();
-    if (!isNarrowErrorUnionType(op.getType()))
+    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
         return failure();
-    if (hasForceWideErrorUnionAttr(op))
+    if (!narrowCarrier && hasForceWideErrorUnionAttr(op) && !scalarCarrier)
+        return failure();
+    if (!isNarrowErrorUnionType(op.getType()) && !scalarCarrier)
+        return failure();
+    if (hasForceWideErrorUnionAttr(op) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -180,13 +204,17 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     PatternRewriter &rewriter) const
 {
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-    if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
+    if (!memrefType)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getMemref()))
+    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
+    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    if (!narrowCarrier && !scalarCarrier)
         return failure();
-    if (!isNarrowErrorUnionType(op.getValue().getType()))
+    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getValue()))
+    if (!isNarrowErrorUnionType(op.getValue().getType()) && !scalarCarrier)
+        return failure();
+    if (valueHasForceWideErrorUnion(op.getValue()) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -220,6 +248,8 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     {
         if (cast.getNumOperands() == 2)
         {
+            if (!narrowCarrier && !hasMaterializationKind(cast, "normalized_error_union"))
+                return failure();
             consumedCast = cast;
             Value tag = ensureI256(cast.getOperand(0));
             Value payload = ensureI256(cast.getOperand(1));
