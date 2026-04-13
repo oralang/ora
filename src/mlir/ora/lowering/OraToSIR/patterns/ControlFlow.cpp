@@ -4426,6 +4426,15 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     if (op.getNumOperands() == 1 && op.getNumResults() == 1)
     {
         if (llvm::isa<sir::U256Type>(resultType) &&
+            llvm::isa<mlir::IndexType>(input.getType()))
+        {
+            auto i256 = mlir::IntegerType::get(rewriter.getContext(), 256);
+            Value asI256 = rewriter.create<arith::IndexCastOp>(loc, i256, input);
+            Value asU256 = rewriter.create<sir::BitcastOp>(loc, resultType, asI256);
+            rewriter.replaceOp(op, asU256);
+            return success();
+        }
+        if (llvm::isa<sir::U256Type>(resultType) &&
             llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
         {
             rewriter.replaceOp(op, input);
@@ -4448,6 +4457,17 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         {
             auto cast = rewriter.create<sir::BitcastOp>(loc, resultType, input);
             rewriter.replaceOp(op, cast.getResult());
+            return success();
+        }
+    }
+
+    // Ptr-backed dynamic aggregates: the Ora view is just the underlying carrier.
+    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
+    {
+        if (llvm::isa<ora::StringType, ora::BytesType>(resultType) &&
+            llvm::isa<sir::PtrType>(input.getType()))
+        {
+            rewriter.replaceOp(op, input);
             return success();
         }
     }

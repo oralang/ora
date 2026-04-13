@@ -700,6 +700,20 @@ pub const VerificationPass = struct {
         }
     }
 
+    fn mergeStableCurrentValueCachesIntoSnapshot(
+        self: *VerificationPass,
+        snap: *EncoderBranchState,
+    ) !void {
+        var value_it = self.encoder.value_map.iterator();
+        while (value_it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (snap.value_map.contains(key)) continue;
+            const value = mlir.MlirValue{ .ptr = @ptrFromInt(key) };
+            if (!self.encoder.valueIsStableAcrossAnnotationRestore(value)) continue;
+            try snap.value_map.put(key, entry.value_ptr.*);
+        }
+    }
+
     fn appendUniqueName(self: *VerificationPass, list: *std.ArrayList([]const u8), name: []const u8) !void {
         for (list.items) |existing| {
             if (std.mem.eql(u8, existing, name)) return;
@@ -1438,12 +1452,18 @@ pub const VerificationPass = struct {
         const should_observe =
             std.mem.eql(u8, op_name, "memref.alloca") or
             std.mem.eql(u8, op_name, "memref.store") or
+            std.mem.eql(u8, op_name, "func.call") or
+            std.mem.eql(u8, op_name, "call") or
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.tstore") or
             std.mem.eql(u8, op_name, "ora.map_store");
         if (!should_observe) return;
 
-        _ = try self.encoder.encodeOperation(op);
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            try self.encoder.materializeCallState(op);
+        } else {
+            _ = try self.encoder.encodeOperation(op);
+        }
 
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
@@ -1469,7 +1489,7 @@ pub const VerificationPass = struct {
                     self.encoder.encodeImplies(guard, obligation)
                 else
                     obligation;
-                try self.encoded_annotations.append(.{
+                try appendEncodedAnnotationUnique(self, .{
                     .function_name = function_name,
                     .kind = .ContractInvariant,
                     .condition = guarded_obligation,
@@ -1704,7 +1724,7 @@ pub const VerificationPass = struct {
                 self.encoder.encodeImplies(guard, obligation)
             else
                 obligation;
-            try self.encoded_annotations.append(.{
+            try appendEncodedAnnotationUnique(self, .{
                 .function_name = function_name,
                 .kind = .ContractInvariant,
                 .condition = guarded_obligation,
@@ -1724,6 +1744,8 @@ pub const VerificationPass = struct {
                 .loop_owner = loop_owner,
             });
         }
+
+        try self.mergeStableCurrentValueCachesIntoSnapshot(&base_encoder_state);
 
         // Avoid cross-annotation reuse of cached expression ASTs whose defining
         // side-constraints were already consumed by takeConstraints() above.
@@ -4144,7 +4166,7 @@ pub const VerificationPass = struct {
             const base_tag = try formatQueryTag(self.allocator, assumption_constraints.items.len, base_hash);
             defer self.allocator.free(base_tag);
             const base_log_prefix = try std.fmt.allocPrint(self.allocator, "{s} [base]{s}", .{ fn_name, base_tag });
-            try queries.append(.{
+            try appendPreparedQueryUnique(&queries, self.allocator, .{
                 .kind = .Base,
                 .function_name = fn_name,
                 .file = self.firstLocationFile(annotations),
@@ -4195,7 +4217,7 @@ pub const VerificationPass = struct {
                     "{s} [{s}]{s}{s}",
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
-                try queries.append(.{
+                try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
@@ -4247,7 +4269,7 @@ pub const VerificationPass = struct {
                             "{s} [invariant-step]{s}",
                             .{ fn_name, step_tag },
                         );
-                        try queries.append(.{
+                        try appendPreparedQueryUnique(&queries, self.allocator, .{
                             .kind = .LoopInvariantStep,
                             .function_name = fn_name,
                             .obligation_kind = .LoopInvariant,
@@ -4298,7 +4320,7 @@ pub const VerificationPass = struct {
                         "{s} [invariant-post]{s}",
                         .{ fn_name, post_tag },
                     );
-                    try queries.append(.{
+                    try appendPreparedQueryUnique(&queries, self.allocator, .{
                         .kind = .LoopInvariantPost,
                         .function_name = fn_name,
                         .obligation_kind = .Ensures,
@@ -4356,7 +4378,7 @@ pub const VerificationPass = struct {
                     "{s} guard {s} [satisfy]{s}",
                     .{ fn_name, ann.guard_id.?, satisfy_tag },
                 );
-                try queries.append(.{
+                try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardSatisfy,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
@@ -4391,7 +4413,7 @@ pub const VerificationPass = struct {
                     "{s} guard {s} [violate]{s}",
                     .{ fn_name, ann.guard_id.?, violate_tag },
                 );
-                try queries.append(.{
+                try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
@@ -5007,6 +5029,34 @@ fn constraintSlicesEquivalent(self: *VerificationPass, lhs: []const z3.Z3_ast, r
     return true;
 }
 
+fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, rhs: EncodedAnnotation) bool {
+    if (!std.mem.eql(u8, lhs.function_name, rhs.function_name)) return false;
+    if (lhs.kind != rhs.kind) return false;
+    if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
+    if (lhs.line != rhs.line or lhs.column != rhs.column) return false;
+    if ((lhs.loop_owner == null) != (rhs.loop_owner == null)) return false;
+    if (lhs.loop_owner != rhs.loop_owner) return false;
+    if ((lhs.guard_id == null) != (rhs.guard_id == null)) return false;
+    if (lhs.guard_id) |lhs_guard| {
+        if (!std.mem.eql(u8, lhs_guard, rhs.guard_id.?)) return false;
+    }
+    if ((lhs.label == null) != (rhs.label == null)) return false;
+    if (lhs.label) |lhs_label| {
+        if (!std.mem.eql(u8, lhs_label, rhs.label.?)) return false;
+    }
+    if (!astEquivalent(self, lhs.condition, rhs.condition)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.extra_constraints, rhs.extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.path_constraints, rhs.path_constraints)) return false;
+    return true;
+}
+
+fn appendEncodedAnnotationUnique(self: *VerificationPass, ann: EncodedAnnotation) !void {
+    for (self.encoded_annotations.items) |existing| {
+        if (encodedAnnotationEquivalent(self, existing, ann)) return;
+    }
+    try self.encoded_annotations.append(ann);
+}
+
 fn collectAstSymbols(
     self: *VerificationPass,
     ast: z3.Z3_ast,
@@ -5564,6 +5614,35 @@ const PreparedQuery = struct {
         allocator.free(self.log_prefix);
     }
 };
+
+fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
+    if (lhs.kind != rhs.kind) return false;
+    if (!std.mem.eql(u8, lhs.function_name, rhs.function_name)) return false;
+    if (lhs.obligation_kind != rhs.obligation_kind) return false;
+    if ((lhs.guard_id == null) != (rhs.guard_id == null)) return false;
+    if (lhs.guard_id) |lhs_guard| {
+        if (!std.mem.eql(u8, lhs_guard, rhs.guard_id.?)) return false;
+    }
+    if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
+    if (lhs.line != rhs.line or lhs.column != rhs.column) return false;
+    if (lhs.smtlib_hash != rhs.smtlib_hash) return false;
+    return std.mem.eql(u8, lhs.smtlib_z, rhs.smtlib_z);
+}
+
+fn appendPreparedQueryUnique(
+    queries: *ManagedArrayList(PreparedQuery),
+    allocator: std.mem.Allocator,
+    query: PreparedQuery,
+) !void {
+    for (queries.items) |existing| {
+        if (preparedQueryEquivalent(existing, query)) {
+            var owned = query;
+            owned.deinit(allocator);
+            return;
+        }
+    }
+    try queries.append(query);
+}
 
 const PreparedQueryResult = struct {
     status: z3.Z3_lbool = z3.Z3_L_UNDEF,

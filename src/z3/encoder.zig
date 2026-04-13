@@ -2276,6 +2276,18 @@ pub const Encoder = struct {
         return self.encodeOperationWithMode(mlir_op, .Current);
     }
 
+    pub fn materializeCallState(self: *Encoder, mlir_op: mlir.MlirOperation) EncodeError!void {
+        if (try self.resolveCalleeName(mlir_op)) |callee| {
+            defer self.allocator.free(callee);
+            if (self.function_ops.get(callee)) |func_op| {
+                if (!self.functionHasWriteEffect(func_op)) return;
+            }
+        }
+        const operands = try self.encodeOperationOperandsWithMode(mlir_op, .Current);
+        defer self.allocator.free(operands);
+        try self.materializeCallSummaryCurrent(mlir_op, operands);
+    }
+
     fn encodeOperationWithMode(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
         // get operation name
         const op_name_ref = mlir.oraOperationGetName(mlir_op);
@@ -2388,6 +2400,33 @@ pub const Encoder = struct {
         // encoded. Reusing a cached AST without replaying those constraints can
         // make later verification queries unsound.
         return !std.mem.eql(u8, op_name, "ora.struct_instantiate");
+    }
+
+    pub fn valueIsStableAcrossAnnotationRestore(self: *Encoder, mlir_value: mlir.MlirValue) bool {
+        if (!mlir.oraValueIsAOpResult(mlir_value)) return true;
+        const defining_op = mlir.oraOpResultGetOwner(mlir_value);
+        if (mlir.oraOperationIsNull(defining_op)) return true;
+        const op_name_ref = mlir.oraOperationGetName(defining_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const owned_callee = self.resolveCalleeName(defining_op) catch return false;
+            defer if (owned_callee) |callee| self.allocator.free(callee);
+            const callee = owned_callee orelse return false;
+            const func_op = self.function_ops.get(callee) orelse return false;
+            return !self.functionHasWriteEffect(func_op);
+        }
+
+        return !std.mem.eql(u8, op_name, "ora.sload") and
+            !std.mem.eql(u8, op_name, "ora.tload") and
+            !std.mem.eql(u8, op_name, "ora.map_get") and
+            !std.mem.eql(u8, op_name, "memref.load") and
+            !std.mem.eql(u8, op_name, "ora.old") and
+            !std.mem.eql(u8, op_name, "ora.struct_instantiate");
     }
 
     fn getResultIndex(_: *Encoder, op: mlir.MlirOperation, value: mlir.MlirValue) ?u32 {
@@ -4388,6 +4427,14 @@ pub const Encoder = struct {
         const result_id = @intFromPtr(result_value.ptr);
         const callee = try self.getOpaqueCalleeKey(mlir_op);
         defer self.allocator.free(callee);
+
+        if (std.mem.eql(u8, callee, "std.bytes.eq") and result_index == 0 and operands.len == 2) {
+            const eq = z3.Z3_mk_eq(self.context.ctx, operands[0], operands[1]);
+            if (mode == .Current) {
+                try self.value_map.put(result_id, eq);
+            }
+            return eq;
+        }
 
         if (mode == .Current) {
             if (self.value_map.get(result_id)) |cached| {
@@ -10747,10 +10794,39 @@ pub const Encoder = struct {
         return self.coerceToBool(ast);
     }
 
+    fn collectUncacheableValueKeys(
+        self: *Encoder,
+        map: *const std.AutoHashMap(u64, z3.Z3_ast),
+        keys: *std.ArrayList(u64),
+    ) !void {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            const value = mlir.MlirValue{ .ptr = @ptrFromInt(entry.key_ptr.*) };
+            if (!self.valueIsCacheable(value)) {
+                try keys.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+    }
+
     pub fn invalidateValueCaches(self: *Encoder) void {
-        self.value_map.clearRetainingCapacity();
-        self.value_map_old.clearRetainingCapacity();
-        self.value_bindings.clearRetainingCapacity();
+        var remove_keys = std.ArrayList(u64){};
+        defer remove_keys.deinit(self.allocator);
+
+        self.collectUncacheableValueKeys(&self.value_map, &remove_keys) catch {
+            self.value_map.clearRetainingCapacity();
+            self.value_map_old.clearRetainingCapacity();
+            return;
+        };
+        self.collectUncacheableValueKeys(&self.value_map_old, &remove_keys) catch {
+            self.value_map.clearRetainingCapacity();
+            self.value_map_old.clearRetainingCapacity();
+            return;
+        };
+
+        for (remove_keys.items) |key| {
+            _ = self.value_map.remove(key);
+            _ = self.value_map_old.remove(key);
+        }
     }
 
     pub fn encodeScalarValueForSort(self: *Encoder, value: i64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {

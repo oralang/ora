@@ -204,6 +204,11 @@ namespace mlir
             if (!llvm::isa<sir::PtrType>(ptrType))
                 return std::nullopt;
 
+            if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+            {
+                return builder.create<sir::BitcastOp>(loc, ptrType, input).getResult();
+            }
+
             if (llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
                           mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
             {

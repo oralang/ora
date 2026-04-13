@@ -1377,6 +1377,13 @@ public:
             }
         }
 
+        // Enable struct lowering before final return lowering so aggregate
+        // returns can convert to ptr carriers during phase 3/3b.
+        typeConverter.setEnableStructLowering(true);
+        // Enable memref lowering before final return lowering so fixed-array
+        // returns can convert to ptr carriers during phase 3/3b.
+        typeConverter.setEnableMemRefLowering(true);
+
         // Phase 3: lower all remaining ora.return via greedy rewrite.
         // We cannot use the conversion framework here because the TypeConverter
         // splits error_union into 2x u256, and the framework cannot adapt the
@@ -1437,7 +1444,6 @@ public:
         }
 
         // Phase 4: lower scf.for, scf.while, memref ops (stack temps) to SIR.
-        typeConverter.setEnableMemRefLowering(true);
         {
             RewritePatternSet finalErrorCleanup(ctx);
             finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
@@ -1510,8 +1516,6 @@ public:
         }
 
         // Phase 5: lower remaining Ora control flow + structs + cleanup.
-        // Enable struct lowering now that scf.if regions are gone.
-        typeConverter.setEnableStructLowering(true);
         {
             ORA_DEBUG_PREFIX("OraToSIR", "Phase4 start");
             RewritePatternSet phase4Patterns(ctx);
@@ -2331,6 +2335,45 @@ namespace mlir
             }
 
         private:
+            static bool containsNestedReturnsOrConditionalReturn(mlir::func::FuncOp funcOp)
+            {
+                auto &funcBody = funcOp.getBody();
+                if (funcBody.empty())
+                    return false;
+                Block *entryBlock = &funcBody.front();
+                bool foundUnsupported = false;
+                for (Operation &op : entryBlock->getOperations())
+                {
+                    if (isa<ora::IfOp>(op))
+                    {
+                        foundUnsupported = true;
+                        break;
+                    }
+
+                    for (Region &region : op.getRegions())
+                    {
+                        region.walk([&](Operation *nestedOp)
+                                    {
+                            if (isa<ora::ReturnOp, mlir::func::ReturnOp>(nestedOp))
+                            {
+                                foundUnsupported = true;
+                                return WalkResult::interrupt();
+                            }
+                            if (isa<ora::IfOp>(nestedOp))
+                            {
+                                foundUnsupported = true;
+                                return WalkResult::interrupt();
+                            }
+                            return WalkResult::advance(); });
+                        if (foundUnsupported)
+                            break;
+                    }
+                    if (foundUnsupported)
+                        break;
+                }
+                return foundUnsupported;
+            }
+
             // Inline a function call by cloning the function body
             // NOTE: only handles single-block functions. Multi-block inlining
             // requires MLIR's InlinerInterface (not yet wired up).
@@ -2341,6 +2384,8 @@ namespace mlir
                     return false;
                 Block *entryBlock = &funcBody.front();
                 if (entryBlock->empty() || funcBody.getBlocks().size() > 1)
+                    return false;
+                if (containsNestedReturnsOrConditionalReturn(funcOp))
                     return false;
 
                 IRMapping mapping;
