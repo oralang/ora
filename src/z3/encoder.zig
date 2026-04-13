@@ -1153,7 +1153,10 @@ pub const Encoder = struct {
     }
 
     pub fn registerFunctionOperation(self: *Encoder, func_op: mlir.MlirOperation) !void {
-        const name = self.getStringAttr(func_op, "sym_name") orelse return;
+        const name = self.getStringAttr(func_op, "sym_name") orelse blk: {
+            const resolved = try self.resolveCalleeName(func_op);
+            break :blk resolved orelse return;
+        };
         if (self.function_ops.contains(name)) return;
         const key = try self.allocator.dupe(u8, name);
         try self.function_ops.put(key, func_op);
@@ -5629,9 +5632,7 @@ pub const Encoder = struct {
             return;
         }
 
-        if (std.mem.eql(u8, op_name, "ora.assert") or
-            std.mem.eql(u8, op_name, "func.call") or
-            std.mem.eql(u8, op_name, "call"))
+        if (std.mem.eql(u8, op_name, "ora.assert"))
         {
             _ = try self.encodeOperation(op);
             return;
@@ -8957,94 +8958,147 @@ pub const Encoder = struct {
         if (self.inlineStackContains(callee)) return false;
         if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return false;
 
-        var summary_encoder = Encoder.init(self.context, self.allocator);
-        defer summary_encoder.deinit();
-        summary_encoder.setVerifyCalls(self.verify_calls);
-        summary_encoder.setVerifyState(self.verify_state);
-        summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
-        try summary_encoder.copyFunctionRegistryFrom(self);
-        try summary_encoder.copyStructRegistryFrom(self);
-        try summary_encoder.copyInlineStackFrom(self);
-        try summary_encoder.copyEnvMapFrom(self);
-        try summary_encoder.copyReturnPathAssumptionsFrom(self);
-        try summary_encoder.pushInlineFunction(callee);
-
-        for (slots) |slot| {
-            const g_key = try summary_encoder.allocator.dupe(u8, slot.name);
-            try summary_encoder.global_map.put(g_key, slot.pre);
-            const old_key = try summary_encoder.allocator.dupe(u8, slot.name);
-            try summary_encoder.global_old_map.put(old_key, slot.pre);
-            const entry_key = try summary_encoder.allocator.dupe(u8, slot.name);
-            try summary_encoder.global_entry_map.put(entry_key, slot.pre);
-        }
-
         const body_region = mlir.oraOperationGetRegion(func_op, 0);
         if (mlir.oraRegionIsNull(body_region)) return false;
         const entry_block = mlir.oraRegionGetFirstBlock(body_region);
         if (mlir.oraBlockIsNull(entry_block)) return false;
 
-        const arg_count = mlir.oraBlockGetNumArguments(entry_block);
-        const bind_count = @min(arg_count, operands.len);
-        for (0..bind_count) |i| {
-            const arg_value = mlir.oraBlockGetArgument(entry_block, i);
-            try summary_encoder.bindValue(arg_value, operands[i]);
-        }
-
         var callee_requires = std.ArrayList(z3.Z3_ast){};
         defer callee_requires.deinit(self.allocator);
-        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
-
         var any_result = false;
-        for (0..result_exprs.len) |i| {
-            const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
-            if (encoded) |expr| {
-                result_exprs[i] = expr;
-                any_result = true;
+        {
+            var result_encoder = Encoder.init(self.context, self.allocator);
+            defer result_encoder.deinit();
+            result_encoder.setVerifyCalls(self.verify_calls);
+            result_encoder.setVerifyState(self.verify_state);
+            result_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+            try result_encoder.copyFunctionRegistryFrom(self);
+            try result_encoder.copyStructRegistryFrom(self);
+            try result_encoder.copyInlineStackFrom(self);
+            try result_encoder.copyEnvMapFrom(self);
+            try result_encoder.copyReturnPathAssumptionsFrom(self);
+            try result_encoder.pushInlineFunction(callee);
+
+            for (slots) |slot| {
+                const g_key = try result_encoder.allocator.dupe(u8, slot.name);
+                try result_encoder.global_map.put(g_key, slot.pre);
+                const old_key = try result_encoder.allocator.dupe(u8, slot.name);
+                try result_encoder.global_old_map.put(old_key, slot.pre);
+                const entry_key = try result_encoder.allocator.dupe(u8, slot.name);
+                try result_encoder.global_entry_map.put(entry_key, slot.pre);
+            }
+
+            const arg_count = mlir.oraBlockGetNumArguments(entry_block);
+            const bind_count = @min(arg_count, operands.len);
+            for (0..bind_count) |i| {
+                const arg_value = mlir.oraBlockGetArgument(entry_block, i);
+                try result_encoder.bindValue(arg_value, operands[i]);
+            }
+
+            try result_encoder.collectRequiresForSummary(func_op, &callee_requires);
+
+            for (0..result_exprs.len) |i| {
+                const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
+                if (encoded) |expr| {
+                    result_exprs[i] = expr;
+                    any_result = true;
+                }
+            }
+
+            if (result_encoder.isDegraded()) {
+                const reason = result_encoder.degradationReason() orelse "summary encoder degraded while extracting call results";
+                if (result_exprs.len > 0) {
+                    self.recordCalleeResultDegradation(call_op, callee, reason);
+                } else {
+                    self.recordDegradation(reason);
+                }
+            }
+
+            const extra_constraints = try result_encoder.takeConstraints(self.allocator);
+            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
+            for (extra_constraints) |cst| self.addConstraint(cst);
+
+            const extra_obligations = try result_encoder.takeObligations(self.allocator);
+            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
+            if (!self.functionIsExternallyVerified(func_op)) {
+                self.addSummaryObligations(extra_obligations, callee_requires.items, result_encoder.return_path_assumptions.items);
             }
         }
 
-        // Result-only summaries can rely on exact returned-path replay for
-        // obligations/local effects. Full state-summary materialization is
-        // still required when the caller tracks state slots or when the callee
-        // has no results.
         if (slots.len > 0 or result_exprs.len == 0) {
-            // Materialize stateful effects from the callee body so summary state
-            // reflects sstore/map_store updates before we snapshot post-state.
-            summary_encoder.encodeStateEffectsInOperation(func_op);
-        }
+            var summary_encoder = Encoder.init(self.context, self.allocator);
+            defer summary_encoder.deinit();
+            summary_encoder.setVerifyCalls(self.verify_calls);
+            summary_encoder.setVerifyState(self.verify_state);
+            summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+            try summary_encoder.copyFunctionRegistryFrom(self);
+            try summary_encoder.copyStructRegistryFrom(self);
+            try summary_encoder.copyInlineStackFrom(self);
+            try summary_encoder.copyEnvMapFrom(self);
+            try summary_encoder.copyReturnPathAssumptionsFrom(self);
+            try summary_encoder.pushInlineFunction(callee);
 
-        if (summary_encoder.isDegraded()) {
-            const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
-            if (result_exprs.len > 0) {
-                self.recordCalleeResultDegradation(call_op, callee, reason);
-            } else {
-                self.recordDegradation(reason);
+            for (slots) |slot| {
+                const g_key = try summary_encoder.allocator.dupe(u8, slot.name);
+                try summary_encoder.global_map.put(g_key, slot.pre);
+                const old_key = try summary_encoder.allocator.dupe(u8, slot.name);
+                try summary_encoder.global_old_map.put(old_key, slot.pre);
+                const entry_key = try summary_encoder.allocator.dupe(u8, slot.name);
+                try summary_encoder.global_entry_map.put(entry_key, slot.pre);
             }
-        }
 
-        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
-        defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-        for (extra_constraints) |cst| self.addConstraint(cst);
+            const arg_count = mlir.oraBlockGetNumArguments(entry_block);
+            const bind_count = @min(arg_count, operands.len);
+            for (0..bind_count) |i| {
+                const arg_value = mlir.oraBlockGetArgument(entry_block, i);
+                try summary_encoder.bindValue(arg_value, operands[i]);
+            }
 
-        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
-        defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
-        }
+            var base_state = try summary_encoder.captureStateSnapshot();
+            defer base_state.deinit(summary_encoder.allocator);
 
-        for (slots) |*slot| {
-            if (summary_encoder.global_map.get(slot.name)) |post| {
-                if (!slot.is_write or summary_encoder.hasWrittenGlobalSlot(slot.name)) {
-                    slot.post = post;
-                } else if (!summary_encoder.isDegraded()) {
-                    slot.post = slot.pre;
-                } else if (self.astEquivalent(post, slot.pre)) {
-                    // Degradation occurred but this slot was not modified by any
-                    // materialized path. Safe to preserve as unchanged.
+            for (0..result_exprs.len) |i| {
+                if (result_exprs[i] == null) {
+                    result_exprs[i] = try summary_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
+                    any_result = any_result or (result_exprs[i] != null);
+                }
+            }
+
+            try summary_encoder.restoreStateSnapshot(&base_state);
+            summary_encoder.encodeStateEffectsInOperation(func_op);
+
+            if (summary_encoder.isDegraded()) {
+                const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
+                if (slots.len > 0) {
+                    self.recordDegradation(reason);
+                }
+                if (result_exprs.len > 0) {
+                    self.recordCalleeResultDegradation(call_op, callee, reason);
+                }
+            }
+
+            const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
+            for (extra_constraints) |cst| self.addConstraint(cst);
+
+            const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
+            if (!self.functionIsExternallyVerified(func_op)) {
+                self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
+            }
+
+            for (slots) |*slot| {
+                if (summary_encoder.global_map.get(slot.name)) |post| {
+                    if (!slot.is_write or summary_encoder.hasWrittenGlobalSlot(slot.name)) {
+                        slot.post = post;
+                    } else if (!summary_encoder.isDegraded()) {
+                        slot.post = slot.pre;
+                    } else if (self.astEquivalent(post, slot.pre)) {
+                        slot.post = slot.pre;
+                    }
+                } else if (slot.is_write and !summary_encoder.isDegraded() and !summary_encoder.hasWrittenGlobalSlot(slot.name)) {
                     slot.post = slot.pre;
                 }
-            } else if (slot.is_write and !summary_encoder.isDegraded() and !summary_encoder.hasWrittenGlobalSlot(slot.name)) {
-                slot.post = slot.pre;
             }
         }
 
@@ -9285,6 +9339,12 @@ pub const Encoder = struct {
                     };
                     const try_region = mlir.oraOperationGetRegion(op, 0);
                     if (!mlir.oraRegionIsNull(try_region)) {
+                        const saved_len = self.return_path_assumptions.items.len;
+                        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+                        self.return_path_assumptions.append(self.allocator, self.encodeNot(info.is_err)) catch {
+                            self.recordDegradation("failed to record direct ora.try_stmt success-path assumption");
+                            return;
+                        };
                         self.encodeStateEffectsInRegion(try_region);
                     }
                     try_state = self.captureStateSnapshot() catch {
@@ -9298,6 +9358,12 @@ pub const Encoder = struct {
                     };
                     const catch_region = mlir.oraOperationGetRegion(op, 1);
                     if (!mlir.oraRegionIsNull(catch_region)) {
+                        const saved_len = self.return_path_assumptions.items.len;
+                        defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
+                        self.return_path_assumptions.append(self.allocator, info.is_err) catch {
+                            self.recordDegradation("failed to record direct ora.try_stmt catch-path assumption");
+                            return;
+                        };
                         self.encodeStateEffectsInRegion(catch_region);
                     }
                     catch_state = self.captureStateSnapshot() catch {
@@ -10679,7 +10745,6 @@ pub const Encoder = struct {
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
-        self.materialized_calls.clearRetainingCapacity();
     }
 
     pub fn encodeScalarValueForSort(self: *Encoder, value: i64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {

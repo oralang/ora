@@ -500,18 +500,26 @@ pub const VerificationPass = struct {
 
     const EncoderBranchState = struct {
         global_map: std.StringHashMap(z3.Z3_ast),
+        global_old_map: std.StringHashMap(z3.Z3_ast),
+        global_entry_map: std.StringHashMap(z3.Z3_ast),
         memref_map: std.AutoHashMap(u64, Encoder.TrackedMemrefState),
         value_map: std.AutoHashMap(u64, z3.Z3_ast),
         value_map_old: std.AutoHashMap(u64, z3.Z3_ast),
         value_bindings: std.AutoHashMap(u64, z3.Z3_ast),
+        written_global_slots: std.StringHashMap(void),
+        materialized_calls: std.AutoHashMap(u64, void),
 
         fn init(allocator: std.mem.Allocator) EncoderBranchState {
             return .{
                 .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+                .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
+                .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
                 .memref_map = std.AutoHashMap(u64, Encoder.TrackedMemrefState).init(allocator),
                 .value_map = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
                 .value_map_old = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
                 .value_bindings = std.AutoHashMap(u64, z3.Z3_ast).init(allocator),
+                .written_global_slots = std.StringHashMap(void).init(allocator),
+                .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             };
         }
 
@@ -521,10 +529,30 @@ pub const VerificationPass = struct {
                 allocator.free(entry.key_ptr.*);
             }
             self.global_map.deinit();
+
+            var old_it = self.global_old_map.iterator();
+            while (old_it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            self.global_old_map.deinit();
+
+            var entry_it = self.global_entry_map.iterator();
+            while (entry_it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            self.global_entry_map.deinit();
+
             self.memref_map.deinit();
             self.value_map.deinit();
             self.value_map_old.deinit();
             self.value_bindings.deinit();
+
+            var written_it = self.written_global_slots.iterator();
+            while (written_it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            self.written_global_slots.deinit();
+            self.materialized_calls.deinit();
         }
     };
 
@@ -536,6 +564,18 @@ pub const VerificationPass = struct {
         while (g_it.next()) |entry| {
             const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
             try snap.global_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var old_it = self.encoder.global_old_map.iterator();
+        while (old_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try snap.global_old_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var entry_it = self.encoder.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try snap.global_entry_map.put(key_dup, entry.value_ptr.*);
         }
 
         var m_it = self.encoder.memref_map.iterator();
@@ -558,6 +598,17 @@ pub const VerificationPass = struct {
             try snap.value_bindings.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        var written_it = self.encoder.written_global_slots.iterator();
+        while (written_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try snap.written_global_slots.put(key_dup, {});
+        }
+
+        var call_it = self.encoder.materialized_calls.iterator();
+        while (call_it.next()) |entry| {
+            try snap.materialized_calls.put(entry.key_ptr.*, {});
+        }
+
         return snap;
     }
 
@@ -571,13 +622,50 @@ pub const VerificationPass = struct {
 
     fn restoreEncoderBranchState(self: *VerificationPass, snap: *const EncoderBranchState) !void {
         self.clearEncoderGlobalMap();
+
+        var old_it = self.encoder.global_old_map.iterator();
+        while (old_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.encoder.global_old_map.clearRetainingCapacity();
+
+        var entry_it = self.encoder.global_entry_map.iterator();
+        while (entry_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.encoder.global_entry_map.clearRetainingCapacity();
+
         self.encoder.memref_map.clearRetainingCapacity();
+
+        self.encoder.value_map.clearRetainingCapacity();
+        self.encoder.value_map_old.clearRetainingCapacity();
+        self.encoder.value_bindings.clearRetainingCapacity();
+
+        var written_it = self.encoder.written_global_slots.iterator();
+        while (written_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.encoder.written_global_slots.clearRetainingCapacity();
+
+        self.encoder.materialized_calls.clearRetainingCapacity();
         self.encoder.invalidateValueCaches();
 
         var g_it = snap.global_map.iterator();
         while (g_it.next()) |entry| {
             const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
             try self.encoder.global_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var snap_old_it = snap.global_old_map.iterator();
+        while (snap_old_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try self.encoder.global_old_map.put(key_dup, entry.value_ptr.*);
+        }
+
+        var snap_entry_it = snap.global_entry_map.iterator();
+        while (snap_entry_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try self.encoder.global_entry_map.put(key_dup, entry.value_ptr.*);
         }
 
         var m_it = snap.memref_map.iterator();
@@ -598,6 +686,17 @@ pub const VerificationPass = struct {
         var bind_it = snap.value_bindings.iterator();
         while (bind_it.next()) |entry| {
             try self.encoder.value_bindings.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var snap_written_it = snap.written_global_slots.iterator();
+        while (snap_written_it.next()) |entry| {
+            const key_dup = try self.allocator.dupe(u8, entry.key_ptr.*);
+            try self.encoder.written_global_slots.put(key_dup, {});
+        }
+
+        var snap_call_it = snap.materialized_calls.iterator();
+        while (snap_call_it.next()) |entry| {
+            try self.encoder.materialized_calls.put(entry.key_ptr.*, {});
         }
     }
 
@@ -1341,21 +1440,8 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "memref.store") or
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.tstore") or
-            std.mem.eql(u8, op_name, "ora.map_store") or
-            std.mem.eql(u8, op_name, "func.call") or
-            std.mem.eql(u8, op_name, "call");
+            std.mem.eql(u8, op_name, "ora.map_store");
         if (!should_observe) return;
-
-        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
-            const num_results: usize = @intCast(mlir.oraOperationGetNumResults(op));
-            for (0..num_results) |result_index| {
-                const result_value = mlir.oraOperationGetResult(op, @intCast(result_index));
-                const result_type = mlir.oraValueGetType(result_value);
-                if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(result_type))) {
-                    return;
-                }
-            }
-        }
 
         _ = try self.encoder.encodeOperation(op);
 
@@ -1464,6 +1550,10 @@ pub const VerificationPass = struct {
             mlir.oraOpResultGetOwner(condition_value)
         else
             op;
+        var base_encoder_state = try self.captureEncoderBranchState();
+        defer base_encoder_state.deinit(self.allocator);
+        defer self.restoreEncoderBranchState(&base_encoder_state) catch {};
+
         const encoded = blk: {
             if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
                 self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
@@ -1493,6 +1583,7 @@ pub const VerificationPass = struct {
         var loop_exit_condition: ?z3.Z3_ast = null;
         var loop_exit_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         if (kind == .LoopInvariant) {
+            try self.restoreEncoderBranchState(&base_encoder_state);
             old_condition = if (try self.encoder.tryEncodeAssertCondition(op, .Old)) |specialized_old|
                 specialized_old
             else
@@ -1524,6 +1615,7 @@ pub const VerificationPass = struct {
                 });
             }
 
+            try self.restoreEncoderBranchState(&base_encoder_state);
             loop_step_condition = try self.encodeLoopContinueCondition(op);
             loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
             const loop_step_safety = try self.encoder.takeObligations(self.allocator);
@@ -1551,6 +1643,7 @@ pub const VerificationPass = struct {
                 });
             }
 
+            try self.restoreEncoderBranchState(&base_encoder_state);
             loop_exit_condition = try self.encodeLoopExitCondition(op);
             loop_exit_extra_constraints = try self.encoder.takeConstraints(self.allocator);
             const loop_exit_safety = try self.encoder.takeObligations(self.allocator);

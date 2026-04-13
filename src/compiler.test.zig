@@ -16049,6 +16049,23 @@ test "compiler supports call-style payload error constructors" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"Failure\""));
 }
 
+test "compiler wraps returned payload error constructors as error branches" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return Failure(7);
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"Failure\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
+}
+
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);

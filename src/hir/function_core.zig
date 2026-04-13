@@ -536,6 +536,37 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn wrapErrorValueForReturn(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const return_type = self.return_type orelse return value;
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+            if (mlir.oraTypeIsNull(success_type)) {
+                return @This().convertValueForFlow(self, value, return_type, range);
+            }
+            if (mlir.oraTypeEqual(mlir.oraValueGetType(value), return_type)) return value;
+
+            const op = mlir.oraErrorErrOpCreate(self.parent.context, self.parent.location(range), value, return_type);
+            if (mlir.oraOperationIsNull(op)) return value;
+            return appendValueOp(self.block, op);
+        }
+
+        fn returnExprIsErrorShaped(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .ErrorReturn => true,
+                .Call => |call| blk: {
+                    const callee_name = switch (self.parent.file.expression(call.callee).*) {
+                        .Name => |name| name.name,
+                        else => null,
+                    } orelse break :blk false;
+                    if (std.mem.eql(u8, callee_name, "Err")) break :blk true;
+                    if (self.parent.item_index.lookup(callee_name)) |item_id| {
+                        break :blk self.parent.file.item(item_id).* == .ErrorDecl;
+                    }
+                    break :blk false;
+                },
+                else => false,
+            };
+        }
+
         pub fn ensureDeferredReturnSlots(self: *FunctionLowerer, range: source.TextRange) anyerror!void {
             if (self.deferred_return_flag != null) return;
 
@@ -929,7 +960,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (self.deferred_return_kind == .none) {
                             if (ret.value) |expr_id| {
                                 const raw_value = try self.lowerExpr(expr_id, locals);
-                                const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                                const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                                    try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                                else
+                                    try @This().wrapValueForReturn(self, raw_value, ret.range);
                                 self.current_return_value = value;
                                 defer self.current_return_value = null;
                                 if (self.function) |function| {
@@ -972,7 +1006,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         if (ret.value) |expr_id| {
                             const raw_value = try self.lowerExpr(expr_id, locals);
-                            const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                            const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                                try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                            else
+                                try @This().wrapValueForReturn(self, raw_value, ret.range);
                             self.current_return_value = value;
                             defer self.current_return_value = null;
                             if (self.function) |function| {
@@ -1008,7 +1045,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                     if (ret.value) |expr_id| {
                         const raw_value = try self.lowerExpr(expr_id, locals);
-                        const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                        const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                            try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                        else
+                            try @This().wrapValueForReturn(self, raw_value, ret.range);
                         self.current_return_value = value;
                         defer self.current_return_value = null;
                         if (self.function) |function| {
