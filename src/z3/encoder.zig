@@ -4386,10 +4386,18 @@ pub const Encoder = struct {
 
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_id = @intFromPtr(result_value.ptr);
+        const callee = try self.getOpaqueCalleeKey(mlir_op);
+        defer self.allocator.free(callee);
 
         if (mode == .Current) {
             if (self.value_map.get(result_id)) |cached| {
                 return cached;
+            }
+            if (self.function_ops.get(callee)) |func_op| {
+                if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
+                    try self.value_map.put(result_id, inlined);
+                    return inlined;
+                }
             }
             if (self.verify_calls) {
                 try self.materializeCallSummaryCurrent(mlir_op, operands);
@@ -4408,8 +4416,6 @@ pub const Encoder = struct {
             return try self.mkUndefValue(result_sort, label, op_id);
         }
 
-        const callee = try self.getOpaqueCalleeKey(mlir_op);
-        defer self.allocator.free(callee);
         if (mode == .Old) {
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
