@@ -20,6 +20,11 @@ const finite_scf_while_unroll_limit: usize = 64;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    pub const PendingObligation = struct {
+        ast: z3.Z3_ast,
+        imported_callee_name: ?[]const u8 = null,
+    };
+
     const SwitchCaseMetadata = struct {
         case_kinds: []i64,
         case_values: []i64,
@@ -107,7 +112,7 @@ pub const Encoder = struct {
     /// Pending constraints emitted during encoding (e.g., error.unwrap validity).
     pending_constraints: std.ArrayList(z3.Z3_ast),
     /// Pending safety obligations emitted during encoding (e.g., div-by-zero, overflow).
-    pending_obligations: std.ArrayList(z3.Z3_ast),
+    pending_obligations: std.ArrayList(PendingObligation),
     /// Set once encoding drops or skips any verification-relevant information.
     encoding_degraded: bool,
     /// Human-readable reason for the first degradation encountered.
@@ -145,7 +150,7 @@ pub const Encoder = struct {
             .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
             .pending_constraints = std.ArrayList(z3.Z3_ast){},
-            .pending_obligations = std.ArrayList(z3.Z3_ast){},
+            .pending_obligations = std.ArrayList(PendingObligation){},
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
@@ -1663,14 +1668,34 @@ pub const Encoder = struct {
         };
     }
 
-    fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
+    fn persistOwnedString(self: *Encoder, text: []const u8) ![]const u8 {
+        const dup = try self.allocator.dupe(u8, text);
+        try self.string_storage.append(self.allocator, dup);
+        return dup;
+    }
+
+    fn addObligationWithImportedCallee(self: *Encoder, obligation: z3.Z3_ast, imported_callee_name: ?[]const u8) void {
         const guarded_obligation = if (self.return_path_assumptions.items.len == 0)
             obligation
         else
             self.encodeImplies(self.encodeAnd(self.return_path_assumptions.items), obligation);
-        self.pending_obligations.append(self.allocator, guarded_obligation) catch {
+        const stored_callee_name = if (imported_callee_name) |name|
+            self.persistOwnedString(name) catch blk: {
+                self.recordDegradation("failed to persist imported callee obligation name");
+                break :blk null;
+            }
+        else
+            null;
+        self.pending_obligations.append(self.allocator, .{
+            .ast = guarded_obligation,
+            .imported_callee_name = stored_callee_name,
+        }) catch {
             self.recordDegradation("failed to record SMT obligation");
         };
+    }
+
+    fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
+        self.addObligationWithImportedCallee(obligation, null);
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
@@ -1681,8 +1706,17 @@ pub const Encoder = struct {
     }
 
     pub fn takeObligations(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
-        if (self.pending_obligations.items.len == 0) return &[_]z3.Z3_ast{};
-        const slice = try allocator.dupe(z3.Z3_ast, self.pending_obligations.items);
+        const records = try self.takeObligationRecords(allocator);
+        defer if (records.len > 0) allocator.free(records);
+        if (records.len == 0) return &[_]z3.Z3_ast{};
+        const slice = try allocator.alloc(z3.Z3_ast, records.len);
+        for (records, 0..) |record, idx| slice[idx] = record.ast;
+        return slice;
+    }
+
+    pub fn takeObligationRecords(self: *Encoder, allocator: std.mem.Allocator) ![]PendingObligation {
+        if (self.pending_obligations.items.len == 0) return &[_]PendingObligation{};
+        const slice = try allocator.dupe(PendingObligation, self.pending_obligations.items);
         self.pending_obligations.clearRetainingCapacity();
         return slice;
     }
@@ -5184,10 +5218,10 @@ pub const Encoder = struct {
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
         for (extra_constraints) |cst| self.addConstraint(cst);
 
-        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+        const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
         if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
+            self.addSummaryObligations(extra_obligations, callee, callee_requires.items, summary_encoder.return_path_assumptions.items);
         }
 
         return encoded;
@@ -5249,10 +5283,10 @@ pub const Encoder = struct {
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
         for (extra_constraints) |cst| self.addConstraint(cst);
 
-        const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+        const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
         if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
+            self.addSummaryObligations(extra_obligations, callee, callee_requires.items, summary_encoder.return_path_assumptions.items);
         }
 
         return elements;
@@ -9123,10 +9157,10 @@ pub const Encoder = struct {
             defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
             for (extra_constraints) |cst| self.addConstraint(cst);
 
-            const extra_obligations = try result_encoder.takeObligations(self.allocator);
+            const extra_obligations = try result_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
             if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(extra_obligations, callee_requires.items, result_encoder.return_path_assumptions.items);
+                self.addSummaryObligations(extra_obligations, callee, callee_requires.items, result_encoder.return_path_assumptions.items);
             }
         }
 
@@ -9186,10 +9220,10 @@ pub const Encoder = struct {
             defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
             for (extra_constraints) |cst| self.addConstraint(cst);
 
-            const extra_obligations = try summary_encoder.takeObligations(self.allocator);
+            const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
             if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(extra_obligations, callee_requires.items, summary_encoder.return_path_assumptions.items);
+                self.addSummaryObligations(extra_obligations, callee, callee_requires.items, summary_encoder.return_path_assumptions.items);
             }
 
             for (slots) |*slot| {
@@ -9274,13 +9308,14 @@ pub const Encoder = struct {
 
     fn addSummaryObligations(
         self: *Encoder,
-        obligations: []const z3.Z3_ast,
+        obligations: []const PendingObligation,
+        callee_name: []const u8,
         requires: []const z3.Z3_ast,
         path_guards: []const z3.Z3_ast,
     ) void {
         if (obligations.len == 0) return;
         if (requires.len == 0 and path_guards.len == 0) {
-            for (obligations) |obl| self.addObligation(obl);
+            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
             return;
         }
 
@@ -9288,18 +9323,21 @@ pub const Encoder = struct {
         defer guard_terms.deinit(self.allocator);
         guard_terms.appendSlice(self.allocator, requires) catch {
             self.recordDegradation("failed to allocate summary obligation guards");
-            for (obligations) |obl| self.addObligation(obl);
+            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
             return;
         };
         guard_terms.appendSlice(self.allocator, path_guards) catch {
             self.recordDegradation("failed to allocate summary obligation guards");
-            for (obligations) |obl| self.addObligation(obl);
+            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
             return;
         };
 
         const precondition_guard = self.encodeAnd(guard_terms.items);
         for (obligations) |obl| {
-            self.addObligation(self.encodeImplies(precondition_guard, obl));
+            self.addObligationWithImportedCallee(
+                self.encodeImplies(precondition_guard, obl.ast),
+                obl.imported_callee_name orelse callee_name,
+            );
         }
     }
 

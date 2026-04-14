@@ -53,6 +53,10 @@ const AssumptionTag = struct {
     loop_owner: ?u64 = null,
 };
 
+const ImportedObligationSource = struct {
+    callee_name: []const u8,
+};
+
 const TrackedAssumption = struct {
     proxy: ?z3.Z3_ast = null,
     ast: z3.Z3_ast,
@@ -1081,7 +1085,7 @@ pub const VerificationPass = struct {
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
-        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
@@ -1153,7 +1157,7 @@ pub const VerificationPass = struct {
         const condition = self.encoder.coerceBoolean(raw_condition);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
-        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
@@ -1258,7 +1262,7 @@ pub const VerificationPass = struct {
         const scrutinee = try self.encoder.encodeValue(scrutinee_value);
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
-        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
         var metadata = try self.getSwitchCaseMetadata(switch_op, num_regions);
@@ -1474,13 +1478,6 @@ pub const VerificationPass = struct {
         else
             op_name_ref.data[0..op_name_ref.length];
 
-        if (!std.mem.eql(u8, op_name, "func.func") and
-            self.current_function_name != null and
-            !self.current_function_verify_enabled)
-        {
-            return null;
-        }
-
         if (self.filter_function_name) |target_fn| {
             const current = self.current_function_name orelse return null;
             if (!std.mem.eql(u8, current, target_fn)) return null;
@@ -1594,7 +1591,7 @@ pub const VerificationPass = struct {
 
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
-        const leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
         // Preserve obligations discovered while observing stateful ops (notably
@@ -1620,9 +1617,17 @@ pub const VerificationPass = struct {
 
             for (leaked_obligations) |obligation| {
                 const guarded_obligation = if (path_guard) |guard|
-                    self.encoder.encodeImplies(guard, obligation)
+                    self.encoder.encodeImplies(guard, obligation.ast)
                 else
-                    obligation;
+                    obligation.ast;
+                const imported_source = if (obligation.imported_callee_name) |callee_name|
+                    ImportedObligationSource{ .callee_name = callee_name }
+                else
+                    null;
+                const obligation_label = if (obligation.imported_callee_name) |callee_name|
+                    try self.importedObligationLabel(callee_name)
+                else
+                    null;
                 try appendEncodedAnnotationUnique(self, .{
                     .function_name = function_name,
                     .kind = .ContractInvariant,
@@ -1638,6 +1643,8 @@ pub const VerificationPass = struct {
                     .file = loc.file,
                     .line = loc.line,
                     .column = loc.column,
+                    .label = obligation_label,
+                    .imported_obligation_source = imported_source,
                     .guard_id = null,
                     .loop_owner = loop_owner,
                 });
@@ -1722,7 +1729,7 @@ pub const VerificationPass = struct {
         };
         const raw_extra_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (raw_extra_constraints.len > 0) self.allocator.free(raw_extra_constraints);
-        const safety_obligations = try self.encoder.takeObligations(self.allocator);
+        const safety_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
         const path_constraints = try self.captureActivePathConstraints();
         const path_guard = if (path_constraints.len > 0)
@@ -1845,9 +1852,17 @@ pub const VerificationPass = struct {
         for (safety_obligations) |obligation| {
             const obligation_extra_constraints = try self.cloneConstraintSlice(extra_constraints);
             const guarded_obligation = if (path_guard) |guard|
-                self.encoder.encodeImplies(guard, obligation)
+                self.encoder.encodeImplies(guard, obligation.ast)
             else
-                obligation;
+                obligation.ast;
+            const imported_source = if (obligation.imported_callee_name) |callee_name|
+                ImportedObligationSource{ .callee_name = callee_name }
+            else
+                null;
+            const obligation_label = if (obligation.imported_callee_name) |callee_name|
+                try self.importedObligationLabel(callee_name)
+            else
+                annotation_label;
             try appendEncodedAnnotationUnique(self, .{
                 .function_name = function_name,
                 .kind = .ContractInvariant,
@@ -1869,7 +1884,8 @@ pub const VerificationPass = struct {
                 .file = loc.file,
                 .line = loc.line,
                 .column = loc.column,
-                .label = annotation_label,
+                .label = obligation_label,
+                .imported_obligation_source = imported_source,
                 .guard_id = null,
                 .loop_owner = loop_owner,
             });
@@ -4551,6 +4567,9 @@ pub const VerificationPass = struct {
         defer function_names.deinit(self.allocator);
 
         for (function_names.items) |fn_name| {
+            if (self.encoder.function_ops.get(fn_name)) |func_op| {
+                if (!self.shouldVerifyFunctionOp(func_op)) continue;
+            }
             const annotations = by_function.get(fn_name).?.items;
             if (annotations.len == 0 and global_contract_invariants.items.len == 0) continue;
             self.phaseLog("buildPreparedQueries function {s} annotations={d}", .{ fn_name, annotations.len });
@@ -4978,6 +4997,13 @@ pub const VerificationPass = struct {
         return null;
     }
 
+    fn importedObligationLabel(self: *VerificationPass, callee_name: []const u8) ![]const u8 {
+        const label = try std.fmt.allocPrint(self.allocator, "imported callee obligation ({s})", .{callee_name});
+        errdefer self.allocator.free(label);
+        try self.label_storage.append(label);
+        return label;
+    }
+
     fn annotationLogSuffix(self: *VerificationPass, ann: EncodedAnnotation) ![]const u8 {
         const file_name = if (ann.file.len > 0) std.fs.path.basename(ann.file) else "";
         const label = ann.label orelse (try self.inferAnnotationLabelFromSource(ann) orelse "");
@@ -5307,6 +5333,7 @@ const EncodedAnnotation = struct {
     line: u32,
     column: u32,
     label: ?[]const u8 = null,
+    imported_obligation_source: ?ImportedObligationSource = null,
     guard_id: ?[]const u8 = null,
     loop_owner: ?u64 = null,
 };
@@ -5556,6 +5583,10 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if ((lhs.label == null) != (rhs.label == null)) return false;
     if (lhs.label) |lhs_label| {
         if (!std.mem.eql(u8, lhs_label, rhs.label.?)) return false;
+    }
+    if ((lhs.imported_obligation_source == null) != (rhs.imported_obligation_source == null)) return false;
+    if (lhs.imported_obligation_source) |lhs_source| {
+        if (!std.mem.eql(u8, lhs_source.callee_name, rhs.imported_obligation_source.?.callee_name)) return false;
     }
     if ((lhs.old_condition == null) != (rhs.old_condition == null)) return false;
     if (lhs.old_condition) |lhs_old| {
@@ -8675,14 +8706,19 @@ test "private callee assert is enforced through reachable public call path" {
     }
 
     var saw_public_obligation = false;
+    var saw_imported_label = false;
     for (queries.items) |q| {
         if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
             saw_public_obligation = true;
+            if (std.mem.indexOf(u8, q.log_prefix, "imported callee obligation (private_helper)") != null) {
+                saw_imported_label = true;
+            }
             break;
         }
     }
     try testing.expect(saw_public_obligation);
+    try testing.expect(saw_imported_label);
 
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
