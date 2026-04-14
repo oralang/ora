@@ -174,6 +174,19 @@ static FailureOr<Value> phase0ToI256(PatternRewriter &rewriter, Location loc, Va
 
 static FailureOr<Value> phase0FromI256(PatternRewriter &rewriter, Location loc, Value value, Type targetType)
 {
+    if (llvm::isa<mlir::NoneType>(targetType))
+    {
+        auto zero = rewriter.create<arith::ConstantOp>(
+            loc,
+            rewriter.getI1Type(),
+            rewriter.getBoolAttr(false));
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(
+            loc,
+            TypeRange{targetType},
+            ValueRange{zero.getResult()});
+        return cast.getResult(0);
+    }
+
     if (auto intType = llvm::dyn_cast<mlir::IntegerType>(targetType))
     {
         if (intType.getWidth() == 256)
@@ -4031,14 +4044,14 @@ LogicalResult NormalizeErrorOkOp::matchAndRewrite(
 {
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
     {
-        bool narrow = isNarrowErrorUnion(errType);
-        if (!narrow)
-            return failure();
-        if (hasForceWideErrorUnionAttr(op))
+        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()))
         {
             rewriter.replaceOp(op, phase0BuildWideErrorUnion(rewriter, op.getLoc(), op.getValue(), op.getType(), false));
             return success();
         }
+        bool narrow = isNarrowErrorUnion(errType);
+        if (!narrow)
+            return failure();
     }
     if (op.getValue().getType() == op.getType())
     {
@@ -4059,14 +4072,14 @@ LogicalResult NormalizeErrorErrOp::matchAndRewrite(
 {
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
     {
-        bool narrow = isNarrowErrorUnion(errType);
-        if (!narrow)
-            return failure();
-        if (hasForceWideErrorUnionAttr(op))
+        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()))
         {
             rewriter.replaceOp(op, phase0BuildWideErrorUnion(rewriter, op.getLoc(), op.getValue(), op.getType(), true));
             return success();
         }
+        bool narrow = isNarrowErrorUnion(errType);
+        if (!narrow)
+            return failure();
     }
     if (op.getValue().getType() == op.getType())
     {
@@ -4211,7 +4224,9 @@ LogicalResult NormalizeErrorGetErrorOp::matchAndRewrite(
             auto *ctx = rewriter.getContext();
             SmallVector<Type, 2> splitTypes;
             splitTypes.push_back(sir::U256Type::get(ctx));
-            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+            // get_error materializes the error payload side, so choose the
+            // carrier from the requested result type, not the union success type.
+            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, op.getType()));
             auto split = createWideErrorUnionSplitCast(rewriter, op.getLoc(), op.getValue(), TypeRange(splitTypes));
             auto cast = split.getOperation();
             Value replacement = adaptErrorPayloadToResultType(rewriter, op.getLoc(), cast->getResult(1), op.getType());
@@ -4464,6 +4479,16 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     // Ptr-backed dynamic aggregates: the Ora view is just the underlying carrier.
     if (op.getNumOperands() == 1 && op.getNumResults() == 1)
     {
+        if (llvm::isa<mlir::NoneType>(resultType))
+        {
+            auto u256Ty = sir::U256Type::get(rewriter.getContext());
+            auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+            Value zero = rewriter.create<sir::ConstOp>(loc, u256Ty,
+                                                       mlir::IntegerAttr::get(u256IntTy, 0));
+            rewriter.replaceOp(op, zero);
+            return success();
+        }
+
         if (llvm::isa<ora::StringType, ora::BytesType>(resultType) &&
             llvm::isa<sir::PtrType>(input.getType()))
         {

@@ -1169,14 +1169,12 @@ public:
             RewritePatternSet phase0Patterns(ctx);
             phase0Patterns.add<NormalizeErrorOkOp>(ctx);
             phase0Patterns.add<NormalizeErrorErrOp>(ctx);
-            phase0Patterns.add<NormalizeErrorIsErrorOp>(ctx);
-            phase0Patterns.add<NormalizeErrorUnwrapOp>(ctx);
-            phase0Patterns.add<NormalizeErrorGetErrorOp>(ctx);
             phase0Patterns.add<NormalizeErrorUnionCastOp>(ctx);
             phase0Patterns.add<NormalizeScfYieldOp>(ctx);
             phase0Patterns.add<NormalizeOraYieldOp>(ctx);
-            phase0Patterns.add<NormalizeReturnOp>(ctx);
-            if (failed(applyPatternsGreedily(module, std::move(phase0Patterns))))
+            GreedyRewriteConfig phase0Config;
+            phase0Config.setMaxIterations(64);
+            if (failed(applyPatternsGreedily(module, std::move(phase0Patterns), phase0Config)))
             {
                 module.emitError("[OraToSIR] Phase 0: error-union normalization failed");
                 signalPassFailure();
@@ -1311,17 +1309,6 @@ public:
 
         // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.conditional_return + returns.
         {
-            RewritePatternSet phase2bPrePatterns(ctx);
-            phase2bPrePatterns.add<NormalizeErrorIsErrorOp>(ctx);
-            phase2bPrePatterns.add<NormalizeErrorUnwrapOp>(ctx);
-            phase2bPrePatterns.add<NormalizeErrorGetErrorOp>(ctx);
-            if (failed(applyPatternsGreedily(module, std::move(phase2bPrePatterns))))
-            {
-                module.emitError("[OraToSIR] Phase 2b pre-pass: error.is_error normalization failed");
-                signalPassFailure();
-                return;
-            }
-
             RewritePatternSet phase2bPatterns(ctx);
             phase2bPatterns.add<ConvertTryStmtOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorOkOp>(typeConverter, ctx);
@@ -1445,16 +1432,6 @@ public:
 
         // Phase 4: lower scf.for, scf.while, memref ops (stack temps) to SIR.
         {
-            RewritePatternSet finalErrorCleanup(ctx);
-            finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
-            finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
-            if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
-            {
-                module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
-                signalPassFailure();
-                return;
-            }
-
             RewritePatternSet phase3PrePatterns(ctx);
             phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefLoadOp>(ctx);
             phase3PrePatterns.add<NormalizeNarrowErrorUnionMemRefStoreOp>(ctx);
@@ -1785,6 +1762,7 @@ public:
                 [](mlir::UnrealizedConversionCastOp op)
                 {
                     return ora::hasMaterializationKind(op, "normalized_error_union") ||
+                           ora::hasMaterializationKind(op, "none_forward") ||
                            ora::hasMaterializationKind(op, "ptr_view") ||
                            ora::hasMaterializationKind(op, "address_forward") ||
                            ora::hasMaterializationKind(op, "wide_error_union_join") ||

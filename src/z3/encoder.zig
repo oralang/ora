@@ -16,7 +16,7 @@ const Context = @import("context.zig").Context;
 const mlir_helpers = @import("mlir_helpers.zig");
 
 const finite_scf_for_unroll_limit: usize = 8;
-const finite_scf_while_unroll_limit: usize = 16;
+const finite_scf_while_unroll_limit: usize = 64;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
@@ -2280,7 +2280,7 @@ pub const Encoder = struct {
         if (try self.resolveCalleeName(mlir_op)) |callee| {
             defer self.allocator.free(callee);
             if (self.function_ops.get(callee)) |func_op| {
-                if (!self.functionHasWriteEffect(func_op)) return;
+                if (!self.functionMayWriteTrackedState(func_op)) return;
             }
         }
         const operands = try self.encodeOperationOperandsWithMode(mlir_op, .Current);
@@ -2385,7 +2385,6 @@ pub const Encoder = struct {
     }
 
     fn valueIsCacheable(self: *Encoder, mlir_value: mlir.MlirValue) bool {
-        _ = self;
         if (!mlir.oraValueIsAOpResult(mlir_value)) return true;
         const defining_op = mlir.oraOpResultGetOwner(mlir_value);
         if (mlir.oraOperationIsNull(defining_op)) return true;
@@ -2399,13 +2398,16 @@ pub const Encoder = struct {
         // These value-producing ops emit semantic side constraints while being
         // encoded. Reusing a cached AST without replaying those constraints can
         // make later verification queries unsound.
-        return !std.mem.eql(u8, op_name, "ora.struct_instantiate");
+        return !std.mem.eql(u8, op_name, "ora.struct_instantiate") and
+            !std.mem.eql(u8, op_name, "ora.old") and
+            !self.valueTransitivelyDependsOnOld(mlir_value);
     }
 
     pub fn valueIsStableAcrossAnnotationRestore(self: *Encoder, mlir_value: mlir.MlirValue) bool {
         if (!mlir.oraValueIsAOpResult(mlir_value)) return true;
         const defining_op = mlir.oraOpResultGetOwner(mlir_value);
         if (mlir.oraOperationIsNull(defining_op)) return true;
+        if (self.valueTransitivelyDependsOnOld(mlir_value)) return false;
         const op_name_ref = mlir.oraOperationGetName(defining_op);
         defer @import("mlir_c_api").freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
@@ -2418,7 +2420,7 @@ pub const Encoder = struct {
             defer if (owned_callee) |callee| self.allocator.free(callee);
             const callee = owned_callee orelse return false;
             const func_op = self.function_ops.get(callee) orelse return false;
-            return !self.functionHasWriteEffect(func_op);
+            return !self.functionMayWriteTrackedState(func_op);
         }
 
         return !std.mem.eql(u8, op_name, "ora.sload") and
@@ -2427,6 +2429,44 @@ pub const Encoder = struct {
             !std.mem.eql(u8, op_name, "memref.load") and
             !std.mem.eql(u8, op_name, "ora.old") and
             !std.mem.eql(u8, op_name, "ora.struct_instantiate");
+    }
+
+    fn valueTransitivelyDependsOnOld(self: *Encoder, value: mlir.MlirValue) bool {
+        var visited = std.AutoHashMap(u64, void).init(self.allocator);
+        defer visited.deinit();
+        return self.valueTransitivelyDependsOnOldImpl(value, &visited);
+    }
+
+    fn valueTransitivelyDependsOnOldImpl(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        visited: *std.AutoHashMap(u64, void),
+    ) bool {
+        if (!mlir.oraValueIsAOpResult(value)) return false;
+
+        const value_id = @intFromPtr(value.ptr);
+        const entry = visited.getOrPut(value_id) catch return true;
+        if (entry.found_existing) return false;
+        entry.value_ptr.* = {};
+
+        const defining_op = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(defining_op)) return false;
+
+        const op_name_ref = mlir.oraOperationGetName(defining_op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.old")) return true;
+
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(defining_op));
+        for (0..num_operands) |index| {
+            const operand = mlir.oraOperationGetOperand(defining_op, @intCast(index));
+            if (self.valueTransitivelyDependsOnOldImpl(operand, visited)) return true;
+        }
+        return false;
     }
 
     fn getResultIndex(_: *Encoder, op: mlir.MlirOperation, value: mlir.MlirValue) ?u32 {
@@ -3528,13 +3568,16 @@ pub const Encoder = struct {
             const operand_sort = try self.encodeMLIRType(operand_type);
             if (mode == .Old) {
                 _ = try self.getOrCreateOldGlobal(global_name, operand_sort);
-            } else if (self.global_map.getPtr(global_name)) |existing| {
-                existing.* = operands[0];
-                try self.markGlobalSlotWritten(global_name);
             } else {
-                const key = try self.allocator.dupe(u8, global_name);
-                try self.global_map.put(key, operands[0]);
-                try self.markGlobalSlotWritten(global_name);
+                _ = try self.getOrCreateGlobal(global_name, operand_sort);
+                if (self.global_map.getPtr(global_name)) |existing| {
+                    existing.* = operands[0];
+                    try self.markGlobalSlotWritten(global_name);
+                } else {
+                    const key = try self.allocator.dupe(u8, global_name);
+                    try self.global_map.put(key, operands[0]);
+                    try self.markGlobalSlotWritten(global_name);
+                }
             }
             return operands[0];
         }
@@ -3584,6 +3627,7 @@ pub const Encoder = struct {
                     if (self.mapOperandUsesNestedGet(map_operand)) {
                         try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode, op_id);
                     } else if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
+                        _ = try self.getOrCreateGlobal(global_name, map_sort);
                         if (self.global_map.getPtr(global_name)) |existing| {
                             existing.* = stored;
                             try self.markGlobalSlotWritten(global_name);
@@ -4171,12 +4215,15 @@ pub const Encoder = struct {
             const operand_sort = try self.encodeMLIRType(operand_type);
             if (mode == .Old) {
                 _ = try self.getOrCreateOldGlobal(transient_name, operand_sort);
-            } else if (self.global_map.getPtr(transient_name)) |existing| {
-                existing.* = operands[0];
-                try self.markGlobalSlotWritten(transient_name);
             } else {
-                try self.global_map.put(try self.allocator.dupe(u8, transient_name), operands[0]);
-                try self.markGlobalSlotWritten(transient_name);
+                _ = try self.getOrCreateGlobal(transient_name, operand_sort);
+                if (self.global_map.getPtr(transient_name)) |existing| {
+                    existing.* = operands[0];
+                    try self.markGlobalSlotWritten(transient_name);
+                } else {
+                    try self.global_map.put(try self.allocator.dupe(u8, transient_name), operands[0]);
+                    try self.markGlobalSlotWritten(transient_name);
+                }
             }
             return operands[0];
         }
@@ -4634,6 +4681,11 @@ pub const Encoder = struct {
         return std.mem.eql(u8, effect, "writes") or std.mem.eql(u8, effect, "readwrites");
     }
 
+    fn functionMayWriteTrackedState(self: *Encoder, func_op: mlir.MlirOperation) bool {
+        if (self.functionHasWriteEffect(func_op)) return true;
+        return self.operationMayWriteTrackedState(func_op) catch true;
+    }
+
     fn collectFunctionWriteInfoRecursive(
         self: *Encoder,
         func_op: mlir.MlirOperation,
@@ -5085,7 +5137,7 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!?z3.Z3_ast {
         // Old-mode fallbacks should not mutate caller state. Inline only pure callees.
-        if (self.functionHasWriteEffect(func_op)) return null;
+        if (self.functionMayWriteTrackedState(func_op)) return null;
         if (self.inlineStackContains(callee)) return null;
         if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
 
@@ -5149,7 +5201,7 @@ pub const Encoder = struct {
         operands: []const z3.Z3_ast,
         mode: EncodeMode,
     ) EncodeError!?[]z3.Z3_ast {
-        if (self.functionHasWriteEffect(func_op)) return null;
+        if (self.functionMayWriteTrackedState(func_op)) return null;
         if (self.inlineStackContains(callee)) return null;
         if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
 
@@ -9251,7 +9303,7 @@ pub const Encoder = struct {
         }
     }
 
-    fn encodeStateEffectsInOperation(self: *Encoder, op: mlir.MlirOperation) void {
+    pub fn encodeStateEffectsInOperation(self: *Encoder, op: mlir.MlirOperation) void {
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
         if (name_ref.data != null and name_ref.length > 0) {
@@ -9791,7 +9843,7 @@ pub const Encoder = struct {
 
         if (func_op) |fop| {
             var summarized = false;
-            if (!self.functionHasWriteEffect(fop) and slots.items.len == 0 and num_results > 0) {
+            if (!self.functionMayWriteTrackedState(fop) and slots.items.len == 0 and num_results > 0) {
                 for (0..num_results) |i| {
                     result_exprs[i] = try self.tryInlinePureCallResult(mlir_op, callee, fop, operands, @intCast(i), .Current);
                     summarized = summarized or (result_exprs[i] != null);

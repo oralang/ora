@@ -60,6 +60,12 @@ pub const VerificationPass = struct {
         }
     };
 
+    const SavedValueBinding = struct {
+        value_id: u64,
+        had_binding: bool,
+        old_binding: z3.Z3_ast,
+    };
+
     pub const VerifyMode = enum {
         Basic,
         Full,
@@ -268,6 +274,12 @@ pub const VerificationPass = struct {
             if (ann.loop_step_extra_constraints.len > 0) {
                 self.allocator.free(ann.loop_step_extra_constraints);
             }
+            if (ann.loop_step_head_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_head_extra_constraints);
+            }
+            if (ann.loop_step_body_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_body_extra_constraints);
+            }
             if (ann.loop_exit_extra_constraints.len > 0) {
                 self.allocator.free(ann.loop_exit_extra_constraints);
             }
@@ -417,6 +429,22 @@ pub const VerificationPass = struct {
                 }
             }
 
+            var block_arg_bindings = std.ArrayList(SavedValueBinding){};
+            defer {
+                for (block_arg_bindings.items) |saved| {
+                    if (saved.had_binding) {
+                        self.encoder.value_bindings.put(saved.value_id, saved.old_binding) catch {};
+                    } else {
+                        _ = self.encoder.value_bindings.remove(saved.value_id);
+                    }
+                }
+                block_arg_bindings.deinit(self.allocator);
+            }
+            try self.bindRegionBlockArguments(current_block, &block_arg_bindings);
+
+            var block_loop_invariant_annotations = std.ArrayList(usize){};
+            defer block_loop_invariant_annotations.deinit(self.allocator);
+
             // walk operations in this block
             var current_op = mlir.oraBlockGetFirstOperation(current_block);
 
@@ -442,7 +470,11 @@ pub const VerificationPass = struct {
                     }
                 }
 
-                try self.processMLIROperation(current_op);
+                if (try self.processMLIROperation(current_op)) |annotation_index| {
+                    if (self.encoded_annotations.items[annotation_index].kind == .LoopInvariant) {
+                        try block_loop_invariant_annotations.append(self.allocator, annotation_index);
+                    }
+                }
 
                 if (std.mem.eql(u8, op_name, "func.func") and !self.current_function_verify_enabled) {
                     // Skip traversing function bodies that are not externally reachable
@@ -470,6 +502,10 @@ pub const VerificationPass = struct {
                 current_op = mlir.oraOperationGetNextInBlock(current_op);
             }
 
+            if (block_loop_invariant_annotations.items.len > 0) {
+                try self.refreshLoopInvariantStepConditions(block_loop_invariant_annotations.items);
+            }
+
             // Propagate accumulated path assumptions to CFG successors with a
             // single predecessor. This keeps linear guard chains precise while
             // staying conservative on merge blocks.
@@ -495,6 +531,55 @@ pub const VerificationPass = struct {
             }
 
             current_block = mlir.oraBlockGetNextInRegion(current_block);
+        }
+    }
+
+    fn bindRegionBlockArguments(
+        self: *VerificationPass,
+        block: mlir.MlirBlock,
+        saved_bindings: *std.ArrayList(SavedValueBinding),
+    ) !void {
+        const parent_op = mlir.mlirBlockGetParentOperation(block);
+        if (mlir.oraOperationIsNull(parent_op)) return;
+
+        const parent_name_ref = mlir.oraOperationGetName(parent_op);
+        defer @import("mlir_c_api").freeStringRef(parent_name_ref);
+        const parent_name = if (parent_name_ref.data == null or parent_name_ref.length == 0)
+            ""
+        else
+            parent_name_ref.data[0..parent_name_ref.length];
+
+        if (!std.mem.eql(u8, parent_name, "scf.while")) return;
+
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(parent_op);
+        if (mlir.oraBlockIsNull(after_block) or after_block.ptr != block.ptr) return;
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(parent_op);
+        if (mlir.oraBlockIsNull(before_block)) return;
+
+        const bind_count = @min(
+            @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
+            @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
+        );
+
+        var i: usize = 0;
+        while (i < bind_count) : (i += 1) {
+            const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+            const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+            const after_value_id = @intFromPtr(after_arg.ptr);
+            if (self.encoder.value_bindings.get(after_value_id)) |old_binding| {
+                try saved_bindings.append(self.allocator, .{
+                    .value_id = after_value_id,
+                    .had_binding = true,
+                    .old_binding = old_binding,
+                });
+            } else {
+                try saved_bindings.append(self.allocator, .{
+                    .value_id = after_value_id,
+                    .had_binding = false,
+                    .old_binding = undefined,
+                });
+            }
+            try self.encoder.bindValue(after_arg, try self.encoder.encodeValue(before_arg));
         }
     }
 
@@ -1336,7 +1421,7 @@ pub const VerificationPass = struct {
     }
 
     /// Process a single MLIR operation to extract verification annotations
-    fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !void {
+    fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !?usize {
         const op_name_ref = self.getMLIROperationName(op);
         defer @import("mlir_c_api").freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
@@ -1348,12 +1433,12 @@ pub const VerificationPass = struct {
             self.current_function_name != null and
             !self.current_function_verify_enabled)
         {
-            return;
+            return null;
         }
 
         if (self.filter_function_name) |target_fn| {
-            const current = self.current_function_name orelse return;
-            if (!std.mem.eql(u8, current, target_fn)) return;
+            const current = self.current_function_name orelse return null;
+            if (!std.mem.eql(u8, current, target_fn)) return null;
         }
 
         try self.observeStateOperation(op, op_name);
@@ -1383,7 +1468,7 @@ pub const VerificationPass = struct {
                     .LoopInvariant
                 else
                     .ContractInvariant;
-                _ = try self.recordEncodedAnnotation(op, invariant_kind, condition_value, null);
+                return try self.recordEncodedAnnotation(op, invariant_kind, condition_value, null);
             }
         } else if (std.mem.eql(u8, op_name, "ora.refinement_guard")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
@@ -1446,6 +1531,7 @@ pub const VerificationPass = struct {
                 }
             }
         }
+        return null;
     }
 
     fn observeStateOperation(self: *VerificationPass, op: mlir.MlirOperation, op_name: []const u8) !void {
@@ -1459,11 +1545,7 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "ora.map_store");
         if (!should_observe) return;
 
-        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
-            try self.encoder.materializeCallState(op);
-        } else {
-            _ = try self.encoder.encodeOperation(op);
-        }
+        _ = try self.encoder.encodeOperation(op);
 
         const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
@@ -1478,11 +1560,18 @@ pub const VerificationPass = struct {
             const loc = try self.getLocationInfo(op);
             const path_constraints = try self.captureActivePathConstraints();
             const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
+            var loop_step_condition: ?z3.Z3_ast = null;
+            var loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
             defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
+            defer if (loop_step_extra_constraints.len > 0) self.allocator.free(loop_step_extra_constraints);
             const path_guard = if (path_constraints.len > 0)
                 self.encoder.encodeAnd(path_constraints)
             else
                 null;
+            if (loop_owner != null) {
+                loop_step_condition = try self.encodeLoopContinueCondition(op);
+                loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            }
 
             for (leaked_obligations) |obligation| {
                 const guarded_obligation = if (path_guard) |guard|
@@ -1497,8 +1586,8 @@ pub const VerificationPass = struct {
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
                     .old_extra_constraints = &[_]z3.Z3_ast{},
-                    .loop_step_condition = null,
-                    .loop_step_extra_constraints = &[_]z3.Z3_ast{},
+                    .loop_step_condition = loop_step_condition,
+                    .loop_step_extra_constraints = try self.cloneConstraintSlice(loop_step_extra_constraints),
                     .loop_exit_condition = null,
                     .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
                     .file = loc.file,
@@ -1586,7 +1675,8 @@ pub const VerificationPass = struct {
                 return err;
             };
         };
-        const extra_constraints = try self.encoder.takeConstraints(self.allocator);
+        const raw_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+        defer if (raw_extra_constraints.len > 0) self.allocator.free(raw_extra_constraints);
         const safety_obligations = try self.encoder.takeObligations(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
         const path_constraints = try self.captureActivePathConstraints();
@@ -1595,6 +1685,12 @@ pub const VerificationPass = struct {
         else
             null;
 
+        var extra_constraint_list = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+        defer extra_constraint_list.deinit();
+        try addConstraintSlice(&extra_constraint_list, raw_extra_constraints);
+        try addExplicitOldLinkConstraintsForAst(self, &extra_constraint_list, encoded);
+        const extra_constraints = try extra_constraint_list.toOwnedSlice();
+
         var old_condition: ?z3.Z3_ast = null;
         var old_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         var loop_entry_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
@@ -1602,6 +1698,12 @@ pub const VerificationPass = struct {
         var loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
         var loop_exit_condition: ?z3.Z3_ast = null;
         var loop_exit_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
+        if (loop_owner != null) {
+            try self.mergeStableCurrentValueCachesIntoSnapshot(&base_encoder_state);
+            try self.restoreEncoderBranchState(&base_encoder_state);
+            loop_step_condition = try self.encodeLoopContinueCondition(op);
+            loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+        }
         if (kind == .LoopInvariant) {
             try self.restoreEncoderBranchState(&base_encoder_state);
             old_condition = if (try self.encoder.tryEncodeAssertCondition(op, .Old)) |specialized_old|
@@ -1634,35 +1736,6 @@ pub const VerificationPass = struct {
                     .loop_owner = loop_owner,
                 });
             }
-
-            try self.restoreEncoderBranchState(&base_encoder_state);
-            loop_step_condition = try self.encodeLoopContinueCondition(op);
-            loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
-            const loop_step_safety = try self.encoder.takeObligations(self.allocator);
-            defer if (loop_step_safety.len > 0) self.allocator.free(loop_step_safety);
-            for (loop_step_safety) |obligation| {
-                const loc_step = try self.getLocationInfo(op);
-                try self.encoded_annotations.append(.{
-                    .function_name = function_name,
-                    .kind = .ContractInvariant,
-                    .condition = obligation,
-                    .extra_constraints = &[_]z3.Z3_ast{},
-                    .path_constraints = try self.cloneConstraintSlice(path_constraints),
-                    .old_condition = null,
-                    .old_extra_constraints = &[_]z3.Z3_ast{},
-                    .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
-                    .loop_step_condition = null,
-                    .loop_step_extra_constraints = &[_]z3.Z3_ast{},
-                    .loop_exit_condition = null,
-                    .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
-                    .file = loc_step.file,
-                    .line = loc_step.line,
-                    .column = loc_step.column,
-                    .guard_id = null,
-                    .loop_owner = loop_owner,
-                });
-            }
-
             try self.restoreEncoderBranchState(&base_encoder_state);
             loop_exit_condition = try self.encodeLoopExitCondition(op);
             loop_exit_extra_constraints = try self.encoder.takeConstraints(self.allocator);
@@ -1699,6 +1772,8 @@ pub const VerificationPass = struct {
             .function_name = function_name,
             .kind = kind,
             .condition = encoded,
+            .condition_value = condition_value,
+            .source_op = op,
             .extra_constraints = extra_constraints,
             .path_constraints = path_constraints,
             .old_condition = old_condition,
@@ -1706,6 +1781,10 @@ pub const VerificationPass = struct {
             .loop_entry_extra_constraints = loop_entry_extra_constraints,
             .loop_step_condition = loop_step_condition,
             .loop_step_extra_constraints = loop_step_extra_constraints,
+            .loop_step_head_condition = null,
+            .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+            .loop_step_body_condition = null,
+            .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
             .loop_exit_condition = loop_exit_condition,
             .loop_exit_extra_constraints = loop_exit_extra_constraints,
             .file = loc.file,
@@ -1728,12 +1807,18 @@ pub const VerificationPass = struct {
                 .function_name = function_name,
                 .kind = .ContractInvariant,
                 .condition = guarded_obligation,
+                .condition_value = null,
+                .source_op = null,
                 .extra_constraints = obligation_extra_constraints,
                 .path_constraints = try self.cloneConstraintSlice(path_constraints),
                 .old_condition = null,
                 .old_extra_constraints = &[_]z3.Z3_ast{},
-                .loop_step_condition = null,
-                .loop_step_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_condition = loop_step_condition,
+                .loop_step_extra_constraints = try self.cloneConstraintSlice(loop_step_extra_constraints),
+                .loop_step_head_condition = null,
+                .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_condition = null,
+                .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
                 .loop_exit_condition = null,
                 .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
                 .file = loc.file,
@@ -1940,6 +2025,140 @@ pub const VerificationPass = struct {
         return try constraints.toOwnedSlice();
     }
 
+    fn refreshLoopInvariantStepConditions(
+        self: *VerificationPass,
+        annotation_indices: []const usize,
+    ) !void {
+        var base_encoder_state = try self.captureEncoderBranchState();
+        defer base_encoder_state.deinit(self.allocator);
+
+        for (annotation_indices) |annotation_index| {
+            if (annotation_index >= self.encoded_annotations.items.len) continue;
+            var ann = &self.encoded_annotations.items[annotation_index];
+            if (ann.kind != .LoopInvariant) continue;
+            const source_op = ann.source_op orelse continue;
+            const condition_value = ann.condition_value orelse continue;
+            const owner_block = mlir.mlirOperationGetBlock(source_op);
+            if (mlir.oraBlockIsNull(owner_block)) continue;
+            const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
+            if (mlir.oraOperationIsNull(parent_op)) continue;
+            const parent_name_ref = mlir.oraOperationGetName(parent_op);
+            defer @import("mlir_c_api").freeStringRef(parent_name_ref);
+            const parent_name = if (parent_name_ref.data == null or parent_name_ref.length == 0)
+                ""
+            else
+                parent_name_ref.data[0..parent_name_ref.length];
+            if (!std.mem.eql(u8, parent_name, "scf.while")) continue;
+
+            const after_block = mlir.oraScfWhileOpGetAfterBlock(parent_op);
+            if (mlir.oraBlockIsNull(after_block) or after_block.ptr != owner_block.ptr) continue;
+            const terminator = mlir.oraBlockGetTerminator(owner_block);
+            if (mlir.oraOperationIsNull(terminator)) continue;
+            const term_name_ref = mlir.oraOperationGetName(terminator);
+            defer @import("mlir_c_api").freeStringRef(term_name_ref);
+            const term_name = if (term_name_ref.data == null or term_name_ref.length == 0)
+                ""
+            else
+                term_name_ref.data[0..term_name_ref.length];
+            if (!std.mem.eql(u8, term_name, "scf.yield")) continue;
+
+            try self.restoreEncoderBranchState(&base_encoder_state);
+            self.clearEncoderGlobalMap();
+            self.encoder.memref_map.clearRetainingCapacity();
+            self.encoder.value_map.clearRetainingCapacity();
+            self.encoder.value_map_old.clearRetainingCapacity();
+            self.encoder.value_bindings.clearRetainingCapacity();
+            self.encoder.materialized_calls.clearRetainingCapacity();
+            {
+                var written_it = self.encoder.written_global_slots.iterator();
+                while (written_it.next()) |entry| {
+                    self.allocator.free(entry.key_ptr.*);
+                }
+                self.encoder.written_global_slots.clearRetainingCapacity();
+            }
+
+            const after_arg_count: usize = @intCast(mlir.oraBlockGetNumArguments(owner_block));
+            var i: usize = 0;
+            while (i < after_arg_count) : (i += 1) {
+                const after_arg = mlir.oraBlockGetArgument(owner_block, @intCast(i));
+                const symbolic_arg = try self.encoder.encodeValue(after_arg);
+                const transient_constraints = try self.encoder.takeConstraints(self.allocator);
+                defer if (transient_constraints.len > 0) self.allocator.free(transient_constraints);
+                try self.encoder.bindValue(after_arg, symbolic_arg);
+            }
+
+            var prefix_op = mlir.oraBlockGetFirstOperation(owner_block);
+            while (!mlir.oraOperationIsNull(prefix_op) and prefix_op.ptr != source_op.ptr) : (prefix_op = mlir.oraOperationGetNextInBlock(prefix_op)) {
+                self.encoder.encodeStateEffectsInOperation(prefix_op);
+                const transient_constraints = try self.encoder.takeConstraints(self.allocator);
+                defer if (transient_constraints.len > 0) self.allocator.free(transient_constraints);
+                const transient_obligations = try self.encoder.takeObligations(self.allocator);
+                defer if (transient_obligations.len > 0) self.allocator.free(transient_obligations);
+            }
+
+            const head_condition = blk: {
+                if (try self.encoder.tryEncodeAssertCondition(source_op, .Current)) |specialized| {
+                    break :blk specialized;
+                }
+                break :blk try self.encoder.encodeValue(condition_value);
+            };
+            var head_constraint_list = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer head_constraint_list.deinit();
+            const raw_head_constraints = try self.encoder.takeConstraints(self.allocator);
+            defer if (raw_head_constraints.len > 0) self.allocator.free(raw_head_constraints);
+            try addConstraintSlice(&head_constraint_list, raw_head_constraints);
+
+            var body_op = mlir.oraOperationGetNextInBlock(source_op);
+            while (!mlir.oraOperationIsNull(body_op) and body_op.ptr != terminator.ptr) : (body_op = mlir.oraOperationGetNextInBlock(body_op)) {
+                self.encoder.encodeStateEffectsInOperation(body_op);
+                const transient_constraints = try self.encoder.takeConstraints(self.allocator);
+                defer if (transient_constraints.len > 0) self.allocator.free(transient_constraints);
+                const transient_obligations = try self.encoder.takeObligations(self.allocator);
+                defer if (transient_obligations.len > 0) self.allocator.free(transient_obligations);
+            }
+
+            const bind_count = @min(
+                after_arg_count,
+                @as(usize, @intCast(mlir.oraOperationGetNumOperands(terminator))),
+            );
+            i = 0;
+            while (i < bind_count) : (i += 1) {
+                const after_arg = mlir.oraBlockGetArgument(owner_block, @intCast(i));
+                const yielded_value = mlir.oraOperationGetOperand(terminator, @intCast(i));
+                try self.encoder.bindValue(after_arg, try self.encoder.encodeValue(yielded_value));
+            }
+
+            const encoded = blk: {
+                if (try self.encoder.tryEncodeAssertCondition(source_op, .Current)) |specialized| {
+                    break :blk specialized;
+                }
+                break :blk try self.encoder.encodeValue(condition_value);
+            };
+
+            var extra_constraint_list = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer extra_constraint_list.deinit();
+            const raw_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            defer if (raw_extra_constraints.len > 0) self.allocator.free(raw_extra_constraints);
+            try addConstraintSlice(&extra_constraint_list, raw_extra_constraints);
+            try addConstraintSlice(&extra_constraint_list, head_constraint_list.items);
+            try extra_constraint_list.append(head_condition);
+            try addExplicitOldLinkConstraintsForAst(self, &extra_constraint_list, encoded);
+
+            if (ann.loop_step_body_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_body_extra_constraints);
+            }
+            if (ann.loop_step_head_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_head_extra_constraints);
+            }
+            ann.loop_step_head_condition = head_condition;
+            ann.loop_step_head_extra_constraints = try head_constraint_list.toOwnedSlice();
+            ann.loop_step_body_condition = encoded;
+            ann.loop_step_body_extra_constraints = try extra_constraint_list.toOwnedSlice();
+        }
+
+        try self.restoreEncoderBranchState(&base_encoder_state);
+    }
+
     fn encodeLoopContinueCondition(self: *VerificationPass, invariant_op: mlir.MlirOperation) !?z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return null;
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
@@ -1952,6 +2171,29 @@ pub const VerificationPass = struct {
         if (std.mem.eql(u8, loop_name, "scf.while")) {
             const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
             if (mlir.oraBlockIsNull(before_block)) return null;
+            const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
+
+            var rebound_before_args: usize = 0;
+            if (!mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr) {
+                const bind_count = @min(
+                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
+                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
+                );
+                var i: usize = 0;
+                while (i < bind_count) : (i += 1) {
+                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                    const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+                    try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
+                    rebound_before_args += 1;
+                }
+            }
+            defer {
+                var i: usize = 0;
+                while (i < rebound_before_args) : (i += 1) {
+                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                    _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
+                }
+            }
 
             var op = mlir.oraBlockGetFirstOperation(before_block);
             while (!mlir.oraOperationIsNull(op)) {
@@ -2111,8 +2353,17 @@ pub const VerificationPass = struct {
     }
 
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
-        if (self.parallel) {
-            self.phaseLog("runVerificationPass -> parallel (temporary prepared-sequential fallback)", .{});
+        // Transitional routing: use the prepared-query engine as the default
+        // execution path so verification semantics come from one query builder.
+        // Keep the legacy direct solver path below as an emergency fallback
+        // until it can be deleted after parity is confirmed.
+        const use_prepared_engine = self.parallel or self.verify_calls or !self.verify_calls;
+        if (use_prepared_engine) {
+            if (self.parallel) {
+                self.phaseLog("runVerificationPass -> prepared-parallel", .{});
+                return try self.runVerificationPassParallel(mlir_module);
+            }
+            self.phaseLog("runVerificationPass -> prepared-sequential", .{});
             return try self.runVerificationPassPreparedSequential(mlir_module);
         }
 
@@ -2313,15 +2564,20 @@ pub const VerificationPass = struct {
                 try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                try addRelevantOldLinkConstraints(self, &obligation_constraints, &relevant_symbols);
                 if (ann.kind == .LoopInvariant) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    try addConstraintSlice(&obligation_constraints, ann.loop_step_extra_constraints);
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
                         try obligation_constraints.append(peer_inv_ann.condition);
+                    }
+                    if (ann.loop_step_condition) |step_cond| {
+                        try obligation_constraints.append(step_cond);
                     }
                 }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
@@ -2345,6 +2601,9 @@ pub const VerificationPass = struct {
                     }
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    for (ann.loop_step_extra_constraints) |cst| {
+                        try self.solver.assertChecked(cst);
+                    }
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         for (peer_inv_ann.path_constraints) |cst| {
@@ -2356,6 +2615,9 @@ pub const VerificationPass = struct {
                             try self.solver.assertChecked(cst);
                         }
                         try self.solver.assertChecked(peer_inv_ann.condition);
+                    }
+                    if (ann.loop_step_condition) |step_cond| {
+                        try self.solver.assertChecked(step_cond);
                     }
                 }
                 try self.solver.assertChecked(negated);
@@ -2440,6 +2702,9 @@ pub const VerificationPass = struct {
                         for (ann.loop_step_extra_constraints) |cst| {
                             try self.solver.assertChecked(cst);
                         }
+                        for (ann.loop_step_body_extra_constraints) |cst| {
+                            try self.solver.assertChecked(cst);
+                        }
                         try self.solver.assertChecked(old_inv);
                         for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                             if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
@@ -2459,7 +2724,8 @@ pub const VerificationPass = struct {
                         if (ann.loop_step_condition) |step_cond| {
                             try self.solver.assertChecked(step_cond);
                         }
-                        try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
+                        const step_body_condition = ann.loop_step_body_condition orelse ann.condition;
+                        try self.solver.assertChecked(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition)));
                         if (self.encoder.isDegraded()) {
                             try self.addDegradedDuringProvingError(&result, ann.file, ann.line, ann.column);
                             return result;
@@ -4195,11 +4461,15 @@ pub const VerificationPass = struct {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
+                    try addConstraintSlice(&obligation_constraints, ann.loop_step_extra_constraints);
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
                         try obligation_constraints.append(peer_inv_ann.condition);
+                    }
+                    if (ann.loop_step_condition) |step_cond| {
+                        try obligation_constraints.append(step_cond);
                     }
                 }
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
@@ -4240,24 +4510,37 @@ pub const VerificationPass = struct {
                         var step_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                         defer step_constraints.deinit();
                         try addConstraintSlice(&step_constraints, assumption_constraints.items);
+                        try addConstraintSlice(&step_constraints, assumption_constraints.items);
                         try addConstraintSlice(&step_constraints, ann.path_constraints);
-                        try addConstraintSlice(&step_constraints, ann.extra_constraints);
-                        try addConstraintSlice(&step_constraints, ann.old_extra_constraints);
+                        if (ann.loop_step_head_condition != null) {
+                            try addConstraintSlice(&step_constraints, ann.loop_step_head_extra_constraints);
+                            try step_constraints.append(ann.loop_step_head_condition.?);
+                        } else {
+                            try addConstraintSlice(&step_constraints, ann.extra_constraints);
+                            try addConstraintSlice(&step_constraints, ann.old_extra_constraints);
+                            try step_constraints.append(old_inv);
+                        }
                         try addConstraintSlice(&step_constraints, ann.loop_step_extra_constraints);
-                        try step_constraints.append(old_inv);
+                        try addConstraintSlice(&step_constraints, ann.loop_step_body_extra_constraints);
                         for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                             if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                             try addConstraintSlice(&step_constraints, peer_inv_ann.path_constraints);
-                            try addConstraintSlice(&step_constraints, peer_inv_ann.extra_constraints);
-                            try addConstraintSlice(&step_constraints, peer_inv_ann.old_extra_constraints);
-                            if (peer_inv_ann.old_condition) |peer_old_inv| {
-                                try step_constraints.append(peer_old_inv);
+                            if (peer_inv_ann.loop_step_head_condition != null) {
+                                try addConstraintSlice(&step_constraints, peer_inv_ann.loop_step_head_extra_constraints);
+                                try step_constraints.append(peer_inv_ann.loop_step_head_condition.?);
+                            } else {
+                                try addConstraintSlice(&step_constraints, peer_inv_ann.extra_constraints);
+                                try addConstraintSlice(&step_constraints, peer_inv_ann.old_extra_constraints);
+                                if (peer_inv_ann.old_condition) |peer_old_inv| {
+                                    try step_constraints.append(peer_old_inv);
+                                }
                             }
                         }
                         if (ann.loop_step_condition) |step_cond| {
                             try step_constraints.append(step_cond);
                         }
-                        try step_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition)));
+                        const step_body_condition = ann.loop_step_body_condition orelse ann.condition;
+                        try step_constraints.append(z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition)));
 
                         const step_query = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
                         const step_smtlib = step_query.smtlib_z;
@@ -4781,6 +5064,8 @@ const EncodedAnnotation = struct {
     function_name: []const u8,
     kind: AnnotationKind,
     condition: z3.Z3_ast,
+    condition_value: ?mlir.MlirValue = null,
+    source_op: ?mlir.MlirOperation = null,
     extra_constraints: []const z3.Z3_ast,
     path_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     old_condition: ?z3.Z3_ast = null,
@@ -4788,6 +5073,10 @@ const EncodedAnnotation = struct {
     loop_entry_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_step_condition: ?z3.Z3_ast = null,
     loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
+    loop_step_head_condition: ?z3.Z3_ast = null,
+    loop_step_head_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
+    loop_step_body_condition: ?z3.Z3_ast = null,
+    loop_step_body_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_exit_condition: ?z3.Z3_ast = null,
     loop_exit_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     file: []const u8,
@@ -5044,9 +5333,30 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if (lhs.label) |lhs_label| {
         if (!std.mem.eql(u8, lhs_label, rhs.label.?)) return false;
     }
+    if ((lhs.old_condition == null) != (rhs.old_condition == null)) return false;
+    if (lhs.old_condition) |lhs_old| {
+        if (!astEquivalent(self, lhs_old, rhs.old_condition.?)) return false;
+    }
+    if ((lhs.loop_step_condition == null) != (rhs.loop_step_condition == null)) return false;
+    if (lhs.loop_step_condition) |lhs_step| {
+        if (!astEquivalent(self, lhs_step, rhs.loop_step_condition.?)) return false;
+    }
+    if ((lhs.loop_step_head_condition == null) != (rhs.loop_step_head_condition == null)) return false;
+    if (lhs.loop_step_head_condition) |lhs_step_head| {
+        if (!astEquivalent(self, lhs_step_head, rhs.loop_step_head_condition.?)) return false;
+    }
+    if ((lhs.loop_exit_condition == null) != (rhs.loop_exit_condition == null)) return false;
+    if (lhs.loop_exit_condition) |lhs_exit| {
+        if (!astEquivalent(self, lhs_exit, rhs.loop_exit_condition.?)) return false;
+    }
     if (!astEquivalent(self, lhs.condition, rhs.condition)) return false;
     if (!constraintSlicesEquivalent(self, lhs.extra_constraints, rhs.extra_constraints)) return false;
     if (!constraintSlicesEquivalent(self, lhs.path_constraints, rhs.path_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.old_extra_constraints, rhs.old_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_entry_extra_constraints, rhs.loop_entry_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_step_extra_constraints, rhs.loop_step_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_step_head_extra_constraints, rhs.loop_step_head_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_exit_extra_constraints, rhs.loop_exit_extra_constraints)) return false;
     return true;
 }
 
@@ -5202,6 +5512,36 @@ fn addRelevantConstraintSlice(
         }
         try list.append(constraint);
     }
+}
+
+fn addRelevantOldLinkConstraints(
+    self: *VerificationPass,
+    list: *ManagedArrayList(z3.Z3_ast),
+    relevant_symbols: *const ManagedArrayList([]const u8),
+) !void {
+    var old_it = self.encoder.global_old_map.iterator();
+    while (old_it.next()) |entry| {
+        const base_name = entry.key_ptr.*;
+        const old_ast = entry.value_ptr.*;
+        const old_symbol = extractZeroArgUninterpretedSymbol(self, old_ast) orelse continue;
+        if (!symbolListContains(relevant_symbols.items, old_symbol)) continue;
+
+        const entry_ast = self.encoder.global_entry_map.get(base_name) orelse continue;
+        const eq = z3.Z3_mk_eq(self.context.ctx, old_ast, entry_ast);
+        if (constraintSliceContains(self, list.items, eq)) continue;
+        try list.append(eq);
+    }
+}
+
+fn addExplicitOldLinkConstraintsForAst(
+    self: *VerificationPass,
+    list: *ManagedArrayList(z3.Z3_ast),
+    ast: z3.Z3_ast,
+) !void {
+    var symbols = ManagedArrayList([]const u8).init(self.allocator);
+    defer symbols.deinit();
+    try collectAstSymbols(self, ast, &symbols);
+    try addRelevantOldLinkConstraints(self, list, &symbols);
 }
 
 fn symbolListContains(symbols: []const []const u8, needle: []const u8) bool {

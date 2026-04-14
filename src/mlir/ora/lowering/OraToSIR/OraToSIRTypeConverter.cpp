@@ -1011,6 +1011,12 @@ namespace mlir
                                             }
                                         }
 
+                                        if (llvm::isa<mlir::NoneType>(type) &&
+                                            llvm::isa<sir::U256Type>(input.getType()))
+                                        {
+                                            return createTaggedCast(builder, loc, type, input, "none_forward");
+                                        }
+
                                         if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
                                         {
                                             if (isNarrowErrorUnion(errType))
