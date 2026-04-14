@@ -40,6 +40,7 @@ const MlirOptions = struct {
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
     verify_stats: bool = false,
+    explain_cores: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -378,6 +379,7 @@ pub fn main() !void {
     const verify_calls: ?bool = parsed.verify_calls;
     const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
+    const explain_cores: bool = parsed.explain_cores;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -481,6 +483,7 @@ pub fn main() !void {
         .verify_calls = verify_calls,
         .verify_state = verify_state,
         .verify_stats = verify_stats,
+        .explain_cores = explain_cores,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -1584,6 +1587,7 @@ fn printUsage() !void {
     try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
+    try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -3403,6 +3407,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setVerifyStats(mlir_options.verify_stats);
+        verifier.setExplainCores(mlir_options.explain_cores);
 
         const verification_result = try verifier.runVerificationPass(final_module);
 
@@ -3440,6 +3445,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        verifier.setExplainCores(mlir_options.explain_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
         m.end();
     }
