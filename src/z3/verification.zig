@@ -36,6 +36,7 @@ pub const AnnotationKind = enum {
 const AssumptionKind = enum {
     requires,
     assume,
+    callee_ensures,
     loop_invariant,
     path_assume,
     goal,
@@ -55,6 +56,7 @@ const AssumptionTag = struct {
 
 const ImportedObligationSource = struct {
     callee_name: []const u8,
+    kind: Encoder.PendingObligationSourceKind,
 };
 
 const TrackedAssumption = struct {
@@ -1621,11 +1623,11 @@ pub const VerificationPass = struct {
                 else
                     obligation.ast;
                 const imported_source = if (obligation.imported_callee_name) |callee_name|
-                    ImportedObligationSource{ .callee_name = callee_name }
+                    ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
                 else
                     null;
-                const obligation_label = if (obligation.imported_callee_name) |callee_name|
-                    try self.importedObligationLabel(callee_name)
+                const obligation_label = if (imported_source) |source|
+                    try self.importedObligationLabel(source)
                 else
                     null;
                 try appendEncodedAnnotationUnique(self, .{
@@ -1856,11 +1858,11 @@ pub const VerificationPass = struct {
             else
                 obligation.ast;
             const imported_source = if (obligation.imported_callee_name) |callee_name|
-                ImportedObligationSource{ .callee_name = callee_name }
+                ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
             else
                 null;
-            const obligation_label = if (obligation.imported_callee_name) |callee_name|
-                try self.importedObligationLabel(callee_name)
+            const obligation_label = if (imported_source) |source|
+                try self.importedObligationLabel(source)
             else
                 annotation_label;
             try appendEncodedAnnotationUnique(self, .{
@@ -4643,6 +4645,9 @@ pub const VerificationPass = struct {
                 .log_prefix = base_log_prefix,
             });
 
+            var previous_imported_callee_ensures = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer previous_imported_callee_ensures.deinit();
+
             for (obligation_annotations.items) |ann| {
                 var relevant_symbols = try buildRelevantSymbolSetForAnnotation(self, ann);
                 defer relevant_symbols.deinit();
@@ -4656,6 +4661,18 @@ pub const VerificationPass = struct {
                 try addApplicableTrackedPathAssumptions(self, &tracked_obligation_assumptions, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                for (previous_imported_callee_ensures.items) |prev| {
+                    if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
+                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
+                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
+                    if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
+                    try obligation_constraints.append(prev.condition);
+                    try appendTrackedAssumption(
+                        &tracked_obligation_assumptions,
+                        prev.condition,
+                        makeTrackedAssumptionTag(.callee_ensures, prev),
+                    );
+                }
                 if (ann.kind == .LoopInvariant) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
                 }
@@ -4710,6 +4727,10 @@ pub const VerificationPass = struct {
                     .smtlib_hash = obligation_hash,
                     .log_prefix = obligation_log_prefix,
                 });
+
+                if (isImportedCalleeEnsuresAnnotation(ann)) {
+                    try previous_imported_callee_ensures.append(ann);
+                }
 
                 if (ann.kind == .LoopInvariant) {
                     if (ann.old_condition) |old_inv| {
@@ -4997,8 +5018,12 @@ pub const VerificationPass = struct {
         return null;
     }
 
-    fn importedObligationLabel(self: *VerificationPass, callee_name: []const u8) ![]const u8 {
-        const label = try std.fmt.allocPrint(self.allocator, "imported callee obligation ({s})", .{callee_name});
+    fn importedObligationLabel(self: *VerificationPass, source: ImportedObligationSource) ![]const u8 {
+        const prefix = switch (source.kind) {
+            .imported_callee_ensures => "imported callee ensures",
+            .imported_callee_obligation, .local => "imported callee obligation",
+        };
+        const label = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ prefix, source.callee_name });
         errdefer self.allocator.free(label);
         try self.label_storage.append(label);
         return label;
@@ -5358,6 +5383,12 @@ fn isGlobalContractInvariantAnnotation(ann: EncodedAnnotation) bool {
         std.mem.eql(u8, ann.function_name, "unknown");
 }
 
+fn isImportedCalleeEnsuresAnnotation(ann: EncodedAnnotation) bool {
+    return ann.kind == .ContractInvariant and
+        ann.imported_obligation_source != null and
+        ann.imported_obligation_source.?.kind == .imported_callee_ensures;
+}
+
 fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
     return switch (kind) {
         .Guard, .Requires => .PreconditionViolation,
@@ -5587,6 +5618,7 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if ((lhs.imported_obligation_source == null) != (rhs.imported_obligation_source == null)) return false;
     if (lhs.imported_obligation_source) |lhs_source| {
         if (!std.mem.eql(u8, lhs_source.callee_name, rhs.imported_obligation_source.?.callee_name)) return false;
+        if (lhs_source.kind != rhs.imported_obligation_source.?.kind) return false;
     }
     if ((lhs.old_condition == null) != (rhs.old_condition == null)) return false;
     if (lhs.old_condition) |lhs_old| {
@@ -6457,6 +6489,7 @@ fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
     return switch (kind) {
         .requires => "requires",
         .assume => "assume",
+        .callee_ensures => "callee ensures",
         .loop_invariant => "loop invariant",
         .path_assume => "path assumption",
         .goal => "goal",
@@ -6476,6 +6509,7 @@ fn makeTrackedAssumptionTag(kind: AssumptionKind, ann: EncodedAnnotation) Assump
         .line = ann.line,
         .column = ann.column,
         .label = trackedAssumptionLabel(kind, ann),
+        .callee_name = if (ann.imported_obligation_source) |source| source.callee_name else null,
         .guard_id = ann.guard_id,
         .loop_owner = ann.loop_owner,
     };
@@ -7665,6 +7699,57 @@ fn buildPublicCallsPrivateAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModu
     return module;
 }
 
+fn buildPublicCallsPrivateEnsuresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const empty_vals = [_]mlir.MlirValue{};
+
+    const private_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private_helper_ensures"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private"))),
+    };
+    const private_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &private_attrs, private_attrs.len, &empty_types, &empty_locs, 0);
+    const private_body = mlir.oraFuncOpGetBodyBlock(private_func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(true_op, 0));
+    const private_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(private_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, private_ret);
+
+    const public_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const public_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &public_attrs, public_attrs.len, &empty_types, &empty_locs, 0);
+    const public_body = mlir.oraFuncOpGetBodyBlock(public_func_op);
+
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("private_helper_ensures"),
+        &empty_vals,
+        empty_vals.len,
+        &empty_types,
+        empty_types.len,
+    );
+    const public_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(public_body, call_op);
+    mlir.oraBlockAppendOwnedOperation(public_body, public_ret);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, public_func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, private_func_op);
+    return module;
+}
+
 fn buildPublicCallsPrivateAssertReturningModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -8724,6 +8809,39 @@ test "private callee assert is enforced through reachable public call path" {
     defer result.deinit();
     try testing.expect(!result.success);
     try testing.expect(result.errors.items.len > 0);
+}
+
+test "private callee ensures is preserved as imported caller-side provenance" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Basic);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildPublicCallsPrivateEnsuresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_public_imported_ensures = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
+        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
+            if (std.mem.indexOf(u8, q.log_prefix, "imported callee ensures (private_helper_ensures)") != null) {
+                saw_public_imported_ensures = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(saw_public_imported_ensures);
 }
 
 test "private result callee assert is enforced through reachable public call path" {

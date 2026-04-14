@@ -20,9 +20,16 @@ const finite_scf_while_unroll_limit: usize = 64;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    pub const PendingObligationSourceKind = enum {
+        local,
+        imported_callee_obligation,
+        imported_callee_ensures,
+    };
+
     pub const PendingObligation = struct {
         ast: z3.Z3_ast,
         imported_callee_name: ?[]const u8 = null,
+        source_kind: PendingObligationSourceKind = .local,
     };
 
     const SwitchCaseMetadata = struct {
@@ -1674,7 +1681,12 @@ pub const Encoder = struct {
         return dup;
     }
 
-    fn addObligationWithImportedCallee(self: *Encoder, obligation: z3.Z3_ast, imported_callee_name: ?[]const u8) void {
+    fn addObligationWithSource(
+        self: *Encoder,
+        obligation: z3.Z3_ast,
+        imported_callee_name: ?[]const u8,
+        source_kind: PendingObligationSourceKind,
+    ) void {
         const guarded_obligation = if (self.return_path_assumptions.items.len == 0)
             obligation
         else
@@ -1689,13 +1701,26 @@ pub const Encoder = struct {
         self.pending_obligations.append(self.allocator, .{
             .ast = guarded_obligation,
             .imported_callee_name = stored_callee_name,
+            .source_kind = source_kind,
         }) catch {
             self.recordDegradation("failed to record SMT obligation");
         };
     }
 
+    fn addObligationWithImportedCallee(self: *Encoder, obligation: z3.Z3_ast, imported_callee_name: ?[]const u8) void {
+        self.addObligationWithSource(
+            obligation,
+            imported_callee_name,
+            if (imported_callee_name != null) .imported_callee_obligation else .local,
+        );
+    }
+
+    fn addImportedCalleeEnsures(self: *Encoder, obligation: z3.Z3_ast, imported_callee_name: []const u8) void {
+        self.addObligationWithSource(obligation, imported_callee_name, .imported_callee_ensures);
+    }
+
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
-        self.addObligationWithImportedCallee(obligation, null);
+        self.addObligationWithSource(obligation, null, .local);
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
@@ -5206,6 +5231,9 @@ pub const Encoder = struct {
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
 
         const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
+        if (!self.functionIsExternallyVerified(func_op)) {
+            try summary_encoder.collectEnsuresForSummary(func_op, callee);
+        }
         if (summary_encoder.isDegraded()) {
             self.recordCalleeResultDegradation(
                 call_op,
@@ -5271,6 +5299,9 @@ pub const Encoder = struct {
 
         const return_value = try summary_encoder.extractFunctionReturnValue(func_op, 0) orelse return null;
         const elements = try summary_encoder.tryResolveTupleElementsFromValue(return_value, mode) orelse return null;
+        if (!self.functionIsExternallyVerified(func_op)) {
+            try summary_encoder.collectEnsuresForSummary(func_op, callee);
+        }
         if (summary_encoder.isDegraded()) {
             self.recordCalleeResultDegradation(
                 call_op,
@@ -9105,6 +9136,7 @@ pub const Encoder = struct {
         var callee_requires = std.ArrayList(z3.Z3_ast){};
         defer callee_requires.deinit(self.allocator);
         var any_result = false;
+        const will_run_summary_encoder = slots.len > 0 or result_exprs.len == 0;
         {
             var result_encoder = Encoder.init(self.context, self.allocator);
             defer result_encoder.deinit();
@@ -9153,6 +9185,10 @@ pub const Encoder = struct {
                 }
             }
 
+            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
+                try result_encoder.collectEnsuresForSummary(func_op, callee);
+            }
+
             const extra_constraints = try result_encoder.takeConstraints(self.allocator);
             defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
             for (extra_constraints) |cst| self.addConstraint(cst);
@@ -9164,7 +9200,7 @@ pub const Encoder = struct {
             }
         }
 
-        if (slots.len > 0 or result_exprs.len == 0) {
+        if (will_run_summary_encoder) {
             var summary_encoder = Encoder.init(self.context, self.allocator);
             defer summary_encoder.deinit();
             summary_encoder.setVerifyCalls(self.verify_calls);
@@ -9205,6 +9241,10 @@ pub const Encoder = struct {
 
             try summary_encoder.restoreStateSnapshot(&base_state);
             summary_encoder.encodeStateEffectsInOperation(func_op);
+
+            if (!self.functionIsExternallyVerified(func_op)) {
+                try summary_encoder.collectEnsuresForSummary(func_op, callee);
+            }
 
             if (summary_encoder.isDegraded()) {
                 const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
@@ -9295,6 +9335,60 @@ pub const Encoder = struct {
         }
     }
 
+    fn collectEnsuresForSummary(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        callee_name: []const u8,
+    ) EncodeError!void {
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        if (name_ref.data != null and name_ref.length > 0) {
+            const op_name = name_ref.data[0..name_ref.length];
+            if (std.mem.eql(u8, op_name, "cf.assert")) {
+                const ensures_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.ensures", 11));
+                if (!mlir.oraAttributeIsNull(ensures_attr) and mlir.oraOperationGetNumOperands(op) >= 1) {
+                    const encoded = if (try self.tryEncodeAssertCondition(op, .Current)) |specialized|
+                        specialized
+                    else blk: {
+                        const condition_value = mlir.oraOperationGetOperand(op, 0);
+                        break :blk self.encodeValue(condition_value) catch {
+                            self.recordDegradation("failed to encode summary ensures");
+                            return;
+                        };
+                    };
+                    self.addImportedCalleeEnsures(self.coerceToBool(encoded), callee_name);
+                }
+            } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
+                if (mlir.oraOperationGetNumOperands(op) >= 1) {
+                    const condition_value = mlir.oraOperationGetOperand(op, 0);
+                    const encoded = if (try self.tryEncodeAssertCondition(op, .Current)) |specialized|
+                        specialized
+                    else
+                        self.encodeValue(condition_value) catch {
+                            self.recordDegradation("failed to encode summary ensures");
+                            return;
+                        };
+                    self.addImportedCalleeEnsures(self.coerceToBool(encoded), callee_name);
+                }
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectEnsuresForSummary(nested, callee_name);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
     fn functionIsExternallyVerified(_: *Encoder, func_op: mlir.MlirOperation) bool {
         const visibility_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.visibility", 14));
         if (mlir.oraAttributeIsNull(visibility_attr)) return true;
@@ -9314,8 +9408,26 @@ pub const Encoder = struct {
         path_guards: []const z3.Z3_ast,
     ) void {
         if (obligations.len == 0) return;
+        const importedSourceKind = struct {
+            fn resolve(obligation: PendingObligation, default_callee_name: []const u8) struct {
+                callee_name: []const u8,
+                source_kind: PendingObligationSourceKind,
+            } {
+                return .{
+                    .callee_name = obligation.imported_callee_name orelse default_callee_name,
+                    .source_kind = switch (obligation.source_kind) {
+                        .local => .imported_callee_obligation,
+                        .imported_callee_obligation => .imported_callee_obligation,
+                        .imported_callee_ensures => .imported_callee_ensures,
+                    },
+                };
+            }
+        };
         if (requires.len == 0 and path_guards.len == 0) {
-            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
+            for (obligations) |obl| {
+                const imported = importedSourceKind.resolve(obl, callee_name);
+                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+            }
             return;
         }
 
@@ -9323,20 +9435,28 @@ pub const Encoder = struct {
         defer guard_terms.deinit(self.allocator);
         guard_terms.appendSlice(self.allocator, requires) catch {
             self.recordDegradation("failed to allocate summary obligation guards");
-            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
+            for (obligations) |obl| {
+                const imported = importedSourceKind.resolve(obl, callee_name);
+                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+            }
             return;
         };
         guard_terms.appendSlice(self.allocator, path_guards) catch {
             self.recordDegradation("failed to allocate summary obligation guards");
-            for (obligations) |obl| self.addObligationWithImportedCallee(obl.ast, obl.imported_callee_name orelse callee_name);
+            for (obligations) |obl| {
+                const imported = importedSourceKind.resolve(obl, callee_name);
+                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+            }
             return;
         };
 
         const precondition_guard = self.encodeAnd(guard_terms.items);
         for (obligations) |obl| {
-            self.addObligationWithImportedCallee(
+            const imported = importedSourceKind.resolve(obl, callee_name);
+            self.addObligationWithSource(
                 self.encodeImplies(precondition_guard, obl.ast),
-                obl.imported_callee_name orelse callee_name,
+                imported.callee_name,
+                imported.source_kind,
             );
         }
     }

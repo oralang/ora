@@ -1,0 +1,19 @@
+// Explain-mode core regression:
+// - the private helper postcondition itself is intentionally not derivable
+//   from caller assumptions, so the file should fail overall
+// - but the caller-side assert should prove using the imported callee ensures
+//   assumption, and `--explain` should surface `callee ensures` in the core
+
+contract FailCalleeEnsuresCore {
+    fn trustedValue(x: u256) -> u256
+        ensures trustedValue(x) == 7
+    {
+        assume(x == 7);
+        return x;
+    }
+
+    pub fn useTrusted(x: u256) {
+        let y = trustedValue(x);
+        assert(y == 7, "caller needs callee ensures");
+    }
+}
