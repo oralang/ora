@@ -35,6 +35,7 @@ pub const AnnotationKind = enum {
 
 const AssumptionKind = enum {
     requires,
+    assume,
     loop_invariant,
     path_assume,
     goal,
@@ -6424,6 +6425,7 @@ fn cloneTrackedAssumptionSlice(
 fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
     return switch (kind) {
         .requires => "requires",
+        .assume => "assume",
         .loop_invariant => "loop invariant",
         .path_assume => "path assumption",
         .goal => "goal",
@@ -6466,6 +6468,7 @@ fn addTrackedBaseAssumptions(
     for (annotations) |ann| {
         switch (ann.kind) {
             .Requires => try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(.requires, ann)),
+            .Assume => try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(.assume, ann)),
             else => {},
         }
     }
@@ -8004,6 +8007,45 @@ fn buildPathAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, path_assume_value: i
     return module;
 }
 
+fn buildUserAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, assume_value: i64, ensures_value: i64) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("user_assume_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+
+    const assume_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, assume_value);
+    const assume_cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, assume_attr);
+    const assume_cond = mlir.oraOperationGetResult(assume_cond_op, 0);
+    const assume_op = mlir.oraAssumeOpCreate(mlir_ctx, loc, assume_cond);
+
+    const ensure_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, ensures_value);
+    const ensure_cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, ensure_attr);
+    const ensure_cond = mlir.oraOperationGetResult(ensure_cond_op, 0);
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, ensure_cond);
+
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, assume_cond_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, assume_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensure_cond_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -9078,6 +9120,55 @@ test "prepared queries carry narrow tracked assumptions" {
                 try testing.expectEqualStrings("path assumption", q.tracked_assumptions[0].tag.label);
                 try testing.expectEqual(AssumptionKind.goal, q.tracked_assumptions[1].tag.kind);
                 try testing.expectEqualStrings("goal", q.tracked_assumptions[1].tag.label);
+            },
+            else => {},
+        }
+    }
+
+    try testing.expect(saw_base);
+    try testing.expect(saw_obligation);
+}
+
+test "prepared queries track user assume in base and obligation queries" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_base = false;
+    var saw_obligation = false;
+
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "user_assume_test")) continue;
+        switch (q.kind) {
+            .Base => {
+                saw_base = true;
+                try testing.expectEqual(@as(usize, 1), q.tracked_assumptions.len);
+                try testing.expectEqual(AssumptionKind.assume, q.tracked_assumptions[0].tag.kind);
+                try testing.expectEqualStrings("assume", q.tracked_assumptions[0].tag.label);
+            },
+            .Obligation => {
+                if (q.obligation_kind != .Ensures) continue;
+                saw_obligation = true;
+                try testing.expectEqual(@as(usize, 2), q.tracked_assumptions.len);
+                try testing.expectEqual(AssumptionKind.assume, q.tracked_assumptions[0].tag.kind);
+                try testing.expectEqualStrings("assume", q.tracked_assumptions[0].tag.label);
+                try testing.expectEqual(AssumptionKind.goal, q.tracked_assumptions[1].tag.kind);
             },
             else => {},
         }
