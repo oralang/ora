@@ -10201,6 +10201,77 @@ test "rendered SMT report json includes multi-requires explain tags and summary 
     try testing.expect(std.mem.indexOf(u8, json, "\"label\":\"checked addition overflow\"") != null);
 }
 
+test "rendered SMT report json includes callee ensures explain tags" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "useTrusted",
+        .obligation_kind = .ContractInvariant,
+        .file = "/tmp/fail_callee_ensures_core.ora",
+        .line = 17,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "useTrusted [contract invariant]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const explain_tags = [_]AssumptionTag{
+        .{
+            .kind = .callee_ensures,
+            .function_name = "useTrusted",
+            .file = "/tmp/fail_callee_ensures_core.ora",
+            .line = 16,
+            .column = 17,
+            .label = "imported callee ensures (trustedValue)",
+            .callee_name = "trustedValue",
+        },
+        .{
+            .kind = .goal,
+            .function_name = "useTrusted",
+            .file = "/tmp/fail_callee_ensures_core.ora",
+            .line = 17,
+            .column = 9,
+            .label = "caller needs callee ensures",
+        },
+    };
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .explain = "callee ensures fail_callee_ensures_core.ora:16 imported callee ensures (trustedValue); goal fail_callee_ensures_core.ora:17 caller needs callee ensures",
+        .explain_tags = explain_tags[0..],
+        .vacuous = false,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/fail_callee_ensures_core.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"callee_ensures\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"callee_name\":\"trustedValue\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"label\":\"imported callee ensures (trustedValue)\"") != null);
+}
+
 test "buildDegradedSmtReport emits degraded report with no queries" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
