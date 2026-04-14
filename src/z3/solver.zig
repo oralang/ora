@@ -54,6 +54,27 @@ pub const Solver = struct {
         return status;
     }
 
+    pub fn checkAssumptions(self: *Solver, assumptions: []const c.Z3_ast) c.Z3_lbool {
+        return c.Z3_solver_check_assumptions(
+            self.context.ctx,
+            self.solver,
+            @intCast(assumptions.len),
+            if (assumptions.len == 0) null else assumptions.ptr,
+        );
+    }
+
+    pub fn checkAssumptionsChecked(self: *Solver, assumptions: []const c.Z3_ast) !c.Z3_lbool {
+        self.context.clearLastError();
+        const status = c.Z3_solver_check_assumptions(
+            self.context.ctx,
+            self.solver,
+            @intCast(assumptions.len),
+            if (assumptions.len == 0) null else assumptions.ptr,
+        );
+        try self.context.checkNoError();
+        return status;
+    }
+
     pub fn getModel(self: *Solver) ?c.Z3_model {
         return c.Z3_solver_get_model(self.context.ctx, self.solver);
     }
@@ -63,6 +84,32 @@ pub const Solver = struct {
         const model = c.Z3_solver_get_model(self.context.ctx, self.solver);
         try self.context.checkNoError();
         return model;
+    }
+
+    pub fn getUnsatCore(self: *Solver) c.Z3_ast_vector {
+        return c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
+    }
+
+    pub fn getUnsatCoreChecked(self: *Solver) !c.Z3_ast_vector {
+        self.context.clearLastError();
+        const core = c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return core;
+    }
+
+    pub fn getUnsatCoreOwned(self: *Solver) ![]c.Z3_ast {
+        const core = try self.getUnsatCoreChecked();
+        c.Z3_ast_vector_inc_ref(self.context.ctx, core);
+        defer c.Z3_ast_vector_dec_ref(self.context.ctx, core);
+
+        const len: usize = @intCast(c.Z3_ast_vector_size(self.context.ctx, core));
+        var result = try self.allocator.alloc(c.Z3_ast, len);
+        errdefer self.allocator.free(result);
+
+        for (0..len) |i| {
+            result[i] = c.Z3_ast_vector_get(self.context.ctx, core, @intCast(i));
+        }
+        return result;
     }
 
     pub fn reset(self: *Solver) void {
@@ -145,6 +192,14 @@ pub const Solver = struct {
         c.Z3_solver_set_params(self.context.ctx, self.solver, params);
         try self.context.checkNoError();
     }
+
+    pub fn mkFreshBoolProxy(self: *Solver, prefix: [:0]const u8) !c.Z3_ast {
+        self.context.clearLastError();
+        const bool_sort = c.Z3_mk_bool_sort(self.context.ctx);
+        const proxy = c.Z3_mk_fresh_const(self.context.ctx, prefix.ptr, bool_sort) orelse return error.SolverInitFailed;
+        try self.context.checkNoError();
+        return proxy;
+    }
 };
 
 const testing = std.testing;
@@ -198,4 +253,27 @@ test "checked solver operations succeed on simple SAT query" {
     try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_TRUE), try solver.checkChecked());
     try testing.expect(try solver.getModelChecked() != null);
     try solver.popChecked();
+}
+
+test "checkAssumptions and unsat core wrappers work on simple contradiction" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    const p = try solver.mkFreshBoolProxy("core_p");
+    const q = try solver.mkFreshBoolProxy("core_q");
+    const not_q = c.Z3_mk_not(context.ctx, q);
+
+    try solver.assertChecked(c.Z3_mk_implies(context.ctx, p, q));
+    try solver.assertChecked(c.Z3_mk_implies(context.ctx, p, not_q));
+
+    const assumptions = [_]c.Z3_ast{p};
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkAssumptionsChecked(&assumptions));
+
+    const core = try solver.getUnsatCoreOwned();
+    defer testing.allocator.free(core);
+    try testing.expectEqual(@as(usize, 1), core.len);
+    try testing.expect(core[0] == p);
 }
