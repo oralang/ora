@@ -1,0 +1,20 @@
+// Explain-mode core regression:
+// - the private helper obligation itself is intentionally not derivable from
+//   caller assumptions, so the file should fail overall
+// - but the caller-side assert should prove using the imported callee
+//   obligation assumption, and `--explain` should surface `callee obligation`
+//   in the core
+
+contract FailCalleeObligationCore {
+    fn trusted(x: u256) -> u256 {
+        assume(x == 7);
+        assert(x == 7, "trusted helper obligation");
+        return x;
+    }
+
+    pub fn useTrusted(x: u256) {
+        let y = trusted(x);
+        assert(x == 7, "caller needs callee obligation");
+        assert(y == x, "keep result live");
+    }
+}

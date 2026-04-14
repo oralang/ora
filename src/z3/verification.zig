@@ -36,6 +36,7 @@ pub const AnnotationKind = enum {
 const AssumptionKind = enum {
     requires,
     assume,
+    callee_obligation,
     callee_ensures,
     loop_invariant,
     path_assume,
@@ -4645,6 +4646,8 @@ pub const VerificationPass = struct {
                 .log_prefix = base_log_prefix,
             });
 
+            var previous_imported_callee_obligations = ManagedArrayList(EncodedAnnotation).init(self.allocator);
+            defer previous_imported_callee_obligations.deinit();
             var previous_imported_callee_ensures = ManagedArrayList(EncodedAnnotation).init(self.allocator);
             defer previous_imported_callee_ensures.deinit();
 
@@ -4661,6 +4664,18 @@ pub const VerificationPass = struct {
                 try addApplicableTrackedPathAssumptions(self, &tracked_obligation_assumptions, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                for (previous_imported_callee_obligations.items) |prev| {
+                    if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
+                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
+                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
+                    if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
+                    try obligation_constraints.append(prev.condition);
+                    try appendTrackedAssumption(
+                        &tracked_obligation_assumptions,
+                        prev.condition,
+                        makeTrackedAssumptionTag(.callee_obligation, prev),
+                    );
+                }
                 for (previous_imported_callee_ensures.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
@@ -4728,6 +4743,9 @@ pub const VerificationPass = struct {
                     .log_prefix = obligation_log_prefix,
                 });
 
+                if (isImportedCalleeObligationAnnotation(ann)) {
+                    try previous_imported_callee_obligations.append(ann);
+                }
                 if (isImportedCalleeEnsuresAnnotation(ann)) {
                     try previous_imported_callee_ensures.append(ann);
                 }
@@ -5387,6 +5405,12 @@ fn isImportedCalleeEnsuresAnnotation(ann: EncodedAnnotation) bool {
     return ann.kind == .ContractInvariant and
         ann.imported_obligation_source != null and
         ann.imported_obligation_source.?.kind == .imported_callee_ensures;
+}
+
+fn isImportedCalleeObligationAnnotation(ann: EncodedAnnotation) bool {
+    return ann.kind == .ContractInvariant and
+        ann.imported_obligation_source != null and
+        ann.imported_obligation_source.?.kind == .imported_callee_obligation;
 }
 
 fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
@@ -6489,6 +6513,7 @@ fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
     return switch (kind) {
         .requires => "requires",
         .assume => "assume",
+        .callee_obligation => "callee obligation",
         .callee_ensures => "callee ensures",
         .loop_invariant => "loop invariant",
         .path_assume => "path assumption",
@@ -10270,6 +10295,77 @@ test "rendered SMT report json includes callee ensures explain tags" {
     try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"callee_ensures\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"callee_name\":\"trustedValue\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"label\":\"imported callee ensures (trustedValue)\"") != null);
+}
+
+test "rendered SMT report json includes callee obligation explain tags" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "useTrusted",
+        .obligation_kind = .ContractInvariant,
+        .file = "/tmp/fail_callee_obligation_core.ora",
+        .line = 10,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "useTrusted [contract invariant]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const explain_tags = [_]AssumptionTag{
+        .{
+            .kind = .callee_obligation,
+            .function_name = "useTrusted",
+            .file = "/tmp/fail_callee_obligation_core.ora",
+            .line = 9,
+            .column = 17,
+            .label = "imported callee obligation (trusted)",
+            .callee_name = "trusted",
+        },
+        .{
+            .kind = .goal,
+            .function_name = "useTrusted",
+            .file = "/tmp/fail_callee_obligation_core.ora",
+            .line = 10,
+            .column = 9,
+            .label = "caller needs callee obligation",
+        },
+    };
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .explain = "callee obligation fail_callee_obligation_core.ora:9 imported callee obligation (trusted); goal fail_callee_obligation_core.ora:10 caller needs callee obligation",
+        .explain_tags = explain_tags[0..],
+        .vacuous = false,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/fail_callee_obligation_core.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"callee_obligation\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"callee_name\":\"trusted\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"label\":\"imported callee obligation (trusted)\"") != null);
 }
 
 test "buildDegradedSmtReport emits degraded report with no queries" {
