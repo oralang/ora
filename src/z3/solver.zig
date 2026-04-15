@@ -86,6 +86,24 @@ pub const Solver = struct {
         return model;
     }
 
+    pub fn getProof(self: *Solver) ?c.Z3_ast {
+        return c.Z3_solver_get_proof(self.context.ctx, self.solver);
+    }
+
+    pub fn getProofChecked(self: *Solver) !?c.Z3_ast {
+        self.context.clearLastError();
+        const proof = c.Z3_solver_get_proof(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return proof;
+    }
+
+    pub fn getProofStringOwned(self: *Solver) !?[]u8 {
+        const proof = try self.getProofChecked() orelse return null;
+        const raw = c.Z3_ast_to_string(self.context.ctx, proof);
+        if (raw == null) return null;
+        return try self.allocator.dupe(u8, std.mem.span(raw));
+    }
+
     pub fn getUnsatCore(self: *Solver) c.Z3_ast_vector {
         return c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
     }
@@ -276,4 +294,27 @@ test "checkAssumptions and unsat core wrappers work on simple contradiction" {
     defer testing.allocator.free(core);
     try testing.expectEqual(@as(usize, 1), core.len);
     try testing.expect(core[0] == p);
+}
+
+test "proof wrappers expose a proof on simple contradiction when enabled" {
+    var context = try Context.initWithOptions(testing.allocator, .{ .proofs_enabled = true });
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    const bool_sort = c.Z3_mk_bool_sort(context.ctx);
+    const sym = c.Z3_mk_string_symbol(context.ctx, "proof_p");
+    const p = c.Z3_mk_const(context.ctx, sym, bool_sort);
+    const not_p = c.Z3_mk_not(context.ctx, p);
+
+    try solver.assertChecked(p);
+    try solver.assertChecked(not_p);
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkChecked());
+
+    const proof = try solver.getProofStringOwned();
+    defer if (proof) |raw| testing.allocator.free(raw);
+
+    try testing.expect(proof != null);
+    try testing.expect(proof.?.len > 0);
 }

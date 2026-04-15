@@ -25,14 +25,27 @@ fn createContext(cfg: c.Z3_config) !c.Z3_context {
 
 /// Z3 Context wrapper for RAII-style resource management
 pub const Context = struct {
+    pub const Options = struct {
+        proofs_enabled: bool = false,
+    };
+
     cfg: c.Z3_config,
     ctx: c.Z3_context,
     allocator: std.mem.Allocator,
+    proofs_enabled: bool,
 
     /// Initialize a new Z3 context with default configuration
     pub fn init(allocator: std.mem.Allocator) !Context {
+        return initWithOptions(allocator, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) !Context {
         const cfg = c.Z3_mk_config() orelse return error.Z3InitFailed;
         errdefer c.Z3_del_config(cfg);
+
+        if (options.proofs_enabled) {
+            c.Z3_set_param_value(cfg, "proof", "true");
+        }
 
         const ctx = try createContext(cfg);
 
@@ -40,22 +53,14 @@ pub const Context = struct {
             .cfg = cfg,
             .ctx = ctx,
             .allocator = allocator,
+            .proofs_enabled = options.proofs_enabled,
         };
     }
 
     /// Initialize with custom configuration options
     pub fn initWithConfig(allocator: std.mem.Allocator, timeout_ms: u32) !Context {
         _ = timeout_ms;
-        const cfg = c.Z3_mk_config() orelse return error.Z3InitFailed;
-        errdefer c.Z3_del_config(cfg);
-
-        const ctx = try createContext(cfg);
-
-        return Context{
-            .cfg = cfg,
-            .ctx = ctx,
-            .allocator = allocator,
-        };
+        return initWithOptions(allocator, .{});
     }
 
     /// Clean up Z3 context and configuration
@@ -97,5 +102,14 @@ test "Context initWithConfig registers a valid context" {
     defer ctx.deinit();
 
     try testing.expect(ctx.ctx != null);
+    try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), ctx.lastErrorCode());
+}
+
+test "Context initWithOptions enables proof generation" {
+    var ctx = try Context.initWithOptions(testing.allocator, .{ .proofs_enabled = true });
+    defer ctx.deinit();
+
+    try testing.expect(ctx.ctx != null);
+    try testing.expect(ctx.proofs_enabled);
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), ctx.lastErrorCode());
 }

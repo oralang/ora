@@ -88,6 +88,10 @@ pub const SmtReportArtifacts = struct {
 
 /// Verification pass for MLIR modules
 pub const VerificationPass = struct {
+    pub const InitOptions = struct {
+        proofs_enabled: ?bool = null,
+    };
+
     const SwitchCaseMetadata = struct {
         case_kinds: []i64,
         case_values: []i64,
@@ -132,6 +136,7 @@ pub const VerificationPass = struct {
     verify_state: bool = true,
     verify_stats: bool = false,
     explain_cores: bool = false,
+    proofs_enabled: bool = false,
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -155,9 +160,26 @@ pub const VerificationPass = struct {
     semantic_constraint_tags: std.AutoHashMap(usize, AssumptionTag),
 
     pub fn init(allocator: std.mem.Allocator) !VerificationPass {
+        return initWithOptions(allocator, .{});
+    }
+
+    pub fn initWithProofs(allocator: std.mem.Allocator, proofs_enabled: bool) !VerificationPass {
+        return initWithOptions(allocator, .{ .proofs_enabled = proofs_enabled });
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: InitOptions) !VerificationPass {
+        const proofs_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PROOFS") catch null;
+        defer if (proofs_env) |val| allocator.free(val);
+        const proofs_enabled = if (options.proofs_enabled) |enabled|
+            enabled
+        else if (proofs_env) |val|
+            parseBoolEnv(val)
+        else
+            false;
+
         var context = try allocator.create(Context);
         errdefer allocator.destroy(context);
-        context.* = try Context.init(allocator);
+        context.* = try Context.initWithOptions(allocator, .{ .proofs_enabled = proofs_enabled });
         errdefer context.deinit();
 
         var solver = try Solver.init(context, allocator);
@@ -269,6 +291,7 @@ pub const VerificationPass = struct {
             .verify_state = verify_state,
             .verify_stats = verify_stats,
             .explain_cores = explain_cores,
+            .proofs_enabled = proofs_enabled,
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
@@ -3763,6 +3786,9 @@ pub const VerificationPass = struct {
                 if (entry.model) |model| {
                     self.allocator.free(model);
                 }
+                if (entry.proof) |proof| {
+                    self.allocator.free(proof);
+                }
                 if (entry.explain) |explain| {
                     self.allocator.free(explain);
                 }
@@ -3836,10 +3862,16 @@ pub const VerificationPass = struct {
                 }
             }
 
+            var proof_copy: ?[]u8 = null;
+            if (self.proofs_enabled and status == z3.Z3_L_FALSE) {
+                proof_copy = try self.solver.getProofStringOwned();
+            }
+
             report_runs[idx] = .{
                 .status = status,
                 .elapsed_ms = elapsed_ms,
                 .model = model_copy,
+                .proof = proof_copy,
                 .explain = explain_copy,
                 .explain_tags = explain_tags_copy,
                 .vacuous = vacuous,
@@ -4089,6 +4121,7 @@ pub const VerificationPass = struct {
         try writer.print("- verify_state: `{any}`\n", .{self.verify_state});
         try writer.print("- parallel: `{any}`\n", .{self.parallel});
         try writer.print("- explain_cores: `{any}`\n", .{self.explain_cores});
+        try writer.print("- z3_proofs: `{any}`\n", .{self.proofs_enabled});
         try writer.print("- random_seed: `{d}`\n", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print("- timeout_ms: `{d}`\n", .{timeout});
@@ -4196,6 +4229,11 @@ pub const VerificationPass = struct {
                 try writer.writeAll(model);
                 try writer.writeAll("\n```\n");
             }
+            if (run.proof) |proof| {
+                try writer.writeAll("- Z3 Proof:\n```smt2\n");
+                try writer.writeAll(proof);
+                try writer.writeAll("\n```\n");
+            }
             try writer.writeAll("- SMT-LIB:\n```smt2\n");
             try writer.writeAll(query.smtlib_z);
             try writer.writeAll("\n```\n\n");
@@ -4232,6 +4270,7 @@ pub const VerificationPass = struct {
         try writer.writeAll(if (self.verify_state) ",\"verify_state\":true" else ",\"verify_state\":false");
         try writer.writeAll(if (self.parallel) ",\"parallel\":true" else ",\"parallel\":false");
         try writer.writeAll(if (self.explain_cores) ",\"explain_cores\":true" else ",\"explain_cores\":false");
+        try writer.writeAll(if (self.proofs_enabled) ",\"z3_proofs\":true" else ",\"z3_proofs\":false");
         try writer.print(",\"random_seed\":{d}", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print(",\"timeout_ms\":{d}", .{timeout});
@@ -4468,6 +4507,12 @@ pub const VerificationPass = struct {
             try writer.writeAll(",\"model\":");
             if (run.model) |model| {
                 try writeJsonStringEscaped(writer, model);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeAll(",\"proof\":");
+            if (run.proof) |proof| {
+                try writeJsonStringEscaped(writer, proof);
             } else {
                 try writer.writeAll("null");
             }
@@ -5917,6 +5962,7 @@ const ReportQueryRun = struct {
     status: z3.Z3_lbool = z3.Z3_L_UNDEF,
     elapsed_ms: u64 = 0,
     model: ?[]u8 = null,
+    proof: ?[]u8 = null,
     explain: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
     vacuous: bool = false,
@@ -10758,6 +10804,56 @@ test "rendered SMT report json includes vacuity_unknown flag" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"vacuity_unknown\":true") != null);
+}
+
+test "rendered SMT report json includes z3 proof metadata and proof payload" {
+    var pass = try VerificationPass.initWithProofs(testing.allocator, true);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "proved",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/proved.ora",
+        .line = 7,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .proof = try testing.allocator.dupe(u8, "(proof raw-z3-proof)"),
+    };
+    defer testing.allocator.free(run.proof.?);
+
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/proved.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"z3_proofs\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"proof\":\"(proof raw-z3-proof)\"") != null);
 }
 
 test "rendered SMT report includes verified_with_caveats" {

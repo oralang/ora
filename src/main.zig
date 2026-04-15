@@ -41,6 +41,7 @@ const MlirOptions = struct {
     verify_state: ?bool = null,
     verify_stats: bool = false,
     explain_cores: bool = false,
+    z3_proofs: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -380,6 +381,7 @@ pub fn main() !void {
     const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
     const explain_cores: bool = parsed.explain_cores;
+    const z3_proofs: bool = parsed.z3_proofs;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -484,6 +486,7 @@ pub fn main() !void {
         .verify_state = verify_state,
         .verify_stats = verify_stats,
         .explain_cores = explain_cores,
+        .z3_proofs = z3_proofs,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -1588,6 +1591,7 @@ fn printUsage() !void {
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
+    try stdout.print("  --z3-proofs            - Enable raw Z3 proof generation (slower, report/debug only)\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -3398,7 +3402,7 @@ fn runMlirEmitAdvanced(
     if (mlir_options.verify_z3) {
         m.begin("z3 verification");
         const z3_verification = @import("z3/verification.zig");
-        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
 
         if (mlir_options.verify_mode) |mode| {
@@ -3438,7 +3442,7 @@ fn runMlirEmitAdvanced(
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
         m.begin("smt report");
         const z3_verification = @import("z3/verification.zig");
-        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
         if (mlir_options.verify_mode) |mode| {
             if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
