@@ -3195,6 +3195,7 @@ pub const VerificationPass = struct {
             var timer = try std.time.Timer.start();
             const status = if (self.explain_cores) blk: {
                 try assertPreparedQueryUntrackedConstraints(&self.solver, query);
+                try assertPreparedQueryTrackedImplications(self, &self.solver, query);
 
                 if (query.kind != .Base) {
                     const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
@@ -3217,11 +3218,6 @@ pub const VerificationPass = struct {
                     if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
                 }
 
-                try self.solver.resetChecked();
-                if (self.timeout_ms) |ms| {
-                    try self.solver.setTimeoutMs(ms);
-                }
-                try assertPreparedQueryUntrackedConstraints(&self.solver, query);
                 const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
                 if (proof.status == z3.Z3_L_FALSE) {
                     if (proof.explain_str) |core| {
@@ -3818,6 +3814,7 @@ pub const VerificationPass = struct {
             var vacuity_unknown = false;
             const status = if (self.explain_cores) blk: {
                 try assertPreparedQueryUntrackedConstraints(&self.solver, query);
+                try assertPreparedQueryTrackedImplications(self, &self.solver, query);
 
                 if (query.kind != .Base) {
                     const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
@@ -3839,11 +3836,6 @@ pub const VerificationPass = struct {
                     if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
                 }
 
-                try self.solver.resetChecked();
-                if (self.timeout_ms) |ms| {
-                    try self.solver.setTimeoutMs(ms);
-                }
-                try assertPreparedQueryUntrackedConstraints(&self.solver, query);
                 const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
                 explain_copy = if (proof.explain_str) |core|
                     try self.allocator.dupe(u8, core)
@@ -4211,6 +4203,9 @@ pub const VerificationPass = struct {
             try writer.print("- SMT hash: `0x{x}`\n", .{query.smtlib_hash});
             try writer.print("- Vacuous: `{any}`\n", .{run.vacuous});
             try writer.print("- Vacuity inconclusive: `{any}`\n", .{run.vacuity_unknown});
+            if (run.vacuity_unknown) {
+                try writer.writeAll("- Warning: vacuity check was inconclusive; proof result may still rely on inconsistent assumptions.\n");
+            }
             if (query.guard_id) |guard_id| {
                 try writer.print("- Guard ID: `{s}`\n", .{guard_id});
             }
@@ -6667,6 +6662,22 @@ fn assertPreparedQueryUntrackedConstraints(solver: *Solver, query: PreparedQuery
     }
 }
 
+fn assertPreparedQueryTrackedImplications(
+    self: *VerificationPass,
+    solver: *Solver,
+    query: PreparedQuery,
+) !void {
+    for (query.tracked_assumptions) |tracked_assumption| {
+        const proxy = tracked_assumption.proxy orelse return error.MissingTrackedAssumptionProxy;
+        const implication = z3.Z3_mk_implies(
+            self.context.ctx,
+            proxy,
+            self.encoder.coerceBoolean(tracked_assumption.ast),
+        );
+        try solver.assertChecked(implication);
+    }
+}
+
 fn formatAssumptionTag(
     allocator: std.mem.Allocator,
     tag: AssumptionTag,
@@ -6721,6 +6732,8 @@ fn formatUnsatCoreSummary(
         if (tracked.tag.kind != .goal) {
             try parts.append(try formatAssumptionTag(allocator, tracked.tag));
         }
+        // Keep `.goal` in structured tags for machine consumers that want the full
+        // core, but omit it from the human-readable summary to avoid repetitive noise.
         try tags.append(tracked.tag);
     }
 
@@ -6758,13 +6771,7 @@ fn checkPreparedQueryTrackedAssumptions(
     for (query.tracked_assumptions) |tracked_assumption| {
         if (!include_goal and tracked_assumption.tag.kind == .goal) continue;
 
-        const proxy = tracked_assumption.proxy orelse return error.Z3ApiError;
-        const implication = z3.Z3_mk_implies(
-            self.context.ctx,
-            proxy,
-            self.encoder.coerceBoolean(tracked_assumption.ast),
-        );
-        try self.solver.assertChecked(implication);
+        const proxy = tracked_assumption.proxy orelse return error.MissingTrackedAssumptionProxy;
         try proxies.append(proxy);
     }
 
@@ -10452,6 +10459,53 @@ test "rendered SMT report json includes vacuity_unknown flag" {
     try testing.expect(std.mem.indexOf(u8, json, "\"vacuity_unknown\":true") != null);
 }
 
+test "rendered SMT report markdown includes vacuity warning" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .vacuity_unknown = true,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "Warning: vacuity check was inconclusive") != null);
+}
+
 test "explain mode reports contradictory requires as vacuous" {
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -10477,6 +10531,46 @@ test "explain mode reports contradictory requires as vacuous" {
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
+}
+
+test "missing tracked assumption proxy returns dedicated error" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const tracked_assumptions = try testing.allocator.dupe(TrackedAssumption, &[_]TrackedAssumption{
+        .{
+            .proxy = null,
+            .ast = z3.Z3_mk_true(pass.context.ctx),
+            .tag = .{
+                .kind = .requires,
+                .function_name = "f",
+                .file = "/tmp/test.ora",
+                .line = 10,
+                .column = 1,
+                .label = "requires",
+            },
+        },
+    });
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .constraints = &.{},
+        .tracked_assumptions = tracked_assumptions,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    try testing.expectError(error.MissingTrackedAssumptionProxy, checkPreparedQueryTrackedAssumptions(&pass, query, false));
 }
 
 test "rendered SMT report json includes multi-requires explain tags and summary vacuous count" {
