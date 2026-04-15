@@ -42,6 +42,7 @@ const MlirOptions = struct {
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
+    minimize_cores: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -382,6 +383,7 @@ pub fn main() !void {
     const verify_stats: bool = parsed.verify_stats;
     const explain_cores: bool = parsed.explain_cores;
     const z3_proofs: bool = parsed.z3_proofs;
+    const minimize_cores: bool = parsed.minimize_cores;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -487,6 +489,7 @@ pub fn main() !void {
         .verify_stats = verify_stats,
         .explain_cores = explain_cores,
         .z3_proofs = z3_proofs,
+        .minimize_cores = minimize_cores,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -1592,6 +1595,7 @@ fn printUsage() !void {
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Enable raw Z3 proof generation (slower, report/debug only)\n", .{});
+    try stdout.print("  --minimize-cores       - Greedily minimize unsat cores in explain mode (slower)\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -3412,6 +3416,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setVerifyStats(mlir_options.verify_stats);
         verifier.setExplainCores(mlir_options.explain_cores);
+        verifier.setMinimizeCores(mlir_options.minimize_cores);
 
         const verification_result = try verifier.runVerificationPass(final_module);
 
@@ -3450,6 +3455,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setExplainCores(mlir_options.explain_cores);
+        verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
         m.end();
     }

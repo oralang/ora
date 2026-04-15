@@ -137,6 +137,7 @@ pub const VerificationPass = struct {
     verify_stats: bool = false,
     explain_cores: bool = false,
     proofs_enabled: bool = false,
+    minimize_cores: bool = false,
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -265,6 +266,12 @@ pub const VerificationPass = struct {
             break :blk parseBoolEnv(val);
         } else false;
 
+        const minimize_cores_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_MINIMIZE_CORES") catch null;
+        const minimize_cores = if (minimize_cores_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else false;
+
         encoder.setVerifyCalls(verify_calls);
         encoder.setVerifyState(verify_state);
         try solver.setRandomSeed(random_seed);
@@ -292,6 +299,7 @@ pub const VerificationPass = struct {
             .verify_stats = verify_stats,
             .explain_cores = explain_cores,
             .proofs_enabled = proofs_enabled,
+            .minimize_cores = minimize_cores,
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
@@ -323,6 +331,10 @@ pub const VerificationPass = struct {
 
     pub fn setExplainCores(self: *VerificationPass, enabled: bool) void {
         self.explain_cores = enabled;
+    }
+
+    pub fn setMinimizeCores(self: *VerificationPass, enabled: bool) void {
+        self.minimize_cores = enabled;
     }
 
     pub fn deinit(self: *VerificationPass) void {
@@ -4122,6 +4134,7 @@ pub const VerificationPass = struct {
         try writer.print("- parallel: `{any}`\n", .{self.parallel});
         try writer.print("- explain_cores: `{any}`\n", .{self.explain_cores});
         try writer.print("- z3_proofs: `{any}`\n", .{self.proofs_enabled});
+        try writer.print("- minimize_cores: `{any}`\n", .{self.minimize_cores});
         try writer.print("- random_seed: `{d}`\n", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print("- timeout_ms: `{d}`\n", .{timeout});
@@ -4271,6 +4284,7 @@ pub const VerificationPass = struct {
         try writer.writeAll(if (self.parallel) ",\"parallel\":true" else ",\"parallel\":false");
         try writer.writeAll(if (self.explain_cores) ",\"explain_cores\":true" else ",\"explain_cores\":false");
         try writer.writeAll(if (self.proofs_enabled) ",\"z3_proofs\":true" else ",\"z3_proofs\":false");
+        try writer.writeAll(if (self.minimize_cores) ",\"minimize_cores\":true" else ",\"minimize_cores\":false");
         try writer.print(",\"random_seed\":{d}", .{self.random_seed});
         if (self.timeout_ms) |timeout| {
             try writer.print(",\"timeout_ms\":{d}", .{timeout});
@@ -6871,6 +6885,39 @@ fn formatUnsatCoreSummary(
     };
 }
 
+fn minimizeUnsatCoreGreedy(
+    self: *VerificationPass,
+    initial_core: []const z3.Z3_ast,
+) ![]z3.Z3_ast {
+    if (initial_core.len <= 1) return try self.allocator.dupe(z3.Z3_ast, initial_core);
+
+    var current = try self.allocator.dupe(z3.Z3_ast, initial_core);
+    errdefer self.allocator.free(current);
+
+    var idx: usize = 0;
+    while (idx < current.len) {
+        var trial = try ManagedArrayList(z3.Z3_ast).initCapacity(self.allocator, current.len - 1);
+        defer trial.deinit();
+
+        for (current, 0..) |ast, ast_idx| {
+            if (ast_idx == idx) continue;
+            trial.appendAssumeCapacity(ast);
+        }
+
+        const status = try self.solver.checkAssumptionsChecked(trial.items);
+        if (status == z3.Z3_L_FALSE) {
+            const minimized = try trial.toOwnedSlice();
+            self.allocator.free(current);
+            current = minimized;
+            continue;
+        }
+
+        idx += 1;
+    }
+
+    return current;
+}
+
 const ExplainCheckResult = struct {
     status: z3.Z3_lbool,
     explain_str: ?[]u8 = null,
@@ -6969,7 +7016,13 @@ fn checkPreparedQueryTrackedAssumptions(
 
     const core_asts = try self.solver.getUnsatCoreOwned();
     defer self.allocator.free(core_asts);
-    const formatted = try formatUnsatCoreSummary(self.allocator, query.tracked_assumptions, core_asts);
+    const selected_core = if (self.minimize_cores)
+        try minimizeUnsatCoreGreedy(self, core_asts)
+    else
+        try self.allocator.dupe(z3.Z3_ast, core_asts);
+    defer self.allocator.free(selected_core);
+
+    const formatted = try formatUnsatCoreSummary(self.allocator, query.tracked_assumptions, selected_core);
     return .{
         .status = status,
         .explain_str = formatted.explain_str,
@@ -9850,6 +9903,31 @@ test "tracked assumption proxies remain stable across vacuity and proof checks" 
     }
 }
 
+test "greedy core minimization removes redundant assumptions" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setMinimizeCores(true);
+
+    const p = try pass.solver.mkFreshBoolProxy("min_core_p");
+    const q = try pass.solver.mkFreshBoolProxy("min_core_q");
+    const r = try pass.solver.mkFreshBoolProxy("min_core_r");
+    const not_q = z3.Z3_mk_not(pass.context.ctx, q);
+
+    try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, p, q));
+    try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, p, not_q));
+    try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, r, z3.Z3_mk_true(pass.context.ctx)));
+
+    const assumptions = [_]z3.Z3_ast{ p, r };
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkAssumptionsChecked(&assumptions));
+
+    const candidate_core = [_]z3.Z3_ast{ p, r };
+    const minimized = try minimizeUnsatCoreGreedy(&pass, candidate_core[0..]);
+    defer testing.allocator.free(minimized);
+
+    try testing.expectEqual(@as(usize, 1), minimized.len);
+    try testing.expectEqual(p, minimized[0]);
+}
+
 test "prepared queries track environment assumptions used by ensures" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -10854,6 +10932,54 @@ test "rendered SMT report json includes z3 proof metadata and proof payload" {
 
     try testing.expect(std.mem.indexOf(u8, json, "\"z3_proofs\":true") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"proof\":\"(proof raw-z3-proof)\"") != null);
+}
+
+test "rendered SMT report json includes minimize core setting" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+    pass.setMinimizeCores(true);
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "core",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/core.ora",
+        .line = 4,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "core [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/core.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"minimize_cores\":true") != null);
 }
 
 test "rendered SMT report includes verified_with_caveats" {
