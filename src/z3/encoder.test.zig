@@ -354,6 +354,49 @@ test "known pure callee returning updated struct preserves untouched fields exac
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "constraints are path-guarded by default while global constraints remain raw" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bool_sort = z3.Z3_mk_bool_sort(z3_ctx.ctx);
+    const path = try encoder.mkVariable("path", bool_sort);
+    const fact = try encoder.mkVariable("fact", bool_sort);
+
+    try encoder.return_path_assumptions.append(testing.allocator, path);
+    encoder.addConstraintForTesting(fact);
+
+    const guarded_constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (guarded_constraints.len > 0) testing.allocator.free(guarded_constraints);
+    try testing.expectEqual(@as(usize, 1), guarded_constraints.len);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(guarded_constraints[0]);
+    solver.assert(path);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, fact));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(guarded_constraints[0]);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, path));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, fact));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver.check());
+
+    encoder.addGlobalConstraintForTesting(fact);
+    const global_constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (global_constraints.len > 0) testing.allocator.free(global_constraints);
+    try testing.expectEqual(@as(usize, 1), global_constraints.len);
+
+    solver.reset();
+    solver.assert(global_constraints[0]);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, path));
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, fact));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "struct_field_update recovers untouched fields from source struct_init metadata" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

@@ -40,6 +40,8 @@ const AssumptionKind = enum {
     callee_ensures,
     ghost_axiom,
     env_assume,
+    binding,
+    two_state_linkage,
     frame,
     loop_invariant,
     path_assume,
@@ -2511,6 +2513,9 @@ pub const VerificationPass = struct {
             self.phaseLog("prepared-sequential degraded after extract", .{});
             return try self.degradedVerificationResult();
         }
+        if (try self.checkGhostAxiomConsistency()) |result| {
+            return result;
+        }
         self.phaseLog("prepared-sequential build-queries begin", .{});
         var queries = try self.buildPreparedQueries();
         defer {
@@ -2641,6 +2646,9 @@ pub const VerificationPass = struct {
             // per-function clearDegradation calls before encoding each function.
             self.phaseLog("parallel degraded after extract", .{});
             return try self.degradedVerificationResult();
+        }
+        if (try self.checkGhostAxiomConsistency()) |result| {
+            return result;
         }
         self.phaseLog("parallel build-queries begin", .{});
         var queries = try self.buildPreparedQueries();
@@ -3120,6 +3128,11 @@ pub const VerificationPass = struct {
             // instead of attempting to continue with later functions.
             self.phaseLog("report degraded before query build", .{});
             return try self.buildDegradedSmtReport(source_file, verification_result);
+        }
+        if (try self.checkGhostAxiomConsistency()) |failure_result| {
+            var result = failure_result;
+            defer result.deinit();
+            return try self.buildVerificationFailureSmtReport(source_file, &result);
         }
 
         self.phaseLog("report build-queries begin", .{});
@@ -4683,6 +4696,104 @@ pub const VerificationPass = struct {
         return result;
     }
 
+    fn isGhostAxiomAnnotation(self: *const VerificationPass, ann: EncodedAnnotation) bool {
+        _ = self;
+        return ann.kind == .Requires and
+            ann.verification_context != null and
+            std.mem.eql(u8, ann.verification_context.?, "ghost_axiom");
+    }
+
+    fn collectGhostAxiomTrackedAssumptions(
+        self: *VerificationPass,
+        list: *ManagedArrayList(TrackedAssumption),
+    ) !void {
+        for (self.encoded_annotations.items) |ann| {
+            if (!self.isGhostAxiomAnnotation(ann)) continue;
+            try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(.ghost_axiom, ann));
+        }
+    }
+
+    fn ghostAxiomConsistencyFailureResult(
+        self: *VerificationPass,
+        tracked_assumptions: []const TrackedAssumption,
+        explain: ?ExplainCheckResult,
+        status: z3.Z3_lbool,
+    ) !errors.VerificationResult {
+        var result = errors.VerificationResult.init(self.allocator);
+        const file = if (tracked_assumptions.len > 0) tracked_assumptions[0].tag.file else "";
+        const line = if (tracked_assumptions.len > 0) tracked_assumptions[0].tag.line else 0;
+        const column = if (tracked_assumptions.len > 0) tracked_assumptions[0].tag.column else 0;
+
+        const message = if (status == z3.Z3_L_FALSE)
+            if (explain) |core|
+                if (core.explain_str) |summary|
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "verification aborted: ghost axioms are inconsistent ({s})",
+                        .{summary},
+                    )
+                else
+                    try self.allocator.dupe(u8, "verification aborted: ghost axioms are inconsistent")
+            else
+                try self.allocator.dupe(u8, "verification aborted: ghost axioms are inconsistent")
+        else
+            try self.allocator.dupe(u8, "verification aborted: ghost axiom consistency check was inconclusive");
+        errdefer self.allocator.free(message);
+
+        try self.addUnknownVerificationError(&result, message, file, line, column);
+        return result;
+    }
+
+    fn checkGhostAxiomConsistency(self: *VerificationPass) !?errors.VerificationResult {
+        var tracked_assumptions = ManagedArrayList(TrackedAssumption).init(self.allocator);
+        defer tracked_assumptions.deinit();
+        try self.collectGhostAxiomTrackedAssumptions(&tracked_assumptions);
+        if (tracked_assumptions.items.len == 0) return null;
+
+        try self.solver.resetChecked();
+
+        if (self.explain_cores) {
+            try materializeTrackedAssumptionProxies(self, &tracked_assumptions);
+            for (tracked_assumptions.items) |tracked_assumption| {
+                const proxy = tracked_assumption.proxy orelse return error.MissingTrackedAssumptionProxy;
+                const implication = z3.Z3_mk_implies(
+                    self.context.ctx,
+                    proxy,
+                    self.encoder.coerceBoolean(tracked_assumption.ast),
+                );
+                try self.solver.assertChecked(implication);
+            }
+
+            const explain = try checkPreparedQueryTrackedAssumptions(
+                self,
+                .{
+                    .kind = .Base,
+                    .function_name = "ghost_axiom_sanity",
+                    .file = if (tracked_assumptions.items.len > 0) tracked_assumptions.items[0].tag.file else "",
+                    .line = if (tracked_assumptions.items.len > 0) tracked_assumptions.items[0].tag.line else 0,
+                    .column = if (tracked_assumptions.items.len > 0) tracked_assumptions.items[0].tag.column else 0,
+                    .tracked_assumptions = tracked_assumptions.items,
+                    .smtlib_z = "",
+                    .log_prefix = "",
+                },
+                false,
+            );
+            defer {
+                if (explain.explain_str) |core| self.allocator.free(core);
+                if (explain.explain_tags.len > 0) self.allocator.free(explain.explain_tags);
+            }
+            if (explain.status == z3.Z3_L_TRUE) return null;
+            return try self.ghostAxiomConsistencyFailureResult(tracked_assumptions.items, explain, explain.status);
+        }
+
+        for (tracked_assumptions.items) |tracked_assumption| {
+            try self.solver.assertChecked(self.encoder.coerceBoolean(tracked_assumption.ast));
+        }
+        const status = try self.solver.checkChecked();
+        if (status == z3.Z3_L_TRUE) return null;
+        return try self.ghostAxiomConsistencyFailureResult(tracked_assumptions.items, null, status);
+    }
+
     fn buildCounterexample(self: *VerificationPass) ?errors.Counterexample {
         const model = (self.solver.getModelChecked() catch return null) orelse return null;
         const num_consts = z3.Z3_model_get_num_consts(self.context.ctx, model);
@@ -6022,6 +6133,10 @@ fn registerSemanticConstraintTag(
 ) !void {
     const kind: AssumptionKind = switch (record.source_kind) {
         .generic => return,
+        .assume => .assume,
+        .path_assume => .path_assume,
+        .binding => .binding,
+        .two_state_linkage => .two_state_linkage,
         .env_assume => .env_assume,
         .frame => .frame,
     };
@@ -6085,6 +6200,8 @@ fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
         .callee_ensures => "callee ensures",
         .ghost_axiom => "ghost axiom",
         .env_assume => "environment assumption",
+        .binding => "binding",
+        .two_state_linkage => "two-state linkage",
         .frame => "frame condition",
         .loop_invariant => "loop invariant",
         .path_assume => "path assumption",
@@ -8066,6 +8183,40 @@ fn buildGhostAxiomRequiresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildInconsistentGhostAxiomModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ghost_axiom_inconsistent_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0));
+    const requires_true_op = mlir.oraRequiresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(true_op, 0));
+    const requires_false_op = mlir.oraRequiresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(false_op, 0));
+    mlir.oraOperationSetAttributeByName(requires_true_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ghost_axiom")));
+    mlir.oraOperationSetAttributeByName(requires_false_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ghost_axiom")));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, false_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, requires_true_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, requires_false_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -9440,6 +9591,52 @@ test "prepared queries track frame conditions from map-store summaries" {
     try testing.expect(saw_frame);
 }
 
+test "semantic constraint tags preserve binding provenance" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const ast = z3.Z3_mk_true(pass.context.ctx);
+    try registerSemanticConstraintTag(
+        &pass,
+        "binding_test",
+        "binding_test.ora",
+        12,
+        8,
+        .{
+            .ast = ast,
+            .source_kind = .binding,
+            .detail = "binding",
+        },
+    );
+
+    const tag = pass.semantic_constraint_tags.get(@intFromPtr(ast)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(AssumptionKind.binding, tag.kind);
+    try testing.expectEqualStrings("binding", tag.label);
+}
+
+test "semantic constraint tags preserve two-state linkage provenance" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const ast = z3.Z3_mk_true(pass.context.ctx);
+    try registerSemanticConstraintTag(
+        &pass,
+        "old_linkage_test",
+        "old_linkage_test.ora",
+        9,
+        3,
+        .{
+            .ast = ast,
+            .source_kind = .two_state_linkage,
+            .detail = "two-state linkage",
+        },
+    );
+
+    const tag = pass.semantic_constraint_tags.get(@intFromPtr(ast)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(AssumptionKind.two_state_linkage, tag.kind);
+    try testing.expectEqualStrings("two-state linkage", tag.label);
+}
+
 test "prepared queries classify ghost_axiom requires separately from plain requires" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -9471,6 +9668,29 @@ test "prepared queries classify ghost_axiom requires separately from plain requi
         }
     }
     try testing.expect(saw_ghost_axiom);
+}
+
+test "inconsistent ghost axioms fail verification even without obligations" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildInconsistentGhostAxiomModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try pass.runVerificationPassPreparedSequential(module);
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "ghost axioms are inconsistent"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "ghost axiom"));
 }
 
 test "guard violate query includes scoped path assumptions" {

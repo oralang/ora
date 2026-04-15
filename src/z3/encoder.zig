@@ -28,6 +28,10 @@ pub const Encoder = struct {
 
     pub const PendingConstraintSourceKind = enum {
         generic,
+        assume,
+        path_assume,
+        binding,
+        two_state_linkage,
         env_assume,
         frame,
     };
@@ -1557,7 +1561,7 @@ pub const Encoder = struct {
             // even if the old symbol was materialized by an earlier assertion.
             const entry_symbol_existing = try self.getOrCreateGlobalEntry(name, sort);
             const eq_existing = z3.Z3_mk_eq(self.context.ctx, existing, entry_symbol_existing);
-            self.addConstraint(eq_existing);
+            self.addGlobalConstraintWithSource(eq_existing, .two_state_linkage, "two-state linkage");
             return existing;
         }
 
@@ -1570,7 +1574,7 @@ pub const Encoder = struct {
         // old(x) is the entry-state value of x; tie it to the entry snapshot.
         const entry_symbol = try self.getOrCreateGlobalEntry(name, sort);
         const eq = z3.Z3_mk_eq(self.context.ctx, symbol, entry_symbol);
-        self.addConstraint(eq);
+        self.addGlobalConstraintWithSource(eq, .two_state_linkage, "two-state linkage");
         return symbol;
     }
 
@@ -1697,11 +1701,12 @@ pub const Encoder = struct {
         return try self.getOrCreateShapedDimSymbol(key, result_sort);
     }
 
-    fn addConstraint(self: *Encoder, constraint: z3.Z3_ast) void {
-        self.addConstraintWithSource(constraint, .generic, null);
+    fn maybeGuardConstraintWithActivePath(self: *Encoder, constraint: z3.Z3_ast) z3.Z3_ast {
+        if (self.return_path_assumptions.items.len == 0) return constraint;
+        return self.encodeImplies(self.encodeAnd(self.return_path_assumptions.items), constraint);
     }
 
-    fn addConstraintWithSource(
+    fn addGlobalConstraintWithSource(
         self: *Encoder,
         constraint: z3.Z3_ast,
         source_kind: PendingConstraintSourceKind,
@@ -1718,6 +1723,30 @@ pub const Encoder = struct {
         }) catch {
             self.recordDegradation("failed to record SMT constraint");
         };
+    }
+
+    fn addConstraintWithSource(
+        self: *Encoder,
+        constraint: z3.Z3_ast,
+        source_kind: PendingConstraintSourceKind,
+        detail: ?[]const u8,
+    ) void {
+        self.addGlobalConstraintWithSource(
+            self.maybeGuardConstraintWithActivePath(constraint),
+            source_kind,
+            detail,
+        );
+    }
+
+    fn replayPendingConstraintRecord(self: *Encoder, record: PendingConstraint) !void {
+        const detail = if (record.detail) |text|
+            try self.persistOwnedString(text)
+        else
+            null;
+        // Replaying under the current path composes guards rather than discarding
+        // the original ones: replay_path => captured_constraint. If the captured
+        // record was already guarded, this becomes the conjunction of both paths.
+        self.addConstraintWithSource(record.ast, record.source_kind, detail);
     }
 
     fn persistOwnedString(self: *Encoder, text: []const u8) ![]const u8 {
@@ -1852,10 +1881,6 @@ pub const Encoder = struct {
         }
     }
 
-    fn addNonZeroBitVectorConstraint(self: *Encoder, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
-        self.addNonZeroBitVectorConstraintWithSource(ast, sort, .generic, null);
-    }
-
     fn addNonZeroBitVectorConstraintWithSource(
         self: *Encoder,
         ast: z3.Z3_ast,
@@ -1866,7 +1891,7 @@ pub const Encoder = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return;
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
         const non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
-        self.addConstraintWithSource(non_zero, source_kind, detail);
+        self.addGlobalConstraintWithSource(non_zero, source_kind, detail);
     }
 
     //===----------------------------------------------------------------------===//
@@ -2220,6 +2245,16 @@ pub const Encoder = struct {
     /// Encode implication (A => B)
     pub fn encodeImplies(self: *Encoder, antecedent: z3.Z3_ast, consequent: z3.Z3_ast) z3.Z3_ast {
         return z3.Z3_mk_implies(self.context.ctx, self.coerceToBool(antecedent), self.coerceToBool(consequent));
+    }
+
+    pub fn addConstraintForTesting(self: *Encoder, constraint: z3.Z3_ast) void {
+        if (!@import("builtin").is_test) unreachable;
+        self.addConstraintWithSource(constraint, .generic, null);
+    }
+
+    pub fn addGlobalConstraintForTesting(self: *Encoder, constraint: z3.Z3_ast) void {
+        if (!@import("builtin").is_test) unreachable;
+        self.addGlobalConstraintWithSource(constraint, .generic, null);
     }
 
     /// Encode if-then-else (ite)
@@ -2999,8 +3034,8 @@ pub const Encoder = struct {
                 z3.Z3_mk_bvult(self.context.ctx, ast, ub_ast)
             else
                 z3.Z3_mk_bvslt(self.context.ctx, ast, ub_ast);
-            self.addConstraint(lower_ok);
-            self.addConstraint(upper_ok);
+            self.addConstraintWithSource(lower_ok, .path_assume, "path assumption");
+            self.addConstraintWithSource(upper_ok, .path_assume, "path assumption");
             return;
         }
 
@@ -3030,8 +3065,12 @@ pub const Encoder = struct {
                     const continue_ast = try self.encodeValueWithMode(continue_value, mode);
                     const carried_ast = try self.encodeValueWithMode(carried_value, mode);
 
-                    self.addConstraint(self.coerceBoolean(continue_ast));
-                    self.addConstraint(z3.Z3_mk_eq(self.context.ctx, ast, carried_ast));
+                    self.addConstraintWithSource(self.coerceBoolean(continue_ast), .path_assume, "path assumption");
+                    self.addConstraintWithSource(
+                        z3.Z3_mk_eq(self.context.ctx, ast, carried_ast),
+                        .path_assume,
+                        "path assumption",
+                    );
                     return;
                 }
                 op = mlir.oraOperationGetNextInBlock(op);
@@ -3844,7 +3883,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.assume")) {
             if (operands.len >= 1) {
                 const condition = self.coerceToBool(operands[0]);
-                self.addConstraint(condition);
+                self.addConstraintWithSource(condition, .assume, "assume");
                 return condition;
             }
         }
@@ -3885,7 +3924,7 @@ pub const Encoder = struct {
                     const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
                     const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
                     const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
-                    self.addConstraint(eq);
+                    self.addConstraintWithSource(eq, .binding, "binding");
                 }
                 return struct_val;
             }
@@ -3923,7 +3962,7 @@ pub const Encoder = struct {
                     const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
                     const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
                     const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
-                    self.addConstraint(eq);
+                    self.addConstraintWithSource(eq, .binding, "binding");
                 }
                 return struct_val;
             }
@@ -3990,7 +4029,7 @@ pub const Encoder = struct {
                 const field_sort = z3.Z3_get_sort(self.context.ctx, operands[1]);
                 const accessor = try self.applyFieldFunction(field_name, result_sort, field_sort, struct_val);
                 const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operands[1]);
-                self.addConstraint(eq);
+                self.addConstraintWithSource(eq, .binding, "binding");
 
                 var field_names_csv = self.lookupStructFieldNames(result_type) catch blk: {
                     self.recordDegradation("failed to resolve struct field names for struct update");
@@ -4052,7 +4091,11 @@ pub const Encoder = struct {
                             struct_update_failed = true;
                             continue;
                         };
-                        self.addConstraint(z3.Z3_mk_eq(self.context.ctx, updated_accessor, original_accessor));
+                        self.addConstraintWithSource(
+                            z3.Z3_mk_eq(self.context.ctx, updated_accessor, original_accessor),
+                            .frame,
+                            "frame condition",
+                        );
                     }
                     if (struct_update_failed) {
                         self.recordDegradation("struct update frame constraints are incomplete");
@@ -4464,13 +4507,21 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.error.unwrap")) {
             const ok_val = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operands[0]});
-            self.addConstraint(z3.Z3_mk_not(self.context.ctx, is_err));
+            self.addConstraintWithSource(
+                z3.Z3_mk_not(self.context.ctx, is_err),
+                .assume,
+                "ora.error.unwrap precondition",
+            );
             return ok_val;
         }
 
         if (std.mem.eql(u8, op_name, "ora.error.get_error")) {
             const err_val = z3.Z3_mk_app(self.context.ctx, eu.proj_err, 1, &[_]z3.Z3_ast{operands[0]});
-            self.addConstraint(is_err);
+            self.addConstraintWithSource(
+                is_err,
+                .assume,
+                "ora.error.get_error precondition",
+            );
             return err_val;
         }
 
@@ -5311,9 +5362,9 @@ pub const Encoder = struct {
             );
         }
 
-        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+        const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-        for (extra_constraints) |cst| self.addConstraint(cst);
+        for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
         const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
@@ -5379,9 +5430,9 @@ pub const Encoder = struct {
             );
         }
 
-        const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+        const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-        for (extra_constraints) |cst| self.addConstraint(cst);
+        for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
         const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
@@ -9258,9 +9309,9 @@ pub const Encoder = struct {
                 try result_encoder.collectEnsuresForSummary(func_op, callee);
             }
 
-            const extra_constraints = try result_encoder.takeConstraints(self.allocator);
+            const extra_constraints = try result_encoder.takeConstraintRecords(self.allocator);
             defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |cst| self.addConstraint(cst);
+            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
             const extra_obligations = try result_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
@@ -9325,9 +9376,9 @@ pub const Encoder = struct {
                 }
             }
 
-            const extra_constraints = try summary_encoder.takeConstraints(self.allocator);
+            const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
             defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |cst| self.addConstraint(cst);
+            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
             const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
@@ -10114,7 +10165,11 @@ pub const Encoder = struct {
                     }
                     post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
                 } else if (!slot.is_write) {
-                    self.addConstraint(z3.Z3_mk_eq(self.context.ctx, post, slot.pre));
+                    self.addConstraintWithSource(
+                        z3.Z3_mk_eq(self.context.ctx, post, slot.pre),
+                        .frame,
+                        "frame condition",
+                    );
                     const slot_sort = z3.Z3_get_sort(self.context.ctx, post);
                     if (self.isArraySort(slot_sort)) {
                         const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));

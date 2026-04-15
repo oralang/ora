@@ -12872,6 +12872,34 @@ test "verification supports multi-field error payload extraction after get_error
     try testing.expect(!result.degraded);
 }
 
+test "verification does not vacuously prove branch-local Result unwrap and get_error assumptions" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Sample {
+        \\    pub fn inspect(value: Result<bytes, Failure>) -> u256 {
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                let _x = inner;
+        \\                assert(false);
+        \\                return 1;
+        \\            },
+        \\            Err(err) => {
+        \\                return err.code;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "inspect");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
         \\comptime const std = @import("std");
