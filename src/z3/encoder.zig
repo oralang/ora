@@ -223,12 +223,13 @@ pub const Encoder = struct {
 
     fn recordDegradation(self: *Encoder, reason: []const u8) void {
         const degradation_reason_cap = 10;
+        const persistent_reason = self.allocPersistentMessage(reason) catch reason;
         self.encoding_degraded = true;
         if (self.encoding_degraded_reason == null) {
-            self.encoding_degraded_reason = reason;
+            self.encoding_degraded_reason = persistent_reason;
         }
         if (self.encoding_degraded_reasons.items.len < degradation_reason_cap) {
-            self.encoding_degraded_reasons.append(self.allocator, reason) catch {};
+            self.encoding_degraded_reasons.append(self.allocator, persistent_reason) catch {};
         }
     }
 
