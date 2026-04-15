@@ -2089,7 +2089,7 @@ pub const Encoder = struct {
                 .Ge => z3.Z3_mk_str_le(self.context.ctx, rhs, lhs),
             };
         }
-        const coerced = self.coerceComparisonOperands(lhs, rhs);
+        const coerced = self.coerceComparisonOperands(lhs, rhs, false);
         return switch (op) {
             .Eq => z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs),
             .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs)),
@@ -2182,6 +2182,10 @@ pub const Encoder = struct {
         return z3.Z3_mk_store(self.context.ctx, array, index, value);
     }
 
+    pub fn coerceAstToSortForTesting(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort) z3.Z3_ast {
+        return self.coerceAstToSort(ast, target_sort);
+    }
+
     fn coerceAstToSort(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort) z3.Z3_ast {
         const src_sort = z3.Z3_get_sort(self.context.ctx, ast);
         if (src_sort == target_sort) return ast;
@@ -2210,6 +2214,7 @@ pub const Encoder = struct {
             return z3.Z3_mk_extract(self.context.ctx, dst_width - 1, 0, ast);
         }
 
+        self.recordDegradation("unsupported AST sort coercion");
         return ast;
     }
 
@@ -11382,13 +11387,37 @@ pub const Encoder = struct {
         return z3.Z3_mk_extract(self.context.ctx, high, 0, operand);
     }
 
+    fn extendBitVectorForComparison(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort, signed: bool) z3.Z3_ast {
+        const src_sort = z3.Z3_get_sort(self.context.ctx, ast);
+        if (src_sort == target_sort) return ast;
+
+        const src_kind = z3.Z3_get_sort_kind(self.context.ctx, src_sort);
+        const dst_kind = z3.Z3_get_sort_kind(self.context.ctx, target_sort);
+        if (src_kind != z3.Z3_BV_SORT or dst_kind != z3.Z3_BV_SORT) {
+            return self.coerceAstToSort(ast, target_sort);
+        }
+
+        const src_width = z3.Z3_get_bv_sort_size(self.context.ctx, src_sort);
+        const dst_width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
+        if (src_width == dst_width) return ast;
+        if (src_width < dst_width) {
+            const extend = dst_width - src_width;
+            return if (signed)
+                z3.Z3_mk_sign_ext(self.context.ctx, extend, ast)
+            else
+                z3.Z3_mk_zero_ext(self.context.ctx, extend, ast);
+        }
+        return z3.Z3_mk_extract(self.context.ctx, dst_width - 1, 0, ast);
+    }
+
     /// Encode MLIR comparison operation (arith.cmpi)
     pub fn encodeCmpOp(self: *Encoder, predicate: u32, operands: []const z3.Z3_ast) !z3.Z3_ast {
         if (operands.len < 2) {
             return error.InvalidOperandCount;
         }
 
-        const coerced = self.coerceComparisonOperands(operands[0], operands[1]);
+        const signed_predicate = predicate >= 2 and predicate <= 5;
+        const coerced = self.coerceComparisonOperands(operands[0], operands[1], signed_predicate);
         const lhs = coerced.lhs;
         const rhs = coerced.rhs;
 
@@ -11407,7 +11436,7 @@ pub const Encoder = struct {
         };
     }
 
-    fn coerceComparisonOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+    fn coerceComparisonOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast, signed: bool) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
         const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
         if (lhs_sort == rhs_sort) return .{ .lhs = lhs, .rhs = rhs };
@@ -11419,8 +11448,8 @@ pub const Encoder = struct {
             const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
             const target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
             return .{
-                .lhs = self.coerceAstToSort(lhs, target_sort),
-                .rhs = self.coerceAstToSort(rhs, target_sort),
+                .lhs = self.extendBitVectorForComparison(lhs, target_sort, signed),
+                .rhs = self.extendBitVectorForComparison(rhs, target_sort, signed),
             };
         }
 

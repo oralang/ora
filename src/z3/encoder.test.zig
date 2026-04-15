@@ -13115,6 +13115,33 @@ test "arith cmpi slt encodes signed comparison" {
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvslt") != null);
 }
 
+test "mixed-width signed comparison sign-extends narrower operand" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const i8_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const i16_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 16);
+    const minus_one_i8 = z3.Z3_mk_numeral(z3_ctx.ctx, "255", i8_sort);
+    const plus_one_i16 = z3.Z3_mk_numeral(z3_ctx.ctx, "1", i16_sort);
+
+    const signed_lt = try encoder.encodeCmpOp(2, &[_]z3.Z3_ast{ minus_one_i8, plus_one_i16 });
+    const unsigned_lt = try encoder.encodeCmpOp(6, &[_]z3.Z3_ast{ minus_one_i8, plus_one_i16 });
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, signed_lt));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.push();
+    defer solver.pop();
+    solver.assert(unsigned_lt);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "arith shrui encodes logical right shift" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -15216,6 +15243,26 @@ test "known callee result degradation reports callee and callsite" {
             std.mem.containsAtLeast(u8, reason, 1, "loop state summary") or
             std.mem.containsAtLeast(u8, reason, 1, "loop summary"),
     );
+}
+
+test "unsupported sort coercion records degradation" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv8_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const seq_bv8_sort = z3.Z3_mk_seq_sort(z3_ctx.ctx, bv8_sort);
+    const ast = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "x"),
+        seq_bv8_sort,
+    );
+    _ = encoder.coerceAstToSortForTesting(ast, bv8_sort);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("unsupported AST sort coercion", encoder.degradationReason().?);
 }
 
 test "known pure callee first-iteration scf.for return encodes exactly" {

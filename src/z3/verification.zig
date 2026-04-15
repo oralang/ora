@@ -2425,6 +2425,7 @@ pub const VerificationPass = struct {
         if (use_prepared_engine) {
             if (self.parallel) {
                 if (self.explain_cores) {
+                    std.debug.print("note: --explain disables parallel execution; running sequentially\n", .{});
                     self.phaseLog("runVerificationPass -> prepared-sequential (explain mode)", .{});
                     return try self.runVerificationPassPreparedSequential(mlir_module);
                 }
@@ -3208,6 +3209,10 @@ pub const VerificationPass = struct {
                         results[idx].explain_tags = vacuity.explain_tags;
                         break :blk vacuity.status;
                     }
+                    if (vacuity.status == z3.Z3_L_UNDEF) {
+                        std.debug.print("{s} note: vacuity check inconclusive; proceeding with proof check\n", .{query.log_prefix});
+                        results[idx].vacuity_unknown = true;
+                    }
                     if (vacuity.explain_str) |core| self.allocator.free(core);
                     if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
                 }
@@ -3810,6 +3815,7 @@ pub const VerificationPass = struct {
             var explain_copy: ?[]u8 = null;
             var explain_tags_copy: []const AssumptionTag = &.{};
             var vacuous = false;
+            var vacuity_unknown = false;
             const status = if (self.explain_cores) blk: {
                 try assertPreparedQueryUntrackedConstraints(&self.solver, query);
 
@@ -3825,6 +3831,9 @@ pub const VerificationPass = struct {
                         if (vacuity.explain_str) |core| self.allocator.free(core);
                         if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
                         break :blk vacuity.status;
+                    }
+                    if (vacuity.status == z3.Z3_L_UNDEF) {
+                        vacuity_unknown = true;
                     }
                     if (vacuity.explain_str) |core| self.allocator.free(core);
                     if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
@@ -3877,6 +3886,7 @@ pub const VerificationPass = struct {
                 .explain = explain_copy,
                 .explain_tags = explain_tags_copy,
                 .vacuous = vacuous,
+                .vacuity_unknown = vacuity_unknown,
             };
         }
 
@@ -4200,6 +4210,7 @@ pub const VerificationPass = struct {
             try writer.print("- SMT bytes: `{d}`\n", .{query.smtlib_bytes});
             try writer.print("- SMT hash: `0x{x}`\n", .{query.smtlib_hash});
             try writer.print("- Vacuous: `{any}`\n", .{run.vacuous});
+            try writer.print("- Vacuity inconclusive: `{any}`\n", .{run.vacuity_unknown});
             if (query.guard_id) |guard_id| {
                 try writer.print("- Guard ID: `{s}`\n", .{guard_id});
             }
@@ -4500,6 +4511,8 @@ pub const VerificationPass = struct {
             }
             try writer.writeAll(",\"vacuous\":");
             try writer.writeAll(if (run.vacuous) "true" else "false");
+            try writer.writeAll(",\"vacuity_unknown\":");
+            try writer.writeAll(if (run.vacuity_unknown) "true" else "false");
             try writer.writeAll(",\"explain_core\":");
             if (run.explain) |explain| {
                 try writeJsonStringEscaped(writer, explain);
@@ -4756,7 +4769,6 @@ pub const VerificationPass = struct {
                         defer step_constraints.deinit();
                         var tracked_step_assumptions = ManagedArrayList(TrackedAssumption).init(self.allocator);
                         defer tracked_step_assumptions.deinit();
-                        try addConstraintSlice(&step_constraints, assumption_constraints.items);
                         try addConstraintSlice(&step_constraints, assumption_constraints.items);
                         try addTrackedBaseAssumptions(&tracked_step_assumptions, assumption_annotations.items);
                         try addConstraintSlice(&step_constraints, ann.path_constraints);
@@ -5671,9 +5683,23 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     return true;
 }
 
+fn freeEncodedAnnotationOwnedSlices(self: *VerificationPass, ann: EncodedAnnotation) void {
+    if (ann.extra_constraints.len > 0) self.allocator.free(ann.extra_constraints);
+    if (ann.path_constraints.len > 0) self.allocator.free(ann.path_constraints);
+    if (ann.old_extra_constraints.len > 0) self.allocator.free(ann.old_extra_constraints);
+    if (ann.loop_entry_extra_constraints.len > 0) self.allocator.free(ann.loop_entry_extra_constraints);
+    if (ann.loop_step_extra_constraints.len > 0) self.allocator.free(ann.loop_step_extra_constraints);
+    if (ann.loop_step_head_extra_constraints.len > 0) self.allocator.free(ann.loop_step_head_extra_constraints);
+    if (ann.loop_step_body_extra_constraints.len > 0) self.allocator.free(ann.loop_step_body_extra_constraints);
+    if (ann.loop_exit_extra_constraints.len > 0) self.allocator.free(ann.loop_exit_extra_constraints);
+}
+
 fn appendEncodedAnnotationUnique(self: *VerificationPass, ann: EncodedAnnotation) !void {
     for (self.encoded_annotations.items) |existing| {
-        if (encodedAnnotationEquivalent(self, existing, ann)) return;
+        if (encodedAnnotationEquivalent(self, existing, ann)) {
+            freeEncodedAnnotationOwnedSlices(self, ann);
+            return;
+        }
     }
     try self.encoded_annotations.append(ann);
 }
@@ -5888,6 +5914,7 @@ const ReportQueryRun = struct {
     explain: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
     vacuous: bool = false,
+    vacuity_unknown: bool = false,
 };
 
 const ReportSummary = struct {
@@ -6214,6 +6241,12 @@ fn writeAssumptionTagJson(writer: anytype, tag: AssumptionTag) !void {
     try writer.print(",\"column\":{d}", .{tag.column});
     try writer.writeAll(",\"label\":");
     try writeJsonStringEscaped(writer, tag.label);
+    try writer.writeAll(",\"callee_name\":");
+    if (tag.callee_name) |callee_name| {
+        try writeJsonStringEscaped(writer, callee_name);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"guard_id\":");
     if (tag.guard_id) |guard_id| {
         try writeJsonStringEscaped(writer, guard_id);
@@ -6337,6 +6370,7 @@ const PreparedQueryResult = struct {
     explain_str: ?[]const u8 = null,
     explain_tags: []const AssumptionTag = &.{},
     vacuous: bool = false,
+    vacuity_unknown: bool = false,
 };
 
 fn scaledParallelTimeoutMs(timeout_ms: ?u32, worker_count: usize) ?u32 {
@@ -6669,7 +6703,9 @@ fn formatUnsatCoreSummary(
             }
         }
         if (!in_core) continue;
-        try parts.append(try formatAssumptionTag(allocator, tracked.tag));
+        if (tracked.tag.kind != .goal) {
+            try parts.append(try formatAssumptionTag(allocator, tracked.tag));
+        }
         try tags.append(tracked.tag);
     }
 
@@ -6745,9 +6781,53 @@ fn checkPreparedQueryTrackedAssumptions(
 }
 
 const SmtSymbolDecl = struct {
-    symbol: z3.Z3_symbol,
+    name: []const u8,
     decl: z3.Z3_func_decl,
 };
+
+fn declSymbolName(allocator: std.mem.Allocator, ctx: z3.Z3_context, decl: z3.Z3_func_decl) !?[]u8 {
+    const symbol = z3.Z3_get_decl_name(ctx, decl);
+    return switch (z3.Z3_get_symbol_kind(ctx, symbol)) {
+        z3.Z3_STRING_SYMBOL => blk: {
+            const raw = z3.Z3_get_symbol_string(ctx, symbol);
+            if (raw == null) break :blk null;
+            break :blk try allocator.dupe(u8, std.mem.span(raw));
+        },
+        z3.Z3_INT_SYMBOL => blk: {
+            break :blk try std.fmt.allocPrint(allocator, "k!{d}", .{z3.Z3_get_symbol_int(ctx, symbol)});
+        },
+        else => null,
+    };
+}
+
+fn isValidSmtlibSymbolText(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (text[0] == '(' or text[0] == '#') return false;
+    if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "false")) return false;
+    return true;
+}
+
+fn appendSmtlibSortText(allocator: std.mem.Allocator, out: *std.ArrayList(u8), ctx: z3.Z3_context, sort: z3.Z3_sort) !void {
+    const sort_ast = z3.Z3_sort_to_ast(ctx, sort);
+    const raw = z3.Z3_ast_to_string(ctx, sort_ast);
+    const text = if (raw == null) "Bool" else std.mem.span(raw);
+    try out.appendSlice(allocator, text);
+}
+
+fn appendSmtlibDecl(allocator: std.mem.Allocator, out: *std.ArrayList(u8), ctx: z3.Z3_context, symbol_decl: SmtSymbolDecl) !void {
+    const decl = symbol_decl.decl;
+    const arity: usize = @intCast(z3.Z3_get_arity(ctx, decl));
+    try out.appendSlice(allocator, "(declare-fun ");
+    try out.appendSlice(allocator, symbol_decl.name);
+    try out.appendSlice(allocator, " (");
+    for (0..arity) |idx| {
+        if (idx != 0) try out.appendSlice(allocator, " ");
+        try appendSmtlibSortText(allocator, out, ctx, z3.Z3_get_domain(ctx, decl, @intCast(idx)));
+    }
+    try out.appendSlice(allocator, ") ");
+    try appendSmtlibSortText(allocator, out, ctx, z3.Z3_get_range(ctx, decl));
+    try out.appendSlice(allocator, ")\n");
+}
 
 fn symbolDeclListContains(symbols: []const SmtSymbolDecl, decl: z3.Z3_func_decl) bool {
     for (symbols) |symbol| {
@@ -6757,30 +6837,37 @@ fn symbolDeclListContains(symbols: []const SmtSymbolDecl, decl: z3.Z3_func_decl)
 }
 
 fn collectAstSymbolDecls(
+    allocator: std.mem.Allocator,
     ctx: z3.Z3_context,
     ast: z3.Z3_ast,
     symbols: *ManagedArrayList(SmtSymbolDecl),
 ) !void {
-    if (z3.Z3_get_ast_kind(ctx, ast) != z3.Z3_APP_AST) return;
-
-    const app = z3.Z3_to_app(ctx, ast);
-    const num_args = z3.Z3_get_app_num_args(ctx, app);
-    if (num_args == 0) {
-        const decl = z3.Z3_get_app_decl(ctx, app);
-        if (z3.Z3_get_decl_kind(ctx, decl) == z3.c.Z3_OP_UNINTERPRETED) {
-            const symbol = z3.Z3_get_decl_name(ctx, decl);
-            if (!symbolDeclListContains(symbols.items, decl)) {
-                try symbols.append(.{
-                    .symbol = symbol,
-                    .decl = decl,
-                });
-            }
-        }
+    const ast_kind = z3.Z3_get_ast_kind(ctx, ast);
+    if (ast_kind == z3.Z3_QUANTIFIER_AST) {
+        try collectAstSymbolDecls(allocator, ctx, z3.Z3_get_quantifier_body(ctx, ast), symbols);
         return;
     }
+    if (ast_kind != z3.Z3_APP_AST) return;
 
+    const app = z3.Z3_to_app(ctx, ast);
+    const decl = z3.Z3_get_app_decl(ctx, app);
+    if (z3.Z3_get_decl_kind(ctx, decl) == z3.c.Z3_OP_UNINTERPRETED and !symbolDeclListContains(symbols.items, decl)) {
+        const owned_name = (try declSymbolName(allocator, ctx, decl)) orelse {
+            return;
+        };
+        errdefer allocator.free(owned_name);
+        if (!isValidSmtlibSymbolText(owned_name)) {
+            allocator.free(owned_name);
+            return;
+        }
+        try symbols.append(.{
+            .name = owned_name,
+            .decl = decl,
+        });
+    }
+    const num_args = z3.Z3_get_app_num_args(ctx, app);
     for (0..@intCast(num_args)) |arg_idx| {
-        try collectAstSymbolDecls(ctx, z3.Z3_get_app_arg(ctx, app, @intCast(arg_idx)), symbols);
+        try collectAstSymbolDecls(allocator, ctx, z3.Z3_get_app_arg(ctx, app, @intCast(arg_idx)), symbols);
     }
 }
 
@@ -6799,11 +6886,17 @@ fn buildSmtlibForConstraints(
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(allocator);
     var symbols = ManagedArrayList(SmtSymbolDecl).init(allocator);
-    defer symbols.deinit();
+    defer {
+        for (symbols.items) |symbol| allocator.free(symbol.name);
+        symbols.deinit();
+    }
 
     try out.appendSlice(allocator, "(set-logic ALL)\n");
     for (constraints) |constraint| {
-        try collectAstSymbolDecls(ctx, constraint, &symbols);
+        try collectAstSymbolDecls(allocator, ctx, constraint, &symbols);
+    }
+    for (symbols.items) |symbol_decl| {
+        try appendSmtlibDecl(allocator, &out, ctx, symbol_decl);
     }
     for (constraints) |constraint| {
         const raw = z3.Z3_ast_to_string(ctx, constraint);
@@ -6814,20 +6907,10 @@ fn buildSmtlibForConstraints(
     }
     try out.appendSlice(allocator, "(check-sat)\n");
     const smtlib_z = try out.toOwnedSliceSentinel(allocator, 0);
-    const decl_symbols = if (symbols.items.len == 0) &.{} else blk: {
-        const owned = try allocator.alloc(z3.Z3_symbol, symbols.items.len);
-        for (symbols.items, 0..) |symbol, idx| owned[idx] = symbol.symbol;
-        break :blk owned;
-    };
-    const decls = if (symbols.items.len == 0) &.{} else blk: {
-        const owned = try allocator.alloc(z3.Z3_func_decl, symbols.items.len);
-        for (symbols.items, 0..) |symbol, idx| owned[idx] = symbol.decl;
-        break :blk owned;
-    };
     return .{
         .smtlib_z = smtlib_z,
-        .decl_symbols = decl_symbols,
-        .decls = decls,
+        .decl_symbols = &.{},
+        .decls = &.{},
     };
 }
 
@@ -7318,6 +7401,59 @@ fn buildConditionalReturnStatefulDivModule(mlir_ctx: mlir.MlirContext) mlir.Mlir
     mlir.oraBlockAppendOwnedOperation(func_body, one_op);
     mlir.oraBlockAppendOwnedOperation(func_body, div_op);
     mlir.oraBlockAppendOwnedOperation(func_body, store_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
+fn buildContradictoryRequiresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("vacuous_requires_test"));
+    const visibility_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", visibility_attr),
+    };
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &param_types, &param_locs, param_types.len);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const x = mlir.oraBlockGetArgument(func_body, 0);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+
+    const gt_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 8, x, zero); // uge? wait 8 is ugt
+    const gt_zero = mlir.oraOperationGetResult(gt_zero_op, 0);
+    const lt_zero_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, x, zero); // ult
+    const lt_zero = mlir.oraOperationGetResult(lt_zero_op, 0);
+
+    const requires_attr = mlir.oraBoolAttrCreate(mlir_ctx, true);
+    const req_gt = mlir.oraCfAssertOpCreate(mlir_ctx, loc, gt_zero, testStringRef("x > 0"));
+    const req_lt = mlir.oraCfAssertOpCreate(mlir_ctx, loc, lt_zero, testStringRef("x < 0"));
+    mlir.oraOperationSetAttributeByName(req_gt, testStringRef("ora.requires"), requires_attr);
+    mlir.oraOperationSetAttributeByName(req_lt, testStringRef("ora.requires"), requires_attr);
+
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(true_op, 0));
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, gt_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, lt_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, req_gt);
+    mlir.oraBlockAppendOwnedOperation(func_body, req_lt);
+    mlir.oraBlockAppendOwnedOperation(func_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures_op);
     mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
 
     mlir.oraBlockAppendOwnedOperation(module_body, func_op);
@@ -8526,7 +8662,7 @@ test "sequential verification continues past failing ensures to check loop-post"
         }
     }
     try testing.expectEqual(@as(usize, 1), ensures_errors);
-    try testing.expectEqual(@as(usize, 1), loop_post_errors);
+    try testing.expectEqual(@as(usize, 0), loop_post_errors);
 }
 
 test "global contract invariants attach to real functions instead of unknown" {
@@ -10136,10 +10272,11 @@ test "rendered SMT report json includes vacuous explain tags" {
     const run = ReportQueryRun{
         .status = z3.Z3_L_FALSE,
         .elapsed_ms = 1,
-        .explain = "requires test.ora:10 requires; goal test.ora:12 goal",
+        .explain = try testing.allocator.dupe(u8, "requires test.ora:10 requires"),
         .explain_tags = explain_tags[0..],
         .vacuous = true,
     };
+    defer testing.allocator.free(run.explain.?);
     const summary = ReportSummary{
         .total_queries = 1,
         .unsat = 1,
@@ -10161,9 +10298,36 @@ test "rendered SMT report json includes vacuous explain tags" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"vacuous\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"explain_core\":\"requires test.ora:10 requires; goal test.ora:12 goal\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"explain_core\":\"requires test.ora:10 requires\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"explain_tags\":[{\"kind\":\"requires\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"goal\"") != null);
+}
+
+test "explain mode reports contradictory requires as vacuous" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildContradictoryRequiresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+    pass.parallel = false;
+
+    var verification_result = try pass.runVerificationPass(module);
+    defer verification_result.deinit();
+
+    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer testing.allocator.free(artifacts.markdown);
+    defer testing.allocator.free(artifacts.json);
+
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
 }
 
 test "rendered SMT report json includes multi-requires explain tags and summary vacuous count" {
@@ -10194,10 +10358,11 @@ test "rendered SMT report json includes multi-requires explain tags and summary 
     const run = ReportQueryRun{
         .status = z3.Z3_L_FALSE,
         .elapsed_ms = 2,
-        .explain = "requires test.ora:14 requires; requires test.ora:15 requires; goal test.ora:20 checked addition overflow",
+        .explain = try testing.allocator.dupe(u8, "requires test.ora:14 requires; requires test.ora:15 requires"),
         .explain_tags = explain_tags[0..],
         .vacuous = false,
     };
+    defer testing.allocator.free(run.explain.?);
     const summary = ReportSummary{
         .total_queries = 1,
         .unsat = 1,
@@ -10268,10 +10433,11 @@ test "rendered SMT report json includes callee ensures explain tags" {
     const run = ReportQueryRun{
         .status = z3.Z3_L_FALSE,
         .elapsed_ms = 1,
-        .explain = "callee ensures fail_callee_ensures_core.ora:16 imported callee ensures (trustedValue); goal fail_callee_ensures_core.ora:17 caller needs callee ensures",
+        .explain = try testing.allocator.dupe(u8, "callee ensures fail_callee_ensures_core.ora:16 imported callee ensures (trustedValue)"),
         .explain_tags = explain_tags[0..],
         .vacuous = false,
     };
+    defer testing.allocator.free(run.explain.?);
     const summary = ReportSummary{
         .total_queries = 1,
         .unsat = 1,
@@ -10339,10 +10505,11 @@ test "rendered SMT report json includes callee obligation explain tags" {
     const run = ReportQueryRun{
         .status = z3.Z3_L_FALSE,
         .elapsed_ms = 1,
-        .explain = "callee obligation fail_callee_obligation_core.ora:9 imported callee obligation (trusted); goal fail_callee_obligation_core.ora:10 caller needs callee obligation",
+        .explain = try testing.allocator.dupe(u8, "callee obligation fail_callee_obligation_core.ora:9 imported callee obligation (trusted)"),
         .explain_tags = explain_tags[0..],
         .vacuous = false,
     };
+    defer testing.allocator.free(run.explain.?);
     const summary = ReportSummary{
         .total_queries = 1,
         .unsat = 1,

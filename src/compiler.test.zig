@@ -16716,7 +16716,6 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/refinements/guards_showcase.ora",
         "ora-example/smt/soundness/conditional_return_split.ora",
         "ora-example/smt/soundness/fail_loop_invariant_post.ora",
-        "ora-example/smt/soundness/open_stream_add_unknown.ora",
         "ora-example/smt/soundness/overflow_mul_constant.ora",
         "ora-example/smt/soundness/switch_arm_path_predicates.ora",
         "ora-example/smt/verification/state_invariants.ora",

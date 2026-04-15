@@ -10,13 +10,11 @@
 
 const std = @import("std");
 const c = @import("c.zig");
-const builtin = @import("builtin");
-
 fn z3ErrorHandler(ctx: c.Z3_context, code: c.Z3_error_code) callconv(.c) void {
-    if (builtin.mode != .Debug) return;
-    const msg_ptr = c.Z3_get_error_msg(ctx, code);
-    const msg = if (msg_ptr == null) "<unknown>" else std.mem.span(msg_ptr);
-    std.debug.print("[z3] API error: {s}\n", .{msg});
+    _ = ctx;
+    _ = code;
+    // The wrappers inspect `lastErrorCode()` and surface structured Zig errors.
+    // Printing here makes expected negative tests look like unexpected failures.
 }
 
 fn createContext(cfg: c.Z3_config) !c.Z3_context {

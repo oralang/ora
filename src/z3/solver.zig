@@ -137,7 +137,7 @@ pub const Solver = struct {
         c.Z3_ast_vector_inc_ref(self.context.ctx, parsed);
         defer c.Z3_ast_vector_dec_ref(self.context.ctx, parsed);
         const count = c.Z3_ast_vector_size(self.context.ctx, parsed);
-        if (count == 0 and smtlib.len != 0) {
+        if (count == 0 and std.mem.indexOf(u8, smtlib, "(check-sat)") == null) {
             return error.Z3ApiError;
         }
         try self.context.checkNoError();
