@@ -3194,39 +3194,12 @@ pub const VerificationPass = struct {
             std.debug.print("{s} start\n", .{query.log_prefix});
             var timer = try std.time.Timer.start();
             const status = if (self.explain_cores) blk: {
-                try assertPreparedQueryUntrackedConstraints(&self.solver, query);
-                try assertPreparedQueryTrackedImplications(self, &self.solver, query);
-
-                if (query.kind != .Base) {
-                    const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
-                    if (vacuity.status == z3.Z3_L_FALSE) {
-                        if (vacuity.explain_str) |core| {
-                            std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ query.log_prefix, core });
-                        } else {
-                            std.debug.print("{s} note: assumptions inconsistent\n", .{query.log_prefix});
-                        }
-                        results[idx].vacuous = true;
-                        results[idx].explain_str = vacuity.explain_str;
-                        results[idx].explain_tags = vacuity.explain_tags;
-                        break :blk vacuity.status;
-                    }
-                    if (vacuity.status == z3.Z3_L_UNDEF) {
-                        std.debug.print("{s} note: vacuity check inconclusive; proceeding with proof check\n", .{query.log_prefix});
-                        results[idx].vacuity_unknown = true;
-                    }
-                    if (vacuity.explain_str) |core| self.allocator.free(core);
-                    if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
-                }
-
-                const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
-                if (proof.status == z3.Z3_L_FALSE) {
-                    if (proof.explain_str) |core| {
-                        std.debug.print("{s} core: {s}\n", .{ query.log_prefix, core });
-                    }
-                }
-                results[idx].explain_str = proof.explain_str;
-                results[idx].explain_tags = proof.explain_tags;
-                break :blk proof.status;
+                const explain = try runExplainCheck(self, &self.solver, query, query.log_prefix);
+                results[idx].vacuous = explain.vacuous;
+                results[idx].vacuity_unknown = explain.vacuity_unknown;
+                results[idx].explain_str = explain.explain_str;
+                results[idx].explain_tags = explain.explain_tags;
+                break :blk explain.status;
             } else blk: {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
@@ -3813,38 +3786,17 @@ pub const VerificationPass = struct {
             var vacuous = false;
             var vacuity_unknown = false;
             const status = if (self.explain_cores) blk: {
-                try assertPreparedQueryUntrackedConstraints(&self.solver, query);
-                try assertPreparedQueryTrackedImplications(self, &self.solver, query);
-
-                if (query.kind != .Base) {
-                    const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
-                    if (vacuity.status == z3.Z3_L_FALSE) {
-                        vacuous = true;
-                        explain_copy = if (vacuity.explain_str) |core|
-                            try self.allocator.dupe(u8, core)
-                        else
-                            null;
-                        explain_tags_copy = try cloneAssumptionTagSlice(self.allocator, vacuity.explain_tags);
-                        if (vacuity.explain_str) |core| self.allocator.free(core);
-                        if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
-                        break :blk vacuity.status;
-                    }
-                    if (vacuity.status == z3.Z3_L_UNDEF) {
-                        vacuity_unknown = true;
-                    }
-                    if (vacuity.explain_str) |core| self.allocator.free(core);
-                    if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
-                }
-
-                const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
-                explain_copy = if (proof.explain_str) |core|
+                const explain = try runExplainCheck(self, &self.solver, query, null);
+                vacuous = explain.vacuous;
+                vacuity_unknown = explain.vacuity_unknown;
+                explain_copy = if (explain.explain_str) |core|
                     try self.allocator.dupe(u8, core)
                 else
                     null;
-                explain_tags_copy = try cloneAssumptionTagSlice(self.allocator, proof.explain_tags);
-                if (proof.explain_str) |core| self.allocator.free(core);
-                if (proof.explain_tags.len > 0) self.allocator.free(proof.explain_tags);
-                break :blk proof.status;
+                explain_tags_copy = try cloneAssumptionTagSlice(self.allocator, explain.explain_tags);
+                if (explain.explain_str) |core| self.allocator.free(core);
+                if (explain.explain_tags.len > 0) self.allocator.free(explain.explain_tags);
+                break :blk explain.status;
             } else blk: {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
@@ -3879,6 +3831,7 @@ pub const VerificationPass = struct {
                 .explain_tags = explain_tags_copy,
                 .vacuous = vacuous,
                 .vacuity_unknown = vacuity_unknown,
+                .verified_with_caveats = status == z3.Z3_L_FALSE and (vacuity_unknown or self.encoder.isDegraded()),
             };
         }
 
@@ -4203,6 +4156,7 @@ pub const VerificationPass = struct {
             try writer.print("- SMT hash: `0x{x}`\n", .{query.smtlib_hash});
             try writer.print("- Vacuous: `{any}`\n", .{run.vacuous});
             try writer.print("- Vacuity inconclusive: `{any}`\n", .{run.vacuity_unknown});
+            try writer.print("- Verified with caveats: `{any}`\n", .{run.verified_with_caveats});
             if (run.vacuity_unknown) {
                 try writer.writeAll("- Warning: vacuity check was inconclusive; proof result may still rely on inconsistent assumptions.\n");
             }
@@ -4508,6 +4462,8 @@ pub const VerificationPass = struct {
             try writer.writeAll(if (run.vacuous) "true" else "false");
             try writer.writeAll(",\"vacuity_unknown\":");
             try writer.writeAll(if (run.vacuity_unknown) "true" else "false");
+            try writer.writeAll(",\"verified_with_caveats\":");
+            try writer.writeAll(if (run.verified_with_caveats) "true" else "false");
             try writer.writeAll(",\"explain_core\":");
             if (run.explain) |explain| {
                 try writeJsonStringEscaped(writer, explain);
@@ -5914,6 +5870,7 @@ const ReportQueryRun = struct {
     explain_tags: []const AssumptionTag = &.{},
     vacuous: bool = false,
     vacuity_unknown: bool = false,
+    verified_with_caveats: bool = false,
 };
 
 const ReportSummary = struct {
@@ -6759,6 +6716,70 @@ const ExplainCheckResult = struct {
     explain_str: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
 };
+
+const ExplainRunResult = struct {
+    status: z3.Z3_lbool,
+    explain_str: ?[]u8 = null,
+    explain_tags: []const AssumptionTag = &.{},
+    vacuous: bool = false,
+    vacuity_unknown: bool = false,
+};
+
+fn runExplainCheck(
+    self: *VerificationPass,
+    solver: *Solver,
+    query: PreparedQuery,
+    log_prefix: ?[]const u8,
+) !ExplainRunResult {
+    try assertPreparedQueryUntrackedConstraints(solver, query);
+    try assertPreparedQueryTrackedImplications(self, solver, query);
+
+    if (query.kind != .Base) {
+        const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
+        if (vacuity.status == z3.Z3_L_FALSE) {
+            if (log_prefix) |prefix| {
+                if (vacuity.explain_str) |core| {
+                    std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
+                } else {
+                    std.debug.print("{s} note: assumptions inconsistent\n", .{prefix});
+                }
+            }
+            return .{
+                .status = vacuity.status,
+                .explain_str = vacuity.explain_str,
+                .explain_tags = vacuity.explain_tags,
+                .vacuous = true,
+            };
+        }
+        if (vacuity.status == z3.Z3_L_UNDEF) {
+            if (log_prefix) |prefix| {
+                std.debug.print("{s} note: vacuity check inconclusive; proceeding with proof check\n", .{prefix});
+            }
+        }
+        // Non-UNSAT vacuity results carry no explain data; these frees are defensive no-ops.
+        if (vacuity.explain_str) |core| self.allocator.free(core);
+        if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
+
+        const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
+        if (log_prefix) |prefix| {
+            if (proof.status == z3.Z3_L_FALSE) {
+                if (proof.explain_str) |core| {
+                    std.debug.print("{s} core: {s}\n", .{ prefix, core });
+                }
+            }
+        }
+        return .{
+            .status = proof.status,
+            .explain_str = proof.explain_str,
+            .explain_tags = proof.explain_tags,
+            .vacuity_unknown = vacuity.status == z3.Z3_L_UNDEF,
+        };
+    }
+
+    return .{
+        .status = try solver.checkChecked(),
+    };
+}
 
 fn checkPreparedQueryTrackedAssumptions(
     self: *VerificationPass,
@@ -10457,6 +10478,65 @@ test "rendered SMT report json includes vacuity_unknown flag" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"vacuity_unknown\":true") != null);
+}
+
+test "rendered SMT report includes verified_with_caveats" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .vacuity_unknown = true,
+        .verified_with_caveats = true,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"verified_with_caveats\":true") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Verified with caveats: `true`") != null);
 }
 
 test "rendered SMT report markdown includes vacuity warning" {
