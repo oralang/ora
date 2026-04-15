@@ -15298,6 +15298,39 @@ test "degradation reason keeps first recorded cause" {
     try testing.expectEqualStrings("first degradation", encoder.degradationReason().?);
 }
 
+test "degradation reasons are capped and preserve encounter order" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    inline for (0..12) |idx| {
+        const reason = switch (idx) {
+            0 => "reason-0",
+            1 => "reason-1",
+            2 => "reason-2",
+            3 => "reason-3",
+            4 => "reason-4",
+            5 => "reason-5",
+            6 => "reason-6",
+            7 => "reason-7",
+            8 => "reason-8",
+            9 => "reason-9",
+            10 => "reason-10",
+            11 => "reason-11",
+            else => unreachable,
+        };
+        encoder.noteDegradation(reason);
+    }
+
+    const reasons = encoder.degradationReasons();
+    try testing.expectEqual(@as(usize, 10), reasons.len);
+    try testing.expectEqualStrings("reason-0", reasons[0]);
+    try testing.expectEqualStrings("reason-9", reasons[9]);
+    try testing.expectEqualStrings("reason-0", encoder.degradationReason().?);
+}
+
 test "known pure callee first-iteration scf.for return encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

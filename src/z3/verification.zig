@@ -2497,6 +2497,10 @@ pub const VerificationPass = struct {
         };
         self.phaseLog("prepared-sequential extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         if (self.encoder.isDegraded()) {
+            // Invariant: degradation aborts the entire pass. We do not clear the
+            // encoder per function because later functions are never processed once
+            // this gate trips. If the verifier ever switches to collect-and-continue,
+            // add per-function clearDegradation calls at function boundaries.
             self.phaseLog("prepared-sequential degraded after extract", .{});
             return try self.degradedVerificationResult();
         }
@@ -2510,6 +2514,8 @@ pub const VerificationPass = struct {
         }
         self.phaseLog("prepared-sequential build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            // Same invariant as above: this early return is what prevents stale
+            // degradation state from leaking across functions in the current pass.
             self.phaseLog("prepared-sequential degraded after build-queries", .{});
             return try self.degradedVerificationResult();
         }
@@ -2619,6 +2625,9 @@ pub const VerificationPass = struct {
         };
         self.phaseLog("parallel extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         if (self.encoder.isDegraded()) {
+            // Invariant: degradation aborts the entire pass. If parallel verification
+            // ever changes to collect-and-continue across functions, add explicit
+            // per-function clearDegradation calls before encoding each function.
             self.phaseLog("parallel degraded after extract", .{});
             return try self.degradedVerificationResult();
         }
@@ -2632,6 +2641,8 @@ pub const VerificationPass = struct {
         }
         self.phaseLog("parallel build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            // Same invariant as above: stale degradation cannot reach another
+            // function because the pass returns immediately here.
             self.phaseLog("parallel degraded after build-queries", .{});
             return try self.degradedVerificationResult();
         }
@@ -3089,6 +3100,9 @@ pub const VerificationPass = struct {
             self.phaseLog("report extract-annotations done annotations={d}", .{self.encoded_annotations.items.len});
         }
         if (self.encoder.isDegraded()) {
+            // Report generation follows the same fail-closed policy as proving:
+            // once degradation is observed we abort report query construction
+            // instead of attempting to continue with later functions.
             self.phaseLog("report degraded before query build", .{});
             return try self.buildDegradedSmtReport(source_file, verification_result);
         }
@@ -3103,6 +3117,8 @@ pub const VerificationPass = struct {
         }
         self.phaseLog("report build-queries done queries={d}", .{queries.items.len});
         if (self.encoder.isDegraded()) {
+            // Same invariant as above: continuing after a degraded query build would
+            // risk attributing stale encoder state to unrelated later functions.
             self.phaseLog("report degraded after query build", .{});
             return try self.buildDegradedSmtReport(source_file, verification_result);
         }
@@ -3222,6 +3238,7 @@ pub const VerificationPass = struct {
         };
         summary.encoding_degraded = self.encoder.isDegraded();
         summary.degradation_reason = self.encoder.degradationReason();
+        summary.degradation_reasons = self.encoder.degradationReasons();
         var kind_counts = ReportKindCounts{};
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
@@ -3405,6 +3422,7 @@ pub const VerificationPass = struct {
             .proven_guards = if (verification_result) |vr| @intCast(vr.proven_guard_ids.count()) else 0,
             .encoding_degraded = true,
             .degradation_reason = self.encoder.degradationReason(),
+            .degradation_reasons = self.encoder.degradationReasons(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3484,6 +3502,12 @@ pub const VerificationPass = struct {
         try writer.print("- Encoding degraded: `{any}`\n", .{summary.encoding_degraded});
         if (summary.degradation_reason) |reason| {
             try writer.print("- Degradation reason: `{s}`\n", .{reason});
+        }
+        if (summary.degradation_reasons.len > 1) {
+            try writer.writeAll("- Degradation reasons:\n");
+            for (summary.degradation_reasons) |reason| {
+                try writer.print("  - `{s}`\n", .{reason});
+            }
         }
         try writer.writeAll("\n");
 
@@ -3635,6 +3659,12 @@ pub const VerificationPass = struct {
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\"degradation_reasons\":[");
+        for (summary.degradation_reasons, 0..) |reason, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeJsonStringEscaped(writer, reason);
+        }
+        try writer.writeByte(']');
         try writer.writeByte('}');
         try writer.writeByte(',');
 
@@ -5326,6 +5356,7 @@ const ReportSummary = struct {
     verification_diagnostics: u64 = 0,
     encoding_degraded: bool = false,
     degradation_reason: ?[]const u8 = null,
+    degradation_reasons: []const []const u8 = &.{},
 };
 
 const ReportKindCounts = struct {
@@ -10168,6 +10199,7 @@ test "rendered SMT report json includes degradation metadata" {
     const summary = ReportSummary{
         .encoding_degraded = true,
         .degradation_reason = "test degradation",
+        .degradation_reasons = &.{ "test degradation", "follow-on degradation" },
     };
     const kind_counts = ReportKindCounts{};
 
@@ -10184,6 +10216,7 @@ test "rendered SMT report json includes degradation metadata" {
 
     try testing.expect(std.mem.indexOf(u8, json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reasons\":[\"test degradation\",\"follow-on degradation\"]") != null);
 }
 
 test "rendered SMT report json includes vacuous explain tags" {

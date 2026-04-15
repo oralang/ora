@@ -136,6 +136,8 @@ pub const Encoder = struct {
     encoding_degraded: bool,
     /// Human-readable reason for the first degradation encountered.
     encoding_degraded_reason: ?[]const u8,
+    /// Bounded list of degradation reasons in encounter order.
+    encoding_degraded_reasons: std.ArrayList([]const u8),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Stack of active quantified variable bindings (innermost binding last).
@@ -172,6 +174,7 @@ pub const Encoder = struct {
             .pending_obligations = std.ArrayList(PendingObligation){},
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
+            .encoding_degraded_reasons = std.ArrayList([]const u8){},
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
             .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
@@ -189,6 +192,7 @@ pub const Encoder = struct {
     pub fn clearDegradation(self: *Encoder) void {
         self.encoding_degraded = false;
         self.encoding_degraded_reason = null;
+        self.encoding_degraded_reasons.clearRetainingCapacity();
     }
 
     pub fn isDegraded(self: *const Encoder) bool {
@@ -199,6 +203,12 @@ pub const Encoder = struct {
         return self.encoding_degraded_reason;
     }
 
+    pub fn degradationReasons(self: *const Encoder) []const []const u8 {
+        return self.encoding_degraded_reasons.items;
+    }
+
+    /// Public wrapper used by verifier-side test hooks and other callers that need
+    /// to taint the current encoder state without reaching into private internals.
     pub fn noteDegradation(self: *Encoder, reason: []const u8) void {
         self.recordDegradation(reason);
     }
@@ -212,9 +222,13 @@ pub const Encoder = struct {
     }
 
     fn recordDegradation(self: *Encoder, reason: []const u8) void {
+        const degradation_reason_cap = 10;
         self.encoding_degraded = true;
         if (self.encoding_degraded_reason == null) {
             self.encoding_degraded_reason = reason;
+        }
+        if (self.encoding_degraded_reasons.items.len < degradation_reason_cap) {
+            self.encoding_degraded_reasons.append(self.allocator, reason) catch {};
         }
     }
 
@@ -1160,6 +1174,7 @@ pub const Encoder = struct {
         self.string_storage.deinit(self.allocator);
         self.pending_constraints.deinit(self.allocator);
         self.pending_obligations.deinit(self.allocator);
+        self.encoding_degraded_reasons.deinit(self.allocator);
         self.error_union_sorts.deinit();
         for (self.quantified_bindings.items) |binding| {
             self.allocator.free(binding.name);
