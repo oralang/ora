@@ -4635,6 +4635,7 @@ pub const VerificationPass = struct {
                 try assumption_constraints.append(ann.condition);
             }
             try addTrackedBaseAssumptions(&tracked_base_assumptions, assumption_annotations.items);
+            try materializeTrackedAssumptionProxies(self, &tracked_base_assumptions);
 
             const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items);
             const base_smtlib = base_query.smtlib_z;
@@ -4724,6 +4725,7 @@ pub const VerificationPass = struct {
                 const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try obligation_constraints.append(negated);
                 try appendGoalTrackedAssumption(&tracked_obligation_assumptions, fn_name, ann, negated);
+                try materializeTrackedAssumptionProxies(self, &tracked_obligation_assumptions);
 
                 const obligation_query = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items);
                 const obligation_smtlib = obligation_query.smtlib_z;
@@ -4823,6 +4825,7 @@ pub const VerificationPass = struct {
                         const negated_step = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
                         try step_constraints.append(negated_step);
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
+                        try materializeTrackedAssumptionProxies(self, &tracked_step_assumptions);
 
                         const step_query = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
                         const step_smtlib = step_query.smtlib_z;
@@ -4885,6 +4888,7 @@ pub const VerificationPass = struct {
                     const negated_post = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition));
                     try post_constraints.append(negated_post);
                     try appendGoalTrackedAssumption(&tracked_post_assumptions, fn_name, ensure_ann, negated_post);
+                    try materializeTrackedAssumptionProxies(self, &tracked_post_assumptions);
 
                     const post_query = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items);
                     const post_smtlib = post_query.smtlib_z;
@@ -6543,6 +6547,17 @@ fn cloneTrackedAssumptionSlice(
     return if (assumptions.len == 0) &.{} else try allocator.dupe(TrackedAssumption, assumptions);
 }
 
+fn materializeTrackedAssumptionProxies(
+    self: *VerificationPass,
+    assumptions: *ManagedArrayList(TrackedAssumption),
+) !void {
+    if (!self.explain_cores) return;
+    for (assumptions.items) |*assumption| {
+        if (assumption.proxy != null) continue;
+        assumption.proxy = try self.solver.mkFreshBoolProxy("ora_assumption");
+    }
+}
+
 fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
     return switch (kind) {
         .requires => "requires",
@@ -6737,25 +6752,19 @@ fn checkPreparedQueryTrackedAssumptions(
     query: PreparedQuery,
     include_goal: bool,
 ) !ExplainCheckResult {
-    var tracked = ManagedArrayList(TrackedAssumption).init(self.allocator);
-    defer tracked.deinit();
     var proxies = ManagedArrayList(z3.Z3_ast).init(self.allocator);
     defer proxies.deinit();
 
     for (query.tracked_assumptions) |tracked_assumption| {
         if (!include_goal and tracked_assumption.tag.kind == .goal) continue;
 
-        const proxy = try self.solver.mkFreshBoolProxy("ora_assumption");
+        const proxy = tracked_assumption.proxy orelse return error.Z3ApiError;
         const implication = z3.Z3_mk_implies(
             self.context.ctx,
             proxy,
             self.encoder.coerceBoolean(tracked_assumption.ast),
         );
         try self.solver.assertChecked(implication);
-
-        var materialized = tracked_assumption;
-        materialized.proxy = proxy;
-        try tracked.append(materialized);
         try proxies.append(proxy);
     }
 
@@ -6772,7 +6781,7 @@ fn checkPreparedQueryTrackedAssumptions(
 
     const core_asts = try self.solver.getUnsatCoreOwned();
     defer self.allocator.free(core_asts);
-    const formatted = try formatUnsatCoreSummary(self.allocator, tracked.items, core_asts);
+    const formatted = try formatUnsatCoreSummary(self.allocator, query.tracked_assumptions, core_asts);
     return .{
         .status = status,
         .explain_str = formatted.explain_str,
@@ -9493,6 +9502,98 @@ test "prepared queries track user assume in base and obligation queries" {
     try testing.expect(saw_obligation);
 }
 
+test "prepared queries pre-materialize tracked assumption proxies in explain mode" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_tracked = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "user_assume_test")) continue;
+        for (q.tracked_assumptions) |tracked| {
+            saw_tracked = true;
+            try testing.expect(tracked.proxy != null);
+        }
+    }
+    try testing.expect(saw_tracked);
+}
+
+test "tracked assumption proxies remain stable across vacuity and proof checks" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var target_query: ?*PreparedQuery = null;
+    for (queries.items) |*q| {
+        if (!std.mem.eql(u8, q.function_name, "user_assume_test")) continue;
+        if (q.kind != .Obligation or q.obligation_kind != .Ensures) continue;
+        target_query = q;
+        break;
+    }
+    try testing.expect(target_query != null);
+
+    const query = target_query.?;
+    try testing.expect(query.tracked_assumptions.len >= 2);
+
+    const before = try testing.allocator.alloc(z3.Z3_ast, query.tracked_assumptions.len);
+    defer testing.allocator.free(before);
+    for (query.tracked_assumptions, 0..) |tracked, idx| {
+        try testing.expect(tracked.proxy != null);
+        before[idx] = tracked.proxy.?;
+    }
+
+    pass.solver.reset();
+    try assertPreparedQueryUntrackedConstraints(&pass.solver, query.*);
+    const vacuity = try checkPreparedQueryTrackedAssumptions(&pass, query.*, false);
+    if (vacuity.explain_str) |s| testing.allocator.free(s);
+    if (vacuity.explain_tags.len > 0) testing.allocator.free(vacuity.explain_tags);
+
+    pass.solver.reset();
+    try assertPreparedQueryUntrackedConstraints(&pass.solver, query.*);
+    const proof = try checkPreparedQueryTrackedAssumptions(&pass, query.*, true);
+    if (proof.explain_str) |s| testing.allocator.free(s);
+    if (proof.explain_tags.len > 0) testing.allocator.free(proof.explain_tags);
+
+    for (query.tracked_assumptions, 0..) |tracked, idx| {
+        try testing.expect(tracked.proxy != null);
+        try testing.expectEqual(before[idx], tracked.proxy.?);
+    }
+}
+
 test "guard violate query includes scoped path assumptions" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -10301,6 +10402,54 @@ test "rendered SMT report json includes vacuous explain tags" {
     try testing.expect(std.mem.indexOf(u8, json, "\"explain_core\":\"requires test.ora:10 requires\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"explain_tags\":[{\"kind\":\"requires\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"goal\"") != null);
+}
+
+test "rendered SMT report json includes vacuity_unknown flag" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .vacuous = false,
+        .vacuity_unknown = true,
+    };
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"vacuity_unknown\":true") != null);
 }
 
 test "explain mode reports contradictory requires as vacuous" {
