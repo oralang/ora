@@ -38,6 +38,8 @@ const AssumptionKind = enum {
     assume,
     callee_obligation,
     callee_ensures,
+    env_assume,
+    frame,
     loop_invariant,
     path_assume,
     goal,
@@ -148,6 +150,8 @@ pub const VerificationPass = struct {
     guard_id_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated annotation labels/messages
     label_storage: ManagedArrayList([]const u8),
+    /// Semantic constraint provenance recorded while extracting prepared queries.
+    semantic_constraint_tags: std.AutoHashMap(usize, AssumptionTag),
 
     pub fn init(allocator: std.mem.Allocator) !VerificationPass {
         var context = try allocator.create(Context);
@@ -270,6 +274,7 @@ pub const VerificationPass = struct {
             .location_storage = ManagedArrayList([]const u8).init(allocator),
             .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
             .label_storage = ManagedArrayList([]const u8).init(allocator),
+            .semantic_constraint_tags = std.AutoHashMap(usize, AssumptionTag).init(allocator),
         };
         return pass;
     }
@@ -313,6 +318,7 @@ pub const VerificationPass = struct {
             self.allocator.free(label);
         }
         self.label_storage.deinit();
+        self.semantic_constraint_tags.deinit();
         for (self.encoded_annotations.items) |ann| {
             if (ann.extra_constraints.len > 0) {
                 self.allocator.free(ann.extra_constraints);
@@ -406,6 +412,7 @@ pub const VerificationPass = struct {
     /// Extract verification annotations from MLIR module
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        self.semantic_constraint_tags.clearRetainingCapacity();
         // get the module operation
         const module_op = mlir.oraModuleGetOperation(mlir_module);
 
@@ -1086,7 +1093,9 @@ pub const VerificationPass = struct {
         self.encoder.invalidateValueCaches();
         const raw_condition = try self.encoder.encodeValue(condition_value);
         const condition = self.encoder.coerceBoolean(raw_condition);
-        const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(if_op);
+        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
@@ -1592,7 +1601,9 @@ pub const VerificationPass = struct {
 
         _ = try self.encoder.encodeOperation(op);
 
-        const leaked_constraints = try self.encoder.takeConstraints(self.allocator);
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(op);
+        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
@@ -1601,8 +1612,6 @@ pub const VerificationPass = struct {
         // call summaries) so public entrypoints with no explicit requires/asserts
         // still prove checked arithmetic safety in reachable callees.
         if (leaked_obligations.len > 0) {
-            const function_name = self.current_function_name orelse "unknown";
-            const loc = try self.getLocationInfo(op);
             const path_constraints = try self.captureActivePathConstraints();
             const loop_owner = if (self.findEnclosingLoopOp(op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
             var loop_step_condition: ?z3.Z3_ast = null;
@@ -1615,7 +1624,7 @@ pub const VerificationPass = struct {
                 null;
             if (loop_owner != null) {
                 loop_step_condition = try self.encodeLoopContinueCondition(op);
-                loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+                loop_step_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
             }
 
             for (leaked_obligations) |obligation| {
@@ -1730,7 +1739,8 @@ pub const VerificationPass = struct {
                 return err;
             };
         };
-        const raw_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+        const loc = try self.getLocationInfo(op);
+        const raw_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         defer if (raw_extra_constraints.len > 0) self.allocator.free(raw_extra_constraints);
         const safety_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (safety_obligations.len > 0) self.allocator.free(safety_obligations);
@@ -1757,7 +1767,7 @@ pub const VerificationPass = struct {
             try self.mergeStableCurrentValueCachesIntoSnapshot(&base_encoder_state);
             try self.restoreEncoderBranchState(&base_encoder_state);
             loop_step_condition = try self.encodeLoopContinueCondition(op);
-            loop_step_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            loop_step_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         }
         if (kind == .LoopInvariant) {
             try self.restoreEncoderBranchState(&base_encoder_state);
@@ -1765,7 +1775,7 @@ pub const VerificationPass = struct {
                 specialized_old
             else
                 try self.encoder.encodeValueOld(condition_value);
-            old_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            old_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
             loop_entry_extra_constraints = try self.encodeLoopEntryConstraints(op);
             const old_safety = try self.encoder.takeObligations(self.allocator);
             defer if (old_safety.len > 0) self.allocator.free(old_safety);
@@ -1793,7 +1803,7 @@ pub const VerificationPass = struct {
             }
             try self.restoreEncoderBranchState(&base_encoder_state);
             loop_exit_condition = try self.encodeLoopExitCondition(op);
-            loop_exit_extra_constraints = try self.encoder.takeConstraints(self.allocator);
+            loop_exit_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
             const loop_exit_safety = try self.encoder.takeObligations(self.allocator);
             defer if (loop_exit_safety.len > 0) self.allocator.free(loop_exit_safety);
             for (loop_exit_safety) |obligation| {
@@ -1820,7 +1830,6 @@ pub const VerificationPass = struct {
             }
         }
 
-        const loc = try self.getLocationInfo(op);
         const annotation_label = try self.annotationLabelForOp(op, kind);
         const annotation_index = self.encoded_annotations.items.len;
         try self.encoded_annotations.append(.{
@@ -4586,6 +4595,9 @@ pub const VerificationPass = struct {
                 try assumption_constraints.append(ann.condition);
             }
             try addTrackedBaseAssumptions(&tracked_base_assumptions, assumption_annotations.items);
+            for (assumption_annotations.items) |ann| {
+                try appendTrackedSemanticConstraintsForSlice(self, &tracked_base_assumptions, ann.extra_constraints);
+            }
             try materializeTrackedAssumptionProxies(self, &tracked_base_assumptions);
 
             const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items);
@@ -4625,14 +4637,21 @@ pub const VerificationPass = struct {
                 defer tracked_obligation_assumptions.deinit();
                 try addConstraintSlice(&obligation_constraints, assumption_constraints.items);
                 try addTrackedBaseAssumptions(&tracked_obligation_assumptions, assumption_annotations.items);
+                for (assumption_annotations.items) |assumption_ann| {
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, assumption_ann.extra_constraints);
+                }
                 try addApplicablePathAssumptionsToConstraintList(self, &obligation_constraints, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addApplicableTrackedPathAssumptions(self, &tracked_obligation_assumptions, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addConstraintSlice(&obligation_constraints, ann.path_constraints);
+                try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
+                try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.extra_constraints);
                 for (previous_imported_callee_obligations.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.path_constraints);
                     try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.extra_constraints);
                     if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try obligation_constraints.append(prev.condition);
                     try appendTrackedAssumption(
@@ -4644,7 +4663,9 @@ pub const VerificationPass = struct {
                 for (previous_imported_callee_ensures.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
                     try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.path_constraints);
                     try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.extra_constraints);
                     if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try obligation_constraints.append(prev.condition);
                     try appendTrackedAssumption(
@@ -4655,13 +4676,17 @@ pub const VerificationPass = struct {
                 }
                 if (ann.kind == .LoopInvariant) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_entry_extra_constraints);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.loop_entry_extra_constraints);
                 }
                 if (ann.kind == .ContractInvariant and ann.loop_owner != null) {
                     try addConstraintSlice(&obligation_constraints, ann.loop_step_extra_constraints);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.loop_step_extra_constraints);
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, peer_inv_ann.path_constraints);
                         try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, peer_inv_ann.extra_constraints);
                         try obligation_constraints.append(peer_inv_ann.condition);
                         try appendTrackedAssumption(
                             &tracked_obligation_assumptions,
@@ -4724,9 +4749,14 @@ pub const VerificationPass = struct {
                         defer tracked_step_assumptions.deinit();
                         try addConstraintSlice(&step_constraints, assumption_constraints.items);
                         try addTrackedBaseAssumptions(&tracked_step_assumptions, assumption_annotations.items);
+                        for (assumption_annotations.items) |assumption_ann| {
+                            try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, assumption_ann.extra_constraints);
+                        }
                         try addConstraintSlice(&step_constraints, ann.path_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.path_constraints);
                         if (ann.loop_step_head_condition != null) {
                             try addConstraintSlice(&step_constraints, ann.loop_step_head_extra_constraints);
+                            try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.loop_step_head_extra_constraints);
                             try step_constraints.append(ann.loop_step_head_condition.?);
                             try appendTrackedAssumption(
                                 &tracked_step_assumptions,
@@ -4735,7 +4765,9 @@ pub const VerificationPass = struct {
                             );
                         } else {
                             try addConstraintSlice(&step_constraints, ann.extra_constraints);
+                            try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.extra_constraints);
                             try addConstraintSlice(&step_constraints, ann.old_extra_constraints);
+                            try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.old_extra_constraints);
                             try step_constraints.append(old_inv);
                             try appendTrackedAssumption(
                                 &tracked_step_assumptions,
@@ -4744,12 +4776,16 @@ pub const VerificationPass = struct {
                             );
                         }
                         try addConstraintSlice(&step_constraints, ann.loop_step_extra_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.loop_step_extra_constraints);
                         try addConstraintSlice(&step_constraints, ann.loop_step_body_extra_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.loop_step_body_extra_constraints);
                         for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                             if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
                             try addConstraintSlice(&step_constraints, peer_inv_ann.path_constraints);
+                            try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, peer_inv_ann.path_constraints);
                             if (peer_inv_ann.loop_step_head_condition != null) {
                                 try addConstraintSlice(&step_constraints, peer_inv_ann.loop_step_head_extra_constraints);
+                                try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, peer_inv_ann.loop_step_head_extra_constraints);
                                 try step_constraints.append(peer_inv_ann.loop_step_head_condition.?);
                                 try appendTrackedAssumption(
                                     &tracked_step_assumptions,
@@ -4758,7 +4794,9 @@ pub const VerificationPass = struct {
                                 );
                             } else {
                                 try addConstraintSlice(&step_constraints, peer_inv_ann.extra_constraints);
+                                try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, peer_inv_ann.extra_constraints);
                                 try addConstraintSlice(&step_constraints, peer_inv_ann.old_extra_constraints);
+                                try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, peer_inv_ann.old_extra_constraints);
                                 if (peer_inv_ann.old_condition) |peer_old_inv| {
                                     try step_constraints.append(peer_old_inv);
                                     try appendTrackedAssumption(
@@ -4818,15 +4856,23 @@ pub const VerificationPass = struct {
                     defer tracked_post_assumptions.deinit();
                     try addConstraintSlice(&post_constraints, assumption_constraints.items);
                     try addTrackedBaseAssumptions(&tracked_post_assumptions, assumption_annotations.items);
+                    for (assumption_annotations.items) |assumption_ann| {
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, assumption_ann.extra_constraints);
+                    }
                     try addConstraintSlice(&post_constraints, ensure_ann.path_constraints);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, ensure_ann.path_constraints);
                     try addConstraintSlice(&post_constraints, ensure_ann.extra_constraints);
+                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, ensure_ann.extra_constraints);
 
                     // Conjoin all invariants for the same loop in loop-post queries.
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, inv_ann, peer_inv_ann)) continue;
                         try addConstraintSlice(&post_constraints, peer_inv_ann.path_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, peer_inv_ann.path_constraints);
                         try addConstraintSlice(&post_constraints, peer_inv_ann.extra_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, peer_inv_ann.extra_constraints);
                         try addConstraintSlice(&post_constraints, peer_inv_ann.loop_exit_extra_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_post_assumptions, peer_inv_ann.loop_exit_extra_constraints);
                         try post_constraints.append(peer_inv_ann.condition);
                         try appendTrackedAssumption(
                             &tracked_post_assumptions,
@@ -6499,6 +6545,60 @@ fn cloneTrackedAssumptionSlice(
     return if (assumptions.len == 0) &.{} else try allocator.dupe(TrackedAssumption, assumptions);
 }
 
+fn registerSemanticConstraintTag(
+    self: *VerificationPass,
+    function_name: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    record: Encoder.PendingConstraint,
+) !void {
+    const kind: AssumptionKind = switch (record.source_kind) {
+        .generic => return,
+        .env_assume => .env_assume,
+        .frame => .frame,
+    };
+    const tag = AssumptionTag{
+        .kind = kind,
+        .function_name = function_name,
+        .file = file,
+        .line = line,
+        .column = column,
+        .label = record.detail orelse defaultTrackedAssumptionLabel(kind),
+    };
+    try self.semantic_constraint_tags.put(@intFromPtr(record.ast), tag);
+}
+
+fn takeConstraintRecordsAndRegisterTags(
+    self: *VerificationPass,
+    function_name: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+) ![]const z3.Z3_ast {
+    const records = try self.encoder.takeConstraintRecords(self.allocator);
+    defer if (records.len > 0) self.allocator.free(records);
+    if (records.len == 0) return &.{};
+
+    const constraints = try self.allocator.alloc(z3.Z3_ast, records.len);
+    for (records, 0..) |record, idx| {
+        constraints[idx] = record.ast;
+        try registerSemanticConstraintTag(self, function_name, file, line, column, record);
+    }
+    return constraints;
+}
+
+fn appendTrackedSemanticConstraintsForSlice(
+    self: *VerificationPass,
+    list: *ManagedArrayList(TrackedAssumption),
+    constraints: []const z3.Z3_ast,
+) !void {
+    for (constraints) |constraint| {
+        const tag = self.semantic_constraint_tags.get(@intFromPtr(constraint)) orelse continue;
+        try appendTrackedAssumption(list, constraint, tag);
+    }
+}
+
 fn materializeTrackedAssumptionProxies(
     self: *VerificationPass,
     assumptions: *ManagedArrayList(TrackedAssumption),
@@ -6516,6 +6616,8 @@ fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
         .assume => "assume",
         .callee_obligation => "callee obligation",
         .callee_ensures => "callee ensures",
+        .env_assume => "environment assumption",
+        .frame => "frame condition",
         .loop_invariant => "loop invariant",
         .path_assume => "path assumption",
         .goal => "goal",
@@ -8360,6 +8462,42 @@ fn buildUserAssumeEnsuresModule(mlir_ctx: mlir.MlirContext, assume_value: i64, e
     return module;
 }
 
+fn buildEnvCallerEnsuresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("env_caller_ensures_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const caller_op = mlir.oraEvmOpCreate(mlir_ctx, loc, testStringRef("ora.evm.caller"), null, 0, addr_ty);
+    const non_zero_op = mlir.oraArithCmpIOpCreate(
+        mlir_ctx,
+        loc,
+        0,
+        mlir.oraOperationGetResult(caller_op, 0),
+        mlir.oraOperationGetResult(caller_op, 0),
+    ); // eq
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(non_zero_op, 0));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, caller_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, non_zero_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -9620,6 +9758,71 @@ test "tracked assumption proxies remain stable across vacuity and proof checks" 
         try testing.expect(tracked.proxy != null);
         try testing.expectEqual(before[idx], tracked.proxy.?);
     }
+}
+
+test "prepared queries track environment assumptions used by ensures" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildEnvCallerEnsuresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_env = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "env_caller_ensures_test")) continue;
+        if (q.kind != .Obligation or q.obligation_kind != .Ensures) continue;
+        for (q.tracked_assumptions) |tracked| {
+            if (tracked.tag.kind != .env_assume) continue;
+            saw_env = true;
+            try testing.expectEqualStrings("environment assumption (evm_caller != 0)", tracked.tag.label);
+        }
+    }
+    try testing.expect(saw_env);
+}
+
+test "prepared queries track frame conditions from map-store summaries" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildConditionalReturnMapStoreDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_frame = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "conditional_return_map_store_div_test")) continue;
+        for (q.tracked_assumptions) |tracked| {
+            if (tracked.tag.kind != .frame) continue;
+            saw_frame = true;
+            try testing.expectEqualStrings("frame condition", tracked.tag.label);
+        }
+    }
+    try testing.expect(saw_frame);
 }
 
 test "guard violate query includes scoped path assumptions" {

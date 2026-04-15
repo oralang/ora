@@ -26,6 +26,18 @@ pub const Encoder = struct {
         imported_callee_ensures,
     };
 
+    pub const PendingConstraintSourceKind = enum {
+        generic,
+        env_assume,
+        frame,
+    };
+
+    pub const PendingConstraint = struct {
+        ast: z3.Z3_ast,
+        source_kind: PendingConstraintSourceKind = .generic,
+        detail: ?[]const u8 = null,
+    };
+
     pub const PendingObligation = struct {
         ast: z3.Z3_ast,
         imported_callee_name: ?[]const u8 = null,
@@ -117,7 +129,7 @@ pub const Encoder = struct {
     /// Keep Z3 symbol names alive for the life of the encoder.
     string_storage: std.ArrayList([]u8),
     /// Pending constraints emitted during encoding (e.g., error.unwrap validity).
-    pending_constraints: std.ArrayList(z3.Z3_ast),
+    pending_constraints: std.ArrayList(PendingConstraint),
     /// Pending safety obligations emitted during encoding (e.g., div-by-zero, overflow).
     pending_obligations: std.ArrayList(PendingObligation),
     /// Set once encoding drops or skips any verification-relevant information.
@@ -156,7 +168,7 @@ pub const Encoder = struct {
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
             .inline_function_stack = std.ArrayList([]u8){},
             .string_storage = std.ArrayList([]u8){},
-            .pending_constraints = std.ArrayList(z3.Z3_ast){},
+            .pending_constraints = std.ArrayList(PendingConstraint){},
             .pending_obligations = std.ArrayList(PendingObligation){},
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
@@ -1670,7 +1682,24 @@ pub const Encoder = struct {
     }
 
     fn addConstraint(self: *Encoder, constraint: z3.Z3_ast) void {
-        self.pending_constraints.append(self.allocator, constraint) catch {
+        self.addConstraintWithSource(constraint, .generic, null);
+    }
+
+    fn addConstraintWithSource(
+        self: *Encoder,
+        constraint: z3.Z3_ast,
+        source_kind: PendingConstraintSourceKind,
+        detail: ?[]const u8,
+    ) void {
+        const persisted_detail = if (detail) |text|
+            self.allocPersistentMessage(text) catch null
+        else
+            null;
+        self.pending_constraints.append(self.allocator, .{
+            .ast = constraint,
+            .source_kind = source_kind,
+            .detail = persisted_detail,
+        }) catch {
             self.recordDegradation("failed to record SMT constraint");
         };
     }
@@ -1724,8 +1753,17 @@ pub const Encoder = struct {
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
-        if (self.pending_constraints.items.len == 0) return &[_]z3.Z3_ast{};
-        const slice = try allocator.dupe(z3.Z3_ast, self.pending_constraints.items);
+        const records = try self.takeConstraintRecords(allocator);
+        defer if (records.len > 0) allocator.free(records);
+        if (records.len == 0) return &[_]z3.Z3_ast{};
+        const slice = try allocator.alloc(z3.Z3_ast, records.len);
+        for (records, 0..) |record, idx| slice[idx] = record.ast;
+        return slice;
+    }
+
+    pub fn takeConstraintRecords(self: *Encoder, allocator: std.mem.Allocator) ![]PendingConstraint {
+        if (self.pending_constraints.items.len == 0) return &[_]PendingConstraint{};
+        const slice = try allocator.dupe(PendingConstraint, self.pending_constraints.items);
         self.pending_constraints.clearRetainingCapacity();
         return slice;
     }
@@ -1794,15 +1832,25 @@ pub const Encoder = struct {
     fn addEnvironmentConstraints(self: *Encoder, name: []const u8, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
         // EVM caller is always a non-zero address in runtime semantics.
         if (std.mem.eql(u8, name, "evm_caller")) {
-            self.addNonZeroBitVectorConstraint(ast, sort);
+            self.addNonZeroBitVectorConstraintWithSource(ast, sort, .env_assume, "environment assumption (evm_caller != 0)");
         }
     }
 
     fn addNonZeroBitVectorConstraint(self: *Encoder, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
+        self.addNonZeroBitVectorConstraintWithSource(ast, sort, .generic, null);
+    }
+
+    fn addNonZeroBitVectorConstraintWithSource(
+        self: *Encoder,
+        ast: z3.Z3_ast,
+        sort: z3.Z3_sort,
+        source_kind: PendingConstraintSourceKind,
+        detail: ?[]const u8,
+    ) void {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return;
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
         const non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
-        self.addConstraint(non_zero);
+        self.addConstraintWithSource(non_zero, source_kind, detail);
     }
 
     //===----------------------------------------------------------------------===//
@@ -2302,7 +2350,7 @@ pub const Encoder = struct {
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
         const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, body);
-        self.addConstraint(frame);
+        self.addConstraintWithSource(frame, .frame, "frame condition");
     }
 
     fn isArraySort(self: *Encoder, sort: z3.Z3_sort) bool {
@@ -2325,7 +2373,7 @@ pub const Encoder = struct {
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
         const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, eq_val);
-        self.addConstraint(frame);
+        self.addConstraintWithSource(frame, .frame, "frame condition");
     }
 
     //===----------------------------------------------------------------------===//
