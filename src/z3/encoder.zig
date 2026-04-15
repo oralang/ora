@@ -11050,6 +11050,7 @@ pub const Encoder = struct {
             const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
             return z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
         }
+        self.recordDegradation("coerceToBool on non-bool non-bv sort");
         return ast;
     }
 

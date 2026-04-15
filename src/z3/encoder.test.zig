@@ -2160,6 +2160,24 @@ test "uninitialized memref load degrades encoding" {
     try testing.expect(std.mem.startsWith(u8, encoder.degradationReason().?, "memref.load read from uninitialized tracked local state"));
 }
 
+test "coerceBoolean degrades on non-bool non-bv sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const index_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const value_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const array_sort = z3.Z3_mk_array_sort(z3_ctx.ctx, index_sort, value_sort);
+    const array_ast = try encoder.mkVariable("array_bool_coercion", array_sort);
+
+    _ = encoder.coerceBoolean(array_ast);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("coerceToBool on non-bool non-bv sort", encoder.degradationReason().?);
+}
+
 test "scalar memref load recovers dominating store before scf.while" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -15263,6 +15281,21 @@ test "unsupported sort coercion records degradation" {
 
     try testing.expect(encoder.isDegraded());
     try testing.expectEqualStrings("unsupported AST sort coercion", encoder.degradationReason().?);
+}
+
+test "degradation reason keeps first recorded cause" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    encoder.noteDegradation("first degradation");
+    encoder.noteDegradation("second degradation");
+    encoder.noteDegradation("third degradation");
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("first degradation", encoder.degradationReason().?);
 }
 
 test "known pure callee first-iteration scf.for return encodes exactly" {
