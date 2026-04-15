@@ -11,6 +11,7 @@ Current implemented behavior:
 - vacuity pre-check
 - unsat-core extraction for successful proofs
 - optional greedy core minimization via `--minimize-cores`
+  - per-query `core_minimized` reporting means the core actually shrank, not merely that minimization was enabled
 - structured explain tags in SMT report JSON/markdown
 - tracked/source-level assumption kinds currently supported:
   - `requires`
@@ -30,6 +31,7 @@ Current intentional limits:
 - legacy fallback no longer owns explain behavior; explain bypasses it and uses prepared queries
 - no independent proof checker / certificate export
 - raw proof objects, when enabled separately, are not source-level explanations
+- raw proof objects are kept in JSON reports; markdown stays source-oriented
 
 ---
 

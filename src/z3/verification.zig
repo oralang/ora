@@ -3128,10 +3128,12 @@ pub const VerificationPass = struct {
             var timer = try std.time.Timer.start();
             var explain_copy: ?[]u8 = null;
             var explain_tags_copy: []const AssumptionTag = &.{};
+            var core_minimized = false;
             var vacuous = false;
             var vacuity_unknown = false;
             const status = if (self.explain_cores) blk: {
                 const explain = try runExplainCheck(self, &self.solver, query, null);
+                core_minimized = explain.core_minimized;
                 vacuous = explain.vacuous;
                 vacuity_unknown = explain.vacuity_unknown;
                 explain_copy = if (explain.explain_str) |core|
@@ -3180,6 +3182,7 @@ pub const VerificationPass = struct {
                 .proof = proof_copy,
                 .explain = explain_copy,
                 .explain_tags = explain_tags_copy,
+                .core_minimized = core_minimized,
                 .vacuous = vacuous,
                 .vacuity_unknown = vacuity_unknown,
                 .verified_with_caveats = status == z3.Z3_L_FALSE and (vacuity_unknown or self.encoder.isDegraded()),
@@ -3510,6 +3513,7 @@ pub const VerificationPass = struct {
             try writer.print("- Vacuous: `{any}`\n", .{run.vacuous});
             try writer.print("- Vacuity inconclusive: `{any}`\n", .{run.vacuity_unknown});
             try writer.print("- Verified with caveats: `{any}`\n", .{run.verified_with_caveats});
+            try writer.print("- Core minimized: `{any}`\n", .{run.core_minimized});
             if (run.vacuity_unknown) {
                 try writer.writeAll("- Warning: vacuity check was inconclusive; proof result may still rely on inconsistent assumptions.\n");
             }
@@ -3536,10 +3540,8 @@ pub const VerificationPass = struct {
                 try writer.writeAll(model);
                 try writer.writeAll("\n```\n");
             }
-            if (run.proof) |proof| {
-                try writer.writeAll("- Raw Z3 Proof Object:\n```smt2\n");
-                try writer.writeAll(proof);
-                try writer.writeAll("\n```\n");
+            if (run.proof != null) {
+                try writer.writeAll("- Raw Z3 proof object omitted from markdown; see JSON report for machine-oriented proof payload.\n");
             }
             try writer.writeAll("- SMT-LIB:\n```smt2\n");
             try writer.writeAll(query.smtlib_z);
@@ -3830,6 +3832,8 @@ pub const VerificationPass = struct {
             try writer.writeAll(if (run.vacuity_unknown) "true" else "false");
             try writer.writeAll(",\"verified_with_caveats\":");
             try writer.writeAll(if (run.verified_with_caveats) "true" else "false");
+            try writer.writeAll(",\"core_minimized\":");
+            try writer.writeAll(if (run.core_minimized) "true" else "false");
             try writer.writeAll(",\"explain_core\":");
             if (run.explain) |explain| {
                 try writeJsonStringEscaped(writer, explain);
@@ -5273,6 +5277,7 @@ const ReportQueryRun = struct {
     proof: ?[]u8 = null,
     explain: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
+    core_minimized: bool = false,
     vacuous: bool = false,
     vacuity_unknown: bool = false,
     verified_with_caveats: bool = false,
@@ -6182,11 +6187,17 @@ fn formatUnsatCoreSummary(
 fn minimizeUnsatCoreGreedy(
     self: *VerificationPass,
     initial_core: []const z3.Z3_ast,
-) ![]z3.Z3_ast {
-    if (initial_core.len <= 1) return try self.allocator.dupe(z3.Z3_ast, initial_core);
+) !MinimizedUnsatCore {
+    if (initial_core.len <= 1) {
+        return .{
+            .asts = try self.allocator.dupe(z3.Z3_ast, initial_core),
+            .changed = false,
+        };
+    }
 
     var current = try self.allocator.dupe(z3.Z3_ast, initial_core);
     errdefer self.allocator.free(current);
+    var changed = false;
 
     var idx: usize = 0;
     while (idx < current.len) {
@@ -6203,25 +6214,36 @@ fn minimizeUnsatCoreGreedy(
             const minimized = try trial.toOwnedSlice();
             self.allocator.free(current);
             current = minimized;
+            changed = true;
             continue;
         }
 
         idx += 1;
     }
 
-    return current;
+    return .{
+        .asts = current,
+        .changed = changed,
+    };
 }
+
+const MinimizedUnsatCore = struct {
+    asts: []z3.Z3_ast,
+    changed: bool,
+};
 
 const ExplainCheckResult = struct {
     status: z3.Z3_lbool,
     explain_str: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
+    core_minimized: bool = false,
 };
 
 const ExplainRunResult = struct {
     status: z3.Z3_lbool,
     explain_str: ?[]u8 = null,
     explain_tags: []const AssumptionTag = &.{},
+    core_minimized: bool = false,
     vacuous: bool = false,
     vacuity_unknown: bool = false,
 };
@@ -6249,6 +6271,7 @@ fn runExplainCheck(
                 .status = vacuity.status,
                 .explain_str = vacuity.explain_str,
                 .explain_tags = vacuity.explain_tags,
+                .core_minimized = vacuity.core_minimized,
                 .vacuous = true,
             };
         }
@@ -6273,6 +6296,7 @@ fn runExplainCheck(
             .status = proof.status,
             .explain_str = proof.explain_str,
             .explain_tags = proof.explain_tags,
+            .core_minimized = proof.core_minimized,
             .vacuity_unknown = vacuity.status == z3.Z3_L_UNDEF,
         };
     }
@@ -6310,17 +6334,21 @@ fn checkPreparedQueryTrackedAssumptions(
 
     const core_asts = try self.solver.getUnsatCoreOwned();
     defer self.allocator.free(core_asts);
-    const selected_core = if (self.minimize_cores)
+    const minimized_core = if (self.minimize_cores)
         try minimizeUnsatCoreGreedy(self, core_asts)
     else
-        try self.allocator.dupe(z3.Z3_ast, core_asts);
-    defer self.allocator.free(selected_core);
+        MinimizedUnsatCore{
+            .asts = try self.allocator.dupe(z3.Z3_ast, core_asts),
+            .changed = false,
+        };
+    defer self.allocator.free(minimized_core.asts);
 
-    const formatted = try formatUnsatCoreSummary(self.allocator, query.tracked_assumptions, selected_core);
+    const formatted = try formatUnsatCoreSummary(self.allocator, query.tracked_assumptions, minimized_core.asts);
     return .{
         .status = status,
         .explain_str = formatted.explain_str,
         .explain_tags = formatted.explain_tags,
+        .core_minimized = minimized_core.changed,
     };
 }
 
@@ -9216,10 +9244,32 @@ test "greedy core minimization removes redundant assumptions" {
 
     const candidate_core = [_]z3.Z3_ast{ p, r };
     const minimized = try minimizeUnsatCoreGreedy(&pass, candidate_core[0..]);
-    defer testing.allocator.free(minimized);
+    defer testing.allocator.free(minimized.asts);
 
-    try testing.expectEqual(@as(usize, 1), minimized.len);
-    try testing.expectEqual(p, minimized[0]);
+    try testing.expect(minimized.changed);
+    try testing.expectEqual(@as(usize, 1), minimized.asts.len);
+    try testing.expectEqual(p, minimized.asts[0]);
+}
+
+test "greedy core minimization reports unchanged when core cannot shrink" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setMinimizeCores(true);
+
+    const p = try pass.solver.mkFreshBoolProxy("min_core_single_p");
+    const q = try pass.solver.mkFreshBoolProxy("min_core_single_q");
+    const not_q = z3.Z3_mk_not(pass.context.ctx, q);
+
+    try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, p, q));
+    try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, p, not_q));
+
+    const candidate_core = [_]z3.Z3_ast{p};
+    const minimized = try minimizeUnsatCoreGreedy(&pass, candidate_core[0..]);
+    defer testing.allocator.free(minimized.asts);
+
+    try testing.expect(!minimized.changed);
+    try testing.expectEqual(@as(usize, 1), minimized.asts.len);
+    try testing.expectEqual(p, minimized.asts[0]);
 }
 
 test "prepared queries track environment assumptions used by ensures" {
@@ -10228,6 +10278,56 @@ test "rendered SMT report json includes z3 proof metadata and proof payload" {
     try testing.expect(std.mem.indexOf(u8, json, "\"proof\":\"(proof raw-z3-proof)\"") != null);
 }
 
+test "rendered SMT report markdown omits raw proof payloads" {
+    var pass = try VerificationPass.initWithProofs(testing.allocator, true);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "proved",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/proved.ora",
+        .line = 7,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .proof = try testing.allocator.dupe(u8, "(proof raw-z3-proof)"),
+    };
+    defer testing.allocator.free(run.proof.?);
+
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/proved.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "Raw Z3 proof object omitted from markdown") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "(proof raw-z3-proof)") == null);
+}
+
 test "rendered SMT report json includes minimize core setting" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -10274,6 +10374,69 @@ test "rendered SMT report json includes minimize core setting" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"minimize_cores\":true") != null);
+}
+
+test "rendered SMT report includes per-query core minimized flag" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+    pass.setMinimizeCores(true);
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "core",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/core.ora",
+        .line = 4,
+        .column = 9,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "core [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_FALSE,
+        .elapsed_ms = 1,
+        .explain = try testing.allocator.dupe(u8, "requires core.ora:3 requires"),
+        .core_minimized = true,
+    };
+    defer testing.allocator.free(run.explain.?);
+
+    const summary = ReportSummary{
+        .total_queries = 1,
+        .unsat = 1,
+        .verification_success = true,
+    };
+    const kind_counts = ReportKindCounts{
+        .obligation = 1,
+    };
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/core.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"core_minimized\":true") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/core.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Core minimized: `true`") != null);
 }
 
 test "rendered SMT report includes verified_with_caveats" {
