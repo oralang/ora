@@ -381,7 +381,7 @@ pub fn main() !void {
     const verify_calls: ?bool = parsed.verify_calls;
     const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
-    const explain_cores: bool = parsed.explain_cores;
+    const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
     const emit_smt_report: bool = parsed.emit_smt_report;
@@ -1594,8 +1594,8 @@ fn printUsage() !void {
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
-    try stdout.print("  --z3-proofs            - Enable raw Z3 proof generation (slower, report/debug only)\n", .{});
-    try stdout.print("  --minimize-cores       - Greedily minimize unsat cores in explain mode (slower)\n", .{});
+    try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
+    try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});

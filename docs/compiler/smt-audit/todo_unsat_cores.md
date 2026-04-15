@@ -2,7 +2,7 @@
 
 **Scope.** Implementation plan for unsat-core support in Ora's SMT verifier. This document is intentionally limited to unsat cores, vacuity detection, and proof explainability for successful proofs. It does **not** include proof-generation/certificate support.
 
-**Status.** V1 landed.
+**Status.** Core explainability support landed. This document remains focused on unsat-core explainability; adjacent proof-object and core-minimization support now exists in the implementation, but those are not the primary subject of this document.
 
 Current implemented behavior:
 
@@ -10,6 +10,7 @@ Current implemented behavior:
 - explain mode always routed through the canonical prepared-query engine
 - vacuity pre-check
 - unsat-core extraction for successful proofs
+- optional greedy core minimization via `--minimize-cores`
 - structured explain tags in SMT report JSON/markdown
 - tracked/source-level assumption kinds currently supported:
   - `requires`
@@ -26,9 +27,9 @@ Current intentional limits:
   - no frame glue
   - no environment glue
   - no broad imported-callee obligation tracking in explain cores
-- no proof generation
-- no minimal-core minimization
 - legacy fallback no longer owns explain behavior; explain bypasses it and uses prepared queries
+- no independent proof checker / certificate export
+- raw proof objects, when enabled separately, are not source-level explanations
 
 ---
 
