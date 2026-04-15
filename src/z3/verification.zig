@@ -130,6 +130,7 @@ pub const VerificationPass = struct {
     timeout_ms: ?u32,
     parallel: bool,
     max_workers: usize,
+    force_legacy_verifier: bool,
     filter_function_name: ?[]const u8 = null,
     verify_mode: VerifyMode = .Full,
     verify_calls: bool = true,
@@ -229,6 +230,12 @@ pub const VerificationPass = struct {
             break :blk parseBoolEnv(val);
         } else false;
 
+        const legacy_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_FORCE_LEGACY_VERIFIER") catch null;
+        const force_legacy_verifier = if (legacy_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk parseBoolEnv(val);
+        } else false;
+
         const workers_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_WORKERS") catch null;
         var max_workers: usize = std.Thread.getCpuCount() catch 1;
         if (workers_env) |val| {
@@ -293,6 +300,7 @@ pub const VerificationPass = struct {
             .timeout_ms = timeout_ms,
             .parallel = parallel,
             .max_workers = max_workers,
+            .force_legacy_verifier = force_legacy_verifier,
             .verify_mode = verify_mode,
             .verify_calls = verify_calls,
             .verify_state = verify_state,
@@ -2465,12 +2473,14 @@ pub const VerificationPass = struct {
     }
 
     pub fn runVerificationPass(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
-        // Transitional routing: use the prepared-query engine as the default
-        // execution path so verification semantics come from one query builder.
-        // Keep the legacy direct solver path below as an emergency fallback
-        // until it can be deleted after parity is confirmed.
-        const use_prepared_engine = self.parallel or self.verify_calls or !self.verify_calls;
+        // Prepared queries are canonical. The direct solver path remains only as
+        // an emergency fallback, and explain-mode features must continue to run
+        // against prepared queries even if that fallback is forced.
+        const use_prepared_engine = !self.force_legacy_verifier or self.explain_cores or self.minimize_cores;
         if (use_prepared_engine) {
+            if (self.force_legacy_verifier and (self.explain_cores or self.minimize_cores)) {
+                std.debug.print("note: explain/minimize mode bypasses legacy verifier fallback; running prepared queries\n", .{});
+            }
             if (self.parallel) {
                 if (self.explain_cores) {
                     std.debug.print("note: --explain disables parallel execution; running sequentially\n", .{});
@@ -11112,6 +11122,32 @@ test "explain mode reports contradictory requires as vacuous" {
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
+}
+
+test "explain mode bypasses legacy verifier fallback and still reports vacuity" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildContradictoryRequiresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+    pass.force_legacy_verifier = true;
+    pass.parallel = false;
+
+    var verification_result = try pass.runVerificationPass(module);
+    defer verification_result.deinit();
+
+    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer testing.allocator.free(artifacts.markdown);
+    defer testing.allocator.free(artifacts.json);
+
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
 }
 
