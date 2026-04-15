@@ -623,6 +623,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                             .kind = .ensures,
                             .expr = assert_stmt.condition,
                             .range = assert_stmt.range,
+                            .verification_context = "ghost_axiom",
                         });
                     },
                     .Assume => |assume_stmt| {
@@ -630,6 +631,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                             .kind = .requires,
                             .expr = assume_stmt.condition,
                             .range = assume_stmt.range,
+                            .verification_context = "ghost_axiom",
                         });
                     },
                     else => {},

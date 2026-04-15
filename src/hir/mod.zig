@@ -939,6 +939,7 @@ const FunctionLowerer = struct {
         kind: ast.SpecClauseKind,
         expr: ast.ExprId,
         range: source.TextRange,
+        verification_context: ?[]const u8 = null,
     };
 
     parent: *Lowerer,

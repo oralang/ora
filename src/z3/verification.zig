@@ -38,6 +38,7 @@ const AssumptionKind = enum {
     assume,
     callee_obligation,
     callee_ensures,
+    ghost_axiom,
     env_assume,
     frame,
     loop_invariant,
@@ -1504,14 +1505,16 @@ pub const VerificationPass = struct {
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                _ = try self.recordEncodedAnnotation(op, .Requires, condition_value, null);
+                const annotation_index = try self.recordEncodedAnnotation(op, .Requires, condition_value, null);
+                self.encoded_annotations.items[annotation_index].verification_context = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
             // extract ensures condition
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
-                _ = try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
+                const annotation_index = try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
+                self.encoded_annotations.items[annotation_index].verification_context = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
             }
         } else if (std.mem.eql(u8, op_name, "ora.invariant")) {
             // extract invariant condition
@@ -1536,17 +1539,18 @@ pub const VerificationPass = struct {
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
                 const origin_attr = try self.getStringAttr(op, "ora.assume_origin", &self.guard_id_storage);
+                const verification_context = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
                 const assume_kind: AnnotationKind = if (origin_attr) |origin| blk: {
                     if (std.mem.eql(u8, origin, "path")) break :blk .PathAssume;
                     break :blk .Assume;
                 } else blk: {
-                    const context_attr = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
-                    if (context_attr) |context_str| {
+                    if (verification_context) |context_str| {
                         if (std.mem.eql(u8, context_str, "path_assumption")) break :blk .PathAssume;
                     }
                     break :blk .Assume;
                 };
                 const annotation_index = try self.recordEncodedAnnotation(op, assume_kind, condition_value, null);
+                self.encoded_annotations.items[annotation_index].verification_context = verification_context;
                 if (assume_kind == .PathAssume) {
                     const ann = self.encoded_annotations.items[annotation_index];
                     try self.active_path_assumptions.append(.{
@@ -5389,6 +5393,7 @@ const EncodedAnnotation = struct {
     line: u32,
     column: u32,
     label: ?[]const u8 = null,
+    verification_context: ?[]const u8 = null,
     imported_obligation_source: ?ImportedObligationSource = null,
     guard_id: ?[]const u8 = null,
     loop_owner: ?u64 = null,
@@ -6616,6 +6621,7 @@ fn defaultTrackedAssumptionLabel(kind: AssumptionKind) []const u8 {
         .assume => "assume",
         .callee_obligation => "callee obligation",
         .callee_ensures => "callee ensures",
+        .ghost_axiom => "ghost axiom",
         .env_assume => "environment assumption",
         .frame => "frame condition",
         .loop_invariant => "loop invariant",
@@ -6660,7 +6666,13 @@ fn addTrackedBaseAssumptions(
 ) !void {
     for (annotations) |ann| {
         switch (ann.kind) {
-            .Requires => try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(.requires, ann)),
+            .Requires => {
+                const tracked_kind: AssumptionKind = if (ann.verification_context) |context|
+                    if (std.mem.eql(u8, context, "ghost_axiom")) .ghost_axiom else .requires
+                else
+                    .requires;
+                try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(tracked_kind, ann));
+            },
             .Assume => try appendTrackedAssumption(list, ann.condition, makeTrackedAssumptionTag(.assume, ann)),
             else => {},
         }
@@ -8498,6 +8510,38 @@ fn buildEnvCallerEnsuresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
+fn buildGhostAxiomRequiresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const sym_name_attr = mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ghost_axiom_requires_test"));
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", sym_name_attr),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
+    const cond = mlir.oraOperationGetResult(true_op, 0);
+    const requires_op = mlir.oraRequiresOpCreate(mlir_ctx, loc, cond);
+    mlir.oraOperationSetAttributeByName(requires_op, testStringRef("ora.verification_context"), mlir.oraStringAttrCreate(mlir_ctx, testStringRef("ghost_axiom")));
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, cond);
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+
+    mlir.oraBlockAppendOwnedOperation(func_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, requires_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -9823,6 +9867,39 @@ test "prepared queries track frame conditions from map-store summaries" {
         }
     }
     try testing.expect(saw_frame);
+}
+
+test "prepared queries classify ghost_axiom requires separately from plain requires" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setExplainCores(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGhostAxiomRequiresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_ghost_axiom = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.function_name, "ghost_axiom_requires_test")) continue;
+        if (q.kind != .Obligation or q.obligation_kind != .Ensures) continue;
+        for (q.tracked_assumptions) |tracked| {
+            if (tracked.tag.kind != .ghost_axiom) continue;
+            saw_ghost_axiom = true;
+            try testing.expectEqualStrings("ghost axiom", tracked.tag.label);
+        }
+    }
+    try testing.expect(saw_ghost_axiom);
 }
 
 test "guard violate query includes scoped path assumptions" {

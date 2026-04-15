@@ -129,6 +129,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const condition = try self.lowerExpr(clause.expr, &self.locals);
                     const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    if (clause.verification_context) |context| {
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                    }
                     appendOp(self.block, op);
                 }
                 try @This().emitExtraGuardClauses(self, &self.locals);
@@ -177,6 +180,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const condition = try self.lowerExpr(clause.expr, locals);
                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                if (clause.verification_context) |context| {
+                    mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                }
                 appendOp(self.block, ensure);
             }
         }
@@ -980,6 +986,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                     const condition = try self.lowerExpr(clause.expr, locals);
                                     const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                    if (clause.verification_context) |context| {
+                                        mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                                    }
                                     appendOp(self.block, ensure);
                                 }
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
@@ -1026,6 +1035,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 const condition = try self.lowerExpr(clause.expr, locals);
                                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                if (clause.verification_context) |context| {
+                                    mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                                }
                                 appendOp(self.block, ensure);
                             }
                             if (self.deferred_return_value_slot) |slot| {
@@ -1065,6 +1077,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const condition = try self.lowerExpr(clause.expr, locals);
                             const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                             if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                            if (clause.verification_context) |context| {
+                                mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                            }
                             appendOp(self.block, ensure);
                         }
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
