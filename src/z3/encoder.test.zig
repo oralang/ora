@@ -60,6 +60,45 @@ test "encodeMLIRType maps bool and i32" {
     try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, basis))));
 }
 
+test "quantified bytes and string binders use sequence sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bytes_sort = encoder.quantifiedVarSortFromTypeStringForTesting("bytes");
+    const string_sort = encoder.quantifiedVarSortFromTypeStringForTesting("string");
+
+    try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, bytes_sort));
+    try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, string_sort));
+
+    const bytes_basis = z3.Z3_get_seq_sort_basis(z3_ctx.ctx, bytes_sort);
+    const string_basis = z3.Z3_get_seq_sort_basis(z3_ctx.ctx, string_sort);
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, bytes_basis))));
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, string_basis))));
+}
+
+test "printed memref and slice sorts match shaped array encoding" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const memref_sort = try encoder.sortFromPrintedTypeForTesting("memref<4x5xi32>");
+    try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, memref_sort))));
+    const memref_inner = z3.Z3_get_array_sort_range(z3_ctx.ctx, memref_sort);
+    try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, memref_inner))));
+    const memref_leaf = z3.Z3_get_array_sort_range(z3_ctx.ctx, memref_inner);
+    try testing.expectEqual(@as(u32, 32), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, memref_leaf))));
+
+    const slice_sort = try encoder.sortFromPrintedTypeForTesting("!ora.slice<!ora.bytes>");
+    try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, slice_sort))));
+    const slice_leaf = z3.Z3_get_array_sort_range(z3_ctx.ctx, slice_sort);
+    try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, slice_leaf));
+}
+
 test "ora.bytes.constant encodes canonical hex string" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -11401,6 +11440,74 @@ test "direct zero-iteration scf.for iter-arg result encodes exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "loop result entry points agree for canonical scf.while and scf.for" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const false_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 0);
+    const i256_seven_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const index_zero_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const index_one_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+
+    const false_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, false_attr);
+    const init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, i256_seven_attr);
+    const index_zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, index_zero_attr);
+    const index_one_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, index_one_attr);
+
+    const while_init = mlir.oraOperationGetResult(init_op, 0);
+    const while_results = [_]mlir.MlirType{i256_ty};
+    const while_op = mlir.oraScfWhileOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{while_init}, 1, &while_results, while_results.len);
+    const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
+    mlir.oraBlockAppendOwnedOperation(before_block, mlir.oraScfConditionOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(false_op, 0),
+        &[_]mlir.MlirValue{while_init},
+        1,
+    ));
+
+    const while_via_operation = try encoder.encodeOperationWithModeForTesting(while_op, .Current);
+    const while_via_result = try encoder.encodeOperationResultWithModeForTesting(while_op, 0, .Current);
+
+    const for_op = mlir.oraScfForOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(index_zero_op, 0),
+        mlir.oraOperationGetResult(index_zero_op, 0),
+        mlir.oraOperationGetResult(index_one_op, 0),
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(init_op, 0)},
+        1,
+        false,
+    );
+
+    const for_via_operation = try encoder.encodeOperationWithModeForTesting(for_op, .Current);
+    const for_via_result = try encoder.encodeOperationResultWithModeForTesting(for_op, 0, .Current);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, while_via_operation, while_via_result)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.reset();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, for_via_operation, for_via_result)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "direct symbolic scf.for identity iter-arg result encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -13229,6 +13336,34 @@ test "arith shrui encodes logical right shift" {
     const ast = try encoder.encodeOperation(shr_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") != null);
+}
+
+test "arith shli encodes left shift" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shl_op = mlir.oraArithShlIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(shl_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvshl") != null);
 }
 
 test "arith shrsi encodes arithmetic right shift" {
@@ -15320,10 +15455,148 @@ test "unsupported sort coercion records degradation" {
         z3.Z3_mk_string_symbol(z3_ctx.ctx, "x"),
         seq_bv8_sort,
     );
-    _ = encoder.coerceAstToSortForTesting(ast, bv8_sort);
+    const coerced = encoder.coerceAstToSortForTesting(ast, bv8_sort);
 
     try testing.expect(encoder.isDegraded());
     try testing.expectEqualStrings("unsupported AST sort coercion", encoder.degradationReason().?);
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, coerced)))));
+}
+
+test "bitvector width-changing coercions degrade instead of silently widening or narrowing" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv8_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const bv16_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 16);
+    const ast = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "w"),
+        bv8_sort,
+    );
+
+    const widened = encoder.coerceAstToSortForTesting(ast, bv16_sort);
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("bitvector widening requires explicit signedness-aware coercion", encoder.degradationReason().?);
+    try testing.expectEqual(@as(u32, 16), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, widened)))));
+
+    var encoder_narrow = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder_narrow.deinit();
+    const narrowed = encoder_narrow.coerceAstToSortForTesting(widened, bv8_sort);
+    try testing.expect(encoder_narrow.isDegraded());
+    try testing.expectEqualStrings("bitvector narrowing requires explicit width-fit proof", encoder_narrow.degradationReason().?);
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, narrowed)))));
+}
+
+test "ora.length to u256 result is exact under bounded byte-sequence model" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const result_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const bytes_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xdeadbeef"), bytes_ty);
+    const length_op = mlir.oraLengthOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(bytes_op, 0), result_ty);
+
+    const ast = try encoder.encodeOperation(length_op);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    const expected = try encoder.encodeIntegerConstant(4, 256);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.length to narrow bitvector result degrades instead of applying unchecked int2bv" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const result_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+    const bytes_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xdeadbeef"), bytes_ty);
+    const length_op = mlir.oraLengthOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(bytes_op, 0), result_ty);
+
+    const ast = try encoder.encodeOperation(length_op);
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("sequence length to narrow bitvector requires explicit bound proof", encoder.degradationReason().?);
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, ast)))));
+}
+
+test "sequence index coercion preserves signedness" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv8_sort = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const minus_one = z3.Z3_mk_numeral(z3_ctx.ctx, "255", bv8_sort);
+    const signed_index = encoder.coerceAstToSeqIndexIntForTesting(minus_one, true);
+    const unsigned_index = encoder.coerceAstToSeqIndexIntForTesting(minus_one, false);
+    const int_sort = z3.Z3_mk_int_sort(z3_ctx.ctx);
+    const minus_one_int = z3.Z3_mk_numeral(z3_ctx.ctx, "-1", int_sort);
+    const two_fifty_five_int = z3.Z3_mk_numeral(z3_ctx.ctx, "255", int_sort);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, signed_index, minus_one_int)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    try solver.resetChecked();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, unsigned_index, two_fifty_five_int)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.byte_at zero-extends extracted byte to wider bitvector results" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const index_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const bytes_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xab"), bytes_ty);
+    const index_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
+    const index_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, index_attr);
+    const byte_at = mlir.oraByteAtOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(bytes_op, 0), mlir.oraOperationGetResult(index_op, 0), i256_ty);
+
+    const ast = try encoder.encodeOperation(byte_at);
+    try testing.expect(!encoder.isDegraded());
+
+    const expected = z3.Z3_mk_numeral(z3_ctx.ctx, "171", z3.Z3_get_sort(z3_ctx.ctx, ast));
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "degradation reason keeps first recorded cause" {
@@ -15839,6 +16112,29 @@ test "unsigned mul overflow check proves bounded constant multiplier safe" {
     defer solver.deinit();
     solver.assert(z3.Z3_mk_bvule(z3_ctx.ctx, lhs_sym, bound));
     solver.assert(overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "signed mul overflow check catches MIN_INT times negative one" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv256 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const min_int = z3.Z3_mk_numeral(
+        z3_ctx.ctx,
+        "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+        bv256,
+    );
+    const neg_one = z3.Z3_mk_numeral(z3_ctx.ctx, "-1", bv256);
+
+    const overflow = encoder.checkSignedMulOverflow(min_int, neg_one);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, overflow));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
@@ -16432,7 +16728,7 @@ test "nested map_store rethreads inner update through outer map" {
     _ = inner_after_value;
 }
 
-test "map key operands are coerced to map domain width" {
+test "map key width mismatch degrades instead of silently coercing" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -16467,13 +16763,10 @@ test "map key operands are coerced to map domain width" {
     const map_after = mlir.oraOperationGetResult(map_load_after, 0);
     const map_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, map_after, key256, i256_ty);
     const loaded = try encoder.encodeOperation(map_get);
-    const expected = try encoder.encodeValue(value);
 
-    var solver = try Solver.init(&z3_ctx, testing.allocator);
-    defer solver.deinit();
-    const neq = z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected));
-    solver.assert(neq);
-    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("bitvector widening requires explicit signedness-aware coercion", encoder.degradationReason().?);
+    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, loaded)))));
 }
 
 test "map_store emits quantified frame constraint" {

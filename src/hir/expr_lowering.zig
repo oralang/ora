@@ -1040,8 +1040,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (imported_target) |target| blk: {
                     _ = target;
                     break :blk try self.parent.runtimeFunctionParameters(function);
-                } else
-                    try self.parent.runtimeFunctionParameters(function)
+                } else try self.parent.runtimeFunctionParameters(function)
             else
                 &.{};
             for (runtime_args, 0..) |arg, index| {

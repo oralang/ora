@@ -29,6 +29,18 @@ pub const Solver = struct {
         };
     }
 
+    pub fn initForLogic(context: *Context, allocator: std.mem.Allocator, logic: [:0]const u8) !Solver {
+        const logic_symbol = c.Z3_mk_string_symbol(context.ctx, logic.ptr);
+        const solver = c.Z3_mk_solver_for_logic(context.ctx, logic_symbol) orelse return error.SolverInitFailed;
+        c.Z3_solver_inc_ref(context.ctx, solver);
+
+        return Solver{
+            .context = context,
+            .solver = solver,
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *Solver) void {
         c.Z3_solver_dec_ref(self.context.ctx, self.solver);
     }
@@ -252,6 +264,21 @@ test "setRandomSeed configures solver without Z3 error" {
 
     try solver.setRandomSeed(7);
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
+}
+
+test "initForLogic creates a usable logic-specific solver" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.initForLogic(&context, testing.allocator, "QF_AUFBV");
+    defer solver.deinit();
+
+    const bool_sort = c.Z3_mk_bool_sort(context.ctx);
+    const p = c.Z3_mk_const(context.ctx, c.Z3_mk_string_symbol(context.ctx, "logic_p"), bool_sort);
+
+    try solver.assertChecked(p);
+    try solver.assertChecked(c.Z3_mk_not(context.ctx, p));
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkChecked());
 }
 
 test "checked solver operations succeed on simple SAT query" {

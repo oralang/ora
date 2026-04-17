@@ -171,6 +171,14 @@ fn verifyExampleWithoutDegradation(
 }
 
 fn verifyTextWithoutDegradation(source_text: []const u8, function_name: ?[]const u8) !VerificationProbeSummary {
+    return verifyTextWithoutDegradationWithTimeout(source_text, function_name, null);
+}
+
+fn verifyTextWithoutDegradationWithTimeout(
+    source_text: []const u8,
+    function_name: ?[]const u8,
+    timeout_ms: ?u32,
+) !VerificationProbeSummary {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
 
@@ -178,6 +186,7 @@ fn verifyTextWithoutDegradation(source_text: []const u8, function_name: ?[]const
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     errdefer verifier.deinit();
     verifier.filter_function_name = function_name;
+    verifier.timeout_ms = timeout_ms;
 
     var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
     errdefer result.deinit();
@@ -691,7 +700,7 @@ test "compiler lowers error-union match expressions with ok and err bindings" {
         \\error Failure(code: u256);
         \\pub fn run(value: Result<u256, Failure>) -> u256 {
         \\    let out = match (value) {
-            \\        Ok(inner) => inner,
+        \\        Ok(inner) => inner,
         \\        Err(err) => err.code,
         \\    };
         \\    return out;
@@ -11978,6 +11987,37 @@ test "compiler lowers native string and bytes len field access" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.length"));
 }
 
+test "compiler lowers checked cast of native bytes length through asserted truncation" {
+    const source_text =
+        \\pub fn bytes_len_checked(data: bytes) -> u8 {
+        \\    return @cast(u8, data.len);
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.length"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "arith.trunci"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "safe cast narrowing overflow"));
+}
+
+test "compiler lowers explicit truncate of native bytes length without overflow assertion" {
+    const source_text =
+        \\pub fn bytes_len_truncated(data: bytes) -> u8 {
+        \\    return @truncate(u8, data.len);
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.length"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "arith.trunci"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "safe cast narrowing overflow"));
+}
+
 test "compiler converts native string and bytes len field access through OraToSIR" {
     const source_text =
         \\pub fn string_len(text: string) -> u256 {
@@ -12002,7 +12042,7 @@ test "compiler converts native string and bytes len field access through OraToSI
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
-test "verification supports native string and bytes len field access without degradation" {
+test "verification supports native string and bytes len field access under bounded byte-sequence model" {
     const source_text =
         \\pub fn same_string_len(text: string) -> bool
         \\    ensures(result)
@@ -12020,10 +12060,12 @@ test "verification supports native string and bytes len field access without deg
     var string_result = try verifyTextWithoutDegradation(source_text, "same_string_len");
     defer string_result.deinit(testing.allocator);
     try testing.expect(string_result.success);
+    try testing.expect(!string_result.degraded);
 
     var bytes_result = try verifyTextWithoutDegradation(source_text, "same_bytes_len");
     defer bytes_result.deinit(testing.allocator);
     try testing.expect(bytes_result.success);
+    try testing.expect(!bytes_result.degraded);
 }
 
 test "compiler lowers native string and bytes index access" {
@@ -12069,7 +12111,7 @@ test "compiler converts native string and bytes index access through OraToSIR" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
-test "verification supports native string and bytes index access without degradation" {
+test "verification supports native string and bytes index access when length preconditions establish safety" {
     const source_text =
         \\pub fn first_eq(data: bytes, text: string) -> bool
         \\    requires(data.len > 0)
@@ -12083,6 +12125,23 @@ test "verification supports native string and bytes index access without degrada
     var result = try verifyTextWithoutDegradation(source_text, "first_eq");
     defer result.deinit(testing.allocator);
     try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+}
+
+test "verification proves checked power for a bounded safe case without degradation" {
+    const source_text =
+        \\pub fn square_ten(x: u8) -> u8
+        \\    requires(x <= 10)
+        \\    ensures(result == x * x)
+        \\{
+        \\    return x ** 2;
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "square_ten", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
 }
 
 test "compiler lowers embedded std bytes helpers through imported module access" {
@@ -12900,6 +12959,30 @@ test "verification does not vacuously prove branch-local Result unwrap and get_e
     try testing.expect(!result.degraded);
 }
 
+test "verification supports multi-error Result match without degradation" {
+    const path = "ora-example/corpus/control-flow/match/result_multi_error_match.ora";
+    const function_name = "project";
+
+    var result = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named error payload Result match without degradation" {
+    const path = "ora-example/corpus/control-flow/match/result_named_error_payload_match.ora";
+    const function_name = "project";
+
+    var result = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
         \\comptime const std = @import("std");
@@ -13109,10 +13192,8 @@ test "compiler does not unroll runtime range-for loops above the unroll limit" {
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
-    try testing.expect(
-        std.mem.indexOf(u8, rendered, "ora.for_placeholder") != null or
-            std.mem.indexOf(u8, rendered, "scf.for") != null
-    );
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") != null or
+        std.mem.indexOf(u8, rendered, "scf.for") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
 }
 
@@ -16821,6 +16902,23 @@ test "complex SMT app probes match between sequential and parallel verification"
         try testing.expect(!seq_result.degraded);
         try testing.expect(!par_result.degraded);
         try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
+test "stale flagship probes remain non-degraded on current branch" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32 }{
+        .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000 },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000 },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000 },
+    };
+
+    for (probes) |probe| {
+        var result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, probe.timeout_ms);
+        defer result.deinit(testing.allocator);
+
+        try testing.expect(!result.degraded);
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.errors_len);
     }
 }
 

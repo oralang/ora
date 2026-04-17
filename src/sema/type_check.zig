@@ -609,8 +609,7 @@ const TypeChecker = struct {
         const bindings = if (function.is_generic) blk: {
             const inferred = self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call) orelse return null;
             break :blk inferred;
-        } else
-            &.{};
+        } else &.{};
 
         const runtime_parameter_types = self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings) orelse return null;
         const return_type = self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings) orelse return null;
@@ -3610,8 +3609,7 @@ const TypeChecker = struct {
             return .{ .unknown = {} };
         }
 
-        if (
-            std.mem.eql(u8, builtin.name, "addWithOverflow") or
+        if (std.mem.eql(u8, builtin.name, "addWithOverflow") or
             std.mem.eql(u8, builtin.name, "subWithOverflow") or
             std.mem.eql(u8, builtin.name, "mulWithOverflow") or
             std.mem.eql(u8, builtin.name, "divWithOverflow") or

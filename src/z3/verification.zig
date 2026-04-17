@@ -65,6 +65,11 @@ const ImportedObligationSource = struct {
     kind: Encoder.PendingObligationSourceKind,
 };
 
+const QuerySolverLogic = enum {
+    all,
+    qf_aufbv,
+};
+
 const TrackedAssumption = struct {
     proxy: ?z3.Z3_ast = null,
     ast: z3.Z3_ast,
@@ -122,6 +127,7 @@ pub const VerificationPass = struct {
 
     context: *Context,
     solver: Solver,
+    qf_solver: Solver,
     encoder: Encoder,
     allocator: std.mem.Allocator,
     debug_z3: bool,
@@ -141,6 +147,7 @@ pub const VerificationPass = struct {
     proofs_enabled: bool = false,
     minimize_cores: bool = false,
     test_force_degradation_after_build_queries: bool = false,
+    test_force_degradation_after_parallel_workers: bool = false,
     test_force_degradation_after_query_index: ?usize = null,
     test_force_degradation_reason: []const u8 = "test forced degradation",
 
@@ -190,6 +197,9 @@ pub const VerificationPass = struct {
 
         var solver = try Solver.init(context, allocator);
         errdefer solver.deinit();
+
+        var qf_solver = try Solver.initForLogic(context, allocator, "QF_AUFBV");
+        errdefer qf_solver.deinit();
 
         var encoder = Encoder.init(context, allocator);
         const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
@@ -280,14 +290,17 @@ pub const VerificationPass = struct {
         encoder.setVerifyCalls(verify_calls);
         encoder.setVerifyState(verify_state);
         try solver.setRandomSeed(random_seed);
+        try qf_solver.setRandomSeed(random_seed);
 
         if (timeout_ms) |ms| {
             try solver.setTimeoutMs(ms);
+            try qf_solver.setTimeoutMs(ms);
         }
 
         const pass = VerificationPass{
             .context = context,
             .solver = solver,
+            .qf_solver = qf_solver,
             .encoder = encoder,
             .allocator = allocator,
             .debug_z3 = debug_z3,
@@ -305,6 +318,8 @@ pub const VerificationPass = struct {
             .explain_cores = explain_cores,
             .proofs_enabled = proofs_enabled,
             .minimize_cores = minimize_cores,
+            .test_force_degradation_after_build_queries = false,
+            .test_force_degradation_after_parallel_workers = false,
             .test_force_degradation_after_query_index = null,
             .test_force_degradation_reason = "test forced degradation",
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
@@ -357,6 +372,12 @@ pub const VerificationPass = struct {
         self.encoder.noteDegradation(self.test_force_degradation_reason);
     }
 
+    fn maybeForceTestDegradationAfterParallelWorkers(self: *VerificationPass) void {
+        if (!@import("builtin").is_test) return;
+        if (!self.test_force_degradation_after_parallel_workers) return;
+        self.encoder.noteDegradation(self.test_force_degradation_reason);
+    }
+
     pub fn deinit(self: *VerificationPass) void {
         for (self.function_name_storage.items) |name| {
             self.allocator.free(name);
@@ -405,6 +426,7 @@ pub const VerificationPass = struct {
         self.releaseActivePathAssumptionsFrom(0);
         self.active_path_assumptions.deinit();
         self.encoder.deinit();
+        self.qf_solver.deinit();
         self.solver.deinit();
         self.context.deinit();
         self.allocator.destroy(self.context);
@@ -2444,10 +2466,11 @@ pub const VerificationPass = struct {
     fn tracePreparedQuery(self: *const VerificationPass, query_index: usize, query: PreparedQuery) void {
         if (!self.trace_smt) return;
         self.traceSmt(
-            "Q{d} kind={s} fn={s} loc={s}:{d}:{d} constraints={d} smt_bytes={d} smt_hash=0x{x}",
+            "Q{d} kind={s} logic={s} fn={s} loc={s}:{d}:{d} constraints={d} smt_bytes={d} smt_hash=0x{x}",
             .{
                 query_index + 1,
                 queryKindLabel(query.kind),
+                querySolverLogicLabel(query.solver_logic),
                 query.function_name,
                 query.file,
                 query.line,
@@ -2542,6 +2565,7 @@ pub const VerificationPass = struct {
         for (results) |*entry| entry.* = .{};
         defer {
             for (results) |entry| {
+                if (entry.err_message) |msg| self.allocator.free(msg);
                 if (entry.model_str) |model| self.allocator.free(model);
                 if (entry.explain_str) |explain| self.allocator.free(explain);
                 if (entry.explain_tags.len > 0) self.allocator.free(entry.explain_tags);
@@ -2549,32 +2573,43 @@ pub const VerificationPass = struct {
         }
 
         for (queries.items, 0..) |query, idx| {
+            const active_solver = solverForPreparedQuery(self, query);
             if (self.trace_smt) {
                 self.tracePreparedQuery(idx, query);
-                self.traceSmt("Q{d} load-smt begin", .{idx + 1});
+                self.traceSmt("Q{d} load-smt begin logic={s}", .{ idx + 1, querySolverLogicLabel(query.solver_logic) });
                 if (self.trace_smtlib) {
                     std.debug.print("smt-trace: Q{d} smtlib-begin\n{s}\n", .{ idx + 1, query.smtlib_z });
                     std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                 }
             }
 
-            try self.solver.resetChecked();
+            active_solver.resetChecked() catch |err| {
+                return try self.queryExecutionFailureResult(query, "solver reset", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+            };
             if (self.timeout_ms) |ms| {
-                try self.solver.setTimeoutMs(ms);
+                active_solver.setTimeoutMs(ms) catch |err| {
+                    return try self.queryExecutionFailureResult(query, "solver timeout configuration", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+                };
             }
 
             std.debug.print("{s} start\n", .{query.log_prefix});
             var timer = try std.time.Timer.start();
             const status = if (self.explain_cores) blk: {
-                const explain = try runExplainCheck(self, &self.solver, query, query.log_prefix);
+                const explain = runExplainCheck(self, active_solver, query, query.log_prefix) catch |err| {
+                    return try self.queryExecutionFailureResult(query, "explain-mode query execution", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+                };
                 results[idx].vacuous = explain.vacuous;
                 results[idx].vacuity_unknown = explain.vacuity_unknown;
                 results[idx].explain_str = explain.explain_str;
                 results[idx].explain_tags = explain.explain_tags;
                 break :blk explain.status;
             } else blk: {
-                try assertPreparedQueryConstraints(&self.solver, query.constraints);
-                break :blk try self.solver.checkChecked();
+                assertPreparedQueryConstraints(active_solver, query.constraints) catch |err| {
+                    return try self.queryExecutionFailureResult(query, "query assertion", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+                };
+                break :blk active_solver.checkChecked() catch |err| {
+                    return try self.queryExecutionFailureResult(query, "solver check", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+                };
             };
             const elapsed_ms = timer.read() / std.time.ns_per_ms;
 
@@ -2591,7 +2626,9 @@ pub const VerificationPass = struct {
             results[idx].elapsed_ms = elapsed_ms;
 
             if (status == z3.Z3_L_TRUE and (query.kind == .GuardViolate or query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost)) {
-                if (try self.solver.getModelChecked()) |model| {
+                if (active_solver.getModelChecked() catch |err| {
+                    return try self.queryExecutionFailureResult(query, "model extraction", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
+                }) |model| {
                     const raw = z3.Z3_model_to_string(self.context.ctx, model);
                     if (raw != null) {
                         results[idx].model_str = try self.allocator.dupe(u8, std.mem.span(raw));
@@ -2687,7 +2724,12 @@ pub const VerificationPass = struct {
         for (results) |*entry| {
             entry.* = .{};
         }
-        defer worker_allocator.free(results);
+        defer {
+            for (results) |entry| {
+                if (entry.err_message) |msg| worker_allocator.free(msg);
+            }
+            worker_allocator.free(results);
+        }
 
         const WorkState = struct {
             queries: []const PreparedQuery,
@@ -2695,6 +2737,7 @@ pub const VerificationPass = struct {
             results: []PreparedQueryResult,
             allocator: std.mem.Allocator,
             timeout_ms: ?u32,
+            random_seed: u32,
             trace_smt: bool,
             trace_smtlib: bool,
             setup_error_mutex: std.Thread.Mutex = .{},
@@ -2715,6 +2758,7 @@ pub const VerificationPass = struct {
             .results = results,
             .allocator = worker_allocator,
             .timeout_ms = scaledParallelTimeoutMs(self.timeout_ms, worker_count),
+            .random_seed = self.random_seed,
             .trace_smt = self.trace_smt,
             .trace_smtlib = self.trace_smtlib,
         };
@@ -2732,6 +2776,20 @@ pub const VerificationPass = struct {
                     return;
                 };
                 defer solver.deinit();
+                solver.setRandomSeed(ctx.random_seed) catch |err| {
+                    ctx.recordSetupError(err);
+                    return;
+                };
+
+                var qf_solver = Solver.initForLogic(&context, ctx.allocator, "QF_AUFBV") catch |err| {
+                    ctx.recordSetupError(err);
+                    return;
+                };
+                defer qf_solver.deinit();
+                qf_solver.setRandomSeed(ctx.random_seed) catch |err| {
+                    ctx.recordSetupError(err);
+                    return;
+                };
 
                 while (true) {
                     const idx = ctx.next_index.fetchAdd(1, .seq_cst);
@@ -2740,10 +2798,11 @@ pub const VerificationPass = struct {
                     const query = ctx.queries[idx];
                     if (ctx.trace_smt) {
                         std.debug.print(
-                            "smt-trace: Q{d} reset kind={s} fn={s} constraints={d} smt_bytes={d} smt_hash=0x{x}\n",
+                            "smt-trace: Q{d} reset kind={s} logic={s} fn={s} constraints={d} smt_bytes={d} smt_hash=0x{x}\n",
                             .{
                                 idx + 1,
                                 queryKindLabel(query.kind),
+                                querySolverLogicLabel(query.solver_logic),
                                 query.function_name,
                                 query.constraint_count,
                                 query.smtlib_bytes,
@@ -2751,8 +2810,13 @@ pub const VerificationPass = struct {
                             },
                         );
                     }
-                    solver.resetChecked() catch |err| {
+                    var active_solver: *Solver = switch (query.solver_logic) {
+                        .all => &solver,
+                        .qf_aufbv => &qf_solver,
+                    };
+                    active_solver.resetChecked() catch |err| {
                         ctx.results[idx].err = err;
+                        ctx.results[idx].err_message = duplicateZ3ApiMessageOrNull(&context, ctx.allocator, err);
                         continue;
                     };
                     if (ctx.trace_smt) {
@@ -2762,13 +2826,15 @@ pub const VerificationPass = struct {
                             std.debug.print("smt-trace: Q{d} smtlib-end\n", .{idx + 1});
                         }
                     }
-                    solver.loadFromSmtlib(query.smtlib_z, query.decl_symbols, query.decls) catch |err| {
+                    active_solver.loadFromSmtlib(query.smtlib_z, query.decl_symbols, query.decls) catch |err| {
                         ctx.results[idx].err = err;
+                        ctx.results[idx].err_message = duplicateZ3ApiMessageOrNull(&context, ctx.allocator, err);
                         continue;
                     };
                     if (ctx.timeout_ms) |ms| {
-                        solver.setTimeoutMs(ms) catch |err| {
+                        active_solver.setTimeoutMs(ms) catch |err| {
                             ctx.results[idx].err = err;
+                            ctx.results[idx].err_message = duplicateZ3ApiMessageOrNull(&context, ctx.allocator, err);
                             continue;
                         };
                     }
@@ -2782,8 +2848,9 @@ pub const VerificationPass = struct {
                         ctx.results[idx].err = err;
                         continue;
                     };
-                    const status = solver.checkChecked() catch |err| {
+                    const status = active_solver.checkChecked() catch |err| {
                         ctx.results[idx].err = err;
+                        ctx.results[idx].err_message = duplicateZ3ApiMessageOrNull(&context, ctx.allocator, err);
                         continue;
                     };
                     const elapsed_ms = timer.read() / std.time.ns_per_ms;
@@ -2820,8 +2887,9 @@ pub const VerificationPass = struct {
 
                     // Capture model string for SAT queries that surface counterexamples.
                     if (status == z3.Z3_L_TRUE and (query.kind == .GuardViolate or query.kind == .Obligation or query.kind == .LoopInvariantStep or query.kind == .LoopInvariantPost)) {
-                        if (solver.getModelChecked() catch |err| {
+                        if (active_solver.getModelChecked() catch |err| {
                             ctx.results[idx].err = err;
+                            ctx.results[idx].err_message = duplicateZ3ApiMessageOrNull(&context, ctx.allocator, err);
                             continue;
                         }) |model| {
                             const raw = z3.Z3_model_to_string(context.ctx, model);
@@ -2848,6 +2916,7 @@ pub const VerificationPass = struct {
         for (threads[0..launched]) |t| t.join();
 
         if (state.setup_error) |err| return err;
+        self.maybeForceTestDegradationAfterParallelWorkers();
 
         const combined = try self.collectPreparedQueryResults(queries.items, results);
         if (self.encoder.isDegraded()) {
@@ -2915,7 +2984,14 @@ pub const VerificationPass = struct {
         }
 
         for (results, 0..) |entry, idx| {
-            if (entry.err) |err| return err;
+            if (entry.err) |err| {
+                return try self.queryExecutionFailureResult(
+                    queries[idx],
+                    "parallel query execution",
+                    err,
+                    if (entry.err_message) |msg| try self.allocator.dupe(u8, msg) else null,
+                );
+            }
             const query = queries[idx];
             if (query.kind != .Base) continue;
 
@@ -4050,7 +4126,8 @@ pub const VerificationPass = struct {
             }
             try materializeTrackedAssumptionProxies(self, &tracked_base_assumptions);
 
-            const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items);
+            const base_solver_logic = inferQuerySolverLogic(self.context.ctx, assumption_constraints.items);
+            const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items, base_solver_logic);
             const base_smtlib = base_query.smtlib_z;
             const base_hash = std.hash.Wyhash.hash(0, base_smtlib);
             const base_tag = try formatQueryTag(self.allocator, assumption_constraints.items.len, base_hash);
@@ -4058,6 +4135,7 @@ pub const VerificationPass = struct {
             const base_log_prefix = try std.fmt.allocPrint(self.allocator, "{s} [base]{s}", .{ fn_name, base_tag });
             try appendPreparedQueryUnique(&queries, self.allocator, .{
                 .kind = .Base,
+                .solver_logic = base_solver_logic,
                 .function_name = fn_name,
                 .file = self.firstLocationFile(annotations),
                 .line = self.firstLocationLine(annotations),
@@ -4153,7 +4231,8 @@ pub const VerificationPass = struct {
                 try appendGoalTrackedAssumption(&tracked_obligation_assumptions, fn_name, ann, negated);
                 try materializeTrackedAssumptionProxies(self, &tracked_obligation_assumptions);
 
-                const obligation_query = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items);
+                const obligation_solver_logic = inferQuerySolverLogic(self.context.ctx, obligation_constraints.items);
+                const obligation_query = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items, obligation_solver_logic);
                 const obligation_smtlib = obligation_query.smtlib_z;
                 const obligation_hash = std.hash.Wyhash.hash(0, obligation_smtlib);
                 const obligation_tag = try formatQueryTag(self.allocator, obligation_constraints.items.len, obligation_hash);
@@ -4167,6 +4246,7 @@ pub const VerificationPass = struct {
                 );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
+                    .solver_logic = obligation_solver_logic,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
                     .obligation_kind = ann.kind,
@@ -4266,7 +4346,8 @@ pub const VerificationPass = struct {
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
                         try materializeTrackedAssumptionProxies(self, &tracked_step_assumptions);
 
-                        const step_query = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items);
+                        const step_solver_logic = inferQuerySolverLogic(self.context.ctx, step_constraints.items);
+                        const step_query = try buildSmtlibForConstraints(self.allocator, &self.solver, step_constraints.items, step_solver_logic);
                         const step_smtlib = step_query.smtlib_z;
                         const step_hash = std.hash.Wyhash.hash(0, step_smtlib);
                         const step_tag = try formatQueryTag(self.allocator, step_constraints.items.len, step_hash);
@@ -4278,6 +4359,7 @@ pub const VerificationPass = struct {
                         );
                         try appendPreparedQueryUnique(&queries, self.allocator, .{
                             .kind = .LoopInvariantStep,
+                            .solver_logic = step_solver_logic,
                             .function_name = fn_name,
                             .obligation_kind = .LoopInvariant,
                             .file = ann.file,
@@ -4337,7 +4419,8 @@ pub const VerificationPass = struct {
                     try appendGoalTrackedAssumption(&tracked_post_assumptions, fn_name, ensure_ann, negated_post);
                     try materializeTrackedAssumptionProxies(self, &tracked_post_assumptions);
 
-                    const post_query = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items);
+                    const post_solver_logic = inferQuerySolverLogic(self.context.ctx, post_constraints.items);
+                    const post_query = try buildSmtlibForConstraints(self.allocator, &self.solver, post_constraints.items, post_solver_logic);
                     const post_smtlib = post_query.smtlib_z;
                     const post_hash = std.hash.Wyhash.hash(0, post_smtlib);
                     const post_tag = try formatQueryTag(self.allocator, post_constraints.items.len, post_hash);
@@ -4349,6 +4432,7 @@ pub const VerificationPass = struct {
                     );
                     try appendPreparedQueryUnique(&queries, self.allocator, .{
                         .kind = .LoopInvariantPost,
+                        .solver_logic = post_solver_logic,
                         .function_name = fn_name,
                         .obligation_kind = .Ensures,
                         .file = ensure_ann.file,
@@ -4396,7 +4480,8 @@ pub const VerificationPass = struct {
                 try addRelevantConstraintSlice(self, &satisfy_constraints, ann.extra_constraints, &relevant_symbols);
                 try satisfy_constraints.append(ann.condition);
 
-                const satisfy_query = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items);
+                const satisfy_solver_logic = inferQuerySolverLogic(self.context.ctx, satisfy_constraints.items);
+                const satisfy_query = try buildSmtlibForConstraints(self.allocator, &self.solver, satisfy_constraints.items, satisfy_solver_logic);
                 const satisfy_smtlib = satisfy_query.smtlib_z;
                 const satisfy_hash = std.hash.Wyhash.hash(0, satisfy_smtlib);
                 const satisfy_tag = try formatQueryTag(self.allocator, satisfy_constraints.items.len, satisfy_hash);
@@ -4408,6 +4493,7 @@ pub const VerificationPass = struct {
                 );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardSatisfy,
+                    .solver_logic = satisfy_solver_logic,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
                     .file = ann.file,
@@ -4431,7 +4517,8 @@ pub const VerificationPass = struct {
                 const not_guard = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
                 try violate_constraints.append(not_guard);
 
-                const violate_query = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items);
+                const violate_solver_logic = inferQuerySolverLogic(self.context.ctx, violate_constraints.items);
+                const violate_query = try buildSmtlibForConstraints(self.allocator, &self.solver, violate_constraints.items, violate_solver_logic);
                 const violate_smtlib = violate_query.smtlib_z;
                 const violate_hash = std.hash.Wyhash.hash(0, violate_smtlib);
                 const violate_tag = try formatQueryTag(self.allocator, violate_constraints.items.len, violate_hash);
@@ -4443,6 +4530,7 @@ pub const VerificationPass = struct {
                 );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
+                    .solver_logic = violate_solver_logic,
                     .function_name = fn_name,
                     .guard_id = ann.guard_id,
                     .file = ann.file,
@@ -4680,11 +4768,26 @@ pub const VerificationPass = struct {
     fn annotationExtractionFailureResult(self: *VerificationPass, err: anyerror) !errors.VerificationResult {
         var result = errors.VerificationResult.init(self.allocator);
         const encoder_reason = self.encoder.degradationReason();
+        const z3_message = duplicateZ3ApiMessageOrNull(self.context, self.allocator, err);
+        defer if (z3_message) |msg| self.allocator.free(msg);
         const message = if (encoder_reason) |reason|
+            if (z3_message) |msg|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "verification aborted during annotation extraction: {s} ({s}; Z3: {s})",
+                    .{ @errorName(err), reason, msg },
+                )
+            else
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "verification aborted during annotation extraction: {s} ({s})",
+                    .{ @errorName(err), reason },
+                )
+        else if (z3_message) |msg|
             try std.fmt.allocPrint(
                 self.allocator,
-                "verification aborted during annotation extraction: {s} ({s})",
-                .{ @errorName(err), reason },
+                "verification aborted during annotation extraction: {s} (Z3: {s})",
+                .{ @errorName(err), msg },
             )
         else
             try std.fmt.allocPrint(
@@ -4693,6 +4796,31 @@ pub const VerificationPass = struct {
                 .{@errorName(err)},
             );
         try self.addUnknownVerificationError(&result, message, "", 0, 0);
+        return result;
+    }
+
+    fn queryExecutionFailureResult(
+        self: *VerificationPass,
+        query: PreparedQuery,
+        phase: []const u8,
+        err: anyerror,
+        z3_message: ?[]const u8,
+    ) !errors.VerificationResult {
+        var result = errors.VerificationResult.init(self.allocator);
+        defer if (z3_message) |msg| self.allocator.free(msg);
+        const message = if (z3_message) |msg|
+            try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted during {s} in {s}: {s} (Z3: {s})",
+                .{ phase, query.function_name, @errorName(err), msg },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "verification aborted during {s} in {s}: {s}",
+                .{ phase, query.function_name, @errorName(err) },
+            );
+        try self.addUnknownVerificationError(&result, message, query.file, query.line, query.column);
         return result;
     }
 
@@ -4766,6 +4894,7 @@ pub const VerificationPass = struct {
 
             const explain = try checkPreparedQueryTrackedAssumptions(
                 self,
+                &self.solver,
                 .{
                     .kind = .Base,
                     .function_name = "ghost_axiom_sanity",
@@ -5038,7 +5167,12 @@ fn formatQueryTag(allocator: std.mem.Allocator, constraint_count: usize, smtlib_
 }
 
 fn buildQueryMetadata(self: *VerificationPass, constraints: []const z3.Z3_ast) !struct { constraint_count: usize, smtlib_hash: u64 } {
-    const built = try buildSmtlibForConstraints(self.allocator, &self.solver, constraints);
+    const built = try buildSmtlibForConstraints(
+        self.allocator,
+        &self.solver,
+        constraints,
+        inferQuerySolverLogic(self.context.ctx, constraints),
+    );
     defer self.allocator.free(built.smtlib_z);
     if (built.decl_symbols.len > 0) self.allocator.free(built.decl_symbols);
     if (built.decls.len > 0) self.allocator.free(built.decls);
@@ -5886,6 +6020,7 @@ fn writeCounterexampleJson(writer: anytype, allocator: std.mem.Allocator, ce: er
 
 const PreparedQuery = struct {
     kind: QueryKind,
+    solver_logic: QuerySolverLogic = .all,
     function_name: []const u8,
     guard_id: ?[]const u8 = null,
     obligation_kind: ?AnnotationKind = null,
@@ -5914,6 +6049,7 @@ const PreparedQuery = struct {
 
 fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
     if (lhs.kind != rhs.kind) return false;
+    if (lhs.solver_logic != rhs.solver_logic) return false;
     if (!std.mem.eql(u8, lhs.function_name, rhs.function_name)) return false;
     if (lhs.obligation_kind != rhs.obligation_kind) return false;
     if ((lhs.guard_id == null) != (rhs.guard_id == null)) return false;
@@ -5946,6 +6082,7 @@ const PreparedQueryResult = struct {
     status: z3.Z3_lbool = z3.Z3_L_UNDEF,
     elapsed_ms: u64 = 0,
     err: ?anyerror = null,
+    err_message: ?[]const u8 = null,
     model_str: ?[]const u8 = null,
     explain_str: ?[]const u8 = null,
     explain_tags: []const AssumptionTag = &.{},
@@ -5953,15 +6090,28 @@ const PreparedQueryResult = struct {
     vacuity_unknown: bool = false,
 };
 
-fn scaledParallelTimeoutMs(timeout_ms: ?u32, worker_count: usize) ?u32 {
-    const base = timeout_ms orelse return null;
-    if (worker_count <= 1) return base;
+fn querySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
+    return switch (logic) {
+        .all => "ALL",
+        .qf_aufbv => "QF_AUFBV",
+    };
+}
 
-    const widened: u64 = @as(u64, base) * @as(u64, @intCast(worker_count));
-    return if (widened > std.math.maxInt(u32))
-        std.math.maxInt(u32)
-    else
-        @as(u32, @intCast(widened));
+fn solverForPreparedQuery(self: *VerificationPass, query: PreparedQuery) *Solver {
+    return switch (query.solver_logic) {
+        .all => &self.solver,
+        .qf_aufbv => &self.qf_solver,
+    };
+}
+
+fn scaledParallelTimeoutMs(timeout_ms: ?u32, worker_count: usize) ?u32 {
+    _ = worker_count;
+    return timeout_ms;
+}
+
+fn duplicateZ3ApiMessageOrNull(ctx: *Context, allocator: std.mem.Allocator, err: anyerror) ?[]const u8 {
+    if (err != error.Z3ApiError) return null;
+    return ctx.lastErrorMessageOwned(allocator) catch null;
 }
 
 fn inferReportVerificationSuccess(
@@ -6114,6 +6264,44 @@ fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z
 
 fn cloneConstraintAstSlice(allocator: std.mem.Allocator, constraints: []const z3.Z3_ast) ![]const z3.Z3_ast {
     return if (constraints.len == 0) &.{} else try allocator.dupe(z3.Z3_ast, constraints);
+}
+
+fn sortIsQfAufbvCompatible(ctx: z3.Z3_context, sort: z3.Z3_sort) bool {
+    return switch (z3.Z3_get_sort_kind(ctx, sort)) {
+        z3.Z3_BOOL_SORT, z3.Z3_BV_SORT => true,
+        z3.Z3_ARRAY_SORT => sortIsQfAufbvCompatible(ctx, z3.Z3_get_array_sort_domain(ctx, sort)) and
+            sortIsQfAufbvCompatible(ctx, z3.Z3_get_array_sort_range(ctx, sort)),
+        else => false,
+    };
+}
+
+fn astIsQfAufbvCompatible(ctx: z3.Z3_context, ast: z3.Z3_ast) bool {
+    const ast_kind = z3.Z3_get_ast_kind(ctx, ast);
+    if (ast_kind == z3.Z3_QUANTIFIER_AST) return false;
+    if (ast_kind != z3.Z3_APP_AST) return true;
+
+    const app = z3.Z3_to_app(ctx, ast);
+    const decl = z3.Z3_get_app_decl(ctx, app);
+    if (!sortIsQfAufbvCompatible(ctx, z3.Z3_get_range(ctx, decl))) return false;
+
+    const arity: usize = @intCast(z3.Z3_get_arity(ctx, decl));
+    for (0..arity) |idx| {
+        if (!sortIsQfAufbvCompatible(ctx, z3.Z3_get_domain(ctx, decl, @intCast(idx)))) return false;
+    }
+
+    const num_args: usize = @intCast(z3.Z3_get_app_num_args(ctx, app));
+    for (0..num_args) |idx| {
+        if (!astIsQfAufbvCompatible(ctx, z3.Z3_get_app_arg(ctx, app, @intCast(idx)))) return false;
+    }
+
+    return true;
+}
+
+fn inferQuerySolverLogic(ctx: z3.Z3_context, constraints: []const z3.Z3_ast) QuerySolverLogic {
+    for (constraints) |constraint| {
+        if (!astIsQfAufbvCompatible(ctx, constraint)) return .all;
+    }
+    return .qf_aufbv;
 }
 
 fn cloneTrackedAssumptionSlice(
@@ -6406,6 +6594,7 @@ fn formatUnsatCoreSummary(
 
 fn minimizeUnsatCoreGreedy(
     self: *VerificationPass,
+    solver: *Solver,
     initial_core: []const z3.Z3_ast,
 ) !MinimizedUnsatCore {
     if (initial_core.len <= 1) {
@@ -6429,7 +6618,7 @@ fn minimizeUnsatCoreGreedy(
             trial.appendAssumeCapacity(ast);
         }
 
-        const status = try self.solver.checkAssumptionsChecked(trial.items);
+        const status = try solver.checkAssumptionsChecked(trial.items);
         if (status == z3.Z3_L_FALSE) {
             const minimized = try trial.toOwnedSlice();
             self.allocator.free(current);
@@ -6478,7 +6667,7 @@ fn runExplainCheck(
     try assertPreparedQueryTrackedImplications(self, solver, query);
 
     if (query.kind != .Base) {
-        const vacuity = try checkPreparedQueryTrackedAssumptions(self, query, false);
+        const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
         if (vacuity.status == z3.Z3_L_FALSE) {
             if (log_prefix) |prefix| {
                 if (vacuity.explain_str) |core| {
@@ -6504,7 +6693,7 @@ fn runExplainCheck(
         if (vacuity.explain_str) |core| self.allocator.free(core);
         if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
 
-        const proof = try checkPreparedQueryTrackedAssumptions(self, query, true);
+        const proof = try checkPreparedQueryTrackedAssumptions(self, solver, query, true);
         if (log_prefix) |prefix| {
             if (proof.status == z3.Z3_L_FALSE) {
                 if (proof.explain_str) |core| {
@@ -6528,6 +6717,7 @@ fn runExplainCheck(
 
 fn checkPreparedQueryTrackedAssumptions(
     self: *VerificationPass,
+    solver: *Solver,
     query: PreparedQuery,
     include_goal: bool,
 ) !ExplainCheckResult {
@@ -6543,19 +6733,19 @@ fn checkPreparedQueryTrackedAssumptions(
 
     if (proxies.items.len == 0) {
         return .{
-            .status = try self.solver.checkChecked(),
+            .status = try solver.checkChecked(),
         };
     }
 
-    const status = try self.solver.checkAssumptionsChecked(proxies.items);
+    const status = try solver.checkAssumptionsChecked(proxies.items);
     if (status != z3.Z3_L_FALSE) {
         return .{ .status = status };
     }
 
-    const core_asts = try self.solver.getUnsatCoreOwned();
+    const core_asts = try solver.getUnsatCoreOwned();
     defer self.allocator.free(core_asts);
     const minimized_core = if (self.minimize_cores)
-        try minimizeUnsatCoreGreedy(self, core_asts)
+        try minimizeUnsatCoreGreedy(self, solver, core_asts)
     else
         MinimizedUnsatCore{
             .asts = try self.allocator.dupe(z3.Z3_ast, core_asts),
@@ -6673,6 +6863,7 @@ fn buildSmtlibForConstraints(
     allocator: std.mem.Allocator,
     solver: *Solver,
     constraints: []const z3.Z3_ast,
+    logic: QuerySolverLogic,
 ) !BuiltSmtlibQuery {
     const ctx = solver.context.ctx;
     var out: std.ArrayList(u8) = .{};
@@ -6683,7 +6874,9 @@ fn buildSmtlibForConstraints(
         symbols.deinit();
     }
 
-    try out.appendSlice(allocator, "(set-logic ALL)\n");
+    try out.appendSlice(allocator, "(set-logic ");
+    try out.appendSlice(allocator, querySolverLogicLabel(logic));
+    try out.appendSlice(allocator, ")\n");
     for (constraints) |constraint| {
         try collectAstSymbolDecls(allocator, ctx, constraint, &symbols);
     }
@@ -6704,6 +6897,35 @@ fn buildSmtlibForConstraints(
         .decl_symbols = &.{},
         .decls = &.{},
     };
+}
+
+fn parseSmtlibAssertionsOwned(
+    allocator: std.mem.Allocator,
+    ctx: z3.Z3_context,
+    smtlib: [:0]const u8,
+    decl_symbols: []const z3.Z3_symbol,
+    decls: []const z3.Z3_func_decl,
+) ![]z3.Z3_ast {
+    const parsed = z3.Z3_parse_smtlib2_string(
+        ctx,
+        smtlib.ptr,
+        0,
+        null,
+        null,
+        @intCast(decl_symbols.len),
+        if (decl_symbols.len == 0) null else decl_symbols.ptr,
+        if (decls.len == 0) null else decls.ptr,
+    ) orelse return error.Z3ApiError;
+    z3.Z3_ast_vector_inc_ref(ctx, parsed);
+    defer z3.Z3_ast_vector_dec_ref(ctx, parsed);
+
+    const count: usize = @intCast(z3.Z3_ast_vector_size(ctx, parsed));
+    var result = try allocator.alloc(z3.Z3_ast, count);
+    errdefer allocator.free(result);
+    for (0..count) |idx| {
+        result[idx] = z3.Z3_ast_vector_get(ctx, parsed, @intCast(idx));
+    }
+    return result;
 }
 
 fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, column: u32 } {
@@ -8467,6 +8689,43 @@ test "annotation extraction failure is reported as unknown verification error" {
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Unsupported"));
 }
 
+test "query execution failure result includes captured Z3 API message" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    _ = z3.Z3_parse_smtlib2_string(pass.context.ctx, "(assert", 0, null, null, 0, null, null);
+    try testing.expect(pass.context.lastErrorCode() != z3.Z3_OK);
+
+    const expected_message = try testing.allocator.dupe(u8, pass.context.lastErrorMessage());
+    defer testing.allocator.free(expected_message);
+
+    var query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 4,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
+    };
+    defer query.deinit(testing.allocator);
+
+    var result = try pass.queryExecutionFailureResult(
+        query,
+        "solver check",
+        error.Z3ApiError,
+        (duplicateZ3ApiMessageOrNull(pass.context, testing.allocator, error.Z3ApiError) orelse unreachable),
+    );
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "solver check"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Z3:"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, expected_message));
+}
+
 test "prepared queries include invariant-post for scf.for" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -9463,13 +9722,13 @@ test "tracked assumption proxies remain stable across vacuity and proof checks" 
 
     pass.solver.reset();
     try assertPreparedQueryUntrackedConstraints(&pass.solver, query.*);
-    const vacuity = try checkPreparedQueryTrackedAssumptions(&pass, query.*, false);
+    const vacuity = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query.*, false);
     if (vacuity.explain_str) |s| testing.allocator.free(s);
     if (vacuity.explain_tags.len > 0) testing.allocator.free(vacuity.explain_tags);
 
     pass.solver.reset();
     try assertPreparedQueryUntrackedConstraints(&pass.solver, query.*);
-    const proof = try checkPreparedQueryTrackedAssumptions(&pass, query.*, true);
+    const proof = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query.*, true);
     if (proof.explain_str) |s| testing.allocator.free(s);
     if (proof.explain_tags.len > 0) testing.allocator.free(proof.explain_tags);
 
@@ -9497,7 +9756,7 @@ test "greedy core minimization removes redundant assumptions" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkAssumptionsChecked(&assumptions));
 
     const candidate_core = [_]z3.Z3_ast{ p, r };
-    const minimized = try minimizeUnsatCoreGreedy(&pass, candidate_core[0..]);
+    const minimized = try minimizeUnsatCoreGreedy(&pass, &pass.solver, candidate_core[0..]);
     defer testing.allocator.free(minimized.asts);
 
     try testing.expect(minimized.changed);
@@ -9518,7 +9777,7 @@ test "greedy core minimization reports unchanged when core cannot shrink" {
     try pass.solver.assertChecked(z3.Z3_mk_implies(pass.context.ctx, p, not_q));
 
     const candidate_core = [_]z3.Z3_ast{p};
-    const minimized = try minimizeUnsatCoreGreedy(&pass, candidate_core[0..]);
+    const minimized = try minimizeUnsatCoreGreedy(&pass, &pass.solver, candidate_core[0..]);
     defer testing.allocator.free(minimized.asts);
 
     try testing.expect(!minimized.changed);
@@ -9950,11 +10209,137 @@ test "parallel verification matches sequential verification on conditional retur
     try expectVerificationResultsEquivalent(&seq_result, &par_result);
 }
 
-test "scaledParallelTimeoutMs widens timeout by worker count" {
+test "scaledParallelTimeoutMs preserves user timeout in parallel mode" {
     try testing.expectEqual(@as(?u32, null), scaledParallelTimeoutMs(null, 4));
     try testing.expectEqual(@as(?u32, 1000), scaledParallelTimeoutMs(1000, 1));
-    try testing.expectEqual(@as(?u32, 4000), scaledParallelTimeoutMs(1000, 4));
+    try testing.expectEqual(@as(?u32, 1000), scaledParallelTimeoutMs(1000, 4));
     try testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scaledParallelTimeoutMs(std.math.maxInt(u32), 2));
+}
+
+test "SMT-LIB build round-trips constraint ASTs for representative prepared queries" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module1 = buildEnvCallerEnsuresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module1);
+    const module2 = buildConditionalReturnMapStoreDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module2);
+    const module3 = buildGhostAxiomRequiresModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module3);
+    const module4 = buildForContractInvariantModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module4);
+
+    const modules = [_]mlir.MlirModule{ module1, module2, module3, module4 };
+
+    for (modules) |module| {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setExplainCores(true);
+
+        try pass.extractAnnotationsFromMLIR(module);
+        var queries = try pass.buildPreparedQueries();
+        defer {
+            for (queries.items) |*q| q.deinit(testing.allocator);
+            queries.deinit();
+        }
+
+        for (queries.items) |query| {
+            const built = try buildSmtlibForConstraints(testing.allocator, &pass.solver, query.constraints, query.solver_logic);
+            defer {
+                testing.allocator.free(built.smtlib_z);
+                if (built.decl_symbols.len > 0) testing.allocator.free(built.decl_symbols);
+                if (built.decls.len > 0) testing.allocator.free(built.decls);
+            }
+
+            const reparsed = try parseSmtlibAssertionsOwned(
+                testing.allocator,
+                pass.context.ctx,
+                built.smtlib_z,
+                built.decl_symbols,
+                built.decls,
+            );
+            defer testing.allocator.free(reparsed);
+
+            try testing.expectEqual(query.constraints.len, reparsed.len);
+            for (query.constraints, reparsed) |original, round_tripped| {
+                try pass.solver.resetChecked();
+                const equivalent = z3.Z3_mk_eq(
+                    pass.context.ctx,
+                    pass.encoder.coerceBoolean(original),
+                    pass.encoder.coerceBoolean(round_tripped),
+                );
+                try pass.solver.assertChecked(z3.Z3_mk_not(pass.context.ctx, equivalent));
+                try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkChecked());
+            }
+        }
+    }
+}
+
+test "query solver logic inference uses QF_AUFBV only for compatible formulas" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    const bool_sort = z3.Z3_mk_bool_sort(context.ctx);
+    const bv8_sort = z3.Z3_mk_bv_sort(context.ctx, 8);
+    const seq_bv8_sort = z3.Z3_mk_seq_sort(context.ctx, bv8_sort);
+
+    const p = z3.Z3_mk_const(context.ctx, z3.Z3_mk_string_symbol(context.ctx, "p"), bool_sort);
+    try testing.expectEqual(QuerySolverLogic.qf_aufbv, inferQuerySolverLogic(context.ctx, &[_]z3.Z3_ast{p}));
+
+    const bytes_sym = z3.Z3_mk_const(context.ctx, z3.Z3_mk_string_symbol(context.ctx, "bytes_q"), seq_bv8_sort);
+    const len = z3.Z3_mk_seq_length(context.ctx, bytes_sym);
+    try testing.expectEqual(QuerySolverLogic.all, inferQuerySolverLogic(context.ctx, &[_]z3.Z3_ast{len}));
+
+    const x = z3.Z3_mk_const(context.ctx, z3.Z3_mk_string_symbol(context.ctx, "x"), bv8_sort);
+    const seven = z3.Z3_mk_numeral(context.ctx, "7", bv8_sort);
+    const body = z3.Z3_mk_eq(context.ctx, x, seven);
+    const bound = [_]z3.Z3_ast{x};
+    const quant = z3.Z3_mk_forall_const(context.ctx, 0, 1, @ptrCast(&bound), 0, null, body);
+    try testing.expectEqual(QuerySolverLogic.all, inferQuerySolverLogic(context.ctx, &[_]z3.Z3_ast{quant}));
+}
+
+test "prepared queries route quantifier-free and quantified formulas to different solvers" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const qf_module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    defer mlir.oraModuleDestroy(qf_module);
+    const quantified_module = buildConditionalReturnMapStoreDivModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(quantified_module);
+
+    var qf_pass = try VerificationPass.init(testing.allocator);
+    defer qf_pass.deinit();
+    try qf_pass.extractAnnotationsFromMLIR(qf_module);
+    var qf_queries = try qf_pass.buildPreparedQueries();
+    defer {
+        for (qf_queries.items) |*q| q.deinit(testing.allocator);
+        qf_queries.deinit();
+    }
+    try testing.expect(qf_queries.items.len > 0);
+    for (qf_queries.items) |query| {
+        try testing.expectEqual(QuerySolverLogic.qf_aufbv, query.solver_logic);
+    }
+
+    var quantified_pass = try VerificationPass.init(testing.allocator);
+    defer quantified_pass.deinit();
+    try quantified_pass.extractAnnotationsFromMLIR(quantified_module);
+    var quantified_queries = try quantified_pass.buildPreparedQueries();
+    defer {
+        for (quantified_queries.items) |*q| q.deinit(testing.allocator);
+        quantified_queries.deinit();
+    }
+    var saw_general = false;
+    for (quantified_queries.items) |query| {
+        if (query.solver_logic == .all) {
+            saw_general = true;
+            break;
+        }
+    }
+    try testing.expect(saw_general);
 }
 
 test "contract invariants from loop body obligations use loop constraints" {
@@ -10354,6 +10739,31 @@ test "parallel verification fails closed when degradation appears after query bu
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "parallel query build degradation"));
 }
 
+test "parallel verification fails closed when degradation appears after worker collection" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    defer mlir.oraModuleDestroy(module);
+
+    pass.parallel = true;
+    pass.test_force_degradation_after_parallel_workers = true;
+    pass.test_force_degradation_reason = "parallel post-worker degradation";
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+
+    try testing.expect(pass.encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "parallel post-worker degradation"));
+}
+
 test "SMT report fails closed when degradation appears after query build" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -10469,6 +10879,52 @@ test "parallel result collection taints function on unknown base" {
     try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
     try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
+}
+
+test "parallel result collection includes captured Z3 API message" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    _ = z3.Z3_parse_smtlib2_string(pass.context.ctx, "(assert", 0, null, null, 0, null, null);
+    try testing.expect(pass.context.lastErrorCode() != z3.Z3_OK);
+    const expected_message = try testing.allocator.dupe(u8, pass.context.lastErrorMessage());
+    defer testing.allocator.free(expected_message);
+
+    const queries = [_]PreparedQuery{
+        .{
+            .kind = .Obligation,
+            .function_name = "f",
+            .obligation_kind = .ContractInvariant,
+            .file = "/tmp/test.ora",
+            .line = 2,
+            .column = 1,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
+        },
+    };
+    defer {
+        var mutable_queries = queries;
+        for (&mutable_queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const z3_message = duplicateZ3ApiMessageOrNull(pass.context, testing.allocator, error.Z3ApiError) orelse unreachable;
+    const results = [_]PreparedQueryResult{
+        .{
+            .err = error.Z3ApiError,
+            .err_message = z3_message,
+        },
+    };
+    defer testing.allocator.free(z3_message);
+
+    var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+    defer collected.deinit();
+
+    try testing.expect(!collected.success);
+    try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "parallel query execution"));
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "Z3:"));
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, expected_message));
 }
 
 test "parallel result collection skips obligations on inconsistent base" {
@@ -11095,7 +11551,7 @@ test "missing tracked assumption proxy returns dedicated error" {
         mutable_query.deinit(testing.allocator);
     }
 
-    try testing.expectError(error.MissingTrackedAssumptionProxy, checkPreparedQueryTrackedAssumptions(&pass, query, false));
+    try testing.expectError(error.MissingTrackedAssumptionProxy, checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query, false));
 }
 
 test "rendered SMT report json includes multi-requires explain tags and summary vacuous count" {

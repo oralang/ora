@@ -57,12 +57,6 @@ pub const Context = struct {
         };
     }
 
-    /// Initialize with custom configuration options
-    pub fn initWithConfig(allocator: std.mem.Allocator, timeout_ms: u32) !Context {
-        _ = timeout_ms;
-        return initWithOptions(allocator, .{});
-    }
-
     /// Clean up Z3 context and configuration
     pub fn deinit(self: *Context) void {
         c.Z3_del_context(self.ctx);
@@ -75,6 +69,17 @@ pub const Context = struct {
 
     pub fn lastErrorCode(self: *Context) c.Z3_error_code {
         return c.Z3_get_error_code(self.ctx);
+    }
+
+    pub fn lastErrorMessage(self: *Context) []const u8 {
+        const code = self.lastErrorCode();
+        const raw = c.Z3_get_error_msg(self.ctx, code);
+        if (raw == null) return @errorName(error.Z3ApiError);
+        return std.mem.span(raw);
+    }
+
+    pub fn lastErrorMessageOwned(self: *Context, allocator: std.mem.Allocator) ![]u8 {
+        return try allocator.dupe(u8, self.lastErrorMessage());
     }
 
     pub fn checkNoError(self: *Context) !void {
@@ -97,8 +102,8 @@ test "Context init and deinit" {
     try testing.expect(ctx.ctx != null);
 }
 
-test "Context initWithConfig registers a valid context" {
-    var ctx = try Context.initWithConfig(testing.allocator, 50);
+test "Context initWithOptions default registers a valid context" {
+    var ctx = try Context.initWithOptions(testing.allocator, .{});
     defer ctx.deinit();
 
     try testing.expect(ctx.ctx != null);
@@ -112,4 +117,13 @@ test "Context initWithOptions enables proof generation" {
     try testing.expect(ctx.ctx != null);
     try testing.expect(ctx.proofs_enabled);
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), ctx.lastErrorCode());
+}
+
+test "Context lastErrorMessage reflects Z3 API failures" {
+    var ctx = try Context.init(testing.allocator);
+    defer ctx.deinit();
+
+    _ = c.Z3_parse_smtlib2_string(ctx.ctx, "(assert", 0, null, null, 0, null, null);
+    try testing.expect(ctx.lastErrorCode() != c.Z3_OK);
+    try testing.expect(ctx.lastErrorMessage().len > 0);
 }

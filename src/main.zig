@@ -2635,13 +2635,13 @@ fn collectItemDebugScopes(
                             .runtime_name = field.name,
                             .runtime_location_kind = debugRuntimeLocationKindForStorageClass(field.storage_class, global_slots.get(field.name)),
                             .runtime_location_root = debugRuntimeLocationRootForStorageClass(field.storage_class, global_slots.get(field.name), field.name),
-                        .runtime_location_slot = global_slots.get(field.name),
-                        .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
-                        .folded_value = null,
-                        .is_folded = false,
-                    });
+                            .runtime_location_slot = global_slots.get(field.name),
+                            .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
+                            .folded_value = null,
+                            .is_folded = false,
+                        });
+                    }
                 }
-            }
             }
             try collectBodyScopeDebugInfo(
                 allocator,
