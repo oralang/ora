@@ -13310,6 +13310,47 @@ test "mixed-width signed comparison sign-extends narrower operand" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "ora.cmp mixed-width signed comparison sign-extends narrower operand" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i8_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+    const i16_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 16);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i8_ty, -1);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i16_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i8_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i16_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const signed_cmp = mlir.oraCmpOpCreate(mlir_ctx, loc, stringRef("slt"), lhs, rhs, i1_ty);
+    const unsigned_cmp = mlir.oraCmpOpCreate(mlir_ctx, loc, stringRef("ult"), lhs, rhs, i1_ty);
+    const signed_lt = try encoder.encodeOperation(signed_cmp);
+    const unsigned_lt = try encoder.encodeOperation(unsigned_cmp);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, signed_lt));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    solver.push();
+    defer solver.pop();
+    solver.assert(unsigned_lt);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "arith shrui encodes logical right shift" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -16728,7 +16769,56 @@ test "nested map_store rethreads inner update through outer map" {
     _ = inner_after_value;
 }
 
-test "map key width mismatch degrades instead of silently coercing" {
+test "nested map_store with address keys rethreads inner update exactly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, addr_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, addr_ty, inner_map_ty);
+
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+
+    const caller_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.evm.caller"), null, 0, addr_ty);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+
+    const owner = mlir.oraOperationGetResult(caller_op, 0);
+    const spender = mlir.oraOperationGetResult(caller_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const outer_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances_by_owner"), outer_map_ty);
+    const outer_before_value = mlir.oraOperationGetResult(outer_before, 0);
+    const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_map_ty);
+    const inner_before_value = mlir.oraOperationGetResult(inner_before, 0);
+
+    _ = try encoder.encodeOperation(mlir.oraMapStoreOpCreate(mlir_ctx, loc, inner_before_value, spender, value));
+    _ = try encoder.encodeOperation(mlir.oraMapStoreOpCreate(mlir_ctx, loc, outer_before_value, owner, inner_before_value));
+    try testing.expect(!encoder.isDegraded());
+
+    const outer_after = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances_by_owner"), outer_map_ty);
+    const outer_after_value = mlir.oraOperationGetResult(outer_after, 0);
+    const inner_after = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_after_value, owner, inner_map_ty);
+    const final_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(inner_after, 0), spender, i256_ty);
+    const loaded = try encoder.encodeOperation(final_get);
+    const expected = try encoder.encodeValue(value);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "map key widening uses typed exact coercion when signedness is known" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -16764,9 +16854,14 @@ test "map key width mismatch degrades instead of silently coercing" {
     const map_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, map_after, key256, i256_ty);
     const loaded = try encoder.encodeOperation(map_get);
 
-    try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("bitvector widening requires explicit signedness-aware coercion", encoder.degradationReason().?);
-    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, z3.Z3_get_sort(z3_ctx.ctx, loaded)))));
+    try testing.expect(!encoder.isDegraded());
+
+    const expected = try encoder.encodeValue(value);
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    const neq = z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected));
+    solver.assert(neq);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
 test "map_store emits quantified frame constraint" {

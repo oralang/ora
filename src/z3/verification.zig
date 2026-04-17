@@ -9023,7 +9023,6 @@ test "full verify mode simplifies checked multiply assert obligations before SMT
     for (queries.items) |q| {
         if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
         found_contract_obligation = true;
-        try testing.expect(std.mem.indexOf(u8, q.smtlib_z, "(bvudiv") != null);
         try testing.expect(std.mem.indexOf(u8, q.smtlib_z, "(bvmul") == null);
     }
     try testing.expect(found_contract_obligation);

@@ -1491,17 +1491,19 @@ pub const Encoder = struct {
         self: *Encoder,
         base: z3.Z3_ast,
         indices: []const z3.Z3_ast,
+        index_types: []const mlir.MlirType,
+        result_type: mlir.MlirType,
         result_sort: z3.Z3_sort,
     ) EncodeError!z3.Z3_ast {
         var current = base;
-        for (indices) |raw_index| {
+        for (indices, index_types) |raw_index, index_type| {
             const current_sort = z3.Z3_get_sort(self.context.ctx, current);
             if (!self.isArraySort(current_sort)) return error.UnsupportedOperation;
             const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, current_sort);
-            const index = self.coerceAstToSort(raw_index, index_sort);
+            const index = try self.coerceTypedAstToSortOrUndef(raw_index, index_type, index_sort, "shaped_read_index", 0);
             current = self.encodeSelect(current, index);
         }
-        return self.coerceAstToSort(current, result_sort);
+        return try self.coerceTypedAstToSortOrUndef(current, result_type, result_sort, "shaped_read_result", 0);
     }
 
     fn encodeShapedWriteToBase(
@@ -1509,6 +1511,8 @@ pub const Encoder = struct {
         base: z3.Z3_ast,
         value: z3.Z3_ast,
         indices: []const z3.Z3_ast,
+        index_types: []const mlir.MlirType,
+        value_type: mlir.MlirType,
     ) EncodeError!z3.Z3_ast {
         if (indices.len == 0) return value;
 
@@ -1518,13 +1522,13 @@ pub const Encoder = struct {
         defer self.allocator.free(cast_indices);
 
         var cursor = base;
-        for (indices, 0..) |raw_index, i| {
+        for (indices, index_types, 0..) |raw_index, index_type, i| {
             const container_sort = z3.Z3_get_sort(self.context.ctx, cursor);
             if (!self.isArraySort(container_sort)) return error.UnsupportedOperation;
 
             containers[i] = cursor;
             const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
-            cast_indices[i] = self.coerceAstToSort(raw_index, index_sort);
+            cast_indices[i] = try self.coerceTypedAstToSortOrUndef(raw_index, index_type, index_sort, "shaped_write_index", 0);
 
             if (i + 1 < indices.len) {
                 cursor = self.encodeSelect(cursor, cast_indices[i]);
@@ -1537,7 +1541,7 @@ pub const Encoder = struct {
         var updated = self.encodeStore(
             leaf_container,
             cast_indices[indices.len - 1],
-            self.coerceAstToSort(value, leaf_range),
+            try self.coerceTypedAstToSortOrUndef(value, value_type, leaf_range, "shaped_write_value", 0),
         );
 
         if (indices.len == 1) return updated;
@@ -2084,7 +2088,13 @@ pub const Encoder = struct {
         };
     }
 
-    fn coerceShiftAmount(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+    fn coerceShiftAmount(
+        self: *Encoder,
+        lhs: z3.Z3_ast,
+        rhs: z3.Z3_ast,
+        rhs_type: mlir.MlirType,
+        op_id: usize,
+    ) EncodeError!z3.Z3_ast {
         const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
         const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
@@ -2095,7 +2105,9 @@ pub const Encoder = struct {
             const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, lhs_sort);
             return z3.Z3_mk_ite(self.context.ctx, rhs, one, zero);
         }
-        if (rhs_kind != z3.Z3_BV_SORT) return self.coerceAstToSort(rhs, lhs_sort);
+        if (rhs_kind != z3.Z3_BV_SORT) {
+            return try self.coerceTypedAstToSortOrUndef(rhs, rhs_type, lhs_sort, "shift_amount", op_id);
+        }
         return self.extendBitVectorForComparison(rhs, lhs_sort, false);
     }
 
@@ -2125,8 +2137,15 @@ pub const Encoder = struct {
         };
     }
 
-    pub fn encodeShiftOp(self: *Encoder, op: ShiftOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        const coerced_rhs = self.coerceShiftAmount(lhs, rhs);
+    pub fn encodeShiftOp(
+        self: *Encoder,
+        op: ShiftOp,
+        lhs: z3.Z3_ast,
+        rhs: z3.Z3_ast,
+        rhs_type: mlir.MlirType,
+        op_id: usize,
+    ) !z3.Z3_ast {
+        const coerced_rhs = try self.coerceShiftAmount(lhs, rhs, rhs_type, op_id);
         // Obligation: shift amount must be < bit_width (undefined behavior otherwise)
         const sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const sort_kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
@@ -2145,15 +2164,22 @@ pub const Encoder = struct {
 
     /// Encode modular exponentiation over bitvectors using exponentiation by squaring.
     /// This is exact for EVM-style arithmetic: all intermediate results wrap to bit-width.
-    pub fn encodePowerOp(self: *Encoder, base_in: z3.Z3_ast, exponent_in: z3.Z3_ast) EncodeError!z3.Z3_ast {
+    pub fn encodePowerOp(
+        self: *Encoder,
+        base_in: z3.Z3_ast,
+        base_type: mlir.MlirType,
+        exponent_in: z3.Z3_ast,
+        exponent_type: mlir.MlirType,
+        op_id: usize,
+    ) EncodeError!z3.Z3_ast {
         const base_sort = z3.Z3_get_sort(self.context.ctx, base_in);
         if (z3.Z3_get_sort_kind(self.context.ctx, base_sort) != z3.Z3_BV_SORT) {
             return error.UnsupportedOperation;
         }
 
         const width = z3.Z3_get_bv_sort_size(self.context.ctx, base_sort);
-        const base = self.coerceAstToSort(base_in, base_sort);
-        const exponent = self.coerceAstToSort(exponent_in, base_sort);
+        const base = try self.coerceTypedAstToSortOrUndef(base_in, base_type, base_sort, "power_base", op_id);
+        const exponent = try self.coerceTypedAstToSortOrUndef(exponent_in, exponent_type, base_sort, "power_exponent", op_id);
 
         const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, base_sort);
 
@@ -2221,10 +2247,9 @@ pub const Encoder = struct {
         // older recovery-division identity ((lhs * rhs) / lhs) != rhs.
         const sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
-        const rhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, rhs, zero));
 
         const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
-        const max_value = if (width <= 64) blk: {
+        const max_value_ast = if (width <= 64) blk: {
             const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
             break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
         } else blk: {
@@ -2246,7 +2271,22 @@ pub const Encoder = struct {
             }
             break :blk assembled orelse zero;
         };
-        const max_div_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, max_value, rhs);
+
+        if (self.tryParseBitVectorNumeral(rhs)) |rhs_value| {
+            if (rhs_value == 0) return self.boolFalse();
+            const bound_value = std.math.maxInt(u256) / rhs_value;
+            const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
+            return z3.Z3_mk_bvugt(self.context.ctx, lhs, bound_ast);
+        }
+        if (self.tryParseBitVectorNumeral(lhs)) |lhs_value| {
+            if (lhs_value == 0) return self.boolFalse();
+            const bound_value = std.math.maxInt(u256) / lhs_value;
+            const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
+            return z3.Z3_mk_bvugt(self.context.ctx, rhs, bound_ast);
+        }
+
+        const rhs_non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, rhs, zero));
+        const max_div_rhs = z3.Z3_mk_bv_udiv(self.context.ctx, max_value_ast, rhs);
         const lhs_too_large = z3.Z3_mk_bvugt(self.context.ctx, lhs, max_div_rhs);
         return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ rhs_non_zero, lhs_too_large });
     }
@@ -2347,6 +2387,37 @@ pub const Encoder = struct {
             .Le => z3.Z3_mk_bvule(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned less than or equal
             .Gt => z3.Z3_mk_bvugt(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than
             .Ge => z3.Z3_mk_bvuge(self.context.ctx, coerced.lhs, coerced.rhs), // Unsigned greater than or equal
+        };
+    }
+
+    fn encodeTypedComparisonOp(
+        self: *Encoder,
+        op: ComparisonOp,
+        lhs: z3.Z3_ast,
+        lhs_type: mlir.MlirType,
+        rhs: z3.Z3_ast,
+        rhs_type: mlir.MlirType,
+        op_id: usize,
+    ) EncodeError!z3.Z3_ast {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        if (z3.Z3_is_string_sort(self.context.ctx, lhs_sort)) {
+            return switch (op) {
+                .Eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
+                .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
+                .Lt => z3.Z3_mk_str_lt(self.context.ctx, lhs, rhs),
+                .Le => z3.Z3_mk_str_le(self.context.ctx, lhs, rhs),
+                .Gt => z3.Z3_mk_str_lt(self.context.ctx, rhs, lhs),
+                .Ge => z3.Z3_mk_str_le(self.context.ctx, rhs, lhs),
+            };
+        }
+        const coerced = try self.coerceTypedComparisonOperands(lhs, lhs_type, rhs, rhs_type, false, op_id);
+        return switch (op) {
+            .Eq => z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Ne => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, coerced.lhs, coerced.rhs)),
+            .Lt => z3.Z3_mk_bvult(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Le => z3.Z3_mk_bvule(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Gt => z3.Z3_mk_bvugt(self.context.ctx, coerced.lhs, coerced.rhs),
+            .Ge => z3.Z3_mk_bvuge(self.context.ctx, coerced.lhs, coerced.rhs),
         };
     }
 
@@ -2515,22 +2586,24 @@ pub const Encoder = struct {
         if (operands.len < 2) return error.InvalidOperandCount;
 
         var current = operands[0];
-        for (operands[1..]) |raw_index| {
+        for (operands[1..], 1..) |raw_index, operand_index| {
             const current_sort = z3.Z3_get_sort(self.context.ctx, current);
             if (!self.isArraySort(current_sort)) return error.UnsupportedOperation;
             const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, current_sort);
-            const index = self.coerceAstToSort(raw_index, index_sort);
+            const index_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(operand_index)));
+            const index = try self.coerceTypedAstToSortOrUndef(raw_index, index_type, index_sort, "tensor_extract_index", @intFromPtr(mlir_op.ptr));
             current = self.encodeSelect(current, index);
         }
 
         const num_results = mlir.oraOperationGetNumResults(mlir_op);
         if (num_results < 1) return current;
         const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
-        return self.coerceAstToSort(current, result_sort);
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+        return try self.coerceTypedAstToSortOrUndef(current, result_type, result_sort, "tensor_extract_result", @intFromPtr(mlir_op.ptr));
     }
 
-    fn encodeTensorInsertOp(self: *Encoder, operands: []const z3.Z3_ast) EncodeError!z3.Z3_ast {
+    fn encodeTensorInsertOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
         // tensor.insert %value into %tensor[%i, ...]
         // operands: value, tensor, idx0, idx1, ...
         if (operands.len < 3) return error.InvalidOperandCount;
@@ -2551,7 +2624,8 @@ pub const Encoder = struct {
 
             containers[i] = cursor;
             const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
-            cast_indices[i] = self.coerceAstToSort(raw_index, index_sort);
+            const index_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(i + 2)));
+            cast_indices[i] = try self.coerceTypedAstToSortOrUndef(raw_index, index_type, index_sort, "tensor_insert_index", @intFromPtr(mlir_op.ptr));
 
             if (i + 1 < indices.len) {
                 cursor = self.encodeSelect(cursor, cast_indices[i]);
@@ -2561,10 +2635,11 @@ pub const Encoder = struct {
         const leaf_container = containers[indices.len - 1];
         const leaf_sort = z3.Z3_get_sort(self.context.ctx, leaf_container);
         const leaf_range = z3.Z3_get_array_sort_range(self.context.ctx, leaf_sort);
+        const value_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
         var updated = self.encodeStore(
             leaf_container,
             cast_indices[indices.len - 1],
-            self.coerceAstToSort(value, leaf_range),
+            try self.coerceTypedAstToSortOrUndef(value, value_type, leaf_range, "tensor_insert_value", @intFromPtr(mlir_op.ptr)),
         );
 
         var depth = indices.len - 1;
@@ -2573,7 +2648,7 @@ pub const Encoder = struct {
             const parent = containers[depth];
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent);
             const parent_range = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
-            updated = self.encodeStore(parent, cast_indices[depth], self.coerceAstToSort(updated, parent_range));
+            updated = self.encodeStore(parent, cast_indices[depth], try self.coerceAstToSortOrUndef(updated, parent_range, "tensor_insert_parent", @intFromPtr(mlir_op.ptr)));
         }
 
         return updated;
@@ -3701,7 +3776,11 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "arith.cmpi")) {
             // get predicate from attributes
             const predicate = try self.getCmpPredicate(mlir_op);
-            return try self.encodeCmpOp(predicate, operands);
+            const operand_types = [_]mlir.MlirType{
+                mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0)),
+                mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1)),
+            };
+            return try self.encodeTypedCmpOp(predicate, operands, &operand_types, @intFromPtr(mlir_op.ptr));
         }
 
         if (std.mem.eql(u8, op_name, "ora.cmp")) {
@@ -3710,16 +3789,31 @@ pub const Encoder = struct {
                 self.recordDegradation("ora.cmp missing predicate");
                 return error.UnsupportedOperation;
             };
-            if (std.mem.eql(u8, predicate, "eq")) return self.encodeComparisonOp(.Eq, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "ne")) return self.encodeComparisonOp(.Ne, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "lt") or std.mem.eql(u8, predicate, "ult")) return self.encodeComparisonOp(.Lt, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "le") or std.mem.eql(u8, predicate, "ule")) return self.encodeComparisonOp(.Le, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "gt") or std.mem.eql(u8, predicate, "ugt")) return self.encodeComparisonOp(.Gt, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "ge") or std.mem.eql(u8, predicate, "uge")) return self.encodeComparisonOp(.Ge, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "slt")) return z3.Z3_mk_bvslt(self.context.ctx, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "sle")) return z3.Z3_mk_bvsle(self.context.ctx, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "sgt")) return z3.Z3_mk_bvsgt(self.context.ctx, operands[0], operands[1]);
-            if (std.mem.eql(u8, predicate, "sge")) return z3.Z3_mk_bvsge(self.context.ctx, operands[0], operands[1]);
+            const lhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+            const rhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
+            const op_id = @intFromPtr(mlir_op.ptr);
+            if (std.mem.eql(u8, predicate, "eq")) return try self.encodeTypedComparisonOp(.Eq, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "ne")) return try self.encodeTypedComparisonOp(.Ne, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "lt") or std.mem.eql(u8, predicate, "ult")) return try self.encodeTypedComparisonOp(.Lt, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "le") or std.mem.eql(u8, predicate, "ule")) return try self.encodeTypedComparisonOp(.Le, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "gt") or std.mem.eql(u8, predicate, "ugt")) return try self.encodeTypedComparisonOp(.Gt, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "ge") or std.mem.eql(u8, predicate, "uge")) return try self.encodeTypedComparisonOp(.Ge, operands[0], lhs_type, operands[1], rhs_type, op_id);
+            if (std.mem.eql(u8, predicate, "slt")) {
+                const coerced = try self.coerceTypedComparisonOperands(operands[0], lhs_type, operands[1], rhs_type, true, op_id);
+                return z3.Z3_mk_bvslt(self.context.ctx, coerced.lhs, coerced.rhs);
+            }
+            if (std.mem.eql(u8, predicate, "sle")) {
+                const coerced = try self.coerceTypedComparisonOperands(operands[0], lhs_type, operands[1], rhs_type, true, op_id);
+                return z3.Z3_mk_bvsle(self.context.ctx, coerced.lhs, coerced.rhs);
+            }
+            if (std.mem.eql(u8, predicate, "sgt")) {
+                const coerced = try self.coerceTypedComparisonOperands(operands[0], lhs_type, operands[1], rhs_type, true, op_id);
+                return z3.Z3_mk_bvsgt(self.context.ctx, coerced.lhs, coerced.rhs);
+            }
+            if (std.mem.eql(u8, predicate, "sge")) {
+                const coerced = try self.coerceTypedComparisonOperands(operands[0], lhs_type, operands[1], rhs_type, true, op_id);
+                return z3.Z3_mk_bvsge(self.context.ctx, coerced.lhs, coerced.rhs);
+            }
             return error.UnsupportedPredicate;
         }
 
@@ -3785,6 +3879,7 @@ pub const Encoder = struct {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results < 1) return length_int;
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_type = mlir.oraValueGetType(result_value);
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const result_kind = z3.Z3_get_sort_kind(self.context.ctx, result_sort);
             if (result_kind == z3.Z3_BV_SORT) {
@@ -3794,7 +3889,7 @@ pub const Encoder = struct {
                 }
                 return self.degradeAstCoercion(result_sort, "sequence length to narrow bitvector requires explicit bound proof");
             }
-            return self.coerceAstToSort(length_int, result_sort);
+            return try self.coerceTypedAstToSortOrUndef(length_int, result_type, result_sort, "sequence_length_result", @intFromPtr(mlir_op.ptr));
         }
 
         if (std.mem.eql(u8, op_name, "ora.byte_at")) {
@@ -3806,6 +3901,7 @@ pub const Encoder = struct {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results < 1) return byte_bv;
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_type = mlir.oraValueGetType(result_value);
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const result_kind = z3.Z3_get_sort_kind(self.context.ctx, result_sort);
             if (result_kind == z3.Z3_BV_SORT) {
@@ -3816,7 +3912,7 @@ pub const Encoder = struct {
                 }
                 return self.degradeAstCoercion(result_sort, "byte extraction to narrow bitvector requires explicit truncation semantics");
             }
-            return self.coerceAstToSort(byte_bv, result_sort);
+            return try self.coerceTypedAstToSortOrUndef(byte_bv, result_type, result_sort, "byte_at_result", @intFromPtr(mlir_op.ptr));
         }
 
         if (std.mem.eql(u8, op_name, "ora.old")) {
@@ -3862,7 +3958,8 @@ pub const Encoder = struct {
                 ShiftOp.ShrSigned
             else
                 ShiftOp.ShrUnsigned;
-            return self.encodeShiftOp(shift_op, operands[0], operands[1]);
+            const rhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
+            return try self.encodeShiftOp(shift_op, operands[0], operands[1], rhs_type, @intFromPtr(mlir_op.ptr));
         }
 
         if (std.mem.eql(u8, op_name, "arith.bitcast")) {
@@ -3932,7 +4029,13 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.power")) {
             if (operands.len < 2) return error.InvalidOperandCount;
-            return try self.encodePowerOp(operands[0], operands[1]);
+            return try self.encodePowerOp(
+                operands[0],
+                mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0)),
+                operands[1],
+                mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1)),
+                @intFromPtr(mlir_op.ptr),
+            );
         }
 
         // storage operations
@@ -3992,7 +4095,13 @@ pub const Encoder = struct {
                 const map_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
                 const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, map_sort);
-                const key = self.coerceAstToSort(operands[1], key_sort);
+                const key = try self.coerceTypedAstToSortOrUndef(
+                    operands[1],
+                    mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1)),
+                    key_sort,
+                    "map_get_key",
+                    @intFromPtr(mlir_op.ptr),
+                );
                 return self.encodeSelect(operands[0], key);
             }
         }
@@ -4008,8 +4117,20 @@ pub const Encoder = struct {
                 if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
                 const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, map_sort);
                 const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, map_sort);
-                const key = self.coerceAstToSort(operands[1], key_sort);
-                const value = self.coerceAstToSort(operands[2], value_sort);
+                const key = try self.coerceTypedAstToSortOrUndef(
+                    operands[1],
+                    mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1)),
+                    key_sort,
+                    "map_store_key",
+                    @intFromPtr(mlir_op.ptr),
+                );
+                const value = try self.coerceTypedAstToSortOrUndef(
+                    operands[2],
+                    mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 2)),
+                    value_sort,
+                    "map_store_value",
+                    @intFromPtr(mlir_op.ptr),
+                );
                 const stored = self.encodeStore(operands[0], key, value);
                 const op_id = @intFromPtr(mlir_op.ptr);
                 self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {
@@ -4421,7 +4542,13 @@ pub const Encoder = struct {
                     tracked.value
                 else
                     operands[1];
-                const updated = try self.encodeShapedWriteToBase(base, operands[0], operands[2..]);
+                const value_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+                var index_types = try self.allocator.alloc(mlir.MlirType, operands.len - 2);
+                defer self.allocator.free(index_types);
+                for (0..index_types.len) |i| {
+                    index_types[i] = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(i + 2)));
+                }
+                const updated = try self.encodeShapedWriteToBase(base, operands[0], operands[2..], index_types, value_type);
                 try map.put(memref_id, .{
                     .value = updated,
                     .initialized = self.boolTrue(),
@@ -4492,7 +4619,12 @@ pub const Encoder = struct {
                     const map = if (mode == .Old) &self.memref_old_map else &self.memref_map;
                     if (map.get(memref_id)) |stored| {
                         if (self.isBoolConst(stored.initialized, true) or self.activeReturnPathImplies(stored.initialized)) {
-                            return try self.encodeShapedReadFromBase(stored.value, operands[1..], result_sort);
+                            var index_types = try self.allocator.alloc(mlir.MlirType, operands.len - 1);
+                            defer self.allocator.free(index_types);
+                            for (0..index_types.len) |i| {
+                                index_types[i] = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(i + 1)));
+                            }
+                            return try self.encodeShapedReadFromBase(stored.value, operands[1..], index_types, result_type, result_sort);
                         }
                     }
                     return try self.encodeTensorExtractOp(operands, mlir_op);
@@ -4519,7 +4651,7 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "tensor.insert")) {
-            return try self.encodeTensorInsertOp(operands);
+            return try self.encodeTensorInsertOp(operands, mlir_op);
         }
 
         if (std.mem.eql(u8, op_name, "tensor.extract")) {
@@ -4673,7 +4805,8 @@ pub const Encoder = struct {
             if (mlir.oraTypeIsNull(success_type)) return error.UnsupportedOperation;
             const eu = try self.getErrorUnionSort(result_type, success_type);
             const is_err = self.encodeBoolConstant(false);
-            const ok_val = try self.coerceAstToSortOrUndef(operands[0], eu.ok_sort, "error_ok", op_id);
+            const payload_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+            const ok_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, eu.ok_sort, "error_ok", op_id);
             const err_val = try self.mkUndefValue(eu.err_sort, "err", op_id);
             return z3.Z3_mk_app(self.context.ctx, eu.ctor, 3, &[_]z3.Z3_ast{ is_err, ok_val, err_val });
         }
@@ -4797,6 +4930,13 @@ pub const Encoder = struct {
                     z3.Z3_mk_sign_ext(self.context.ctx, extend, value)
                 else
                     z3.Z3_mk_zero_ext(self.context.ctx, extend, value);
+            }
+            if (self.tryParseBitVectorNumeral(value)) |numeral| {
+                const mask = self.bitMaskForWidth(dst_width);
+                if ((numeral & ~mask) == 0) {
+                    return self.encodeIntegerConstant(numeral, dst_width) catch
+                        try self.degradeToUndef(target_sort, prefix, op_id, "failed to encode exact narrowed typed bitvector numeral");
+                }
             }
             return try self.degradeToUndef(target_sort, prefix, op_id, "failed to coerce typed AST to target sort");
         }
@@ -10621,6 +10761,7 @@ pub const Encoder = struct {
         // Rebuild parent stores from leaf -> root:
         // updated_leaf, then store into each parent map_get site.
         var updated = stored_value;
+        var updated_type = mlir.oraMapTypeGetValueType(mlir.oraValueGetType(map_operand));
         for (chain.items, 0..) |ancestor, depth| {
             const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
@@ -10629,10 +10770,27 @@ pub const Encoder = struct {
             const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, parent_sort);
             const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
             const raw_key = try self.encodeValueWithMode(ancestor.key, mode);
-            const parent_key = self.coerceAstToSort(raw_key, key_sort);
-            const parent_value = self.coerceAstToSort(updated, value_sort);
+            const key_type = mlir.oraValueGetType(ancestor.key);
+            const parent_key = try self.coerceTypedAstToSortOrUndef(
+                raw_key,
+                key_type,
+                key_sort,
+                "nested_map_parent_key",
+                @intFromPtr(ancestor.parent_map.ptr),
+            );
+            const parent_value = if (mlir.oraTypeIsNull(updated_type))
+                try self.coerceAstToSortOrUndef(updated, value_sort, "nested_map_parent_value", @intFromPtr(ancestor.parent_map.ptr))
+            else
+                try self.coerceTypedAstToSortOrUndef(
+                    updated,
+                    updated_type,
+                    value_sort,
+                    "nested_map_parent_value",
+                    @intFromPtr(ancestor.parent_map.ptr),
+                );
 
             updated = self.encodeStore(parent_map_ast, parent_key, parent_value);
+            updated_type = mlir.oraValueGetType(ancestor.parent_map);
             self.addArrayStoreFrameConstraint(
                 parent_map_ast,
                 parent_key,
@@ -11808,6 +11966,44 @@ pub const Encoder = struct {
         };
     }
 
+    fn encodeTypedCmpOp(
+        self: *Encoder,
+        predicate: u32,
+        operands: []const z3.Z3_ast,
+        operand_types: []const mlir.MlirType,
+        op_id: usize,
+    ) EncodeError!z3.Z3_ast {
+        if (operands.len < 2 or operand_types.len < 2) {
+            return error.InvalidOperandCount;
+        }
+
+        const signed_predicate = predicate >= 2 and predicate <= 5;
+        const coerced = try self.coerceTypedComparisonOperands(
+            operands[0],
+            operand_types[0],
+            operands[1],
+            operand_types[1],
+            signed_predicate,
+            op_id,
+        );
+        const lhs = coerced.lhs;
+        const rhs = coerced.rhs;
+
+        return switch (predicate) {
+            0 => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
+            1 => z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, lhs, rhs)),
+            2 => z3.Z3_mk_bvslt(self.context.ctx, lhs, rhs),
+            3 => z3.Z3_mk_bvsle(self.context.ctx, lhs, rhs),
+            4 => z3.Z3_mk_bvsgt(self.context.ctx, lhs, rhs),
+            5 => z3.Z3_mk_bvsge(self.context.ctx, lhs, rhs),
+            6 => z3.Z3_mk_bvult(self.context.ctx, lhs, rhs),
+            7 => z3.Z3_mk_bvule(self.context.ctx, lhs, rhs),
+            8 => z3.Z3_mk_bvugt(self.context.ctx, lhs, rhs),
+            9 => z3.Z3_mk_bvuge(self.context.ctx, lhs, rhs),
+            else => return error.UnsupportedPredicate,
+        };
+    }
+
     fn coerceComparisonOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast, signed: bool) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
         const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
@@ -11828,6 +12024,51 @@ pub const Encoder = struct {
         return .{
             .lhs = lhs,
             .rhs = self.coerceAstToSort(rhs, lhs_sort),
+        };
+    }
+
+    fn coerceTypedComparisonOperands(
+        self: *Encoder,
+        lhs: z3.Z3_ast,
+        lhs_type: mlir.MlirType,
+        rhs: z3.Z3_ast,
+        rhs_type: mlir.MlirType,
+        signed: bool,
+        op_id: usize,
+    ) EncodeError!struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+        const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
+        if (lhs_sort == rhs_sort) return .{ .lhs = lhs, .rhs = rhs };
+
+        const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
+        const rhs_kind = z3.Z3_get_sort_kind(self.context.ctx, rhs_sort);
+        if (lhs_kind == z3.Z3_BV_SORT and rhs_kind == z3.Z3_BV_SORT) {
+            const lhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
+            const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
+            const target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
+            return .{
+                .lhs = self.extendBitVectorForComparison(lhs, target_sort, signed),
+                .rhs = self.extendBitVectorForComparison(rhs, target_sort, signed),
+            };
+        }
+
+        if (lhs_kind == z3.Z3_BV_SORT) {
+            return .{
+                .lhs = lhs,
+                .rhs = try self.coerceTypedAstToSortOrUndef(rhs, rhs_type, lhs_sort, "comparison_rhs", op_id),
+            };
+        }
+
+        if (rhs_kind == z3.Z3_BV_SORT) {
+            return .{
+                .lhs = try self.coerceTypedAstToSortOrUndef(lhs, lhs_type, rhs_sort, "comparison_lhs", op_id),
+                .rhs = rhs,
+            };
+        }
+
+        return .{
+            .lhs = lhs,
+            .rhs = try self.coerceTypedAstToSortOrUndef(rhs, rhs_type, lhs_sort, "comparison_rhs", op_id),
         };
     }
 

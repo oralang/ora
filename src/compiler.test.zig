@@ -12144,6 +12144,22 @@ test "verification proves checked power for a bounded safe case without degradat
     try testing.expect(!result.degraded);
 }
 
+test "verification rejects unchecked power overflow without degradation" {
+    const source_text =
+        \\pub fn square_any(x: u8) -> u8
+        \\{
+        \\    return x ** 2;
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "square_any", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "compiler lowers embedded std bytes helpers through imported module access" {
     const source_text =
         \\comptime const std = @import("std");
