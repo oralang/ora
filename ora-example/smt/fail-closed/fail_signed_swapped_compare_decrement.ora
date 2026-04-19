@@ -1,0 +1,24 @@
+// SMT Fail-Closed Test: signed swapped-compare decrement while remains non-exact.
+// EXPECTED: Verification should fail closed with EncodingDegraded.
+
+comptime const std = @import("std");
+
+contract SignedSwappedCompareDecrement {
+    storage var last: i256 = 0;
+
+    pub fn run(n: i256)
+        requires 0 <= n
+        requires n <= 32
+        ensures last >= old(last)
+    {
+        var i: i256 = n;
+        var acc: i256 = 1;
+
+        while (0 < i) {
+            acc = acc + i;
+            i = i - 1;
+        }
+
+        last = acc;
+    }
+}

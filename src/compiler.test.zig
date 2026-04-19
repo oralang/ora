@@ -17045,6 +17045,14 @@ test "SMT degradation probes fail closed in sequential and parallel verification
             .path = "ora-example/smt/fail-closed/fail_loop_result_degraded.ora",
             .function_name = "run",
         },
+        .{
+            .path = "ora-example/smt/fail-closed/fail_swapped_compare_decrement.ora",
+            .function_name = "run",
+        },
+        .{
+            .path = "ora-example/smt/fail-closed/fail_signed_swapped_compare_decrement.ora",
+            .function_name = "run",
+        },
     };
 
     for (probes) |probe| {
