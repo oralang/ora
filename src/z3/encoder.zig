@@ -669,6 +669,7 @@ pub const Encoder = struct {
             }
             return sort;
         }
+        self.recordDegradation("unsupported printed type encoded via opaque bv256 fallback");
         return self.mkBitVectorSort(256);
     }
 
@@ -1563,14 +1564,6 @@ pub const Encoder = struct {
     //===----------------------------------------------------------------------===//
     // type Encoding
     //===----------------------------------------------------------------------===//
-
-    /// Encode MLIR type to Z3 sort
-    pub fn encodeType(self: *Encoder, mlir_type: anytype) EncodeError!z3.Z3_sort {
-        if (@TypeOf(mlir_type) == mlir.MlirType) {
-            return self.encodeMLIRType(mlir_type);
-        }
-        return self.mkBitVectorSort(256);
-    }
 
     /// Create Z3 bitvector sort of given width
     pub fn mkBitVectorSort(self: *Encoder, width: u32) z3.Z3_sort {
@@ -3735,14 +3728,19 @@ pub const Encoder = struct {
             const map_key_type = mlir.oraMapTypeGetKeyType(mlir_type);
             const key_sort = if (!mlir.oraTypeIsNull(map_key_type))
                 try self.encodeMLIRType(map_key_type)
-            else
-                self.mkBitVectorSort(256); // fallback to 256-bit
+            else blk: {
+                self.recordDegradation("map type missing key type encoded via opaque bv256 fallback");
+                break :blk self.mkBitVectorSort(256);
+            };
             return self.mkArraySort(key_sort, value_sort);
         }
 
         if (mlir.oraTypeIsAShaped(mlir_type)) {
             const elem_type = mlir.oraShapedTypeGetElementType(mlir_type);
-            if (mlir.oraTypeIsNull(elem_type)) return self.mkBitVectorSort(256);
+            if (mlir.oraTypeIsNull(elem_type)) {
+                self.recordDegradation("shaped type missing element type encoded via opaque bv256 fallback");
+                return self.mkBitVectorSort(256);
+            }
 
             var sort = try self.encodeMLIRType(elem_type);
             const rank_i = mlir.oraShapedTypeGetRank(mlir_type);
@@ -11593,7 +11591,7 @@ pub const Encoder = struct {
             return self.mkBitVectorSort(width);
         }
 
-        // Default to EVM word width for unknown/refinement type spellings.
+        self.recordDegradation("unsupported quantified binder type encoded via opaque bv256 fallback");
         return self.mkBitVectorSort(256);
     }
 

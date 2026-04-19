@@ -12160,6 +12160,40 @@ test "verification rejects unchecked power overflow without degradation" {
     try testing.expect(!result.degraded);
 }
 
+test "verification proves checked power for bounded symbolic exponent without degradation" {
+    const source_text =
+        \\pub fn bounded_pow(base: u8, exp: u8) -> u8
+        \\    requires(base <= 3)
+        \\    requires(exp <= 4)
+        \\    ensures(result <= 81)
+        \\{
+        \\    return base ** exp;
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "bounded_pow", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects symbolic checked power overflow without degradation" {
+    const source_text =
+        \\pub fn bounded_pow_overflow(base: u8, exp: u8) -> u8
+        \\    requires(exp <= 4)
+        \\{
+        \\    return base ** exp;
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "bounded_pow_overflow", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "compiler lowers embedded std bytes helpers through imported module access" {
     const source_text =
         \\comptime const std = @import("std");
@@ -17003,6 +17037,10 @@ test "SMT degradation probes fail closed in sequential and parallel verification
         path: []const u8,
         function_name: []const u8,
     }{
+        .{
+            .path = "ora-example/smt/fail-closed/fail_degraded_must_not_succeed.ora",
+            .function_name = "incrementLock",
+        },
         .{
             .path = "ora-example/smt/fail-closed/fail_loop_result_degraded.ora",
             .function_name = "run",

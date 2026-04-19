@@ -79,6 +79,20 @@ test "quantified bytes and string binders use sequence sort" {
     try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, string_basis))));
 }
 
+test "unknown quantified binder types degrade before opaque bv256 fallback" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const opaque_sort = encoder.quantifiedVarSortFromTypeStringForTesting("FutureType");
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, opaque_sort))));
+    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, opaque_sort))));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("unsupported quantified binder type encoded via opaque bv256 fallback", encoder.degradationReason().?);
+}
+
 test "printed memref and slice sorts match shaped array encoding" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -97,6 +111,20 @@ test "printed memref and slice sorts match shaped array encoding" {
     try testing.expectEqual(@as(u32, z3.Z3_ARRAY_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, slice_sort))));
     const slice_leaf = z3.Z3_get_array_sort_range(z3_ctx.ctx, slice_sort);
     try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, slice_leaf));
+}
+
+test "unknown printed types degrade before opaque bv256 fallback" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const opaque_sort = try encoder.sortFromPrintedTypeForTesting("!ora.future_magic_type");
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, opaque_sort))));
+    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, opaque_sort))));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("unsupported printed type encoded via opaque bv256 fallback", encoder.degradationReason().?);
 }
 
 test "ora.bytes.constant encodes canonical hex string" {
