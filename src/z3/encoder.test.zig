@@ -13144,6 +13144,45 @@ test "ora.power encodes modular exponentiation" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_pow256.check());
 }
 
+test "ora.assert records checked power overflow obligations without degradation" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i8_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+
+    const base_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("powerBase"), i8_ty);
+    const exp_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("powerExp"), i8_ty);
+    const base_arg = mlir.oraOperationGetResult(base_op, 0);
+    const exp_arg = mlir.oraOperationGetResult(exp_op, 0);
+
+    const pow_op = mlir.oraPowerOpCreate(mlir_ctx, loc, base_arg, exp_arg, i8_ty);
+    const pow = mlir.oraOperationGetResult(pow_op, 0);
+
+    const limit_attr = mlir.oraIntegerAttrCreateI64FromType(i8_ty, 81);
+    const limit_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i8_ty, limit_attr);
+    const limit = mlir.oraOperationGetResult(limit_const, 0);
+
+    const cmp_op = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 6, pow, limit); // ule
+    const within_bound = mlir.oraOperationGetResult(cmp_op, 0);
+    const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, within_bound, stringRef("checked power overflow"));
+
+    _ = try encoder.encodeOperation(assert_op);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expect(obligations.len >= 1);
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "arith.constant -1 is encoded as all-ones at target bit width" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
