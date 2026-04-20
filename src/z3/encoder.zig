@@ -90,6 +90,35 @@ pub const Encoder = struct {
         initialized: z3.Z3_ast,
     };
 
+    const ProductField = struct {
+        name: []u8,
+        sort: z3.Z3_sort,
+        projection: z3.Z3_func_decl,
+    };
+
+    const ProductSort = struct {
+        sort: z3.Z3_sort,
+        ctor: z3.Z3_func_decl,
+        fields: []ProductField,
+
+        fn deinit(self: *ProductSort, allocator: std.mem.Allocator) void {
+            for (self.fields) |field| allocator.free(field.name);
+            allocator.free(self.fields);
+        }
+
+        fn findField(self: *const ProductSort, field_name: []const u8) ?ProductField {
+            for (self.fields) |field| {
+                if (std.mem.eql(u8, field.name, field_name)) return field;
+            }
+            return null;
+        }
+
+        fn fieldAt(self: *const ProductSort, index: usize) ?ProductField {
+            if (index >= self.fields.len) return null;
+            return self.fields[index];
+        }
+    };
+
     context: *Context,
     allocator: std.mem.Allocator,
     verify_calls: bool,
@@ -144,6 +173,8 @@ pub const Encoder = struct {
     encoding_degraded_reasons: std.ArrayList([]const u8),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Cache of product tuple sorts for tuples and structs.
+    product_sorts: std.StringHashMap(ProductSort),
     /// Stack of active quantified variable bindings (innermost binding last).
     quantified_bindings: std.ArrayList(QuantifiedBinding),
     /// Active branch assumptions used during pure-return extraction.
@@ -180,6 +211,7 @@ pub const Encoder = struct {
             .encoding_degraded_reason = null,
             .encoding_degraded_reasons = std.ArrayList([]const u8){},
             .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
             .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
         };
@@ -586,6 +618,185 @@ pub const Encoder = struct {
             try elements.append(self.allocator, try self.allocator.dupe(u8, tail));
         }
         return elements.toOwnedSlice(self.allocator);
+    }
+
+    fn productSortKey(self: *Encoder, ty: mlir.MlirType) !?[]u8 {
+        const type_text = try self.printMlirTypeOwned(ty);
+        errdefer self.allocator.free(type_text);
+        const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
+        if (std.mem.startsWith(u8, trimmed, "!ora.tuple<") or
+            std.mem.startsWith(u8, trimmed, "!ora.struct_anon<"))
+        {
+            return type_text;
+        }
+        if (std.mem.startsWith(u8, trimmed, "!ora.struct<")) {
+            const parsed_name = parseStructTypeName(trimmed) orelse return type_text;
+            const canonical_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+            const canonical_name_copy = try self.allocator.dupe(u8, canonical_name);
+            defer self.allocator.free(canonical_name_copy);
+            self.allocator.free(type_text);
+            return try std.fmt.allocPrint(self.allocator, "!ora.struct<\"{s}\">", .{canonical_name_copy});
+        }
+        return blk: {
+            self.allocator.free(type_text);
+            break :blk null;
+        };
+    }
+
+    fn createProductSortFromFields(
+        self: *Encoder,
+        key: []const u8,
+        field_names: []const []const u8,
+        field_types: []const mlir.MlirType,
+    ) !ProductSort {
+        if (field_names.len == 0 or field_types.len != field_names.len) return error.UnsupportedOperation;
+
+        var field_sorts = try self.allocator.alloc(z3.Z3_sort, field_names.len);
+        defer self.allocator.free(field_sorts);
+        var field_symbols = try self.allocator.alloc(z3.Z3_symbol, field_names.len);
+        defer self.allocator.free(field_symbols);
+
+        for (field_types, 0..) |field_type, index| {
+            field_sorts[index] = try self.encodeMLIRType(field_type);
+        }
+        for (field_names, 0..) |field_name, index| {
+            field_symbols[index] = try self.mkSymbol(field_name);
+        }
+
+        const tuple_symbol = try self.mkSymbol(key);
+        var ctor: z3.Z3_func_decl = undefined;
+        const projections = try self.allocator.alloc(z3.Z3_func_decl, field_names.len);
+        errdefer self.allocator.free(projections);
+        const sort = z3.Z3_mk_tuple_sort(
+            self.context.ctx,
+            tuple_symbol,
+            @intCast(field_names.len),
+            field_symbols.ptr,
+            field_sorts.ptr,
+            &ctor,
+            projections.ptr,
+        );
+
+        const fields = try self.allocator.alloc(ProductField, field_names.len);
+        for (fields) |*field| {
+            field.* = .{
+                .name = &.{},
+                .sort = undefined,
+                .projection = undefined,
+            };
+        }
+        errdefer {
+            for (fields[0..field_names.len]) |field| {
+                if (field.name.len != 0) self.allocator.free(field.name);
+            }
+            self.allocator.free(fields);
+        }
+        for (field_names, 0..) |field_name, index| {
+            fields[index] = .{
+                .name = try self.allocator.dupe(u8, field_name),
+                .sort = field_sorts[index],
+                .projection = projections[index],
+            };
+        }
+        self.allocator.free(projections);
+
+        return .{
+            .sort = sort,
+            .ctor = ctor,
+            .fields = fields,
+        };
+    }
+
+    fn createTupleProductSort(self: *Encoder, ty: mlir.MlirType, key: []const u8) !ProductSort {
+        const arity = mlir.oraTupleTypeGetNumElements(ty);
+        if (arity == 0) return error.UnsupportedOperation;
+
+        const field_names = try self.allocator.alloc([]const u8, arity);
+        defer self.allocator.free(field_names);
+        const field_types = try self.allocator.alloc(mlir.MlirType, arity);
+        defer self.allocator.free(field_types);
+
+        for (0..arity) |index| {
+            field_names[index] = try std.fmt.allocPrint(self.allocator, "{d}", .{index});
+            errdefer self.allocator.free(@constCast(field_names[index]));
+            field_types[index] = mlir.oraTupleTypeGetElementType(ty, index);
+            if (mlir.oraTypeIsNull(field_types[index])) return error.UnsupportedOperation;
+        }
+        defer for (field_names) |field_name| self.allocator.free(@constCast(field_name));
+
+        return self.createProductSortFromFields(key, field_names, field_types);
+    }
+
+    fn createAnonymousStructProductSort(self: *Encoder, ty: mlir.MlirType, key: []const u8) !ProductSort {
+        const field_count = mlir.oraAnonymousStructTypeGetFieldCount(ty);
+        if (field_count == 0) return error.UnsupportedOperation;
+
+        const field_names = try self.allocator.alloc([]const u8, field_count);
+        defer self.allocator.free(field_names);
+        const field_types = try self.allocator.alloc(mlir.MlirType, field_count);
+        defer self.allocator.free(field_types);
+
+        for (0..field_count) |index| {
+            const name_ref = mlir.oraAnonymousStructTypeGetFieldName(ty, index);
+            if (name_ref.data == null or name_ref.length == 0) return error.UnsupportedOperation;
+            field_names[index] = try self.allocator.dupe(u8, name_ref.data[0..name_ref.length]);
+            errdefer self.allocator.free(@constCast(field_names[index]));
+            field_types[index] = mlir.oraAnonymousStructTypeGetFieldType(ty, index);
+            if (mlir.oraTypeIsNull(field_types[index])) return error.UnsupportedOperation;
+        }
+        defer for (field_names) |field_name| self.allocator.free(@constCast(field_name));
+
+        return self.createProductSortFromFields(key, field_names, field_types);
+    }
+
+    fn createNamedStructProductSort(self: *Encoder, ty: mlir.MlirType, key: []const u8) !ProductSort {
+        const csv = try self.lookupStructFieldNames(ty) orelse return error.UnsupportedOperation;
+        var count: usize = 0;
+        var count_it = std.mem.tokenizeScalar(u8, csv, ',');
+        while (count_it.next()) |_| count += 1;
+        if (count == 0) return error.UnsupportedOperation;
+
+        const field_names = try self.allocator.alloc([]const u8, count);
+        defer self.allocator.free(field_names);
+        const field_types = try self.allocator.alloc(mlir.MlirType, count);
+        defer self.allocator.free(field_types);
+
+        var it = std.mem.tokenizeScalar(u8, csv, ',');
+        var index: usize = 0;
+        while (it.next()) |field_name_raw| : (index += 1) {
+            const field_name = std.mem.trim(u8, field_name_raw, " \t\n\r");
+            field_names[index] = try self.allocator.dupe(u8, field_name);
+            errdefer self.allocator.free(@constCast(field_names[index]));
+            field_types[index] = try self.lookupStructFieldType(ty, index);
+            if (mlir.oraTypeIsNull(field_types[index])) return error.UnsupportedOperation;
+        }
+        defer for (field_names) |field_name| self.allocator.free(@constCast(field_name));
+
+        return self.createProductSortFromFields(key, field_names, field_types);
+    }
+
+    fn getProductSort(self: *Encoder, ty: mlir.MlirType) !?ProductSort {
+        const key = try self.productSortKey(ty) orelse return null;
+        errdefer self.allocator.free(key);
+        if (self.product_sorts.get(key)) |cached| {
+            self.allocator.free(key);
+            return cached;
+        }
+
+        const sort = if (std.mem.startsWith(u8, key, "!ora.tuple<"))
+            try self.createTupleProductSort(ty, key)
+        else if (std.mem.startsWith(u8, key, "!ora.struct_anon<"))
+            try self.createAnonymousStructProductSort(ty, key)
+        else if (std.mem.startsWith(u8, key, "!ora.struct<"))
+            try self.createNamedStructProductSort(ty, key)
+        else
+            return blk: {
+                self.allocator.free(key);
+                break :blk null;
+            };
+
+        try self.product_sorts.put(key, sort);
+        return sort;
     }
 
     pub fn sortFromPrintedTypeForTesting(self: *Encoder, type_text: []const u8) !z3.Z3_sort {
@@ -1244,6 +1455,12 @@ pub const Encoder = struct {
         self.pending_obligations.deinit(self.allocator);
         self.encoding_degraded_reasons.deinit(self.allocator);
         self.error_union_sorts.deinit();
+        var product_it = self.product_sorts.iterator();
+        while (product_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.product_sorts.deinit();
         for (self.quantified_bindings.items) |binding| {
             self.allocator.free(binding.name);
         }
@@ -3755,6 +3972,14 @@ pub const Encoder = struct {
             return sort;
         }
 
+        const product = self.getProductSort(mlir_type) catch |err| switch (err) {
+            error.UnsupportedOperation => null,
+            else => return err,
+        };
+        if (product) |resolved| {
+            return resolved.sort;
+        }
+
         const printed_type = try self.printMlirTypeOwned(mlir_type);
         defer self.allocator.free(printed_type);
         const trimmed_type = std.mem.trim(u8, printed_type, " \t\n\r");
@@ -3762,9 +3987,6 @@ pub const Encoder = struct {
             std.mem.startsWith(u8, trimmed_type, "!ora.struct_anon<") or
             std.mem.startsWith(u8, trimmed_type, "!ora.tuple<"))
         {
-            // Current struct/tuple support is intentionally opaque: field access is modeled
-            // through accessor functions over a stable bv256 handle. This is incomplete but
-            // not an accidental unknown-type fallback, so keep it non-degrading.
             return self.mkBitVectorSort(256);
         }
 
@@ -4172,27 +4394,30 @@ pub const Encoder = struct {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results < 1) return error.UnsupportedOperation;
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-            const result_id = @intFromPtr(result_value.ptr);
-            const elements = try self.allocator.dupe(z3.Z3_ast, operands);
-            try self.putTupleValue(result_id, elements);
-            return if (operands.len > 0) operands[0] else self.encodeBoolConstant(true);
+            const product = (try self.getProductSort(mlir.oraValueGetType(result_value))) orelse return error.UnsupportedOperation;
+            if (operands.len != product.fields.len) return error.InvalidOperandCount;
+            return z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(operands.len), operands.ptr);
         }
 
         if (std.mem.eql(u8, op_name, "ora.tuple_extract")) {
             const tuple_operand = mlir.oraOperationGetOperand(mlir_op, 0);
-            const tuple_id = @intFromPtr(tuple_operand.ptr);
-            if (!self.tuple_values.contains(tuple_id)) {
-                if (try self.tryResolveTupleElementsFromValue(tuple_operand, mode)) |elements| {
-                    try self.putTupleValue(tuple_id, elements);
+            const index_attr = mlir.oraOperationGetAttributeByName(mlir_op, .{ .data = "index".ptr, .length = 5 });
+            if (mlir.oraAttributeIsNull(index_attr)) return error.UnsupportedOperation;
+            const index: usize = @intCast(mlir.oraIntegerAttrGetValueSInt(index_attr));
+
+            if (try self.getProductSort(mlir.oraValueGetType(tuple_operand))) |product| {
+                if (z3.Z3_get_sort(self.context.ctx, operands[0]) == product.sort) {
+                    const field = product.fieldAt(index) orelse return error.UnsupportedOperation;
+                    return z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{operands[0]});
                 }
             }
-            if (self.tuple_values.get(tuple_id)) |tuple| {
-                const index_attr = mlir.oraOperationGetAttributeByName(mlir_op, .{ .data = "index".ptr, .length = 5 });
-                if (!mlir.oraAttributeIsNull(index_attr)) {
-                    const index: usize = @intCast(mlir.oraIntegerAttrGetValueSInt(index_attr));
-                    if (index < tuple.elements.len) return tuple.elements[index];
-                }
+
+            if (try self.tryResolveTupleElementsFromValue(tuple_operand, mode)) |elements| {
+                defer self.allocator.free(elements);
+                if (index >= elements.len) return error.UnsupportedOperation;
+                return elements[index];
             }
+
             return error.UnsupportedOperation;
         }
 
@@ -4246,6 +4471,15 @@ pub const Encoder = struct {
             if (mlir.oraOperationGetNumResults(mlir_op) >= 1) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
+                const product = self.getProductSort(result_type) catch |err| switch (err) {
+                    error.UnsupportedOperation => null,
+                    else => return err,
+                };
+                if (product) |resolved| {
+                    if (operands.len != resolved.fields.len) return error.InvalidOperandCount;
+                    return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
+                }
+
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
                 const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_instantiate_{d}", .{op_id});
@@ -4288,14 +4522,20 @@ pub const Encoder = struct {
             if (mlir.oraOperationGetNumResults(mlir_op) >= 1) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
+                const product = self.getProductSort(result_type) catch |err| switch (err) {
+                    error.UnsupportedOperation => null,
+                    else => return err,
+                };
+                if (product) |resolved| {
+                    if (operands.len != resolved.fields.len) return error.InvalidOperandCount;
+                    return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
+                }
+
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                // Build a struct-like value; bind each operand as a named field
-                // so ora.struct_field_extract can recover them.
                 const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_init_{d}", .{op_id});
                 defer self.allocator.free(struct_var_name);
                 const struct_val = try self.mkVariable(struct_var_name, result_sort);
-                // Use field names from attribute if available, otherwise fall back to field_N
                 var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
                 var field_names_owned: ?[]u8 = null;
                 defer if (field_names_owned) |owned| self.allocator.free(owned);
@@ -4355,6 +4595,17 @@ pub const Encoder = struct {
                     self.recordDegradation("struct_field_extract missing field_name");
                     return error.UnsupportedOperation;
                 };
+                const struct_operand = mlir.oraOperationGetOperand(mlir_op, 0);
+                const product = self.getProductSort(mlir.oraValueGetType(struct_operand)) catch |err| switch (err) {
+                    error.UnsupportedOperation => null,
+                    else => return err,
+                };
+                if (product) |resolved| {
+                    if (z3.Z3_get_sort(self.context.ctx, operands[0]) == resolved.sort) {
+                        const field = resolved.findField(field_name) orelse return error.UnsupportedOperation;
+                        return z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{operands[0]});
+                    }
+                }
                 const struct_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
@@ -4372,6 +4623,24 @@ pub const Encoder = struct {
                 };
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
+                const product = self.getProductSort(result_type) catch |err| switch (err) {
+                    error.UnsupportedOperation => null,
+                    else => return err,
+                };
+                if (product) |resolved| {
+                    if (z3.Z3_get_sort(self.context.ctx, operands[0]) == resolved.sort) {
+                        var args = try self.allocator.alloc(z3.Z3_ast, resolved.fields.len);
+                        defer self.allocator.free(args);
+                        for (resolved.fields, 0..) |field, index| {
+                            args[index] = if (std.mem.eql(u8, field.name, field_name))
+                                operands[1]
+                            else
+                                z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{operands[0]});
+                        }
+                        return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(args.len), args.ptr);
+                    }
+                }
+
                 const result_sort = try self.encodeMLIRType(result_type);
                 const source_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 const op_id = @intFromPtr(mlir_op.ptr);
@@ -11544,6 +11813,12 @@ pub const Encoder = struct {
     }
 
     pub fn invalidateValueCaches(self: *Encoder) void {
+        var tuple_it = self.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*.elements);
+        }
+        self.tuple_values.clearRetainingCapacity();
+
         var remove_keys = std.ArrayList(u64){};
         defer remove_keys.deinit(self.allocator);
 

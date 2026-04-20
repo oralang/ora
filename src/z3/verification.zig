@@ -862,6 +862,11 @@ pub const VerificationPass = struct {
         self.encoder.value_map.clearRetainingCapacity();
         self.encoder.value_map_old.clearRetainingCapacity();
         self.encoder.value_bindings.clearRetainingCapacity();
+        var tuple_it = self.encoder.tuple_values.iterator();
+        while (tuple_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*.elements);
+        }
+        self.encoder.tuple_values.clearRetainingCapacity();
 
         var written_it = self.encoder.written_global_slots.iterator();
         while (written_it.next()) |entry| {
@@ -2560,7 +2565,11 @@ pub const VerificationPass = struct {
             return errors.VerificationResult.init(self.allocator);
         }
 
-        const results = try self.allocator.alloc(PreparedQueryResult, queries.items.len);
+        return try self.executePreparedQueriesSequential(queries.items);
+    }
+
+    fn executePreparedQueriesSequential(self: *VerificationPass, queries: []const PreparedQuery) !errors.VerificationResult {
+        const results = try self.allocator.alloc(PreparedQueryResult, queries.len);
         defer self.allocator.free(results);
         for (results) |*entry| entry.* = .{};
         defer {
@@ -2572,7 +2581,7 @@ pub const VerificationPass = struct {
             }
         }
 
-        for (queries.items, 0..) |query, idx| {
+        for (queries, 0..) |query, idx| {
             const active_solver = solverForPreparedQuery(self, query);
             if (self.trace_smt) {
                 self.tracePreparedQuery(idx, query);
@@ -2667,7 +2676,7 @@ pub const VerificationPass = struct {
             );
         }
 
-        return try self.collectPreparedQueryResults(queries.items, results);
+        return try self.collectPreparedQueryResults(queries, results);
     }
 
     fn runVerificationPassParallel(self: *VerificationPass, mlir_module: mlir.MlirModule) !errors.VerificationResult {
@@ -2706,6 +2715,11 @@ pub const VerificationPass = struct {
 
         if (queries.items.len == 0) {
             return errors.VerificationResult.init(self.allocator);
+        }
+
+        if (preparedQueriesRequireSequentialExecution(queries.items)) {
+            std.debug.print("note: datatype-backed prepared queries disable parallel execution; running sequentially\n", .{});
+            return try self.executePreparedQueriesSequential(queries.items);
         }
 
         if (self.trace_smt) {
@@ -2956,6 +2970,15 @@ pub const VerificationPass = struct {
         }
 
         return combined;
+    }
+
+    fn preparedQueriesRequireSequentialExecution(queries: []const PreparedQuery) bool {
+        for (queries) |query| {
+            if (std.mem.indexOf(u8, query.smtlib_z, "(declare-datatypes") != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn collectPreparedQueryResults(
@@ -6865,30 +6888,23 @@ fn buildSmtlibForConstraints(
     constraints: []const z3.Z3_ast,
     logic: QuerySolverLogic,
 ) !BuiltSmtlibQuery {
-    const ctx = solver.context.ctx;
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    var symbols = ManagedArrayList(SmtSymbolDecl).init(allocator);
-    defer {
-        for (symbols.items) |symbol| allocator.free(symbol.name);
-        symbols.deinit();
+    var temp_solver = switch (logic) {
+        .all => try Solver.init(solver.context, allocator),
+        .qf_aufbv => try Solver.initForLogic(solver.context, allocator, "QF_AUFBV"),
+    };
+    defer temp_solver.deinit();
+
+    for (constraints) |constraint| {
+        try temp_solver.assertChecked(constraint);
     }
 
-    try out.appendSlice(allocator, "(set-logic ");
-    try out.appendSlice(allocator, querySolverLogicLabel(logic));
-    try out.appendSlice(allocator, ")\n");
-    for (constraints) |constraint| {
-        try collectAstSymbolDecls(allocator, ctx, constraint, &symbols);
-    }
-    for (symbols.items) |symbol_decl| {
-        try appendSmtlibDecl(allocator, &out, ctx, symbol_decl);
-    }
-    for (constraints) |constraint| {
-        const raw = z3.Z3_ast_to_string(ctx, constraint);
-        const text = if (raw == null) "true" else std.mem.span(raw);
-        try out.appendSlice(allocator, "(assert ");
-        try out.appendSlice(allocator, text);
-        try out.appendSlice(allocator, ")\n");
+    const raw = z3.Z3_solver_to_string(solver.context.ctx, temp_solver.solver);
+    const text = if (raw == null) "" else std.mem.span(raw);
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, text);
+    if (!std.mem.endsWith(u8, text, "\n")) {
+        try out.appendSlice(allocator, "\n");
     }
     try out.appendSlice(allocator, "(check-sat)\n");
     const smtlib_z = try out.toOwnedSliceSentinel(allocator, 0);

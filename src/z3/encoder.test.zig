@@ -60,6 +60,73 @@ test "encodeMLIRType maps bool and i32" {
     try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, basis))));
 }
 
+test "encodeMLIRType maps tuple to product sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const elements = [_]mlir.MlirType{
+        mlir.oraIntegerTypeCreate(mlir_ctx, 256),
+        mlir.oraIntegerTypeCreate(mlir_ctx, 1),
+    };
+    const tuple_ty = mlir.oraTupleTypeGet(mlir_ctx, elements.len, &elements);
+    const tuple_sort = try encoder.encodeMLIRType(tuple_ty);
+    try testing.expectEqual(false, z3.Z3_get_sort_kind(z3_ctx.ctx, tuple_sort) == z3.Z3_BV_SORT);
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "encodeMLIRType maps anonymous struct to product sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const field_names = [_]mlir.MlirStringRef{
+        stringRef("value"),
+        stringRef("overflow"),
+    };
+    const field_types = [_]mlir.MlirType{
+        mlir.oraIntegerTypeCreate(mlir_ctx, 256),
+        mlir.oraIntegerTypeCreate(mlir_ctx, 1),
+    };
+    const struct_ty = mlir.oraAnonymousStructTypeGet(mlir_ctx, field_names.len, &field_names, &field_types);
+    const struct_sort = try encoder.encodeMLIRType(struct_ty);
+    try testing.expectEqual(false, z3.Z3_get_sort_kind(z3_ctx.ctx, struct_sort) == z3.Z3_BV_SORT);
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "encodeMLIRType keeps named struct opaque without declaration metadata" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
+    const struct_sort = try encoder.encodeMLIRType(struct_ty);
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, struct_sort))));
+    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, struct_sort))));
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "quantified bytes and string binders use sequence sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
