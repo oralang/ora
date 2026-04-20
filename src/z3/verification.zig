@@ -7944,6 +7944,72 @@ fn buildKnownCalleePartialWriteSetDegradedModule(mlir_ctx: mlir.MlirContext) mli
     return module;
 }
 
+fn buildKnownCalleeReadSetDegradedModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const empty_vals = [_]mlir.MlirValue{};
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private_reader_with_unknown"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("private"))),
+        testNamedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("reads"))),
+    };
+    const helper_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &empty_types, &empty_locs, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper_func_op);
+
+    const known_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("counter"), i256_ty);
+    const unresolved_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("opaqueReader"),
+        &empty_vals,
+        empty_vals.len,
+        &empty_types,
+        empty_types.len,
+    );
+    const helper_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(helper_body, known_load);
+    mlir.oraBlockAppendOwnedOperation(helper_body, unresolved_call);
+    mlir.oraBlockAppendOwnedOperation(helper_body, helper_ret);
+
+    const caller_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const caller_func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &caller_attrs, caller_attrs.len, &empty_types, &empty_locs, 0);
+    const caller_body = mlir.oraFuncOpGetBodyBlock(caller_func_op);
+
+    const call_op = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("private_reader_with_unknown"),
+        &empty_vals,
+        empty_vals.len,
+        &empty_types,
+        empty_types.len,
+    );
+    const true_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, true_attr);
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(true_op, 0));
+    const caller_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(caller_body, call_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, true_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, caller_ret);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, caller_func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, helper_func_op);
+    return module;
+}
+
 fn buildPublicCallsPrivateEnsuresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -10878,6 +10944,55 @@ test "known callee partial write-set recovery fails closed in sequential and par
             result.errors.items[0].message,
             1,
             "failed to recover known callee write set exactly",
+        ));
+    }
+}
+
+test "known callee read-set recovery fails closed in sequential and parallel verification" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildKnownCalleeReadSetDegradedModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+
+        var result = try pass.runVerificationPassPreparedSequential(module);
+        defer result.deinit();
+
+        try testing.expect(pass.encoder.isDegraded());
+        try testing.expect(!result.success);
+        try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            result.errors.items[0].message,
+            1,
+            "failed to recover known callee read set exactly",
+        ));
+    }
+
+    {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.parallel = true;
+
+        var result = try pass.runVerificationPass(module);
+        defer result.deinit();
+
+        try testing.expect(pass.encoder.isDegraded());
+        try testing.expect(!result.success);
+        try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            result.errors.items[0].message,
+            1,
+            "failed to recover known callee read set exactly",
         ));
     }
 }
