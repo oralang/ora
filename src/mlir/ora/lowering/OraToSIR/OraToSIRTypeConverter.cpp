@@ -76,7 +76,7 @@ namespace
         if (auto exactType = llvm::dyn_cast<ora::ExactType>(type))
             return getOraBitWidth(exactType.getBaseType());
 
-        if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::MapType>(type))
+        if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::AnonymousStructType, ora::MapType>(type))
             return 256u;
 
         return std::nullopt;
@@ -94,7 +94,7 @@ namespace
     {
         if (!ctx)
             return Type();
-        if (llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+        if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                       mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
             return sir::PtrType::get(ctx, /*addrSpace*/ 1);
         return sir::U256Type::get(ctx);
@@ -209,7 +209,7 @@ namespace mlir
                 return builder.create<sir::BitcastOp>(loc, ptrType, input).getResult();
             }
 
-            if (llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+            if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                           mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
             {
                 if (auto bitcast = input.getDefiningOp<sir::BitcastOp>())
@@ -315,6 +315,21 @@ namespace mlir
                         Value payload = errCast.getOperand(1);
                         if (llvm::isa<sir::PtrType>(payload.getType()))
                             return payload;
+                        if (llvm::isa<sir::U256Type>(payload.getType()) &&
+                            llvm::isa<ora::AnonymousStructType>(input.getType()))
+                        {
+                            auto anonType = llvm::cast<ora::AnonymousStructType>(input.getType());
+                            if (anonType.getFieldTypes().size() == 1)
+                            {
+                                auto u256Type = sir::U256Type::get(builder.getContext());
+                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                Value size = builder.create<sir::ConstOp>(
+                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                                builder.create<sir::StoreOp>(loc, ptr, payload);
+                                return ptr;
+                            }
+                        }
                         if (llvm::isa<sir::U256Type>(payload.getType()) &&
                             llvm::isa<ora::TupleType>(input.getType()))
                         {
@@ -481,6 +496,8 @@ namespace mlir
                     return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
                 return type;
             });
+            addConversion([](ora::AnonymousStructType type) -> Type
+                          { return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1); });
             addConversion([](ora::TupleType type) -> Type
                           { return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1); });
 
@@ -1037,7 +1054,7 @@ namespace mlir
                                             }
                                         }
 
-                                        if (llvm::isa<ora::StructType>(type))
+                                        if (llvm::isa<ora::StructType, ora::AnonymousStructType>(type))
                                         {
                                             if (llvm::isa<sir::U256Type>(input.getType()))
                                             {

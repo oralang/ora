@@ -94,7 +94,7 @@ fn resultCarrierShapeSupported(ty: sema.Type) bool {
 pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
     return switch (ty) {
         .tuple => allocator.dupe(u8, "tuple"),
-        .anonymous_struct => allocator.dupe(u8, "tuple"),
+        .anonymous_struct => allocator.dupe(u8, "struct"),
         .bitfield => allocator.dupe(u8, "uint256"),
         .struct_, .contract => allocator.dupe(u8, "tuple"),
         else => canonicalAbiType(allocator, ty),

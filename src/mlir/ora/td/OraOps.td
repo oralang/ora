@@ -1175,8 +1175,8 @@ def Ora_StructFieldExtractOp : Ora_PureOp<"struct_field_extract"> {
 
 // Struct type constraint for operations
 def Ora_StructValueType : TypeConstraint<
-  CPred<"::llvm::isa<ora::StructType>($_self)">,
-  "ora.struct">;
+  CPred<"::llvm::isa<ora::StructType, ora::AnonymousStructType>($_self)">,
+  "ora.struct or ora.struct_anon">;
 
 // Update struct field (pure operation - returns new struct)
 // Result type must match input struct type (enforced in C++ builder)

@@ -1682,6 +1682,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, self.createCompareOp(loc, "ne", value, zero));
             }
 
+            const tuple_to_anon = try @This().convertTupleToAnonymousStruct(self, value, value_type, target_type, range);
+            if (tuple_to_anon) |converted| {
+                return converted;
+            }
+
+            const anon_to_tuple = try @This().convertAnonymousStructToTuple(self, value, value_type, target_type, range);
+            if (anon_to_tuple) |converted| {
+                return converted;
+            }
+
             if (!(value_is_int and target_is_int)) return value;
 
             const value_width = mlir.oraIntegerTypeGetWidth(value_type);
@@ -1704,6 +1714,93 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
+        }
+
+        fn convertTupleToAnonymousStruct(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            value_type: mlir.MlirType,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            const tuple_count = mlir.oraTupleTypeGetNumElements(value_type);
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(target_type);
+            if (tuple_count == 0 or field_count == 0 or tuple_count != field_count) return null;
+
+            const loc = self.parent.location(range);
+            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            defer fields.deinit(self.parent.allocator);
+
+            var index: usize = 0;
+            while (index < field_count) : (index += 1) {
+                const field_type = mlir.oraAnonymousStructTypeGetFieldType(target_type, index);
+                if (mlir.oraTypeIsNull(field_type)) return null;
+                const extract = mlir.oraTupleExtractOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    @intCast(index),
+                    field_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return null;
+                const extracted = appendValueOp(self.block, extract);
+                const converted = try @This().convertValueForFlow(self, extracted, field_type, range);
+                try fields.append(self.parent.allocator, converted);
+            }
+
+            const struct_init = mlir.oraStructInitOpCreate(
+                self.parent.context,
+                loc,
+                if (fields.items.len == 0) null else fields.items.ptr,
+                fields.items.len,
+                target_type,
+            );
+            if (mlir.oraOperationIsNull(struct_init)) return null;
+            return appendValueOp(self.block, struct_init);
+        }
+
+        fn convertAnonymousStructToTuple(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            value_type: mlir.MlirType,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(value_type);
+            const tuple_count = mlir.oraTupleTypeGetNumElements(target_type);
+            if (field_count == 0 or tuple_count == 0 or field_count != tuple_count) return null;
+
+            const loc = self.parent.location(range);
+            var elements: std.ArrayList(mlir.MlirValue) = .{};
+            defer elements.deinit(self.parent.allocator);
+
+            var index: usize = 0;
+            while (index < field_count) : (index += 1) {
+                const field_name = mlir.oraAnonymousStructTypeGetFieldName(value_type, index);
+                const target_element_type = mlir.oraTupleTypeGetElementType(target_type, index);
+                if (field_name.data == null or mlir.oraTypeIsNull(target_element_type)) return null;
+                const extract = mlir.oraStructFieldExtractOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    field_name,
+                    target_element_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return null;
+                const extracted = appendValueOp(self.block, extract);
+                const converted = try @This().convertValueForFlow(self, extracted, target_element_type, range);
+                try elements.append(self.parent.allocator, converted);
+            }
+
+            const tuple = mlir.oraTupleCreateOpCreate(
+                self.parent.context,
+                loc,
+                if (elements.items.len == 0) null else elements.items.ptr,
+                elements.items.len,
+                target_type,
+            );
+            if (mlir.oraOperationIsNull(tuple)) return null;
+            return appendValueOp(self.block, tuple);
         }
 
         pub fn lowerPowerWithOverflow(

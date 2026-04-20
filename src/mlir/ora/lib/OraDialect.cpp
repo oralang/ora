@@ -273,6 +273,66 @@ namespace mlir
             printer << "\">";
         }
 
+        // AnonymousStructType: !ora.struct_anon<("field", type), ...>
+        ::mlir::Type AnonymousStructType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            ::llvm::SmallVector<::llvm::StringRef> fieldNames;
+            ::llvm::SmallVector<::mlir::Type> fieldTypes;
+
+            if (parser.parseOptionalGreater().succeeded())
+                return AnonymousStructType::get(parser.getContext(), fieldNames, fieldTypes);
+
+            while (true)
+            {
+                if (parser.parseLParen())
+                    return {};
+
+                std::string name;
+                if (parser.parseString(&name))
+                    return {};
+
+                if (parser.parseComma())
+                    return {};
+
+                ::mlir::Type fieldType;
+                if (parser.parseType(fieldType))
+                    return {};
+
+                if (parser.parseRParen())
+                    return {};
+
+                fieldNames.push_back(parser.getBuilder().getStringAttr(name).getValue());
+                fieldTypes.push_back(fieldType);
+
+                if (parser.parseOptionalGreater().succeeded())
+                    break;
+
+                if (parser.parseComma())
+                    return {};
+            }
+
+            return AnonymousStructType::get(parser.getContext(), fieldNames, fieldTypes);
+        }
+
+        void AnonymousStructType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<";
+            auto fieldNames = getFieldNames();
+            auto fieldTypes = getFieldTypes();
+            for (size_t i = 0; i < fieldNames.size(); ++i)
+            {
+                if (i > 0)
+                    printer << ", ";
+                printer << "(\"" << fieldNames[i] << "\", ";
+                printer.printType(fieldTypes[i]);
+                printer << ")";
+            }
+            printer << ">";
+        }
+
         // EnumType: !ora.enum<"enum_name", repr_type>
         ::mlir::Type EnumType::parse(::mlir::AsmParser &parser)
         {
@@ -689,6 +749,31 @@ namespace mlir
 
                 return op->emitError() << "unknown field '" << fieldName << "' on struct '" << structType.getName() << "'";
             }
+
+            static ::mlir::LogicalResult getStructFieldInfo(
+                Operation *op,
+                AnonymousStructType structType,
+                StringRef fieldName,
+                size_t &fieldIndex,
+                ::mlir::Type &fieldType)
+            {
+                auto fieldNames = structType.getFieldNames();
+                auto fieldTypes = structType.getFieldTypes();
+                if (fieldNames.size() != fieldTypes.size())
+                    return op->emitError("anonymous struct type has malformed field metadata");
+
+                for (size_t i = 0; i < fieldNames.size(); ++i)
+                {
+                    if (fieldNames[i] == fieldName)
+                    {
+                        fieldIndex = i;
+                        fieldType = fieldTypes[i];
+                        return success();
+                    }
+                }
+
+                return op->emitError() << "unknown field '" << fieldName << "' on anonymous struct";
+            }
         } // namespace
 
         ::mlir::LogicalResult DivOp::verify()
@@ -739,34 +824,53 @@ namespace mlir
 
         ::mlir::LogicalResult StructInitOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getResult().getType());
-            if (!structType)
-                return emitOpError("result type must be !ora.struct<...>");
+            SmallVector<Type, 8> expectedFieldTypes;
+            std::string typeLabel;
 
-            auto structDecl = findStructDecl(*this, structType.getName());
-            if (!structDecl)
-                return emitOpError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
-
-            auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
-            if (!fieldTypesAttr)
-                return emitOpError() << "struct declaration for '" << structType.getName() << "' is missing ora.field_types";
-
-            if (getFieldValues().size() != fieldTypesAttr.size())
+            if (auto structType = llvm::dyn_cast<StructType>(getResult().getType()))
             {
-                return emitOpError() << "expected " << fieldTypesAttr.size()
-                                     << " field values for struct '" << structType.getName()
-                                     << "', got " << getFieldValues().size();
+                auto structDecl = findStructDecl(*this, structType.getName());
+                if (!structDecl)
+                    return emitOpError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
+
+                auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+                if (!fieldTypesAttr)
+                    return emitOpError() << "struct declaration for '" << structType.getName() << "' is missing ora.field_types";
+
+                for (auto attr : fieldTypesAttr)
+                {
+                    auto typeAttr = llvm::dyn_cast<TypeAttr>(attr);
+                    if (!typeAttr)
+                        return emitOpError() << "struct declaration for '" << structType.getName() << "' has invalid field type metadata";
+                    expectedFieldTypes.push_back(typeAttr.getValue());
+                }
+                typeLabel = ("struct '" + structType.getName()).str();
+                typeLabel += "'";
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getResult().getType()))
+            {
+                auto fieldTypes = anonType.getFieldTypes();
+                expectedFieldTypes.append(fieldTypes.begin(), fieldTypes.end());
+                typeLabel = "anonymous struct";
+            }
+            else
+            {
+                return emitOpError("result type must be !ora.struct<...> or !ora.struct_anon<...>");
             }
 
-            for (size_t i = 0; i < fieldTypesAttr.size(); ++i)
+            if (getFieldValues().size() != expectedFieldTypes.size())
             {
-                auto typeAttr = llvm::dyn_cast<TypeAttr>(fieldTypesAttr[i]);
-                if (!typeAttr)
-                    return emitOpError() << "struct declaration for '" << structType.getName() << "' has invalid field type metadata";
-                if (getFieldValues()[i].getType() != typeAttr.getValue())
+                return emitOpError() << "expected " << expectedFieldTypes.size()
+                                     << " field values for " << typeLabel
+                                     << ", got " << getFieldValues().size();
+            }
+
+            for (size_t i = 0; i < expectedFieldTypes.size(); ++i)
+            {
+                if (getFieldValues()[i].getType() != expectedFieldTypes[i])
                 {
                     return emitOpError() << "field operand #" << i << " has type " << getFieldValues()[i].getType()
-                                         << " but struct '" << structType.getName() << "' expects " << typeAttr.getValue();
+                                         << " but " << typeLabel << " expects " << expectedFieldTypes[i];
                 }
             }
 
@@ -826,14 +930,22 @@ namespace mlir
 
         ::mlir::LogicalResult StructFieldExtractOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
-            if (!structType)
-                return emitOpError("struct operand must have !ora.struct<...> type");
-
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                return failure();
+            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else
+            {
+                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+            }
 
             if (getResult().getType() != fieldType)
             {
@@ -847,17 +959,25 @@ namespace mlir
 
         ::mlir::LogicalResult StructFieldUpdateOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
-            if (!structType)
-                return emitOpError("struct operand must have !ora.struct<...> type");
-
             if (getResult().getType() != getStructValue().getType())
                 return emitOpError("result type must match the input struct type");
 
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                return failure();
+            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else
+            {
+                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+            }
 
             if (getValue().getType() != fieldType)
             {

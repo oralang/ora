@@ -1302,13 +1302,7 @@ const CompilerAbiGenerator = struct {
             .array => |array| return self.resolveArrayType(ctx, array),
             .slice => |slice| return self.resolveSliceType(ctx, slice),
             .tuple => |elements| return self.resolveTupleType(ctx, elements),
-            .anonymous_struct => |struct_type| {
-                const elements = try self.allocator.alloc(compiler.sema.Type, struct_type.fields.len);
-                for (struct_type.fields, 0..) |field, index| {
-                    elements[index] = field.ty;
-                }
-                return self.resolveTupleType(ctx, elements);
-            },
+            .anonymous_struct => |struct_type| return self.resolveAnonymousStructType(ctx, struct_type.fields),
             .struct_ => |named| return self.resolveNamedStructType(ctx, named.name),
             .bitfield => |named| return self.resolveNamedBitfieldType(ctx, named.name),
             .enum_ => |named| return self.resolveNamedEnumType(ctx, named.name),
@@ -1406,6 +1400,40 @@ const CompilerAbiGenerator = struct {
             .allocator = self.allocator,
             .components = component_ids,
             .wire_type = wire,
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveAnonymousStructType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        fields_input: []const compiler.sema.AnonymousStructField,
+    ) anyerror!ResolvedType {
+        var fields = try self.allocator.alloc(AbiFieldRef, fields_input.len);
+        errdefer self.allocator.free(fields);
+        var wire_parts: std.ArrayList([]const u8) = .{};
+        defer {
+            for (wire_parts.items) |part| self.allocator.free(part);
+            wire_parts.deinit(self.allocator);
+        }
+        for (fields_input, 0..) |field, index| {
+            const resolved = try self.resolveSemaType(ctx, field.ty, &.{});
+            fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
+            try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+        }
+        const joined = try std.mem.join(self.allocator, ",", wire_parts.items);
+        defer self.allocator.free(joined);
+        const wire = try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+        var node = AbiTypeNode{
+            .kind = .struct_,
+            .allocator = self.allocator,
+            .name = "__anon_struct__",
+            .wire_type = wire,
+            .fields = fields,
+            .ui_label = "anonymous struct",
             .ui_widget = "json",
         };
         const type_id = try self.ensureTypeNode(&node);

@@ -132,6 +132,22 @@ extern "C"
         size_t numElements,
         const MlirType *elementTypes);
 
+    MLIR_CAPI_EXPORTED size_t oraTupleTypeGetNumElements(MlirType tupleType);
+
+    MLIR_CAPI_EXPORTED MlirType oraTupleTypeGetElementType(MlirType tupleType, size_t index);
+
+    MLIR_CAPI_EXPORTED MlirType oraAnonymousStructTypeGet(
+        MlirContext ctx,
+        size_t numFields,
+        const MlirStringRef *fieldNames,
+        const MlirType *fieldTypes);
+
+    MLIR_CAPI_EXPORTED size_t oraAnonymousStructTypeGetFieldCount(MlirType structType);
+
+    MLIR_CAPI_EXPORTED MlirStringRef oraAnonymousStructTypeGetFieldName(MlirType structType, size_t index);
+
+    MLIR_CAPI_EXPORTED MlirType oraAnonymousStructTypeGetFieldType(MlirType structType, size_t index);
+
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraOperationPrintToString(MlirOperation op);
 

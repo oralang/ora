@@ -154,6 +154,19 @@ def Ora_StructType : Ora_Type<"Struct", "struct"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+// Anonymous struct type - structural product with named fields
+def Ora_AnonymousStructType : Ora_Type<"AnonymousStruct", "struct_anon"> {
+  let summary = "Anonymous struct type";
+  let description = [{
+    Anonymous struct type carrying ordered field names and field types.
+    Syntax: `!ora.struct_anon<("x", i256), ("y", !ora.address)>`
+  }];
+
+  let parameters = (ins ArrayRefParameter<"StringRef">:$fieldNames,
+                        ArrayRefParameter<"Type">:$fieldTypes);
+  let hasCustomAssemblyFormat = 1;
+}
+
 // Enum type - named enum with representation type
 def Ora_EnumType : Ora_Type<"Enum", "enum"> {
   let summary = "Named enum type";

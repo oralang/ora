@@ -2798,14 +2798,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var operands: std.ArrayList(mlir.MlirValue) = .{};
             for (fields) |decl_field| {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.tuple.create", struct_literal.range, operands.items, result_type));
+                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
                 };
                 const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
                 const raw_value = try self.lowerExpr(init.value, locals);
                 const value = try self.convertValueForFlow(raw_value, field_type, init.range);
                 try operands.append(self.parent.allocator, value);
             }
-            const op = mlir.oraTupleCreateOpCreate(
+            const op = mlir.oraStructInitOpCreate(
                 self.parent.context,
                 self.parent.location(struct_literal.range),
                 if (operands.items.len == 0) null else operands.items.ptr,
@@ -2813,7 +2813,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 result_type,
             );
             if (mlir.oraOperationIsNull(op)) {
-                const placeholder = try self.createAggregatePlaceholder("ora.tuple.create", struct_literal.range, operands.items, result_type);
+                const placeholder = try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type);
                 return appendValueOp(self.block, placeholder);
             }
             return appendValueOp(self.block, op);
@@ -2882,6 +2882,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     else => {},
                 }
             }
+            const base_value_type = mlir.oraValueGetType(base);
+            if (mlir.oraAnonymousStructTypeGetFieldCount(base_value_type) != 0) {
+                const struct_op = mlir.oraStructFieldExtractOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    base,
+                    strRef(field.name),
+                    result_type,
+                );
+                if (!mlir.oraOperationIsNull(struct_op)) return appendValueOp(self.block, struct_op);
+            }
             if (@This().overflowTupleFieldIndex(base_type, field.name)) |tuple_index| {
                 const extract_type = if (std.mem.eql(u8, field.name, "overflow"))
                     mlir.oraIntegerTypeCreate(self.parent.context, 1)
@@ -2910,15 +2921,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 );
                 if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
             }
-            if (@This().anonymousStructFieldIndex(base_type, field.name)) |tuple_index| {
-                const op = mlir.oraTupleExtractOpCreate(
+            if (base_type.kind() == .anonymous_struct) {
+                const struct_op = mlir.oraStructFieldExtractOpCreate(
                     self.parent.context,
                     self.parent.location(field.range),
                     base,
-                    tuple_index,
+                    strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                if (!mlir.oraOperationIsNull(struct_op)) return appendValueOp(self.block, struct_op);
             }
             if (@This().isBitfieldLikeType(self, base_type)) {
                 const extracted_type = self.parent.lowerExprType(expr_id);
@@ -2968,14 +2979,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (base_type.kind() == .struct_ or base_type.kind() == .named) return null;
             if (std.mem.eql(u8, field_name, "value")) return 0;
             if (std.mem.eql(u8, field_name, "overflow")) return 1;
-            return null;
-        }
-
-        fn anonymousStructFieldIndex(base_type: sema.Type, field_name: []const u8) ?i64 {
-            if (base_type.kind() != .anonymous_struct) return null;
-            for (base_type.anonymous_struct.fields, 0..) |field, index| {
-                if (std.mem.eql(u8, field.name, field_name)) return @intCast(index);
-            }
             return null;
         }
 

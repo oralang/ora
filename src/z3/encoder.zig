@@ -649,6 +649,7 @@ pub const Encoder = struct {
         if (std.mem.startsWith(u8, trimmed, "!ora.int<")) return self.mkBitVectorSort(256);
         if (std.mem.startsWith(u8, trimmed, "!ora.tuple<")) return self.mkBitVectorSort(256);
         if (std.mem.startsWith(u8, trimmed, "!ora.struct<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.struct_anon<")) return self.mkBitVectorSort(256);
         if ((std.mem.startsWith(u8, trimmed, "memref<") or std.mem.startsWith(u8, trimmed, "tensor<")) and trimmed[trimmed.len - 1] == '>') {
             const body = trimmed[std.mem.indexOfScalar(u8, trimmed, '<').? + 1 .. trimmed.len - 1];
             const parsed = try self.parsePrintedShapedType(body, 0);
@@ -3757,7 +3758,10 @@ pub const Encoder = struct {
         const printed_type = try self.printMlirTypeOwned(mlir_type);
         defer self.allocator.free(printed_type);
         const trimmed_type = std.mem.trim(u8, printed_type, " \t\n\r");
-        if (std.mem.startsWith(u8, trimmed_type, "!ora.struct<") or std.mem.startsWith(u8, trimmed_type, "!ora.tuple<")) {
+        if (std.mem.startsWith(u8, trimmed_type, "!ora.struct<") or
+            std.mem.startsWith(u8, trimmed_type, "!ora.struct_anon<") or
+            std.mem.startsWith(u8, trimmed_type, "!ora.tuple<"))
+        {
             // Current struct/tuple support is intentionally opaque: field access is modeled
             // through accessor functions over a stable bv256 handle. This is incomplete but
             // not an accidental unknown-type fallback, so keep it non-degrading.

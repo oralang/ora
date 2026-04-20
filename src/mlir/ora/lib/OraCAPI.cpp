@@ -635,6 +635,115 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return wrap(mlir::ora::TupleType::get(unwrap(ctx), elements));
     }
 
+    size_t oraTupleTypeGetNumElements(MlirType tupleType)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::TupleType>(unwrap(tupleType));
+            if (!type)
+                return 0;
+            return type.getElementTypes().size();
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    MlirType oraTupleTypeGetElementType(MlirType tupleType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::TupleType>(unwrap(tupleType));
+            if (!type)
+                return {nullptr};
+            auto elements = type.getElementTypes();
+            if (index >= elements.size())
+                return {nullptr};
+            return wrap(elements[index]);
+        }
+        catch (...)
+        {
+            return {nullptr};
+        }
+    }
+
+    MlirType oraAnonymousStructTypeGet(
+        MlirContext ctx,
+        size_t numFields,
+        const MlirStringRef *fieldNames,
+        const MlirType *fieldTypes)
+    {
+        llvm::SmallVector<llvm::StringRef, 8> names;
+        llvm::SmallVector<mlir::Type, 8> types;
+        names.reserve(numFields);
+        types.reserve(numFields);
+        for (size_t i = 0; i < numFields; ++i)
+        {
+            names.push_back(unwrap(fieldNames[i]));
+            types.push_back(unwrap(fieldTypes[i]));
+        }
+        return wrap(mlir::ora::AnonymousStructType::get(unwrap(ctx), names, types));
+    }
+
+    size_t oraAnonymousStructTypeGetFieldCount(MlirType structType)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return 0;
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size())
+                return 0;
+            return fieldNames.size();
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    MlirStringRef oraAnonymousStructTypeGetFieldName(MlirType structType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return oraStringRefCreate(nullptr, 0);
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size() || index >= fieldNames.size())
+                return oraStringRefCreate(nullptr, 0);
+            auto value = fieldNames[index];
+            return oraStringRefCreate(value.data(), value.size());
+        }
+        catch (...)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+    }
+
+    MlirType oraAnonymousStructTypeGetFieldType(MlirType structType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return {nullptr};
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size() || index >= fieldTypes.size())
+                return {nullptr};
+            return wrap(fieldTypes[index]);
+        }
+        catch (...)
+        {
+            return {nullptr};
+        }
+    }
+
     MlirStringRef oraOperationPrintToString(MlirOperation op)
     {
         try

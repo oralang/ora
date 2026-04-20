@@ -299,7 +299,7 @@ static Value adaptErrorPayloadToResultType(
                     elemValue = rewriter.create<sir::BitcastOp>(loc, elemType, elemValue);
                 }
                 else if (llvm::isa<sir::PtrType>(elemValue.getType()) &&
-                         llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+                         llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                                    mlir::MemRefType, mlir::UnrankedMemRefType>(elemType))
                 {
                     elemValue = createPtrViewMaterializationCast(rewriter, loc, elemType, elemValue);
@@ -322,14 +322,14 @@ static Value adaptErrorPayloadToResultType(
     }
 
     if (llvm::isa<sir::PtrType>(replacement.getType()) &&
-        llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+        llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                   mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
     {
         return createPtrViewMaterializationCast(rewriter, loc, resultType, replacement);
     }
 
     if (llvm::isa<sir::U256Type>(replacement.getType()) &&
-        llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+        llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                   mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
     {
         auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);

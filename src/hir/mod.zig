@@ -466,14 +466,18 @@ const Lowerer = struct {
                 );
             },
             .anonymous_struct => |struct_type| blk: {
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
                 var field_types: std.ArrayList(mlir.MlirType) = .{};
                 for (struct_type.fields) |field| {
+                    field_names.append(self.allocator, support.strRef(field.name)) catch
+                        break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
                     field_types.append(self.allocator, self.lowerSemaType(field.ty, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
                 }
-                break :blk mlir.oraTupleTypeGet(
+                break :blk mlir.oraAnonymousStructTypeGet(
                     self.context,
                     field_types.items.len,
+                    if (field_names.items.len == 0) null else field_names.items.ptr,
                     if (field_types.items.len == 0) null else field_types.items.ptr,
                 );
             },

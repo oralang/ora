@@ -367,6 +367,22 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
             }
         }
     }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        auto fieldNames = anonType.getFieldNames();
+        auto fieldTypes = anonType.getFieldTypes();
+        for (size_t i = 0; i < fieldNames.size(); ++i)
+        {
+            if (fieldNames[i] != fieldName)
+            {
+                continue;
+            }
+            fieldIndex = i;
+            expected = fieldTypes[i];
+            found = true;
+            break;
+        }
+    }
 
     if (!found && parseNumericFieldIndex(fieldName, fieldIndex))
     {
@@ -449,17 +465,23 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType());
-    if (!structType)
-    {
-        return rewriter.notifyMatchFailure(op, "struct_field_update expects ora.struct type");
-    }
-
     SmallVector<StringRef, 8> fieldNames;
     SmallVector<Type, 8> fieldTypes;
-    if (failed(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+    if (auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType()))
     {
-        return rewriter.notifyMatchFailure(op, "failed to resolve struct fields");
+        if (failed(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+        {
+            return rewriter.notifyMatchFailure(op, "failed to resolve struct fields");
+        }
+    }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        fieldNames.append(anonType.getFieldNames().begin(), anonType.getFieldNames().end());
+        fieldTypes.append(anonType.getFieldTypes().begin(), anonType.getFieldTypes().end());
+    }
+    else
+    {
+        return rewriter.notifyMatchFailure(op, "struct_field_update expects ora.struct or ora.struct_anon type");
     }
 
     StringRef fieldName = op.getFieldName();
@@ -568,7 +590,7 @@ LogicalResult StripStructMaterializeOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "expected single operand/result");
     }
 
-    if (!llvm::isa<ora::StructType>(op.getResult(0).getType()))
+    if (!llvm::isa<ora::StructType, ora::AnonymousStructType>(op.getResult(0).getType()))
     {
         return rewriter.notifyMatchFailure(op, "not a struct materialization");
     }

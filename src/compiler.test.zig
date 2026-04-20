@@ -10512,8 +10512,38 @@ test "compiler assigns overflow builtin results to overflow record types" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_extract"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct_anon<"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_field_extract"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
+}
+
+test "compiler abi keeps anonymous structs distinct from tuples" {
+    const source_text =
+        \\contract Test {
+        \\    pub fn viewFn() -> struct { amount: u256, ok: bool } {
+        \\        return .{ .amount = 1, .ok = true };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_struct_output = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "viewFn")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(usize, 2), output.fields.len);
+        try testing.expectEqual(@as(usize, 0), output.components.len);
+        try testing.expectEqualStrings("amount", output.fields[0].name);
+        try testing.expectEqualStrings("ok", output.fields[1].name);
+        saw_struct_output = true;
+    }
+    try testing.expect(saw_struct_output);
 }
 
 test "compiler supports general anonymous struct types" {
@@ -10546,8 +10576,9 @@ test "compiler supports general anonymous struct types" {
 
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct_anon<"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_init"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
 }
 
 test "compiler supports tuple index access in storage assignment expressions" {
