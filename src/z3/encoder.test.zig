@@ -10986,6 +10986,108 @@ test "direct ora.try_stmt composes nested escaping catch predicate exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "direct ora.try_stmt degrades when nested escaping try result requires exact catch summary" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const eu_ty = mlir.oraErrorUnionTypeGet(mlir_ctx, i256_ty);
+
+    const cond_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValueNestedYield"), i1_ty);
+
+    const outer_try = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const outer_try_block = mlir.oraTryStmtOpGetTryBlock(outer_try);
+    const outer_catch_block = mlir.oraTryStmtOpGetCatchBlock(outer_try);
+
+    const inner_try = mlir.oraTryStmtOpCreate(mlir_ctx, loc, &[_]mlir.MlirType{i256_ty}, 1);
+    const inner_try_block = mlir.oraTryStmtOpGetTryBlock(inner_try);
+    const inner_catch_block = mlir.oraTryStmtOpGetCatchBlock(inner_try);
+
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const if_op = mlir.oraScfIfOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(cond_op, 0),
+        &result_types,
+        result_types.len,
+        true,
+    );
+    const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+    const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+
+    const err_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const err_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, err_attr);
+    mlir.oraBlockAppendOwnedOperation(then_block, err_val_op);
+    const err_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_val_op, 0), eu_ty);
+    mlir.oraBlockAppendOwnedOperation(then_block, err_op);
+    const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(then_block, unwrap_op);
+    mlir.oraBlockAppendOwnedOperation(then_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(unwrap_op, 0)},
+        1,
+    ));
+
+    const else_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const else_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, else_attr);
+    mlir.oraBlockAppendOwnedOperation(else_block, else_op);
+    mlir.oraBlockAppendOwnedOperation(else_block, mlir.oraScfYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(else_op, 0)},
+        1,
+    ));
+
+    mlir.oraBlockAppendOwnedOperation(inner_try_block, if_op);
+    mlir.oraBlockAppendOwnedOperation(inner_try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(if_op, 0)},
+        1,
+    ));
+
+    const catch_err_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const catch_err_val_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, catch_err_attr);
+    mlir.oraBlockAppendOwnedOperation(inner_catch_block, catch_err_val_op);
+    const catch_err_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(catch_err_val_op, 0), eu_ty);
+    mlir.oraBlockAppendOwnedOperation(inner_catch_block, catch_err_op);
+    const catch_unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(catch_err_op, 0), i256_ty);
+    mlir.oraBlockAppendOwnedOperation(inner_catch_block, catch_unwrap_op);
+
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, inner_try);
+    mlir.oraBlockAppendOwnedOperation(outer_try_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(inner_try, 0)},
+        1,
+    ));
+
+    const outer_catch_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const outer_catch_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, outer_catch_attr);
+    mlir.oraBlockAppendOwnedOperation(outer_catch_block, outer_catch_op);
+    mlir.oraBlockAppendOwnedOperation(outer_catch_block, mlir.oraYieldOpCreate(
+        mlir_ctx,
+        loc,
+        &[_]mlir.MlirValue{mlir.oraOperationGetResult(outer_catch_op, 0)},
+        1,
+    ));
+
+    _ = try encoder.encodeValue(mlir.oraOperationGetResult(outer_try, 0));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.try_stmt result requires exact catch summary", encoder.degradationReason().?);
+}
+
 test "direct ora.switch_expr with default encodes exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
