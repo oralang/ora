@@ -127,6 +127,52 @@ test "encodeMLIRType keeps named struct opaque without declaration metadata" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "sortFromPrintedType maps tuple and anonymous struct to product sorts" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const tuple_sort = try encoder.sortFromPrintedTypeForTesting("!ora.tuple<i256, i1>");
+    try testing.expectEqual(false, z3.Z3_get_sort_kind(z3_ctx.ctx, tuple_sort) == z3.Z3_BV_SORT);
+
+    const anon_sort = try encoder.sortFromPrintedTypeForTesting("!ora.struct_anon<(\"value\", i256), (\"overflow\", i1)>");
+    try testing.expectEqual(false, z3.Z3_get_sort_kind(z3_ctx.ctx, anon_sort) == z3.Z3_BV_SORT);
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "sortFromPrintedType maps named struct to product sort when declaration metadata is registered" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.mlirLocationUnknownGet(mlir_ctx);
+    const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256"));
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("lhs")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("rhs")),
+    };
+    const field_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraTypeAttrCreateFromType(mlir.oraIntegerTypeCreate(mlir_ctx, 256)),
+        mlir.oraTypeAttrCreateFromType(mlir.oraIntegerTypeCreate(mlir_ctx, 256)),
+    };
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_types"), mlir.oraArrayAttrCreate(mlir_ctx, field_type_attrs.len, &field_type_attrs));
+    try encoder.registerStructDeclOperation(struct_decl);
+
+    const struct_sort = try encoder.sortFromPrintedTypeForTesting("!ora.struct<\"Pair__u256\">");
+    try testing.expectEqual(false, z3.Z3_get_sort_kind(z3_ctx.ctx, struct_sort) == z3.Z3_BV_SORT);
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "quantified bytes and string binders use sequence sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

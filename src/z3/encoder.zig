@@ -577,6 +577,10 @@ pub const Encoder = struct {
         const body = trimmed[prefix.len .. trimmed.len - 1];
         if (body.len == 0) return &.{};
 
+        return self.splitTopLevelTypeList(body);
+    }
+
+    fn splitTopLevelTypeList(self: *Encoder, body: []const u8) error{ OutOfMemory, UnsupportedOperation }![][]u8 {
         var elements = std.ArrayList([]u8){};
         errdefer {
             for (elements.items) |entry| self.allocator.free(entry);
@@ -618,6 +622,216 @@ pub const Encoder = struct {
             try elements.append(self.allocator, try self.allocator.dupe(u8, tail));
         }
         return elements.toOwnedSlice(self.allocator);
+    }
+
+    fn parseAnonymousStructFieldTexts(
+        self: *Encoder,
+        struct_type_text: []const u8,
+    ) error{ OutOfMemory, UnsupportedOperation }!struct { names: [][]u8, types: [][]u8 } {
+        const trimmed = std.mem.trim(u8, struct_type_text, " \t\n\r");
+        const prefix = "!ora.struct_anon<";
+        if (!std.mem.startsWith(u8, trimmed, prefix) or trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') {
+            return .{ .names = &.{}, .types = &.{} };
+        }
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        if (body.len == 0) return .{ .names = &.{}, .types = &.{} };
+
+        const entries = try self.splitTopLevelTypeList(body);
+        defer {
+            for (entries) |entry| self.allocator.free(entry);
+            self.allocator.free(entries);
+        }
+
+        var field_names = std.ArrayList([]u8){};
+        errdefer {
+            for (field_names.items) |name| self.allocator.free(name);
+            field_names.deinit(self.allocator);
+        }
+        var field_types = std.ArrayList([]u8){};
+        errdefer {
+            for (field_types.items) |ty| self.allocator.free(ty);
+            field_types.deinit(self.allocator);
+        }
+
+        for (entries) |entry| {
+            const field = std.mem.trim(u8, entry, " \t\n\r");
+            if (field.len < 5 or field[0] != '(' or field[field.len - 1] != ')') return error.UnsupportedOperation;
+            const inner = std.mem.trim(u8, field[1 .. field.len - 1], " \t\n\r");
+            if (inner.len < 4 or inner[0] != '"') return error.UnsupportedOperation;
+            const name_rest = inner[1..];
+            const name_end = std.mem.indexOfScalar(u8, name_rest, '"') orelse return error.UnsupportedOperation;
+            const field_name = name_rest[0..name_end];
+            const after_name = std.mem.trim(u8, name_rest[name_end + 1 ..], " \t\n\r");
+            if (after_name.len < 2 or after_name[0] != ',') return error.UnsupportedOperation;
+            const field_type = std.mem.trim(u8, after_name[1..], " \t\n\r");
+            if (field_name.len == 0 or field_type.len == 0) return error.UnsupportedOperation;
+            try field_names.append(self.allocator, try self.allocator.dupe(u8, field_name));
+            try field_types.append(self.allocator, try self.allocator.dupe(u8, field_type));
+        }
+
+        return .{
+            .names = try field_names.toOwnedSlice(self.allocator),
+            .types = try field_types.toOwnedSlice(self.allocator),
+        };
+    }
+
+    fn createProductSortFromPrintedFields(
+        self: *Encoder,
+        key: []const u8,
+        field_names: []const []const u8,
+        field_type_texts: []const []const u8,
+    ) error{ OutOfMemory, UnsupportedOperation }!ProductSort {
+        if (field_names.len == 0 or field_type_texts.len != field_names.len) return error.UnsupportedOperation;
+
+        var field_sorts = try self.allocator.alloc(z3.Z3_sort, field_names.len);
+        defer self.allocator.free(field_sorts);
+        var field_symbols = try self.allocator.alloc(z3.Z3_symbol, field_names.len);
+        defer self.allocator.free(field_symbols);
+
+        for (field_type_texts, 0..) |field_type_text, index| {
+            field_sorts[index] = try self.sortFromPrintedType(field_type_text);
+        }
+        for (field_names, 0..) |field_name, index| {
+            field_symbols[index] = self.mkSymbol(field_name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.UnsupportedOperation,
+            };
+        }
+
+        const tuple_symbol = self.mkSymbol(key) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        var ctor: z3.Z3_func_decl = undefined;
+        const projections = try self.allocator.alloc(z3.Z3_func_decl, field_names.len);
+        errdefer self.allocator.free(projections);
+        const sort = z3.Z3_mk_tuple_sort(
+            self.context.ctx,
+            tuple_symbol,
+            @intCast(field_names.len),
+            field_symbols.ptr,
+            field_sorts.ptr,
+            &ctor,
+            projections.ptr,
+        );
+
+        const fields = try self.allocator.alloc(ProductField, field_names.len);
+        for (fields) |*field| {
+            field.* = .{
+                .name = &.{},
+                .sort = undefined,
+                .projection = undefined,
+            };
+        }
+        errdefer {
+            for (fields[0..field_names.len]) |field| {
+                if (field.name.len != 0) self.allocator.free(field.name);
+            }
+            self.allocator.free(fields);
+        }
+        for (field_names, 0..) |field_name, index| {
+            fields[index] = .{
+                .name = try self.allocator.dupe(u8, field_name),
+                .sort = field_sorts[index],
+                .projection = projections[index],
+            };
+        }
+        self.allocator.free(projections);
+
+        return .{
+            .sort = sort,
+            .ctor = ctor,
+            .fields = fields,
+        };
+    }
+
+    fn getProductSortFromTypeText(self: *Encoder, type_text: []const u8) error{ OutOfMemory, UnsupportedOperation }!?ProductSort {
+        const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
+        var key = try self.allocator.dupe(u8, trimmed);
+        errdefer self.allocator.free(key);
+        if (std.mem.startsWith(u8, trimmed, "!ora.struct<")) {
+            const parsed_name = parseStructTypeName(trimmed) orelse return null;
+            const canonical_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+            self.allocator.free(key);
+            key = try std.fmt.allocPrint(self.allocator, "!ora.struct<\"{s}\">", .{canonical_name});
+        } else if (!std.mem.startsWith(u8, trimmed, "!ora.tuple<") and !std.mem.startsWith(u8, trimmed, "!ora.struct_anon<")) {
+            return null;
+        }
+
+        if (self.product_sorts.get(key)) |cached| {
+            self.allocator.free(key);
+            return cached;
+        }
+
+        const product = if (std.mem.startsWith(u8, key, "!ora.tuple<")) blk: {
+            const field_type_texts = try self.parseTupleElementTypeTexts(key);
+            defer {
+                for (field_type_texts) |entry| self.allocator.free(entry);
+                self.allocator.free(field_type_texts);
+            }
+            if (field_type_texts.len == 0) return error.UnsupportedOperation;
+            const field_names = try self.allocator.alloc([]const u8, field_type_texts.len);
+            defer self.allocator.free(field_names);
+            for (field_type_texts, 0..) |_, index| {
+                field_names[index] = try std.fmt.allocPrint(self.allocator, "{d}", .{index});
+                errdefer self.allocator.free(@constCast(field_names[index]));
+            }
+            defer for (field_names) |field_name| self.allocator.free(@constCast(field_name));
+            break :blk try self.createProductSortFromPrintedFields(key, field_names, field_type_texts);
+        } else if (std.mem.startsWith(u8, key, "!ora.struct_anon<")) blk: {
+            const parsed = try self.parseAnonymousStructFieldTexts(key);
+            defer {
+                for (parsed.names) |name| self.allocator.free(name);
+                for (parsed.types) |ty| self.allocator.free(ty);
+                self.allocator.free(parsed.names);
+                self.allocator.free(parsed.types);
+            }
+            if (parsed.names.len == 0) return error.UnsupportedOperation;
+            break :blk try self.createProductSortFromPrintedFields(key, parsed.names, parsed.types);
+        } else blk: {
+            const parsed_name = parseStructTypeName(key) orelse return error.UnsupportedOperation;
+            const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+            const struct_decl = self.struct_decl_ops.get(struct_name) orelse return error.UnsupportedOperation;
+            const field_names_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_names", 15));
+            const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+            if (mlir.oraAttributeIsNull(field_names_attr) or mlir.oraAttributeIsNull(field_types_attr)) {
+                return error.UnsupportedOperation;
+            }
+            const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(field_names_attr));
+            if (count == 0 or count != @as(usize, @intCast(mlir.oraArrayAttrGetNumElements(field_types_attr)))) {
+                return error.UnsupportedOperation;
+            }
+            const field_names = try self.allocator.alloc([]const u8, count);
+            defer self.allocator.free(field_names);
+            const field_types = try self.allocator.alloc([]const u8, count);
+            defer self.allocator.free(field_types);
+            for (0..count) |index| {
+                const field_name_attr = mlir.oraArrayAttrGetElement(field_names_attr, index);
+                const field_name_ref = mlir.oraStringAttrGetValue(field_name_attr);
+                if (field_name_ref.data == null or field_name_ref.length == 0) return error.UnsupportedOperation;
+                field_names[index] = try self.allocator.dupe(u8, field_name_ref.data[0..field_name_ref.length]);
+                errdefer self.allocator.free(@constCast(field_names[index]));
+
+                const field_type_attr = mlir.oraArrayAttrGetElement(field_types_attr, index);
+                const field_type_text = try self.printMlirAttributeOwned(field_type_attr);
+                defer self.allocator.free(field_type_text);
+                var field_type_slice = std.mem.trim(u8, field_type_text, " \t\n\r");
+                const type_prefix = "type<";
+                if (std.mem.startsWith(u8, field_type_slice, type_prefix) and field_type_slice.len > type_prefix.len and field_type_slice[field_type_slice.len - 1] == '>') {
+                    field_type_slice = field_type_slice[type_prefix.len .. field_type_slice.len - 1];
+                }
+                field_types[index] = try self.allocator.dupe(u8, field_type_slice);
+                errdefer self.allocator.free(@constCast(field_types[index]));
+            }
+            defer {
+                for (field_names) |field_name| self.allocator.free(@constCast(field_name));
+                for (field_types) |field_type| self.allocator.free(@constCast(field_type));
+            }
+            break :blk try self.createProductSortFromPrintedFields(key, field_names, field_types);
+        };
+
+        try self.product_sorts.put(key, product);
+        return product;
     }
 
     fn productSortKey(self: *Encoder, ty: mlir.MlirType) !?[]u8 {
@@ -844,7 +1058,7 @@ pub const Encoder = struct {
         return .{ .element_text = element_text, .rank = if (rank == 0) default_rank else rank };
     }
 
-    fn sortFromPrintedType(self: *Encoder, type_text: []const u8) !z3.Z3_sort {
+    fn sortFromPrintedType(self: *Encoder, type_text: []const u8) error{ OutOfMemory, UnsupportedOperation }!z3.Z3_sort {
         const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
         if (trimmed.len == 0) return error.UnsupportedOperation;
         if (std.mem.eql(u8, trimmed, "i1") or std.mem.eql(u8, trimmed, "bool")) return z3.Z3_mk_bool_sort(self.context.ctx);
@@ -858,9 +1072,13 @@ pub const Encoder = struct {
             return self.mkBitVectorSort(width);
         }
         if (std.mem.startsWith(u8, trimmed, "!ora.int<")) return self.mkBitVectorSort(256);
-        if (std.mem.startsWith(u8, trimmed, "!ora.tuple<")) return self.mkBitVectorSort(256);
-        if (std.mem.startsWith(u8, trimmed, "!ora.struct<")) return self.mkBitVectorSort(256);
-        if (std.mem.startsWith(u8, trimmed, "!ora.struct_anon<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.tuple<") or
+            std.mem.startsWith(u8, trimmed, "!ora.struct<") or
+            std.mem.startsWith(u8, trimmed, "!ora.struct_anon<"))
+        {
+            if (try self.getProductSortFromTypeText(trimmed)) |product| return product.sort;
+            return self.mkBitVectorSort(256);
+        }
         if ((std.mem.startsWith(u8, trimmed, "memref<") or std.mem.startsWith(u8, trimmed, "tensor<")) and trimmed[trimmed.len - 1] == '>') {
             const body = trimmed[std.mem.indexOfScalar(u8, trimmed, '<').? + 1 .. trimmed.len - 1];
             const parsed = try self.parsePrintedShapedType(body, 0);
