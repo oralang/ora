@@ -339,6 +339,94 @@ test "struct_field_update preserves untouched fields exactly" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "struct_field_update degrades when declaration and source metadata are both absent" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
+
+    const pair_placeholder = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("opaquePair"), struct_ty);
+    const update_value = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    ), 0);
+
+    const update_op = mlir.oraStructFieldUpdateOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(pair_placeholder, 0),
+        stringRef("left"),
+        update_value,
+    );
+
+    _ = try encoder.encodeOperation(update_op);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("missing struct declaration metadata for struct update", encoder.degradationReason().?);
+}
+
+test "struct_field_update degrades when field type metadata is missing" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256_missing_types"));
+
+    const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256_missing_types"));
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("left")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("right")),
+    };
+    mlir.oraOperationSetAttributeByName(
+        struct_decl,
+        stringRef("ora.field_names"),
+        mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs),
+    );
+    try encoder.registerStructDeclOperation(struct_decl);
+
+    const pair_placeholder = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("pairWithMissingTypes"), struct_ty);
+    const update_value = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7),
+    ), 0);
+
+    const update_op = mlir.oraStructFieldUpdateOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(pair_placeholder, 0),
+        stringRef("left"),
+        update_value,
+    );
+
+    _ = try encoder.encodeOperation(update_op);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("missing struct field type metadata for struct update", encoder.degradationReason().?);
+}
+
 test "known pure callee returning updated struct preserves untouched fields exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
