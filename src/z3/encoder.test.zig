@@ -16671,6 +16671,72 @@ test "known callee with partially recovered write set still degrades encoder" {
     try testing.expect(std.mem.eql(u8, encoder.degradationReason().?, "failed to recover known callee write set exactly"));
 }
 
+test "known callee with unknown read set degrades encoder" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("readerWithUnknownSlots"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("reads"))),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+
+    const unresolved_call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueReader"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, unresolved_call);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+
+    try encoder.registerFunctionOperation(helper);
+
+    const zero_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, zero_attr);
+    const zero = mlir.oraOperationGetResult(zero_op, 0);
+    const seed_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, zero, stringRef("counter"));
+    _ = try encoder.encodeOperation(seed_store);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("readerWithUnknownSlots"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    var found_read_reason = false;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "failed to recover known callee read set exactly")) {
+            found_read_reason = true;
+            break;
+        }
+    }
+    try testing.expect(found_read_reason);
+}
+
 test "known callee nested map write set stays exact" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
