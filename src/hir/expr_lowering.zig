@@ -357,10 +357,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         operands.items.len,
                         result_type,
                     );
-                    if (mlir.oraOperationIsNull(op)) {
-                        const placeholder = try self.createAggregatePlaceholder("ora.tuple.create", tuple.range, operands.items, result_type);
-                        break :blk appendValueOp(self.block, placeholder);
-                    }
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .ArrayLiteral => |array| blk: {
@@ -2680,7 +2677,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
                     return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
                 }
-                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)));
+                return error.MlirOperationCreationFailed;
             };
             const item = self.parent.file.item(struct_item_id).*;
             if (item == .Bitfield) {
@@ -2709,7 +2706,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (self.parent.typecheck.instantiatedStructByName(concrete_name)) |instantiated| {
                         return try @This().lowerInstantiatedStructLiteral(self, expr_id, struct_literal, instantiated.fields, concrete_name, locals);
                     }
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, &.{}, self.parent.lowerExprType(expr_id)));
+                    return error.MlirOperationCreationFailed;
                 },
             };
 
@@ -2717,7 +2714,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var operands: std.ArrayList(mlir.MlirValue) = .{};
             for (struct_item.fields) |decl_field| {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
+                    return error.MlirOperationCreationFailed;
                 };
                 const field_type = self.parent.lowerTypeExpr(decl_field.type_expr);
                 const raw_value = try self.lowerExpr(init.value, locals);
@@ -2733,9 +2730,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 operands.items.len,
                 result_type,
             );
-            if (mlir.oraOperationIsNull(op)) {
-                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
-            }
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -2751,7 +2746,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var operands: std.ArrayList(mlir.MlirValue) = .{};
             for (fields) |decl_field| {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
+                    return error.MlirOperationCreationFailed;
                 };
                 const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
                 const raw_value = try self.lowerExpr(init.value, locals);
@@ -2766,9 +2761,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 operands.items.len,
                 result_type,
             );
-            if (mlir.oraOperationIsNull(op)) {
-                return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
-            }
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -2783,7 +2776,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var operands: std.ArrayList(mlir.MlirValue) = .{};
             for (fields) |decl_field| {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
-                    return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type));
+                    return error.MlirOperationCreationFailed;
                 };
                 const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
                 const raw_value = try self.lowerExpr(init.value, locals);
@@ -2797,10 +2790,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 operands.items.len,
                 result_type,
             );
-            if (mlir.oraOperationIsNull(op)) {
-                const placeholder = try self.createAggregatePlaceholder("ora.struct.create", struct_literal.range, operands.items, result_type);
-                return appendValueOp(self.block, placeholder);
-            }
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -2876,7 +2866,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(struct_op)) return appendValueOp(self.block, struct_op);
+                if (mlir.oraOperationIsNull(struct_op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, struct_op);
             }
             if (@This().overflowTupleFieldIndex(base_type, field.name)) |tuple_index| {
                 const extract_type = if (std.mem.eql(u8, field.name, "overflow"))
@@ -2914,7 +2905,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(struct_op)) return appendValueOp(self.block, struct_op);
+                if (mlir.oraOperationIsNull(struct_op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, struct_op);
             }
             if (@This().isBitfieldLikeType(self, base_type)) {
                 const extracted_type = self.parent.lowerExprType(expr_id);
@@ -2936,7 +2928,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     strRef(field.name),
                     result_type,
                 );
-                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
             }
             return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{base}, self.parent.lowerExprType(expr_id)));
         }
