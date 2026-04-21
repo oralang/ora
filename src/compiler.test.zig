@@ -10799,6 +10799,24 @@ test "compiler permits recursive runtime structs through map indirection" {
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
+test "compiler permits recursive runtime structs through slice indirection" {
+    const source_text =
+        \\struct Node {
+        \\    children: slice[Node],
+        \\}
+        \\
+        \\pub fn probe() -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler supports tuple index access in storage assignment expressions" {
     const source_text =
         \\contract TupleStore {
