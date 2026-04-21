@@ -173,6 +173,70 @@ test "sortFromPrintedType maps named struct to product sort when declaration met
     try testing.expect(!encoder.isDegraded());
 }
 
+test "transparent cast rebuilds matching product value into target product sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const named_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Pair__u256"));
+
+    const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Pair__u256"));
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("left")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("right")),
+    };
+    const field_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+    };
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_types"), mlir.oraArrayAttrCreate(mlir_ctx, field_type_attrs.len, &field_type_attrs));
+    try encoder.registerStructDeclOperation(struct_decl);
+
+    const anon_field_names = [_]mlir.MlirStringRef{
+        stringRef("left"),
+        stringRef("right"),
+    };
+    const anon_field_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const anon_ty = mlir.oraAnonymousStructTypeGet(mlir_ctx, anon_field_names.len, &anon_field_names, &anon_field_types);
+
+    const one_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1),
+    );
+    const two_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2),
+    );
+    const one = mlir.oraOperationGetResult(one_op, 0);
+    const two = mlir.oraOperationGetResult(two_op, 0);
+
+    const init_op = mlir.oraStructInitOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{ one, two }, 2, anon_ty);
+    const cast_op = mlir.oraUnrealizedConversionCastOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(init_op, 0), named_ty);
+    const extract_op = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(cast_op, 0), stringRef("right"), i256_ty);
+    const right_ast = try encoder.encodeOperation(extract_op);
+
+    try testing.expect(!encoder.isDegraded());
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, right_ast, try encoder.encodeValue(two))));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "sortFromPrintedType degrades on named struct without declaration metadata" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

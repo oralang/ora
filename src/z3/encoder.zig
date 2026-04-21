@@ -2987,6 +2987,46 @@ pub const Encoder = struct {
         return self.degradeAstCoercion(target_sort, "unsupported AST sort coercion");
     }
 
+    fn findProductSortByZ3Sort(self: *Encoder, sort: z3.Z3_sort) ?ProductSort {
+        var it = self.product_sorts.iterator();
+        while (it.next()) |entry| {
+            const product = entry.value_ptr.*;
+            if (product.sort == sort) return product;
+        }
+        return null;
+    }
+
+    fn coerceProductAstToSort(
+        self: *Encoder,
+        value: z3.Z3_ast,
+        value_type: mlir.MlirType,
+        target_sort: z3.Z3_sort,
+    ) EncodeError!?z3.Z3_ast {
+        const value_sort = z3.Z3_get_sort(self.context.ctx, value);
+        if (value_sort == target_sort) return value;
+
+        const source_product = (self.getProductSort(value_type) catch |err| switch (err) {
+            error.UnsupportedOperation => null,
+            else => return err,
+        }) orelse return null;
+        if (value_sort != source_product.sort) return null;
+
+        const target_product = self.findProductSortByZ3Sort(target_sort) orelse return null;
+        if (source_product.fields.len != target_product.fields.len) return null;
+
+        const args = try self.allocator.alloc(z3.Z3_ast, target_product.fields.len);
+        defer self.allocator.free(args);
+
+        for (target_product.fields, 0..) |target_field, index| {
+            const source_field = source_product.findField(target_field.name) orelse
+                source_product.fieldAt(index) orelse return null;
+            if (source_field.sort != target_field.sort) return null;
+            args[index] = z3.Z3_mk_app(self.context.ctx, source_field.projection, 1, &[_]z3.Z3_ast{value});
+        }
+
+        return z3.Z3_mk_app(self.context.ctx, target_product.ctor, @intCast(args.len), args.ptr);
+    }
+
     fn encodeTensorExtractOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
         if (operands.len < 2) return error.InvalidOperandCount;
 
@@ -4614,19 +4654,46 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
             if (operands.len >= 1) {
-                return operands[0];
+                const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                return try self.coerceTypedAstToSortOrUndef(
+                    operands[0],
+                    mlir.oraValueGetType(operand_value),
+                    result_sort,
+                    "refinement_to_base",
+                    @intFromPtr(mlir_op.ptr),
+                );
             }
         }
 
         if (std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast")) {
             if (operands.len >= 1) {
-                return operands[0];
+                const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                return try self.coerceTypedAstToSortOrUndef(
+                    operands[0],
+                    mlir.oraValueGetType(operand_value),
+                    result_sort,
+                    "unrealized_conversion_cast",
+                    @intFromPtr(mlir_op.ptr),
+                );
             }
         }
 
         if (std.mem.eql(u8, op_name, "ora.base_to_refinement")) {
             if (operands.len >= 1) {
-                return operands[0];
+                const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
+                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+                const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+                return try self.coerceTypedAstToSortOrUndef(
+                    operands[0],
+                    mlir.oraValueGetType(operand_value),
+                    result_sort,
+                    "base_to_refinement",
+                    @intFromPtr(mlir_op.ptr),
+                );
             }
         }
 
@@ -4974,7 +5041,9 @@ pub const Encoder = struct {
                     .initialized = self.boolTrue(),
                 });
                 if (mode == .Current) {
-                    if (self.resolveGlobalNameFromMapOperand(memref_value)) |global_name| {
+                    if (self.mapOperandUsesNestedGet(memref_value)) {
+                        try self.tryUpdateNestedGlobalMapStore(memref_value, updated, mode, @intFromPtr(mlir_op.ptr));
+                    } else if (self.resolveGlobalNameFromMapOperand(memref_value)) |global_name| {
                         const global_sort = z3.Z3_get_sort(self.context.ctx, updated);
                         _ = try self.getOrCreateGlobal(global_name, global_sort);
                         if (self.global_map.getPtr(global_name)) |existing| {
@@ -5361,6 +5430,10 @@ pub const Encoder = struct {
     ) EncodeError!z3.Z3_ast {
         const value_sort = z3.Z3_get_sort(self.context.ctx, value);
         if (value_sort == target_sort) return value;
+
+        if (try self.coerceProductAstToSort(value, value_type, target_sort)) |coerced| {
+            return coerced;
+        }
 
         const src_kind = z3.Z3_get_sort_kind(self.context.ctx, value_sort);
         const dst_kind = z3.Z3_get_sort_kind(self.context.ctx, target_sort);

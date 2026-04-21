@@ -13713,6 +13713,32 @@ test "verification supports named struct field extraction after helper storage a
     try testing.expect(!result.degraded);
 }
 
+test "verification supports storage map values containing fixed arrays without degradation" {
+    const source_text =
+        \\contract MapOfArrays {
+        \\    storage var slots: map<address, [u256; 4]>;
+        \\
+        \\    pub fn set_slot(account: address, index: u256, val: u256) {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        arr[index] = val;
+        \\        slots[account] = arr;
+        \\    }
+        \\
+        \\    pub fn get_slot(account: address, index: u256) -> u256 {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        return arr[index];
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "set_slot");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
 test "verification does not vacuously prove branch-local Result unwrap and get_error assumptions" {
     const source_text =
         \\error Failure(code: u256);
