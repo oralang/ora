@@ -806,6 +806,18 @@ const CompilerAbiGenerator = struct {
                             try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = item_id });
                         }
                     },
+                    .Contract => |contract| {
+                        for (contract.members) |member_id| {
+                            switch (ctx.file.item(member_id).*) {
+                                .Struct => |struct_item| {
+                                    if (!self.global_structs.contains(struct_item.name)) {
+                                        try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = member_id });
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    },
                     .Bitfield => |bitfield_item| {
                         if (!self.global_bitfields.contains(bitfield_item.name)) {
                             try self.global_bitfields.put(bitfield_item.name, .{ .module_id = module_id, .item_id = item_id });

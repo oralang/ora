@@ -989,6 +989,27 @@ pub const Encoder = struct {
         return self.createProductSortFromFields(key, field_names, field_types);
     }
 
+    fn ensureNamedStructProductSortFromFieldInfo(
+        self: *Encoder,
+        ty: mlir.MlirType,
+        field_names: []const []const u8,
+        field_types: []const mlir.MlirType,
+    ) !?ProductSort {
+        const key = try self.productSortKey(ty) orelse return null;
+        errdefer self.allocator.free(key);
+        if (self.product_sorts.get(key)) |cached| {
+            self.allocator.free(key);
+            return cached;
+        }
+        if (!std.mem.startsWith(u8, key, "!ora.struct<")) {
+            self.allocator.free(key);
+            return null;
+        }
+        const sort = try self.createProductSortFromFields(key, field_names, field_types);
+        try self.product_sorts.put(key, sort);
+        return sort;
+    }
+
     fn getProductSort(self: *Encoder, ty: mlir.MlirType) !?ProductSort {
         const key = try self.productSortKey(ty) orelse return null;
         errdefer self.allocator.free(key);
@@ -1076,8 +1097,12 @@ pub const Encoder = struct {
             std.mem.startsWith(u8, trimmed, "!ora.struct<") or
             std.mem.startsWith(u8, trimmed, "!ora.struct_anon<"))
         {
-            if (try self.getProductSortFromTypeText(trimmed)) |product| return product.sort;
-            return self.mkBitVectorSort(256);
+            if (self.getProductSortFromTypeText(trimmed) catch |err| switch (err) {
+                error.UnsupportedOperation => null,
+                else => return err,
+            }) |product| return product.sort;
+            self.recordDegradation("printed product type requires exact metadata-backed sort reconstruction");
+            return error.UnsupportedOperation;
         }
         if ((std.mem.startsWith(u8, trimmed, "memref<") or std.mem.startsWith(u8, trimmed, "tensor<")) and trimmed[trimmed.len - 1] == '>') {
             const body = trimmed[std.mem.indexOfScalar(u8, trimmed, '<').? + 1 .. trimmed.len - 1];
@@ -1771,6 +1796,41 @@ pub const Encoder = struct {
             if (self.struct_decl_ops.contains(name)) continue;
             const key = try self.allocator.dupe(u8, name);
             try self.struct_decl_ops.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyProductSortRegistryFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.product_sorts.iterator();
+        while (it.next()) |entry| {
+            const key_text = entry.key_ptr.*;
+            if (self.product_sorts.contains(key_text)) continue;
+
+            const key = try self.allocator.dupe(u8, key_text);
+            errdefer self.allocator.free(key);
+
+            const source = entry.value_ptr.*;
+            var fields = try self.allocator.alloc(ProductField, source.fields.len);
+            errdefer self.allocator.free(fields);
+
+            var copied: usize = 0;
+            errdefer {
+                for (0..copied) |i| self.allocator.free(fields[i].name);
+            }
+
+            for (source.fields, 0..) |field, index| {
+                fields[index] = .{
+                    .name = try self.allocator.dupe(u8, field.name),
+                    .sort = field.sort,
+                    .projection = field.projection,
+                };
+                copied += 1;
+            }
+
+            try self.product_sorts.put(key, .{
+                .sort = source.sort,
+                .ctor = source.ctor,
+                .fields = fields,
+            });
         }
     }
 
@@ -4698,12 +4758,6 @@ pub const Encoder = struct {
                     return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
                 }
 
-                const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_instantiate_{d}", .{op_id});
-                defer self.allocator.free(struct_var_name);
-                const struct_val = try self.mkVariable(struct_var_name, result_sort);
-
                 var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
                 var field_names_owned: ?[]u8 = null;
                 defer if (field_names_owned) |owned| self.allocator.free(owned);
@@ -4721,16 +4775,30 @@ pub const Encoder = struct {
                     field_names_owned = try self.lookupStructFieldNamesInScope(mlir_op, result_type);
                     field_names_str = field_names_owned;
                 }
-
-                for (operands, 0..) |operand, i| {
-                    const field_attr_name = try self.resolveFieldNameForIndex(field_names_str, i);
-                    defer self.allocator.free(field_attr_name);
-                    const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
-                    const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
-                    const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
-                    self.addConstraintWithSource(eq, .binding, "binding");
+                if (field_names_str) |csv| {
+                    var it = std.mem.splitScalar(u8, csv, ',');
+                    var names = std.ArrayList([]const u8){};
+                    defer names.deinit(self.allocator);
+                    var types = std.ArrayList(mlir.MlirType){};
+                    defer types.deinit(self.allocator);
+                    var index: usize = 0;
+                    while (it.next()) |part| : (index += 1) {
+                        const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                        if (trimmed.len == 0) continue;
+                        if (index >= operands.len) break;
+                        try names.append(self.allocator, trimmed);
+                        try types.append(self.allocator, mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(index))));
+                    }
+                    if (names.items.len == operands.len) {
+                        if (try self.ensureNamedStructProductSortFromFieldInfo(result_type, names.items, types.items)) |resolved| {
+                            return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
+                        }
+                    }
                 }
-                return struct_val;
+
+                const result_sort = try self.encodeMLIRType(result_type);
+                self.recordDegradation("ora.struct_instantiate requires exact product metadata");
+                return try self.degradeToUndef(result_sort, "struct_instantiate_result", @intFromPtr(mlir_op.ptr), "ora.struct_instantiate requires exact product metadata");
             }
         }
 
@@ -4748,12 +4816,6 @@ pub const Encoder = struct {
                     if (operands.len != resolved.fields.len) return error.InvalidOperandCount;
                     return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
                 }
-
-                const result_sort = try self.encodeMLIRType(result_type);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                const struct_var_name = try std.fmt.allocPrint(self.allocator, "struct_init_{d}", .{op_id});
-                defer self.allocator.free(struct_var_name);
-                const struct_val = try self.mkVariable(struct_var_name, result_sort);
                 var field_names_str = self.getStringAttr(mlir_op, "ora.field_names");
                 var field_names_owned: ?[]u8 = null;
                 defer if (field_names_owned) |owned| self.allocator.free(owned);
@@ -4766,15 +4828,29 @@ pub const Encoder = struct {
                     field_names_owned = try self.lookupStructFieldNamesInScope(mlir_op, result_type);
                     field_names_str = field_names_owned;
                 }
-                for (operands, 0..) |operand, i| {
-                    const field_attr_name = try self.resolveFieldNameForIndex(field_names_str, i);
-                    defer self.allocator.free(field_attr_name);
-                    const field_sort = z3.Z3_get_sort(self.context.ctx, operand);
-                    const accessor = try self.applyFieldFunction(field_attr_name, result_sort, field_sort, struct_val);
-                    const eq = z3.Z3_mk_eq(self.context.ctx, accessor, operand);
-                    self.addConstraintWithSource(eq, .binding, "binding");
+                if (field_names_str) |csv| {
+                    var it = std.mem.splitScalar(u8, csv, ',');
+                    var names = std.ArrayList([]const u8){};
+                    defer names.deinit(self.allocator);
+                    var types = std.ArrayList(mlir.MlirType){};
+                    defer types.deinit(self.allocator);
+                    var index: usize = 0;
+                    while (it.next()) |part| : (index += 1) {
+                        const trimmed = std.mem.trim(u8, part, " \t\n\r");
+                        if (trimmed.len == 0) continue;
+                        if (index >= operands.len) break;
+                        try names.append(self.allocator, trimmed);
+                        try types.append(self.allocator, mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(index))));
+                    }
+                    if (names.items.len == operands.len) {
+                        if (try self.ensureNamedStructProductSortFromFieldInfo(result_type, names.items, types.items)) |resolved| {
+                            return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(operands.len), operands.ptr);
+                        }
+                    }
                 }
-                return struct_val;
+                const result_sort = try self.encodeMLIRType(result_type);
+                self.recordDegradation("ora.struct_init requires exact product metadata");
+                return try self.degradeToUndef(result_sort, "struct_init_result", @intFromPtr(mlir_op.ptr), "ora.struct_init requires exact product metadata");
             }
         }
 
@@ -4858,7 +4934,6 @@ pub const Encoder = struct {
                         return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(args.len), args.ptr);
                     }
                 }
-
                 const result_sort = try self.encodeMLIRType(result_type);
                 const source_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 const op_id = @intFromPtr(mlir_op.ptr);
@@ -6231,6 +6306,7 @@ pub const Encoder = struct {
                 summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call result",
             );
         }
+        try self.copyProductSortRegistryFrom(&summary_encoder);
 
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
@@ -6299,6 +6375,7 @@ pub const Encoder = struct {
                 summary_encoder.degradationReason() orelse "summary encoder degraded while inlining pure call tuple result",
             );
         }
+        try self.copyProductSortRegistryFrom(&summary_encoder);
 
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);

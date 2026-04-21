@@ -173,6 +173,18 @@ test "sortFromPrintedType maps named struct to product sort when declaration met
     try testing.expect(!encoder.isDegraded());
 }
 
+test "sortFromPrintedType degrades on named struct without declaration metadata" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    try testing.expectError(error.UnsupportedOperation, encoder.sortFromPrintedTypeForTesting("!ora.struct<\"Pair__u256\">"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("printed product type requires exact metadata-backed sort reconstruction", encoder.degradationReason().?);
+}
+
 test "quantified bytes and string binders use sequence sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

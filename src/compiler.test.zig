@@ -10546,6 +10546,170 @@ test "compiler abi keeps anonymous structs distinct from tuples" {
     try testing.expect(saw_struct_output);
 }
 
+test "compiler abi preserves named struct return types" {
+    const source_text =
+        \\contract Test {
+        \\    struct Pair {
+        \\        left: u256,
+        \\        right: bool,
+        \\    }
+        \\
+        \\    pub fn viewFn() -> Pair {
+        \\        return Pair { left: 1, right: true };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_struct_output = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "viewFn")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Pair", output.name.?);
+        try testing.expectEqual(@as(usize, 2), output.fields.len);
+        try testing.expectEqual(@as(usize, 0), output.components.len);
+        try testing.expectEqualStrings("left", output.fields[0].name);
+        try testing.expectEqualStrings("right", output.fields[1].name);
+        saw_struct_output = true;
+    }
+    try testing.expect(saw_struct_output);
+}
+
+test "compiler abi preserves named struct parameter types" {
+    const source_text =
+        \\contract Test {
+        \\    struct Pair {
+        \\        left: u256,
+        \\        right: bool,
+        \\    }
+        \\
+        \\    pub fn consume(pair: Pair) -> bool {
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_struct_input = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "consume")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.inputs.len);
+        const input = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Pair", input.name.?);
+        try testing.expectEqual(@as(usize, 2), input.fields.len);
+        try testing.expectEqual(@as(usize, 0), input.components.len);
+        try testing.expectEqualStrings("left", input.fields[0].name);
+        try testing.expectEqualStrings("right", input.fields[1].name);
+        saw_struct_input = true;
+    }
+    try testing.expect(saw_struct_input);
+}
+
+test "compiler abi preserves nested named struct return types" {
+    const source_text =
+        \\contract Test {
+        \\    struct Pair {
+        \\        left: u256,
+        \\        right: bool,
+        \\    }
+        \\
+        \\    struct Wrapper {
+        \\        pair: Pair,
+        \\        ok: bool,
+        \\    }
+        \\
+        \\    pub fn viewFn() -> Wrapper {
+        \\        return Wrapper { pair: Pair { left: 1, right: true }, ok: true };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_wrapper_output = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "viewFn")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+        const wrapper = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Wrapper", wrapper.name.?);
+        try testing.expectEqual(@as(usize, 2), wrapper.fields.len);
+        try testing.expectEqualStrings("pair", wrapper.fields[0].name);
+        try testing.expectEqualStrings("ok", wrapper.fields[1].name);
+        try testing.expectEqual(@as(usize, 0), wrapper.components.len);
+
+        const pair = contract_abi.findType(wrapper.fields[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Pair", pair.name.?);
+        try testing.expectEqual(@as(usize, 2), pair.fields.len);
+        try testing.expectEqualStrings("left", pair.fields[0].name);
+        try testing.expectEqualStrings("right", pair.fields[1].name);
+        try testing.expectEqual(@as(usize, 0), pair.components.len);
+        saw_wrapper_output = true;
+    }
+    try testing.expect(saw_wrapper_output);
+}
+
+test "compiler abi preserves nested named struct parameter types" {
+    const source_text =
+        \\contract Test {
+        \\    struct Pair {
+        \\        left: u256,
+        \\        right: bool,
+        \\    }
+        \\
+        \\    struct Wrapper {
+        \\        pair: Pair,
+        \\        ok: bool,
+        \\    }
+        \\
+        \\    pub fn consume(wrapper: Wrapper) -> bool {
+        \\        return wrapper.pair.right;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_wrapper_input = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "consume")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.inputs.len);
+        const wrapper = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Wrapper", wrapper.name.?);
+        try testing.expectEqual(@as(usize, 2), wrapper.fields.len);
+        try testing.expectEqualStrings("pair", wrapper.fields[0].name);
+        try testing.expectEqualStrings("ok", wrapper.fields[1].name);
+        try testing.expectEqual(@as(usize, 0), wrapper.components.len);
+
+        const pair = contract_abi.findType(wrapper.fields[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Pair", pair.name.?);
+        try testing.expectEqual(@as(usize, 2), pair.fields.len);
+        try testing.expectEqualStrings("left", pair.fields[0].name);
+        try testing.expectEqualStrings("right", pair.fields[1].name);
+        try testing.expectEqual(@as(usize, 0), pair.components.len);
+        saw_wrapper_input = true;
+    }
+    try testing.expect(saw_wrapper_input);
+}
+
 test "compiler supports general anonymous struct types" {
     const source_text =
         \\pub fn run(amount: u256) -> u256 {
@@ -13005,6 +13169,69 @@ test "verification supports multi-field error payload extraction after get_error
     ;
 
     var result = try verifyTextWithoutDegradation(source_text, "inspect");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction from known pure callee without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    fn makePair(value: u256) -> Pair {
+        \\        return Pair { left: value, right: value };
+        \\    }
+        \\
+        \\    pub fn value_identity(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let pair = makePair(value);
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports nested named struct extraction from known pure callee without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\struct Wrapper {
+        \\    pair: Pair,
+        \\    ok: bool,
+        \\}
+        \\
+        \\contract Sample {
+        \\    fn wrap(value: u256) -> Wrapper {
+        \\        return Wrapper { pair: Pair { left: value, right: value }, ok: true };
+        \\    }
+        \\
+        \\    pub fn value_identity(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let wrapper = wrap(value);
+        \\        return wrapper.pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
     defer result.deinit(testing.allocator);
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
