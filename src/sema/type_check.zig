@@ -913,10 +913,116 @@ const TypeChecker = struct {
                     self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
                 }
             },
+            .Struct => |struct_item| try self.validateRuntimeAdtCycleForStruct(item_id, struct_item),
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
         }
+    }
+
+    fn activeTypeStackContains(_: *const TypeChecker, active: []const ast.ItemId, item_id: ast.ItemId) bool {
+        for (active) |active_id| {
+            if (active_id == item_id) return true;
+        }
+        return false;
+    }
+
+    fn validateRuntimeAdtCycleForStruct(self: *TypeChecker, item_id: ast.ItemId, struct_item: ast.StructItem) anyerror!void {
+        var active = std.ArrayList(ast.ItemId){};
+        defer active.deinit(self.arena);
+        try active.append(self.arena, item_id);
+
+        for (struct_item.fields) |field| {
+            if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, active.items)) |cycle_name| {
+                try self.emitRangeError(
+                    field.range,
+                    "struct '{s}' has recursive field '{s}' through '{s}'; recursive runtime ADTs must use slice or map indirection",
+                    .{ struct_item.name, field.name, cycle_name },
+                );
+            }
+        }
+    }
+
+    fn typeExprContainsActiveRuntimeAdt(
+        self: *TypeChecker,
+        type_expr: ast.TypeExprId,
+        active: []const ast.ItemId,
+    ) anyerror!?[]const u8 {
+        return switch (self.file.typeExpr(type_expr).*) {
+            .Path => |path| self.pathTypeContainsActiveRuntimeAdt(path.name, active),
+            .Generic => |generic| blk: {
+                if (std.mem.eql(u8, generic.name, "map")) break :blk null;
+                if (std.mem.eql(u8, generic.name, "Result")) {
+                    for (generic.args) |arg| {
+                        if (arg != .Type) continue;
+                        if (try self.typeExprContainsActiveRuntimeAdt(arg.Type, active)) |cycle_name| break :blk cycle_name;
+                    }
+                    break :blk null;
+                }
+                if (try self.pathTypeContainsActiveRuntimeAdt(generic.name, active)) |cycle_name| break :blk cycle_name;
+                for (generic.args) |arg| {
+                    if (arg != .Type) continue;
+                    if (try self.typeExprContainsActiveRuntimeAdt(arg.Type, active)) |cycle_name| break :blk cycle_name;
+                }
+                break :blk null;
+            },
+            .Tuple => |tuple| blk: {
+                for (tuple.elements) |element| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(element, active)) |cycle_name| break :blk cycle_name;
+                }
+                break :blk null;
+            },
+            .AnonymousStruct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, active)) |cycle_name| break :blk cycle_name;
+                }
+                break :blk null;
+            },
+            .Array => |array| self.typeExprContainsActiveRuntimeAdt(array.element, active),
+            .Slice => null,
+            .ErrorUnion => |error_union| blk: {
+                if (try self.typeExprContainsActiveRuntimeAdt(error_union.payload, active)) |cycle_name| break :blk cycle_name;
+                for (error_union.errors) |error_type| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(error_type, active)) |cycle_name| break :blk cycle_name;
+                }
+                break :blk null;
+            },
+            .Error => null,
+        };
+    }
+
+    fn pathTypeContainsActiveRuntimeAdt(
+        self: *TypeChecker,
+        name: []const u8,
+        active: []const ast.ItemId,
+    ) anyerror!?[]const u8 {
+        const item_id = self.lookupTypeItemInScope(name) orelse return null;
+        if (self.activeTypeStackContains(active, item_id)) {
+            return std.mem.trim(u8, name, " \t\n\r");
+        }
+
+        switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| {
+                var next_active = std.ArrayList(ast.ItemId){};
+                defer next_active.deinit(self.arena);
+                try next_active.appendSlice(self.arena, active);
+                try next_active.append(self.arena, item_id);
+
+                for (struct_item.fields) |field| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, next_active.items)) |cycle_name| return cycle_name;
+                }
+            },
+            .TypeAlias => |type_alias| {
+                for (self.active_aliases.items) |active_alias| {
+                    if (active_alias == item_id) return null;
+                }
+                try self.active_aliases.append(self.arena, item_id);
+                defer _ = self.active_aliases.pop();
+                if (try self.typeExprContainsActiveRuntimeAdt(type_alias.target_type, active)) |cycle_name| return cycle_name;
+            },
+            else => {},
+        }
+        return null;
     }
 
     fn validateConstructorFunction(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {

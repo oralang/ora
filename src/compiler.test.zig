@@ -10745,6 +10745,60 @@ test "compiler supports general anonymous struct types" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
 }
 
+test "compiler rejects directly recursive runtime structs" {
+    const source_text =
+        \\struct Node {
+        \\    next: Node,
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "recursive runtime ADTs must use slice or map indirection");
+}
+
+test "compiler rejects mutually recursive runtime structs" {
+    const source_text =
+        \\struct A {
+        \\    b: B,
+        \\}
+        \\
+        \\struct B {
+        \\    a: A,
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "recursive runtime ADTs must use slice or map indirection");
+}
+
+test "compiler rejects product-contained recursive runtime structs" {
+    const source_text =
+        \\struct Node {
+        \\    tuple_path: (u256, Node),
+        \\    array_path: [Node; 2],
+        \\    anonymous_path: struct { child: Node },
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "recursive runtime ADTs must use slice or map indirection");
+}
+
+test "compiler permits recursive runtime structs through map indirection" {
+    const source_text =
+        \\struct Node {
+        \\    children: map<u256, Node>,
+        \\}
+        \\
+        \\pub fn probe() -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler supports tuple index access in storage assignment expressions" {
     const source_text =
         \\contract TupleStore {
