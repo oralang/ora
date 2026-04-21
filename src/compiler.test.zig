@@ -13277,6 +13277,38 @@ test "verification supports named struct field extraction from known pure callee
     try testing.expect(!result.degraded);
 }
 
+test "verification keeps same-named fields on distinct struct sorts independent" {
+    const source_text =
+        \\struct Debit {
+        \\    amount: u256,
+        \\}
+        \\
+        \\struct Toggle {
+        \\    amount: bool,
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn amount_accessors_are_independent(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let debit = Debit { amount: value };
+        \\        let toggle = Toggle { amount: true };
+        \\        if (toggle.amount) {
+        \\            return debit.amount;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "amount_accessors_are_independent");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports nested named struct extraction from known pure callee without degradation" {
     const source_text =
         \\struct Pair {

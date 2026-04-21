@@ -914,6 +914,8 @@ const TypeChecker = struct {
                 }
             },
             .Struct => |struct_item| try self.validateRuntimeAdtCycleForStruct(item_id, struct_item),
+            // D9: enum variants are tag-only today. When payload-carrying enums add
+            // variant type expressions, run the same runtime ADT cycle check here.
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
@@ -952,13 +954,6 @@ const TypeChecker = struct {
             .Path => |path| self.pathTypeContainsActiveRuntimeAdt(path.name, active),
             .Generic => |generic| blk: {
                 if (std.mem.eql(u8, generic.name, "map")) break :blk null;
-                if (std.mem.eql(u8, generic.name, "Result")) {
-                    for (generic.args) |arg| {
-                        if (arg != .Type) continue;
-                        if (try self.typeExprContainsActiveRuntimeAdt(arg.Type, active)) |cycle_name| break :blk cycle_name;
-                    }
-                    break :blk null;
-                }
                 if (try self.pathTypeContainsActiveRuntimeAdt(generic.name, active)) |cycle_name| break :blk cycle_name;
                 for (generic.args) |arg| {
                     if (arg != .Type) continue;
