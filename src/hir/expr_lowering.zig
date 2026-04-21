@@ -350,21 +350,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try operands.append(self.parent.allocator, value);
                     }
                     const result_type = self.parent.lowerSemaType(sema_tuple_type, tuple.range);
-                    const file_path = self.parent.sources.file(self.parent.file.file_id).path;
-                    const line_col = self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = tuple.range });
-                    if (std.mem.endsWith(u8, file_path, "ora-example/tuples/tuple_basics.ora") and line_col.line == 13) {
-                        std.debug.print(
-                            "[tuple-debug] expr_id={d} sema_kind={s} lowered_sema={any} lowered_expr={any} line={d}:{d}\n",
-                            .{
-                                expr_id.index(),
-                                @tagName(sema_tuple_type.kind()),
-                                result_type,
-                                self.parent.lowerExprType(expr_id),
-                                line_col.line,
-                                line_col.column,
-                            },
-                        );
-                    }
                     const op = mlir.oraTupleCreateOpCreate(
                         self.parent.context,
                         self.parent.location(tuple.range),
