@@ -73,13 +73,6 @@ namespace
                           {
                 auto successType = convertType(type.getSuccessType());
                 return ora::ErrorUnionType::get(type.getContext(), successType); });
-            addConversion([&](ora::UnionType type) -> Type
-                          {
-                SmallVector<Type> elems;
-                elems.reserve(type.getElementTypes().size());
-                for (Type elem : type.getElementTypes())
-                    elems.push_back(convertType(elem));
-                return ora::UnionType::get(type.getContext(), elems); });
             addConversion([&](ora::MapType type) -> Type
                           {
                 auto key = convertType(type.getKeyType());

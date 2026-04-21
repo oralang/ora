@@ -203,18 +203,6 @@ def Ora_FunctionType : Ora_Type<"Function", "function"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-// Union type - sum type T1 | T2 | ...
-def Ora_UnionType : Ora_Type<"Union", "union"> {
-  let summary = "Union type";
-  let description = [{
-    Union type representing a sum type.
-    Syntax: `!ora.union<type1, type2, ...>`
-  }];
-  
-  let parameters = (ins ArrayRefParameter<"Type">:$elementTypes);
-  let hasCustomAssemblyFormat = 1;
-}
-
 // Error union type - result type !T
 def Ora_ErrorUnionType : Ora_Type<"ErrorUnion", "error_union"> {
   let summary = "Error union type";

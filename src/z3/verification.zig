@@ -517,6 +517,8 @@ pub const VerificationPass = struct {
             try self.encoder.registerFunctionOperation(root);
         } else if (std.mem.eql(u8, op_name, "ora.struct.decl")) {
             try self.encoder.registerStructDeclOperation(root);
+        } else if (std.mem.eql(u8, op_name, "ora.enum.decl")) {
+            try self.encoder.registerEnumDeclOperation(root);
         }
 
         const num_regions = mlir.oraOperationGetNumRegions(root);

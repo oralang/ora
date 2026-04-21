@@ -142,6 +142,49 @@ test "sortFromPrintedType maps tuple and anonymous struct to product sorts" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "tag-only enum constants encode as distinct datatype constructors" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const enum_decl = mlir.oraEnumDeclOpCreate(mlir_ctx, loc, stringRef("Status"), i256_ty);
+    const variant_names = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("Active")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("Paused")),
+    };
+    mlir.oraOperationSetAttributeByName(
+        enum_decl,
+        stringRef("ora.variant_names"),
+        mlir.oraArrayAttrCreate(mlir_ctx, variant_names.len, &variant_names),
+    );
+    try encoder.registerEnumDeclOperation(enum_decl);
+
+    const enum_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.enum<\"Status\", i256>"));
+    try testing.expect(!mlir.oraTypeIsNull(enum_ty));
+    const enum_sort = try encoder.encodeMLIRType(enum_ty);
+    try testing.expectEqual(@as(u32, z3.Z3_DATATYPE_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, enum_sort))));
+
+    const active_op = mlir.oraEnumConstantOpCreate(mlir_ctx, loc, stringRef("Status"), stringRef("Active"), enum_ty);
+    const paused_op = mlir.oraEnumConstantOpCreate(mlir_ctx, loc, stringRef("Status"), stringRef("Paused"), enum_ty);
+    const active = try encoder.encodeOperation(active_op);
+    const paused = try encoder.encodeOperation(paused_op);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, active, paused));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "sortFromPrintedType maps named struct to product sort when declaration metadata is registered" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
