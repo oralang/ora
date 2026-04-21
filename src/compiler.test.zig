@@ -13239,6 +13239,376 @@ test "verification supports nested named struct extraction from known pure calle
     try testing.expect(!result.degraded);
 }
 
+test "verification supports named struct extraction through if-returning pure callee without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    fn choose(flag: bool, value: u256) -> Pair {
+        \\        if (flag) {
+        \\            return Pair { left: value, right: value };
+        \\        }
+        \\        return Pair { left: value, right: value };
+        \\    }
+        \\
+        \\    pub fn value_identity(flag: bool, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let pair = choose(flag, value);
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct extraction after branch-local reassignment without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn value_identity(flag: bool, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        var pair = Pair { left: value, right: value };
+        \\        if (flag) {
+        \\            pair = Pair { left: value, right: value };
+        \\        }
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct extraction through switch-returning pure callee without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    fn choose(tag: u8, value: u256) -> Pair {
+        \\        switch (tag) {
+        \\            0 => return Pair { left: value, right: value };
+        \\            1 => return Pair { left: value, right: value };
+        \\            else => return Pair { left: value, right: value };
+        \\        }
+        \\        return Pair { left: value, right: value };
+        \\    }
+        \\
+        \\    pub fn value_identity(tag: u8, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let pair = choose(tag, value);
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports tuple extraction from known pure callee without degradation" {
+    const source_text =
+        \\contract Sample {
+        \\    fn makePair(value: u256) -> (u256, u256) {
+        \\        return (value, value);
+        \\    }
+        \\
+        \\    pub fn value_identity(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let pair = makePair(value);
+        \\        return pair[1];
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports tuple extraction after branch-local reassignment without degradation" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn value_identity(flag: bool, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        var pair: (u256, u256) = (value, value);
+        \\        if (flag) {
+        \\            pair = (value, value);
+        \\        }
+        \\        return pair[1];
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports anonymous struct extraction without degradation" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn value_identity(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        let payload: struct { amount: u256, ok: bool } = .{ .amount = value, .ok = true };
+        \\        return payload.amount;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "value_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after storage roundtrip without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var saved: Pair;
+        \\
+        \\    pub fn store_then_read(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        saved = Pair { left: value, right: value };
+        \\        let pair: Pair = saved;
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after storage map roundtrip without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var saved: map<address, Pair>;
+        \\
+        \\    pub fn store_then_read(account: address, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        saved[account] = Pair { left: value, right: value };
+        \\        let pair: Pair = saved[account];
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after helper storage write without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var saved: Pair;
+        \\
+        \\    fn write_saved(value: u256) {
+        \\        saved = Pair { left: value, right: value };
+        \\    }
+        \\
+        \\    pub fn store_then_read(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        write_saved(value);
+        \\        let pair: Pair = saved;
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after helper storage map write without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var saved: map<address, Pair>;
+        \\
+        \\    fn write_saved(account: address, value: u256) {
+        \\        saved[account] = Pair { left: value, right: value };
+        \\    }
+        \\
+        \\    pub fn store_then_read(account: address, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        write_saved(account, value);
+        \\        let pair: Pair = saved[account];
+        \\        return pair.right;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification preserves untouched named struct field after storage field update without degradation" {
+    const source_text =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var saved: Pair;
+        \\
+        \\    pub fn update_right(left: u256, right: u256) -> u256
+        \\        ensures(result == left)
+        \\    {
+        \\        saved = Pair { left: left, right: 0 };
+        \\        saved.right = right;
+        \\        let pair: Pair = saved;
+        \\        return pair.left;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "update_right");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after storage array roundtrip without degradation" {
+    const source_text =
+        \\struct Point {
+        \\    x: u256,
+        \\    y: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var points: [Point; 3];
+        \\
+        \\    pub fn store_then_read(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        points[1] = Point { x: value, y: value };
+        \\        let point: Point = points[1];
+        \\        return point.y;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports named struct field extraction after helper storage array write without degradation" {
+    const source_text =
+        \\struct Point {
+        \\    x: u256,
+        \\    y: u256,
+        \\}
+        \\
+        \\contract Sample {
+        \\    storage var points: [Point; 3];
+        \\
+        \\    fn write_point(value: u256) {
+        \\        points[1] = Point { x: value, y: value };
+        \\    }
+        \\
+        \\    pub fn store_then_read(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        write_point(value);
+        \\        let point: Point = points[1];
+        \\        return point.y;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "store_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
 test "verification does not vacuously prove branch-local Result unwrap and get_error assumptions" {
     const source_text =
         \\error Failure(code: u256);

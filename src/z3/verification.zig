@@ -862,11 +862,6 @@ pub const VerificationPass = struct {
         self.encoder.value_map.clearRetainingCapacity();
         self.encoder.value_map_old.clearRetainingCapacity();
         self.encoder.value_bindings.clearRetainingCapacity();
-        var tuple_it = self.encoder.tuple_values.iterator();
-        while (tuple_it.next()) |entry| {
-            self.allocator.free(entry.value_ptr.*.elements);
-        }
-        self.encoder.tuple_values.clearRetainingCapacity();
 
         var written_it = self.encoder.written_global_slots.iterator();
         while (written_it.next()) |entry| {
