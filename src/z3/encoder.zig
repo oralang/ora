@@ -5612,6 +5612,40 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn errorUnionTypeContainsSymbol(_: *Encoder, error_union_type: mlir.MlirType, sym_name: []const u8) bool {
+        const error_count = mlir.oraErrorUnionTypeGetNumErrorTypes(error_union_type);
+        for (0..error_count) |index| {
+            const error_type = mlir.oraErrorUnionTypeGetErrorType(error_union_type, index);
+            if (mlir.oraTypeIsNull(error_type)) continue;
+            const struct_name_ref = mlir.oraStructTypeGetName(error_type);
+            const struct_name = if (struct_name_ref.data == null or struct_name_ref.length == 0)
+                ""
+            else
+                struct_name_ref.data[0..struct_name_ref.length];
+            if (struct_name.len == 0) continue;
+            if (std.mem.eql(u8, struct_name, sym_name)) return true;
+            if (std.mem.endsWith(u8, sym_name, struct_name) and sym_name.len > struct_name.len and sym_name[sym_name.len - struct_name.len - 1] == '.') return true;
+        }
+        return false;
+    }
+
+    fn sourceErrorUnionTypeForDiscriminant(_: *Encoder, value: mlir.MlirValue) ?mlir.MlirType {
+        if (mlir.oraValueIsNull(value) or !mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+        const name_ref = mlir.oraOperationGetName(owner);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+        if (!std.mem.eql(u8, op_name, "ora.error.get_error")) return null;
+        if (mlir.oraOperationGetNumOperands(owner) < 1) return null;
+        const source_value = mlir.oraOperationGetOperand(owner, 0);
+        const source_type = mlir.oraValueGetType(source_value);
+        if (mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(source_type))) return null;
+        return source_type;
+    }
+
     fn errorVariantSymbolName(variant: ErrorVariantSort) ?[]const u8 {
         if (mlir.oraTypeIsNull(variant.payload_type)) return null;
         const struct_name_ref = mlir.oraStructTypeGetName(variant.payload_type);
@@ -5653,6 +5687,7 @@ pub const Encoder = struct {
         mlir_op: mlir.MlirOperation,
         eu: ErrorUnionSort,
         discriminant: z3.Z3_ast,
+        source_error_union_type: ?mlir.MlirType,
         op_id: usize,
     ) EncodeError!?z3.Z3_ast {
         const discriminant_sort = z3.Z3_get_sort(self.context.ctx, discriminant);
@@ -5664,6 +5699,9 @@ pub const Encoder = struct {
         for (eu.error_variants) |variant| {
             const sym_name = errorVariantSymbolName(variant) orelse
                 return try self.degradeToUndef(eu.sort, "error_err", op_id, "missing error variant symbol name");
+            if (source_error_union_type) |source_type| {
+                if (!self.errorUnionTypeContainsSymbol(source_type, sym_name)) continue;
+            }
             const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse
                 return try self.degradeToUndef(eu.sort, "error_err", op_id, "failed to resolve error declaration id");
             const id_ast = try self.encodeIntegerConstant(error_id, width);
@@ -5705,7 +5743,8 @@ pub const Encoder = struct {
                 const err_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, variant.payload_sort, "error_err", op_id);
                 return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
             }
-            if (try self.encodeErrorUnionFromDiscriminant(mlir_op, eu, operands[0], op_id)) |wrapped| {
+            const source_error_union_type = self.sourceErrorUnionTypeForDiscriminant(mlir.oraOperationGetOperand(mlir_op, 0));
+            if (try self.encodeErrorUnionFromDiscriminant(mlir_op, eu, operands[0], source_error_union_type, op_id)) |wrapped| {
                 return wrapped;
             }
             return try self.degradeToUndef(eu.sort, "error_err", op_id, "error payload type not in error_union error set");

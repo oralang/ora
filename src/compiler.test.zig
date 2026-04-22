@@ -13913,6 +13913,20 @@ test "verification supports multi-error try propagation without degradation" {
     }
 }
 
+test "verification supports wide error-union try catch without degradation" {
+    const path = "ora-example/corpus/types/error-union/vault_with_errors.ora";
+    const functions = [_][]const u8{ "deposit", "withdraw", "emergency_withdraw_all", "safe_deposit", "safe_withdraw" };
+
+    for (functions) |function_name| {
+        var result = try verifyExampleWithoutDegradation(path, function_name, false, 10_000);
+        defer result.deinit(testing.allocator);
+
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.errors_len);
+        try testing.expect(!result.degraded);
+    }
+}
+
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
         \\comptime const std = @import("std");
