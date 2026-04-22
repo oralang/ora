@@ -5748,7 +5748,10 @@ pub const Encoder = struct {
                 mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0))
             else
                 mlir.MlirType{ .ptr = null };
-            const variant = if (operands.len >= 1)
+            const variant = if (self.getStringAttr(mlir_op, "sym_name")) |sym_name|
+                findErrorVariantForSymbol(self, eu, sym_name) orelse
+                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set")
+            else if (operands.len >= 1)
                 findErrorVariantForType(eu, payload_type) orelse
                     return try self.degradeToUndef(eu.sort, "error_return", op_id, "error payload type not in error_union error set")
             else blk: {
@@ -5757,16 +5760,39 @@ pub const Encoder = struct {
                 break :blk findErrorVariantForSymbol(self, eu, sym_name) orelse
                     return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set");
             };
-            const err_val = if (operands.len >= 1)
-                try self.coerceTypedAstToSortOrUndef(
+            const err_val = if (operands.len >= 1) blk: {
+                if (!mlir.oraTypeIsNull(variant.payload_type)) {
+                    const maybe_product = self.getProductSort(variant.payload_type) catch |err| switch (err) {
+                        error.UnsupportedOperation => null,
+                        else => return err,
+                    };
+                    if (maybe_product) |product| {
+                        if (operands.len != product.fields.len) {
+                            return try self.degradeToUndef(eu.sort, "error_return", op_id, "error payload constructor operand count mismatch");
+                        }
+                        const args = try self.allocator.alloc(z3.Z3_ast, operands.len);
+                        defer self.allocator.free(args);
+                        for (operands, 0..) |operand, index| {
+                            const operand_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(index)));
+                            args[index] = try self.coerceTypedAstToSortOrUndef(
+                                operand,
+                                operand_type,
+                                product.fields[index].sort,
+                                "error_return",
+                                op_id,
+                            );
+                        }
+                        break :blk z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(args.len), args.ptr);
+                    }
+                }
+                break :blk try self.coerceTypedAstToSortOrUndef(
                     operands[0],
                     payload_type,
                     variant.payload_sort,
                     "error_return",
                     op_id,
-                )
-            else
-                try self.encodeErrorIdValue(mlir_op, variant.payload_sort, op_id);
+                );
+            } else try self.encodeErrorIdValue(mlir_op, variant.payload_sort, op_id);
             return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
         }
 

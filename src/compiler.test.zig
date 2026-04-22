@@ -13885,6 +13885,20 @@ test "verification supports named error payload Result match without degradation
     try testing.expect(!result.degraded);
 }
 
+test "verification supports named error payload Result roundtrip without degradation" {
+    const path = "ora-example/corpus/control-flow/match/result_roundtrip.ora";
+    const functions = [_][]const u8{ "make", "consume_and_bump", "project" };
+
+    for (functions) |function_name| {
+        var result = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+        defer result.deinit(testing.allocator);
+
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.errors_len);
+        try testing.expect(!result.degraded);
+    }
+}
+
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
         \\comptime const std = @import("std");
