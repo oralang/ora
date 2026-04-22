@@ -5589,8 +5589,13 @@ pub const Encoder = struct {
         return z3.Z3_mk_not(self.context.ctx, is_ok);
     }
 
-    fn findErrorVariantForType(eu: ErrorUnionSort, payload_type: mlir.MlirType) ?ErrorVariantSort {
+    fn legacyErrorVariant(eu: ErrorUnionSort) ?ErrorVariantSort {
         if (eu.error_variants.len == 1 and mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) return eu.error_variants[0];
+        return null;
+    }
+
+    fn findErrorVariantForType(eu: ErrorUnionSort, payload_type: mlir.MlirType) ?ErrorVariantSort {
+        if (legacyErrorVariant(eu)) |variant| return variant;
         for (eu.error_variants) |variant| {
             if (!mlir.oraTypeIsNull(variant.payload_type) and mlir.oraTypeEqual(payload_type, variant.payload_type)) return variant;
         }
@@ -5824,6 +5829,7 @@ pub const Encoder = struct {
                 mlir.MlirType{ .ptr = null };
             const variant = if (self.getStringAttr(mlir_op, "sym_name")) |sym_name|
                 findErrorVariantForSymbol(self, eu, sym_name) orelse
+                    legacyErrorVariant(eu) orelse
                     return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set")
             else if (operands.len >= 1)
                 findErrorVariantForType(eu, payload_type) orelse
@@ -5832,6 +5838,7 @@ pub const Encoder = struct {
                 const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse
                     return try self.degradeToUndef(eu.sort, "error_return", op_id, "missing error symbol name");
                 break :blk findErrorVariantForSymbol(self, eu, sym_name) orelse
+                    legacyErrorVariant(eu) orelse
                     return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set");
             };
             const err_val = if (operands.len >= 1) blk: {

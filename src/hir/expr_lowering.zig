@@ -2834,10 +2834,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             if (base_type == .enum_) {
                 if (@This().enumFieldOrdinal(self, field.base, field.name)) |ordinal| {
-                    return appendValueOp(
-                        self.block,
-                        createIntegerConstant(self.parent.context, self.parent.location(field.range), result_type, ordinal),
+                    const enum_name = base_type.name() orelse
+                        return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
+                    const op = mlir.oraEnumConstantOpCreate(
+                        self.parent.context,
+                        self.parent.location(field.range),
+                        strRef(enum_name),
+                        strRef(field.name),
+                        result_type,
                     );
+                    if (!mlir.oraOperationIsNull(op)) {
+                        mlir.oraOperationSetAttributeByName(
+                            op,
+                            strRef("ora.enum_ordinal"),
+                            mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.parent.context), ordinal),
+                        );
+                        return appendValueOp(self.block, op);
+                    }
+                    return error.MlirOperationCreationFailed;
                 }
                 return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
             }

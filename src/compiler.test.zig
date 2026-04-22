@@ -5316,7 +5316,8 @@ test "compiler lowers enum variant access through real enum constant op" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_constant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_ordinal"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
@@ -13837,6 +13838,35 @@ test "verification supports multi-error Result match without degradation" {
 
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports legacy shorthand error union named return without degradation" {
+    const source_text =
+        \\error ParseError;
+        \\
+        \\contract Sample {
+        \\    fn may_fail(flag: bool) -> !u256 {
+        \\        if (flag) {
+        \\            return ParseError;
+        \\        }
+        \\        return 7;
+        \\    }
+        \\
+        \\    pub fn probe() -> u256 {
+        \\        return match (may_fail(true)) {
+        \\            Ok(_) => 0,
+        \\            ParseError => 1,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "probe");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
     try testing.expect(!result.degraded);
 }
 

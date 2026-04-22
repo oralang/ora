@@ -280,6 +280,8 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     int64_t discriminant = -1;
+    if (auto ordinalAttr = op->getAttrOfType<mlir::IntegerAttr>("ora.enum_ordinal"))
+        discriminant = ordinalAttr.getInt();
 
     Operation *moduleOp = op->getParentOfType<mlir::ModuleOp>();
     if (!moduleOp)
@@ -291,20 +293,41 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
                 return;
 
             auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
-            auto variantValues = decl->getAttrOfType<mlir::DenseI64ArrayAttr>("ora.variant_values");
-            if (!variantNames || !variantValues)
+            auto denseVariantValues = decl->getAttrOfType<mlir::DenseI64ArrayAttr>("ora.variant_values");
+            auto arrayVariantValues = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_values");
+            if (!variantNames || (!denseVariantValues && !arrayVariantValues))
                 return;
 
-            const size_t count = std::min<size_t>(variantNames.size(), variantValues.size());
+            const size_t valueCount = denseVariantValues ? denseVariantValues.size() : arrayVariantValues.size();
+            const size_t count = std::min<size_t>(variantNames.size(), valueCount);
             for (size_t i = 0; i < count; ++i)
             {
                 auto nameAttr = llvm::dyn_cast<mlir::StringAttr>(variantNames[i]);
                 if (!nameAttr || nameAttr.getValue() != op.getVariantName())
                     continue;
-                discriminant = variantValues[i];
+                if (denseVariantValues)
+                {
+                    discriminant = denseVariantValues[i];
+                    return;
+                }
+                auto valueAttr = llvm::dyn_cast<mlir::IntegerAttr>(arrayVariantValues[i]);
+                if (!valueAttr)
+                    return;
+                discriminant = valueAttr.getInt();
                 return;
             }
         });
+    }
+    if (discriminant < 0 && moduleOp)
+    {
+        if (auto enumDict = moduleOp->getAttrOfType<DictionaryAttr>("sir.enum_values"))
+        {
+            std::string key = op.getEnumName().str();
+            key.push_back('.');
+            key += op.getVariantName().str();
+            if (auto valueAttr = llvm::dyn_cast_or_null<mlir::IntegerAttr>(enumDict.get(key)))
+                discriminant = valueAttr.getInt();
+        }
     }
     if (discriminant < 0)
         return rewriter.notifyMatchFailure(op, "missing enum discriminant metadata");
