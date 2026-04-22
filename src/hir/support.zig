@@ -96,11 +96,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     return mlir.oraStructTypeGet(ctx, strRef(trimmed));
 }
 
-pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.MlirType {
-    return lowerTypeDescriptorWithAllocator(ctx, descriptor, std.heap.page_allocator);
-}
-
-fn lowerTypeDescriptorWithAllocator(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) mlir.MlirType {
+pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     return switch (descriptor) {
         .bool => boolType(ctx),
         .integer => |integer| if (integer.spelling) |name| lowerPathType(ctx, name) else defaultIntegerType(ctx),
@@ -108,14 +104,14 @@ fn lowerTypeDescriptorWithAllocator(ctx: mlir.MlirContext, descriptor: sema.Type
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
-        .array => |array| arrayMemRefType(ctx, lowerTypeDescriptorWithAllocator(ctx, array.element_type.*, allocator), array.len orelse 0),
-        .slice => |slice| sliceMemRefType(ctx, lowerTypeDescriptorWithAllocator(ctx, slice.element_type.*, allocator)),
+        .array => |array| arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), array.len orelse 0),
+        .slice => |slice| sliceMemRefType(ctx, try lowerTypeDescriptor(ctx, slice.element_type.*, allocator)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,
-            if (map.key_type) |key| lowerTypeDescriptorWithAllocator(ctx, key.*, allocator) else defaultIntegerType(ctx),
-            if (map.value_type) |value| lowerTypeDescriptorWithAllocator(ctx, value.*, allocator) else defaultIntegerType(ctx),
+            if (map.key_type) |key| try lowerTypeDescriptor(ctx, key.*, allocator) else defaultIntegerType(ctx),
+            if (map.value_type) |value| try lowerTypeDescriptor(ctx, value.*, allocator) else defaultIntegerType(ctx),
         ),
-        .refinement => |refinement| lowerRefinementType(ctx, refinement),
+        .refinement => |refinement| try lowerRefinementType(ctx, refinement, allocator),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.
@@ -123,16 +119,14 @@ fn lowerTypeDescriptorWithAllocator(ctx: mlir.MlirContext, descriptor: sema.Type
         .enum_ => defaultIntegerType(ctx),
         .named => |named| lowerPathType(ctx, named.name),
         .error_union => |error_union| blk: {
-            const error_types = allocator.alloc(mlir.MlirType, error_union.error_types.len) catch {
-                @panic("out of memory lowering error_union error set");
-            };
+            const error_types = try allocator.alloc(mlir.MlirType, error_union.error_types.len);
             defer allocator.free(error_types);
             for (error_union.error_types, 0..) |error_type, index| {
-                error_types[index] = lowerTypeDescriptorWithAllocator(ctx, error_type, allocator);
+                error_types[index] = try lowerTypeDescriptor(ctx, error_type, allocator);
             }
             break :blk mlir.oraErrorUnionTypeGetWithErrors(
                 ctx,
-                lowerTypeDescriptorWithAllocator(ctx, error_union.payload_type.*, allocator),
+                try lowerTypeDescriptor(ctx, error_union.payload_type.*, allocator),
                 error_union.error_types.len,
                 if (error_union.error_types.len == 0) null else error_types.ptr,
             );
@@ -141,8 +135,8 @@ fn lowerTypeDescriptorWithAllocator(ctx: mlir.MlirContext, descriptor: sema.Type
     };
 }
 
-pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType) mlir.MlirType {
-    const base_type = lowerTypeDescriptor(ctx, refinement.base_type.*);
+pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
+    const base_type = try lowerTypeDescriptor(ctx, refinement.base_type.*, allocator);
     return buildRefinementType(ctx, refinement.name, base_type, refinement.args) orelse base_type;
 }
 

@@ -148,7 +148,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     defer self.parent.allocator.free(values);
                     for (elements, 0..) |element, index| {
                         const element_sema_type = tuple_types[index];
-                        const element_type = lowerTypeDescriptor(self.parent.context, element_sema_type);
+                        const element_type = try lowerTypeDescriptor(self.parent.context, element_sema_type, self.parent.allocator);
                         values[index] = (try @This().lowerPersistedConstValue(self, element, element_sema_type, element_type, loc)) orelse break :blk null;
                     }
                     const op = mlir.oraTupleCreateOpCreate(self.parent.context, loc, values.ptr, values.len, tuple_result_type);

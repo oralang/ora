@@ -427,10 +427,12 @@ const Lowerer = struct {
                         var base_copy = substituted_base;
                         var refinement_copy = refinement;
                         refinement_copy.base_type = &base_copy;
-                        break :blk support.lowerRefinementType(self.context, refinement_copy);
+                        break :blk support.lowerRefinementType(self.context, refinement_copy, self.allocator) catch
+                            return self.recordTypeFallback(.unsupported_syntax_type, range);
                     }
                 }
-                break :blk support.lowerRefinementType(self.context, refinement);
+                break :blk support.lowerRefinementType(self.context, refinement, self.allocator) catch
+                    return self.recordTypeFallback(.unsupported_syntax_type, range);
             },
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
