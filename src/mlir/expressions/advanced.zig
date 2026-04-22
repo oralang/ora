@@ -1005,7 +1005,6 @@ fn isErrorUnionType(ti: lib.ast.Types.TypeInfo) bool {
     if (ti.category == .ErrorUnion) return true;
     if (ti.ora_type) |ot| switch (ot) {
         .error_union => return true,
-        ._union => |members| return members.len > 0 and members[0] == .error_union,
         else => {},
     };
     return false;
@@ -1831,7 +1830,6 @@ pub fn getTypeString(
             .function => "function",
             .contract_type => "contract",
             .tuple => "tuple",
-            ._union => "union",
             .anonymous_struct => "anonymous_struct",
             .module => "module",
             .min_value => "MinValue",

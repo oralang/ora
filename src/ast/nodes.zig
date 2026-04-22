@@ -643,6 +643,7 @@ pub const EnumItem = struct {
     name: []const u8,
     is_generic: bool = false,
     template_parameters: []const Parameter,
+    base_type: ?TypeExprId,
     variants: []EnumVariant,
 };
 

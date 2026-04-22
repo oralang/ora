@@ -8,7 +8,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
         .address => allocator.dupe(u8, "address"),
         .string => allocator.dupe(u8, "string"),
         .bytes => allocator.dupe(u8, "bytes"),
-        .enum_ => allocator.dupe(u8, "uint32"),
+        .enum_ => error.UnsupportedAbiType,
         .bitfield => allocator.dupe(u8, "uint256"),
         .integer => |integer| blk: {
             const spelling = integer.spelling orelse "u256";

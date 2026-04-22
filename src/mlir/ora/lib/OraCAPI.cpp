@@ -1848,6 +1848,22 @@ MlirType oraStructTypeGet(MlirContext ctx, MlirStringRef structName)
     }
 }
 
+MlirStringRef oraStructTypeGetName(MlirType structType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::StructType>(unwrap(structType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = type.getName();
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
 size_t oraStructTypeGetFieldCountInScope(MlirOperation anchorOp, MlirType structType)
 {
     try
@@ -1957,7 +1973,33 @@ MlirType oraErrorUnionTypeGet(MlirContext ctx, MlirType successType)
             return {nullptr};
         }
 
-        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef);
+        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef, llvm::ArrayRef<Type>{});
+        return wrap(errorUnionType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraErrorUnionTypeGetWithErrors(MlirContext ctx, MlirType successType, size_t numErrorTypes, const MlirType *errorTypes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Type successTypeRef = unwrap(successType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        llvm::SmallVector<Type> errorTypeRefs;
+        errorTypeRefs.reserve(numErrorTypes);
+        for (size_t i = 0; i < numErrorTypes; ++i)
+            errorTypeRefs.push_back(unwrap(errorTypes[i]));
+
+        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef, errorTypeRefs);
         return wrap(errorUnionType);
     }
     catch (...)
@@ -1974,6 +2016,40 @@ MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType)
         if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
         {
             return wrap(errorUnion.getSuccessType());
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+size_t oraErrorUnionTypeGetNumErrorTypes(MlirType errorUnionType)
+{
+    try
+    {
+        Type mlirType = unwrap(errorUnionType);
+        if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
+            return errorUnion.getErrorTypes().size();
+        return 0;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirType oraErrorUnionTypeGetErrorType(MlirType errorUnionType, size_t index)
+{
+    try
+    {
+        Type mlirType = unwrap(errorUnionType);
+        if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
+        {
+            auto errorTypes = errorUnion.getErrorTypes();
+            if (index < errorTypes.size())
+                return wrap(errorTypes[index]);
         }
         return {nullptr};
     }

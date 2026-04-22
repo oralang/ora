@@ -274,6 +274,7 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
+            const base_type = firstDirectTypeChild(node);
             var variants: std.ArrayList(EnumVariant) = .{};
 
             var it = node.children();
@@ -299,6 +300,7 @@ pub fn mixin(Builder: type) type {
                 .name = name,
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
+                .base_type = if (base_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .variants = try variants.toOwnedSlice(self.allocator),
             } });
         }

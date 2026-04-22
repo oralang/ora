@@ -125,12 +125,8 @@ pub const TypeInfo = struct {
 
     /// Create TypeInfo from OraType
     pub fn fromOraType(ora_type: OraType) TypeInfo {
-        var category = ora_type.getCategory();
-        if (ora_type == ._union and ora_type._union.len > 0 and ora_type._union[0] == .error_union) {
-            category = .ErrorUnion;
-        }
         return TypeInfo{
-            .category = category,
+            .category = ora_type.getCategory(),
             .ora_type = ora_type,
             .source = .inferred,
             .span = null,
@@ -192,7 +188,6 @@ pub const TypeCategory = enum {
     Tuple,
     ErrorUnion,
     Result,
-    Union,
 
     // special categories
     Void,
@@ -244,7 +239,6 @@ pub const OraType = union(enum) {
     tuple: []const OraType, // Element types
     function: FunctionType, // Parameter and return types
     error_union: *const OraType, // Success type (!T)
-    _union: []const OraType, // Union of types T1 | T2 | ... (underscore to avoid Zig keyword conflict)
     anonymous_struct: []const AnonymousStructFieldType, // struct { field: T, ... }
     module: ?[]const u8, // Optional module name
 
@@ -292,7 +286,6 @@ pub const OraType = union(enum) {
             .tuple => .Tuple,
             .function => .Function,
             .error_union => .ErrorUnion,
-            ._union => .Union,
             .anonymous_struct => .Struct,
             .module => .Module,
             .type => .Type,
@@ -394,7 +387,6 @@ pub const OraType = union(enum) {
             .tuple => "tuple",
             .function => "function",
             .error_union => "error_union",
-            ._union => "union",
             .anonymous_struct => "struct",
             .module => "module",
             .type => "type",
@@ -468,17 +460,6 @@ pub const OraType = union(enum) {
             },
             .error_union => |ap| switch (b) {
                 .error_union => |bp| equals(@constCast(ap).*, @constCast(bp).*),
-                else => unreachable,
-            },
-            ._union => |as| switch (b) {
-                ._union => |bs| blk: {
-                    if (as.len != bs.len) break :blk false;
-                    var i: usize = 0;
-                    while (i < as.len) : (i += 1) {
-                        if (!equals(@constCast(&as[i]).*, @constCast(&bs[i]).*)) break :blk false;
-                    }
-                    break :blk true;
-                },
                 else => unreachable,
             },
             .anonymous_struct => |af| switch (b) {
@@ -574,12 +555,6 @@ pub const OraType = union(enum) {
             .error_union => |t| {
                 const sub = OraType.hash(@constCast(t).*);
                 h.update(std.mem.asBytes(&sub));
-            },
-            ._union => |us| {
-                for (us) |u| {
-                    const sub = OraType.hash(@constCast(&u).*);
-                    h.update(std.mem.asBytes(&sub));
-                }
             },
             .anonymous_struct => |fs| {
                 for (fs) |f| {
@@ -692,14 +667,6 @@ pub const OraType = union(enum) {
             .error_union => |succ| {
                 try writer.writeByte('!');
                 try (@constCast(succ).*).render(writer);
-            },
-            ._union => |members| {
-                var first = true;
-                for (members) |m| {
-                    if (!first) try writer.writeAll(" | ");
-                    first = false;
-                    try (@constCast(&m).*).render(writer);
-                }
             },
             .anonymous_struct => |fields| {
                 try writer.writeAll("struct {");
@@ -937,13 +904,6 @@ pub fn deinitTypeInfo(allocator: std.mem.Allocator, type_info: *TypeInfo) void {
                 deinitOraType(allocator, @constCast(ptr));
                 allocator.destroy(ptr);
             },
-            ._union => |types| {
-                // free each union member type (by value in slice)
-                for (types) |member| {
-                    deinitOraType(allocator, @constCast(&member));
-                }
-                allocator.free(types);
-            },
             .anonymous_struct => |fields| {
                 // free each field's allocated type pointer
                 for (fields) |field| {
@@ -1020,12 +980,6 @@ pub fn deinitOraType(allocator: std.mem.Allocator, ora_type: *OraType) void {
         .error_union => |succ_ptr| {
             deinitOraType(allocator, @constCast(succ_ptr));
             allocator.destroy(succ_ptr);
-        },
-        ._union => |types| {
-            for (types) |member| {
-                deinitOraType(allocator, @constCast(&member));
-            }
-            allocator.free(types);
         },
         .anonymous_struct => |fields| {
             for (fields) |field| {

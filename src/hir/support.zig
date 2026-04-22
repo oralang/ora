@@ -97,6 +97,10 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
 }
 
 pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.MlirType {
+    return lowerTypeDescriptorWithAllocator(ctx, descriptor, std.heap.page_allocator);
+}
+
+fn lowerTypeDescriptorWithAllocator(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) mlir.MlirType {
     return switch (descriptor) {
         .bool => boolType(ctx),
         .integer => |integer| if (integer.spelling) |name| lowerPathType(ctx, name) else defaultIntegerType(ctx),
@@ -104,12 +108,12 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
-        .array => |array| arrayMemRefType(ctx, lowerTypeDescriptor(ctx, array.element_type.*), array.len orelse 0),
-        .slice => |slice| sliceMemRefType(ctx, lowerTypeDescriptor(ctx, slice.element_type.*)),
+        .array => |array| arrayMemRefType(ctx, lowerTypeDescriptorWithAllocator(ctx, array.element_type.*, allocator), array.len orelse 0),
+        .slice => |slice| sliceMemRefType(ctx, lowerTypeDescriptorWithAllocator(ctx, slice.element_type.*, allocator)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,
-            if (map.key_type) |key| lowerTypeDescriptor(ctx, key.*) else defaultIntegerType(ctx),
-            if (map.value_type) |value| lowerTypeDescriptor(ctx, value.*) else defaultIntegerType(ctx),
+            if (map.key_type) |key| lowerTypeDescriptorWithAllocator(ctx, key.*, allocator) else defaultIntegerType(ctx),
+            if (map.value_type) |value| lowerTypeDescriptorWithAllocator(ctx, value.*, allocator) else defaultIntegerType(ctx),
         ),
         .refinement => |refinement| lowerRefinementType(ctx, refinement),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
@@ -118,7 +122,21 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type) mlir.Ml
         .bitfield => defaultIntegerType(ctx),
         .enum_ => defaultIntegerType(ctx),
         .named => |named| lowerPathType(ctx, named.name),
-        .error_union => |error_union| mlir.oraErrorUnionTypeGet(ctx, lowerTypeDescriptor(ctx, error_union.payload_type.*)),
+        .error_union => |error_union| blk: {
+            const error_types = allocator.alloc(mlir.MlirType, error_union.error_types.len) catch {
+                @panic("out of memory lowering error_union error set");
+            };
+            defer allocator.free(error_types);
+            for (error_union.error_types, 0..) |error_type, index| {
+                error_types[index] = lowerTypeDescriptorWithAllocator(ctx, error_type, allocator);
+            }
+            break :blk mlir.oraErrorUnionTypeGetWithErrors(
+                ctx,
+                lowerTypeDescriptorWithAllocator(ctx, error_union.payload_type.*, allocator),
+                error_union.error_types.len,
+                if (error_union.error_types.len == 0) null else error_types.ptr,
+            );
+        },
         else => defaultIntegerType(ctx),
     };
 }

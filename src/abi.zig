@@ -1530,8 +1530,9 @@ const CompilerAbiGenerator = struct {
         ctx: CompilerModuleContext,
         name: []const u8,
     ) anyerror!ResolvedType {
-        if (ctx.typecheck.instantiatedEnumByName(name) != null) {
-            const repr = try self.resolveSemaType(ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+        if (ctx.typecheck.instantiatedEnumByName(name)) |instantiated| {
+            const repr_type = instantiated.repr_type orelse defaultEnumReprType();
+            const repr = try self.resolveSemaType(ctx, repr_type, &.{});
             var node = AbiTypeNode{
                 .kind = .enum_,
                 .allocator = self.allocator,
@@ -1550,7 +1551,11 @@ const CompilerAbiGenerator = struct {
         const ref = self.global_enums.get(name) orelse return error.UnknownEnumType;
         const owner_ctx = try self.moduleContext(ref.module_id);
         const enum_item = owner_ctx.file.item(ref.item_id).Enum;
-        const repr = try self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+        const repr_type = if (enum_item.base_type) |base_type|
+            try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, base_type)
+        else
+            defaultEnumReprType();
+        const repr = try self.resolveSemaType(owner_ctx, repr_type, &.{});
         var variants = try self.allocator.alloc(AbiEnumVariant, enum_item.variants.len);
         errdefer self.allocator.free(variants);
         for (enum_item.variants, 0..) |variant, index| {
@@ -1569,6 +1574,10 @@ const CompilerAbiGenerator = struct {
         const type_id = try self.ensureTypeNode(&node);
         const idx = self.type_lookup.get(type_id).?;
         return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn defaultEnumReprType() compiler.sema.Type {
+        return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
     }
 
     fn resolveNamedBitfieldType(

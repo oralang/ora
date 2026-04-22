@@ -929,7 +929,53 @@ const Parser = struct {
     }
 
     fn parseEnumItem(self: *Parser) anyerror!green.GreenNodeId {
-        return self.parseMemberItem(SyntaxKind.EnumItem, SyntaxKind.EnumVariant, "expected enum variant");
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            if (self.at(.Colon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
+            if (self.at(.Colon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (!self.at(.LeftBrace)) {
+            try self.reportHere("expected braced body");
+            return self.finishNode(SyntaxKind.EnumItem, children.items);
+        }
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma) or self.at(.Semicolon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseMemberNode(SyntaxKind.EnumVariant, "expected enum variant") });
+        }
+
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated braced item body", children.items);
+        }
+
+        return self.finishNode(SyntaxKind.EnumItem, children.items);
     }
 
     fn parseTypeAliasItem(self: *Parser) anyerror!green.GreenNodeId {

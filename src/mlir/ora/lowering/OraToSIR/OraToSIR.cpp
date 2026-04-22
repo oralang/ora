@@ -72,7 +72,10 @@ namespace
             addConversion([&](ora::ErrorUnionType type) -> Type
                           {
                 auto successType = convertType(type.getSuccessType());
-                return ora::ErrorUnionType::get(type.getContext(), successType); });
+                llvm::SmallVector<Type> errorTypes;
+                for (auto errorType : type.getErrorTypes())
+                    errorTypes.push_back(convertType(errorType));
+                return ora::ErrorUnionType::get(type.getContext(), successType, errorTypes); });
             addConversion([&](ora::MapType type) -> Type
                           {
                 auto key = convertType(type.getKeyType());

@@ -185,6 +185,98 @@ test "tag-only enum constants encode as distinct datatype constructors" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "tag-only enum constructors are scoped by enum sort" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const status_decl = mlir.oraEnumDeclOpCreate(mlir_ctx, loc, stringRef("Status"), i256_ty);
+    const mode_decl = mlir.oraEnumDeclOpCreate(mlir_ctx, loc, stringRef("Mode"), i256_ty);
+    const status_names = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("Active")),
+    };
+    const mode_names = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("Active")),
+    };
+    mlir.oraOperationSetAttributeByName(
+        status_decl,
+        stringRef("ora.variant_names"),
+        mlir.oraArrayAttrCreate(mlir_ctx, status_names.len, &status_names),
+    );
+    mlir.oraOperationSetAttributeByName(
+        mode_decl,
+        stringRef("ora.variant_names"),
+        mlir.oraArrayAttrCreate(mlir_ctx, mode_names.len, &mode_names),
+    );
+    try encoder.registerEnumDeclOperation(status_decl);
+    try encoder.registerEnumDeclOperation(mode_decl);
+
+    const status_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.enum<\"Status\", i256>"));
+    const mode_ty = mlir.mlirTypeParseGet(mlir_ctx, stringRef("!ora.enum<\"Mode\", i256>"));
+    const status_active_op = mlir.oraEnumConstantOpCreate(mlir_ctx, loc, stringRef("Status"), stringRef("Active"), status_ty);
+    const mode_active_op = mlir.oraEnumConstantOpCreate(mlir_ctx, loc, stringRef("Mode"), stringRef("Active"), mode_ty);
+    const status_active = try encoder.encodeOperation(status_active_op);
+    const mode_active = try encoder.encodeOperation(mode_active_op);
+
+    const status_sort = z3.Z3_get_sort(z3_ctx.ctx, status_active);
+    const mode_sort = z3.Z3_get_sort(z3_ctx.ctx, mode_active);
+    try testing.expect(status_sort != mode_sort);
+    try testing.expectEqual(@as(u32, z3.Z3_DATATYPE_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, status_sort))));
+    try testing.expectEqual(@as(u32, z3.Z3_DATATYPE_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, mode_sort))));
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "error_union uses distinct constructors for declared error payload types" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const ok_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const err_a_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 32);
+    const err_b_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 64);
+    var error_types = [_]mlir.MlirType{ err_a_ty, err_b_ty };
+    const eu_ty = mlir.oraErrorUnionTypeGetWithErrors(mlir_ctx, ok_ty, error_types.len, &error_types);
+
+    const err_a_attr = mlir.oraIntegerAttrCreateI64FromType(err_a_ty, 7);
+    const err_a_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, err_a_ty, err_a_attr);
+    const err_a_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_a_value_op, 0), eu_ty);
+
+    const err_b_attr = mlir.oraIntegerAttrCreateI64FromType(err_b_ty, 9);
+    const err_b_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, err_b_ty, err_b_attr);
+    const err_b_op = mlir.oraErrorErrOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(err_b_value_op, 0), eu_ty);
+
+    const err_a = try encoder.encodeOperation(err_a_op);
+    const err_b = try encoder.encodeOperation(err_b_op);
+    const err_a_decl = z3.Z3_get_app_decl(z3_ctx.ctx, z3.Z3_to_app(z3_ctx.ctx, err_a));
+    const err_b_decl = z3.Z3_get_app_decl(z3_ctx.ctx, z3.Z3_to_app(z3_ctx.ctx, err_b));
+    try testing.expect(err_a_decl != err_b_decl);
+    try testing.expectEqual(@as(c_uint, 1), z3.Z3_get_app_num_args(z3_ctx.ctx, z3.Z3_to_app(z3_ctx.ctx, err_a)));
+    try testing.expectEqual(@as(c_uint, 1), z3.Z3_get_app_num_args(z3_ctx.ctx, z3.Z3_to_app(z3_ctx.ctx, err_b)));
+    try testing.expectEqual(z3.Z3_get_sort(z3_ctx.ctx, err_a), z3.Z3_get_sort(z3_ctx.ctx, err_b));
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, err_a, err_b));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "sortFromPrintedType maps named struct to product sort when declaration metadata is registered" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

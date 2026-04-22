@@ -334,6 +334,10 @@ extern "C"
         MlirContext ctx,
         MlirStringRef structName);
 
+    /// Return the symbolic name for an Ora struct type.
+    /// Returns a null/empty string ref if the type is not !ora.struct<...>.
+    MLIR_CAPI_EXPORTED MlirStringRef oraStructTypeGetName(MlirType structType);
+
     /// Look up the number of fields for an Ora struct type using the nearest
     /// in-scope ora.struct.decl visible from `anchorOp`.
     /// Returns 0 if the type is not an Ora struct or no declaration is found.
@@ -357,14 +361,28 @@ extern "C"
         MlirType structType,
         size_t index);
 
-    /// Create an Ora error union type !ora.error_union<successType>
+    /// Create an Ora error union type !ora.error_union<successType>.
+    /// This legacy constructor leaves the declared error set empty.
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
         MlirContext ctx,
         MlirType successType);
 
+    /// Create an Ora error union type !ora.error_union<successType, errorTypes...>
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetWithErrors(
+        MlirContext ctx,
+        MlirType successType,
+        size_t numErrorTypes,
+        const MlirType *errorTypes);
+
     /// Extract the success type from an Ora error union type
     /// Returns null type if the input is not an error union type
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType);
+
+    /// Return the number of declared error types in an Ora error union type.
+    MLIR_CAPI_EXPORTED size_t oraErrorUnionTypeGetNumErrorTypes(MlirType errorUnionType);
+
+    /// Return the declared error type at `index`, or null on failure.
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetErrorType(MlirType errorUnionType, size_t index);
 
     /// Extract the value type from an Ora map type !ora.map<keyType, valueType>
     /// Returns null type if the input is not a map type

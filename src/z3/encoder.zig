@@ -192,7 +192,7 @@ pub const Encoder = struct {
     /// Bounded list of degradation reasons in encounter order.
     encoding_degraded_reasons: std.ArrayList([]const u8),
     /// Cache of error_union tuple sorts by MLIR type pointer.
-    error_union_sorts: std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    error_union_sorts: std.StringHashMap(ErrorUnionSort),
     /// Cache of product tuple sorts for tuples and structs.
     product_sorts: std.StringHashMap(ProductSort),
     /// Cache of tag-only enum datatype sorts.
@@ -232,7 +232,7 @@ pub const Encoder = struct {
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
             .encoding_degraded_reasons = std.ArrayList([]const u8){},
-            .error_union_sorts = std.HashMap(u64, ErrorUnionSort, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
@@ -674,8 +674,14 @@ pub const Encoder = struct {
             const parsed_name = parseStructTypeName(key) orelse return error.UnsupportedOperation;
             const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
             const struct_decl = self.struct_decl_ops.get(struct_name) orelse return error.UnsupportedOperation;
-            const field_names_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_names", 15));
-            const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+            var field_names_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_names", 15));
+            var field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+            if (mlir.oraAttributeIsNull(field_names_attr)) {
+                field_names_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.param_names", 15));
+            }
+            if (mlir.oraAttributeIsNull(field_types_attr)) {
+                field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.param_types", 15));
+            }
             if (mlir.oraAttributeIsNull(field_names_attr) or mlir.oraAttributeIsNull(field_types_attr)) {
                 return error.UnsupportedOperation;
             }
@@ -1732,6 +1738,11 @@ pub const Encoder = struct {
         self.pending_constraints.deinit(self.allocator);
         self.pending_obligations.deinit(self.allocator);
         self.encoding_degraded_reasons.deinit(self.allocator);
+        var error_union_it = self.error_union_sorts.iterator();
+        while (error_union_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.error_variants);
+        }
         self.error_union_sorts.deinit();
         var product_it = self.product_sorts.iterator();
         while (product_it.next()) |entry| {
@@ -1792,6 +1803,33 @@ pub const Encoder = struct {
         try self.registerStructDeclAlias(canonical_type_key, csv_builder.items, struct_op);
     }
 
+    pub fn registerErrorDeclOperation(self: *Encoder, error_op: mlir.MlirOperation) !void {
+        const name = self.getStringAttr(error_op, "sym_name") orelse
+            self.getStringAttr(error_op, "name") orelse return;
+        if (self.struct_field_names_csv.contains(name)) return;
+
+        const params_attr = mlir.oraOperationGetAttributeByName(error_op, mlir.oraStringRefCreate("ora.param_names", 15));
+        var csv_builder = std.ArrayList(u8){};
+        defer csv_builder.deinit(self.allocator);
+        if (!mlir.oraAttributeIsNull(params_attr)) {
+            const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(params_attr));
+            for (0..count) |i| {
+                const field_attr = mlir.oraArrayAttrGetElement(params_attr, i);
+                if (mlir.oraAttributeIsNull(field_attr)) continue;
+                const field_ref = mlir.oraStringAttrGetValue(field_attr);
+                if (field_ref.data == null or field_ref.length == 0) continue;
+                if (csv_builder.items.len > 0) try csv_builder.append(self.allocator, ',');
+                try csv_builder.appendSlice(self.allocator, field_ref.data[0..field_ref.length]);
+            }
+        }
+
+        try self.registerStructDeclAlias(name, csv_builder.items, error_op);
+
+        const canonical_type_key = try std.fmt.allocPrint(self.allocator, "!ora.struct<\"{s}\">", .{name});
+        defer self.allocator.free(canonical_type_key);
+        try self.registerStructDeclAlias(canonical_type_key, csv_builder.items, error_op);
+    }
+
     pub fn registerEnumDeclOperation(self: *Encoder, enum_op: mlir.MlirOperation) !void {
         const name = self.getStringAttr(enum_op, "sym_name") orelse
             self.getStringAttr(enum_op, "name") orelse return;
@@ -1850,6 +1888,21 @@ pub const Encoder = struct {
             if (self.enum_decl_ops.contains(name)) continue;
             const key = try self.allocator.dupe(u8, name);
             try self.enum_decl_ops.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn copyErrorUnionRegistryFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.error_union_sorts.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (self.error_union_sorts.contains(key)) continue;
+            const key_copy = try self.allocator.dupe(u8, key);
+            errdefer self.allocator.free(key_copy);
+            const variants_copy = try self.allocator.dupe(ErrorVariantSort, entry.value_ptr.error_variants);
+            errdefer self.allocator.free(variants_copy);
+            var sort_copy = entry.value_ptr.*;
+            sort_copy.error_variants = variants_copy;
+            try self.error_union_sorts.put(key_copy, sort_copy);
         }
     }
 
@@ -5387,6 +5440,14 @@ pub const Encoder = struct {
         return error.UnsupportedOperation;
     }
 
+    const ErrorVariantSort = struct {
+        ctor: z3.Z3_func_decl,
+        tester: z3.Z3_func_decl,
+        projection: z3.Z3_func_decl,
+        payload_sort: z3.Z3_sort,
+        payload_type: mlir.MlirType,
+    };
+
     const ErrorUnionSort = struct {
         sort: z3.Z3_sort,
         ok_ctor: z3.Z3_func_decl,
@@ -5397,36 +5458,33 @@ pub const Encoder = struct {
         proj_err: z3.Z3_func_decl,
         ok_sort: z3.Z3_sort,
         err_sort: z3.Z3_sort,
+        error_variants: []const ErrorVariantSort,
     };
 
-    fn getErrorUnionSort(self: *Encoder, _: mlir.MlirType, success_type: mlir.MlirType) EncodeError!ErrorUnionSort {
+    fn getErrorUnionSort(self: *Encoder, error_union_type: mlir.MlirType, success_type: mlir.MlirType) EncodeError!ErrorUnionSort {
         const ok_sort = try self.encodeMLIRType(success_type);
-        const err_sort = self.mkBitVectorSort(256);
-        const ok_key = @as(u64, @intFromPtr(ok_sort));
-        const err_key = @as(u64, @intFromPtr(err_sort));
-        const key = (ok_key *% 0x9E3779B185EBCA87) ^ (err_key *% 0xC2B2AE3D27D4EB4F) ^ 0x4555;
+        const printed_key = try self.printMlirTypeOwned(error_union_type);
+        defer self.allocator.free(printed_key);
+        const key = std.mem.trim(u8, printed_key, " \t\n\r");
         if (self.error_union_sorts.get(key)) |cached| {
             return cached;
         }
+        const stored_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(stored_key);
 
-        const datatype_name = try std.fmt.allocPrint(self.allocator, "ora.error_union.{d}.{d}", .{ ok_key, err_key });
+        const error_count = mlir.oraErrorUnionTypeGetNumErrorTypes(error_union_type);
+        const datatype_hash = std.hash.Wyhash.hash(0, key);
+        const datatype_name = try std.fmt.allocPrint(self.allocator, "ora.error_union.{x}", .{datatype_hash});
         defer self.allocator.free(datatype_name);
         const datatype_symbol = try self.mkSymbol(datatype_name);
 
         var ok_field_names = [_]z3.Z3_symbol{try self.mkSymbol("ok")};
         var ok_field_sorts = [_]z3.Z3_sort{ok_sort};
         var ok_sort_refs = [_]c_uint{0};
-        var err_field_names = [_]z3.Z3_symbol{try self.mkSymbol("err")};
-        var err_field_sorts = [_]z3.Z3_sort{err_sort};
-        var err_sort_refs = [_]c_uint{0};
         const ok_ctor_name = try std.fmt.allocPrint(self.allocator, "{s}.Ok", .{datatype_name});
         defer self.allocator.free(ok_ctor_name);
         const ok_tester_name = try std.fmt.allocPrint(self.allocator, "{s}.is_Ok", .{datatype_name});
         defer self.allocator.free(ok_tester_name);
-        const err_ctor_name = try std.fmt.allocPrint(self.allocator, "{s}.Err", .{datatype_name});
-        defer self.allocator.free(err_ctor_name);
-        const err_tester_name = try std.fmt.allocPrint(self.allocator, "{s}.is_Err", .{datatype_name});
-        defer self.allocator.free(err_tester_name);
 
         const ok_constructor = z3.Z3_mk_constructor(
             self.context.ctx,
@@ -5439,19 +5497,45 @@ pub const Encoder = struct {
         );
         defer z3.Z3_del_constructor(self.context.ctx, ok_constructor);
 
-        const err_constructor = z3.Z3_mk_constructor(
-            self.context.ctx,
-            try self.mkSymbol(err_ctor_name),
-            try self.mkSymbol(err_tester_name),
-            1,
-            err_field_names[0..].ptr,
-            err_field_sorts[0..].ptr,
-            err_sort_refs[0..].ptr,
-        );
-        defer z3.Z3_del_constructor(self.context.ctx, err_constructor);
+        const effective_error_count: usize = if (error_count == 0) 1 else error_count;
+        var constructors = try self.allocator.alloc(z3.Z3_constructor, effective_error_count + 1);
+        defer self.allocator.free(constructors);
+        constructors[0] = ok_constructor;
 
-        var constructors = [_]z3.Z3_constructor{ ok_constructor, err_constructor };
-        const sort = z3.Z3_mk_datatype(self.context.ctx, datatype_symbol, constructors.len, &constructors);
+        const variant_payload_types = try self.allocator.alloc(mlir.MlirType, effective_error_count);
+        defer self.allocator.free(variant_payload_types);
+        const variant_payload_sorts = try self.allocator.alloc(z3.Z3_sort, effective_error_count);
+        defer self.allocator.free(variant_payload_sorts);
+
+        for (0..effective_error_count) |index| {
+            const error_type = if (error_count == 0) mlir.MlirType{ .ptr = null } else mlir.oraErrorUnionTypeGetErrorType(error_union_type, index);
+            if (error_count != 0 and mlir.oraTypeIsNull(error_type)) return error.UnsupportedOperation;
+            const payload_sort = if (error_count == 0) self.mkBitVectorSort(256) else try self.encodeMLIRType(error_type);
+            variant_payload_types[index] = error_type;
+            variant_payload_sorts[index] = payload_sort;
+
+            var err_field_names = [_]z3.Z3_symbol{try self.mkSymbol("err")};
+            var err_field_sorts = [_]z3.Z3_sort{payload_sort};
+            var err_sort_refs = [_]c_uint{0};
+            const err_ctor_name = try std.fmt.allocPrint(self.allocator, "{s}.Err{d}", .{ datatype_name, index });
+            defer self.allocator.free(err_ctor_name);
+            const err_tester_name = try std.fmt.allocPrint(self.allocator, "{s}.is_Err{d}", .{ datatype_name, index });
+            defer self.allocator.free(err_tester_name);
+            constructors[index + 1] = z3.Z3_mk_constructor(
+                self.context.ctx,
+                try self.mkSymbol(err_ctor_name),
+                try self.mkSymbol(err_tester_name),
+                1,
+                err_field_names[0..].ptr,
+                err_field_sorts[0..].ptr,
+                err_sort_refs[0..].ptr,
+            );
+        }
+        defer {
+            for (constructors[1..]) |constructor| z3.Z3_del_constructor(self.context.ctx, constructor);
+        }
+
+        const sort = z3.Z3_mk_datatype(self.context.ctx, datatype_symbol, @intCast(constructors.len), constructors.ptr);
 
         var ok_ctor: z3.Z3_func_decl = undefined;
         var is_ok: z3.Z3_func_decl = undefined;
@@ -5460,8 +5544,29 @@ pub const Encoder = struct {
 
         var err_ctor: z3.Z3_func_decl = undefined;
         var is_err: z3.Z3_func_decl = undefined;
-        var err_accessors: [1]z3.Z3_func_decl = undefined;
-        z3.Z3_query_constructor(self.context.ctx, err_constructor, 1, &err_ctor, &is_err, &err_accessors);
+        var proj_err: z3.Z3_func_decl = undefined;
+        var err_sort = self.mkBitVectorSort(256);
+        var error_variants = try self.allocator.alloc(ErrorVariantSort, effective_error_count);
+        errdefer self.allocator.free(error_variants);
+        for (0..effective_error_count) |index| {
+            var ctor: z3.Z3_func_decl = undefined;
+            var tester: z3.Z3_func_decl = undefined;
+            var accessors: [1]z3.Z3_func_decl = undefined;
+            z3.Z3_query_constructor(self.context.ctx, constructors[index + 1], 1, &ctor, &tester, &accessors);
+            error_variants[index] = .{
+                .ctor = ctor,
+                .tester = tester,
+                .projection = accessors[0],
+                .payload_sort = variant_payload_sorts[index],
+                .payload_type = variant_payload_types[index],
+            };
+            if (index == 0) {
+                err_ctor = ctor;
+                is_err = tester;
+                proj_err = accessors[0];
+                err_sort = variant_payload_sorts[index];
+            }
+        }
 
         const eu = ErrorUnionSort{
             .sort = sort,
@@ -5470,12 +5575,77 @@ pub const Encoder = struct {
             .is_ok = is_ok,
             .is_err = is_err,
             .proj_ok = ok_accessors[0],
-            .proj_err = err_accessors[0],
+            .proj_err = proj_err,
             .ok_sort = ok_sort,
             .err_sort = err_sort,
+            .error_variants = error_variants,
         };
-        try self.error_union_sorts.put(key, eu);
+        try self.error_union_sorts.put(stored_key, eu);
         return eu;
+    }
+
+    fn errorUnionIsErr(self: *Encoder, eu: ErrorUnionSort, value: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        const is_ok = z3.Z3_mk_app(self.context.ctx, eu.is_ok, 1, &[_]z3.Z3_ast{value});
+        return z3.Z3_mk_not(self.context.ctx, is_ok);
+    }
+
+    fn findErrorVariantForType(eu: ErrorUnionSort, payload_type: mlir.MlirType) ?ErrorVariantSort {
+        if (eu.error_variants.len == 1 and mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) return eu.error_variants[0];
+        for (eu.error_variants) |variant| {
+            if (!mlir.oraTypeIsNull(variant.payload_type) and mlir.oraTypeEqual(payload_type, variant.payload_type)) return variant;
+        }
+        return null;
+    }
+
+    fn findErrorVariantForSymbol(_: *Encoder, eu: ErrorUnionSort, sym_name: []const u8) ?ErrorVariantSort {
+        for (eu.error_variants) |variant| {
+            if (mlir.oraTypeIsNull(variant.payload_type)) continue;
+            const struct_name_ref = mlir.oraStructTypeGetName(variant.payload_type);
+            const struct_name = if (struct_name_ref.data == null or struct_name_ref.length == 0)
+                ""
+            else
+                struct_name_ref.data[0..struct_name_ref.length];
+            if (struct_name.len == 0) continue;
+            if (std.mem.eql(u8, struct_name, sym_name)) return variant;
+            if (std.mem.endsWith(u8, sym_name, struct_name) and sym_name.len > struct_name.len and sym_name[sym_name.len - struct_name.len - 1] == '.') return variant;
+        }
+        return null;
+    }
+
+    fn errorVariantSymbolName(variant: ErrorVariantSort) ?[]const u8 {
+        if (mlir.oraTypeIsNull(variant.payload_type)) return null;
+        const struct_name_ref = mlir.oraStructTypeGetName(variant.payload_type);
+        if (struct_name_ref.data == null or struct_name_ref.length == 0) return null;
+        return struct_name_ref.data[0..struct_name_ref.length];
+    }
+
+    fn encodeErrorUnionDiscriminant(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        eu: ErrorUnionSort,
+        value: z3.Z3_ast,
+        target_sort: z3.Z3_sort,
+        op_id: usize,
+    ) EncodeError!?z3.Z3_ast {
+        if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) != z3.Z3_BV_SORT) return null;
+        if (eu.error_variants.len == 1 and mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) return null;
+
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
+        var result: ?z3.Z3_ast = null;
+        for (eu.error_variants) |variant| {
+            const sym_name = errorVariantSymbolName(variant) orelse
+                return try self.degradeToUndef(target_sort, "error_get_error", op_id, "missing error variant symbol name");
+            const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse
+                return try self.degradeToUndef(target_sort, "error_get_error", op_id, "failed to resolve error declaration id");
+            const id_ast = try self.encodeIntegerConstant(error_id, width);
+            if (result) |current| {
+                const is_variant = z3.Z3_mk_app(self.context.ctx, variant.tester, 1, &[_]z3.Z3_ast{value});
+                result = z3.Z3_mk_ite(self.context.ctx, is_variant, id_ast, current);
+            } else {
+                result = id_ast;
+            }
+        }
+        return result;
     }
 
     fn encodeErrorUnionOp(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
@@ -5500,8 +5670,10 @@ pub const Encoder = struct {
             if (mlir.oraTypeIsNull(success_type)) return error.UnsupportedOperation;
             const eu = try self.getErrorUnionSort(result_type, success_type);
             const payload_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
-            const err_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, eu.err_sort, "error_err", op_id);
-            return z3.Z3_mk_app(self.context.ctx, eu.err_ctor, 1, &[_]z3.Z3_ast{err_val});
+            const variant = findErrorVariantForType(eu, payload_type) orelse
+                return try self.degradeToUndef(eu.sort, "error_err", op_id, "error payload type not in error_union error set");
+            const err_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, variant.payload_sort, "error_err", op_id);
+            return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
         }
 
         const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -5510,7 +5682,7 @@ pub const Encoder = struct {
         if (mlir.oraTypeIsNull(success_type)) return error.UnsupportedOperation;
         const eu = try self.getErrorUnionSort(operand_type, success_type);
 
-        const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{operands[0]});
+        const is_err = try self.errorUnionIsErr(eu, operands[0]);
 
         if (std.mem.eql(u8, op_name, "ora.error.is_error")) {
             return is_err;
@@ -5527,7 +5699,6 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.error.get_error")) {
-            const err_val = z3.Z3_mk_app(self.context.ctx, eu.proj_err, 1, &[_]z3.Z3_ast{operands[0]});
             self.addConstraintWithSource(
                 is_err,
                 .assume,
@@ -5536,16 +5707,27 @@ pub const Encoder = struct {
             if (mlir.oraOperationGetNumResults(mlir_op) >= 1) {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
+                if (findErrorVariantForType(eu, result_type)) |variant| {
+                    return z3.Z3_mk_app(self.context.ctx, variant.projection, 1, &[_]z3.Z3_ast{operands[0]});
+                }
+                const result_sort = try self.encodeMLIRType(result_type);
+                if (try self.encodeErrorUnionDiscriminant(mlir_op, eu, operands[0], result_sort, op_id)) |discriminant| {
+                    return discriminant;
+                }
                 if (try self.getProductSort(result_type)) |_| {
-                    const result_sort = try self.encodeMLIRType(result_type);
-                    if (result_sort != eu.err_sort) {
-                        const payload_name = try std.fmt.allocPrint(self.allocator, "error_payload_{d}", .{op_id});
-                        defer self.allocator.free(payload_name);
-                        return try self.mkVariable(payload_name, result_sort);
+                    for (eu.error_variants) |variant| {
+                        if (mlir.oraTypeIsNull(variant.payload_type)) continue;
+                        const projected = z3.Z3_mk_app(self.context.ctx, variant.projection, 1, &[_]z3.Z3_ast{operands[0]});
+                        if (try self.coerceProductAstToSort(projected, variant.payload_type, result_sort)) |coerced| {
+                            return coerced;
+                        }
                     }
                 }
+                if (eu.error_variants.len != 1 or !mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) {
+                    return try self.degradeToUndef(result_sort, "error_get_error", op_id, "error get_error result type not in error_union error set");
+                }
             }
-            return err_val;
+            return z3.Z3_mk_app(self.context.ctx, eu.proj_err, 1, &[_]z3.Z3_ast{operands[0]});
         }
 
         return error.UnsupportedOperation;
@@ -5562,20 +5744,55 @@ pub const Encoder = struct {
 
         if (!mlir.oraTypeIsNull(success_type)) {
             const eu = try self.getErrorUnionSort(result_type, success_type);
+            const payload_type = if (operands.len >= 1)
+                mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0))
+            else
+                mlir.MlirType{ .ptr = null };
+            const variant = if (operands.len >= 1)
+                findErrorVariantForType(eu, payload_type) orelse
+                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error payload type not in error_union error set")
+            else blk: {
+                const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse
+                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "missing error symbol name");
+                break :blk findErrorVariantForSymbol(self, eu, sym_name) orelse
+                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set");
+            };
             const err_val = if (operands.len >= 1)
                 try self.coerceTypedAstToSortOrUndef(
                     operands[0],
-                    mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0)),
-                    eu.err_sort,
+                    payload_type,
+                    variant.payload_sort,
                     "error_return",
                     op_id,
                 )
             else
-                try self.encodeErrorIdValue(mlir_op, eu.err_sort, op_id);
-            return z3.Z3_mk_app(self.context.ctx, eu.err_ctor, 1, &[_]z3.Z3_ast{err_val});
+                try self.encodeErrorIdValue(mlir_op, variant.payload_sort, op_id);
+            return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
         }
 
         const result_sort = try self.encodeMLIRType(result_type);
+        const maybe_product = self.getProductSort(result_type) catch |err| switch (err) {
+            error.UnsupportedOperation => null,
+            else => return err,
+        };
+        if (maybe_product) |product| {
+            if (operands.len != product.fields.len) {
+                return try self.degradeToUndef(result_sort, "error_return", op_id, "error payload constructor operand count mismatch");
+            }
+            const args = try self.allocator.alloc(z3.Z3_ast, operands.len);
+            defer self.allocator.free(args);
+            for (operands, 0..) |operand, index| {
+                const operand_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(index)));
+                args[index] = try self.coerceTypedAstToSortOrUndef(
+                    operand,
+                    operand_type,
+                    product.fields[index].sort,
+                    "error_return",
+                    op_id,
+                );
+            }
+            return z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(args.len), args.ptr);
+        }
         if (operands.len >= 1) {
             return try self.coerceTypedAstToSortOrUndef(
                 operands[0],
@@ -6438,6 +6655,7 @@ pub const Encoder = struct {
             );
         }
         try self.copyProductSortRegistryFrom(&summary_encoder);
+        try self.copyErrorUnionRegistryFrom(&summary_encoder);
 
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
@@ -7020,7 +7238,7 @@ pub const Encoder = struct {
 
         const encoded = try self.encodeValueWithMode(value, mode);
         const eu = try self.getErrorUnionSort(value_type, success_type);
-        const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{encoded});
+        const is_err = try self.errorUnionIsErr(eu, encoded);
         return self.astSimplifiesToBool(is_err);
     }
 
@@ -8992,7 +9210,7 @@ pub const Encoder = struct {
 
             const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
             const eu = try self.getErrorUnionSort(operand_type, success_type);
-            const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{operand_expr});
+            const is_err = try self.errorUnionIsErr(eu, operand_expr);
             const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
             return .{ .is_err = is_err, .ok_expr = ok_expr };
         }
@@ -9195,7 +9413,7 @@ pub const Encoder = struct {
 
             const operand_expr = try self.encodeValueWithMode(operand, mode);
             const eu = try self.getErrorUnionSort(operand_type, success_type);
-            const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{operand_expr});
+            const is_err = try self.errorUnionIsErr(eu, operand_expr);
             const rest = (try self.tryExtractCatchPredicateFromSequence(next, mode, continuation)) orelse return null;
             return self.encodeOr(&.{ is_err, self.encodeAnd(&.{ self.encodeNot(is_err), rest }) });
         }
@@ -9960,7 +10178,7 @@ pub const Encoder = struct {
 
                 const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
                 const eu = try self.getErrorUnionSort(operand_type, success_type);
-                const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{operand_expr});
+                const is_err = try self.errorUnionIsErr(eu, operand_expr);
                 const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
                 return .{ .is_err = is_err, .ok_expr = ok_expr };
             }
@@ -10024,7 +10242,7 @@ pub const Encoder = struct {
 
                 const operand_expr = try self.encodeValueWithMode(unwrap_operand, mode);
                 const eu = try self.getErrorUnionSort(operand_type, success_type);
-                const is_err = z3.Z3_mk_app(self.context.ctx, eu.is_err, 1, &[_]z3.Z3_ast{operand_expr});
+                const is_err = try self.errorUnionIsErr(eu, operand_expr);
                 const ok_expr = z3.Z3_mk_app(self.context.ctx, eu.proj_ok, 1, &[_]z3.Z3_ast{operand_expr});
                 return .{ .is_err = is_err, .ok_expr = ok_expr };
             }
@@ -11793,7 +12011,10 @@ pub const Encoder = struct {
             const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
             break :blk self.struct_decl_ops.get(struct_name) orelse return .{ .ptr = null };
         };
-        const field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+        var field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_types", 15));
+        if (mlir.oraAttributeIsNull(field_types_attr)) {
+            field_types_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.param_types", 15));
+        }
         if (mlir.oraAttributeIsNull(field_types_attr)) return .{ .ptr = null };
         const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(field_types_attr));
         if (index >= count) return .{ .ptr = null };

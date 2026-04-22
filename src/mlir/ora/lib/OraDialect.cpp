@@ -426,6 +426,44 @@ namespace mlir
             printer << ">";
         }
 
+        // ErrorUnionType: !ora.error_union<success_type[, error_type...]>
+        ::mlir::Type ErrorUnionType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            ::mlir::Type successType;
+            if (parser.parseType(successType))
+                return {};
+
+            ::llvm::SmallVector<::mlir::Type> errorTypes;
+            while (parser.parseOptionalComma().succeeded())
+            {
+                ::mlir::Type errorType;
+                if (parser.parseType(errorType))
+                    return {};
+                errorTypes.push_back(errorType);
+            }
+
+            if (parser.parseGreater())
+                return {};
+
+            return ErrorUnionType::get(parser.getContext(), successType, errorTypes);
+        }
+
+        void ErrorUnionType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<";
+            printer.printType(getSuccessType());
+            auto errorTypes = getErrorTypes();
+            for (auto errorType : errorTypes)
+            {
+                printer << ", ";
+                printer.printType(errorType);
+            }
+            printer << ">";
+        }
+
         // MinValueType: !ora.min_value<base_type, min_high_high, min_high_low, min_low_high, min_low_low>
         ::mlir::Type MinValueType::parse(::mlir::AsmParser &parser)
         {

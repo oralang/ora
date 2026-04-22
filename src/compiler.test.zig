@@ -5440,7 +5440,7 @@ test "compiler carries tuple-payload error unions through HIR" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.error_union<!ora.tuple<i256, i1>>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.error_union<!ora.tuple<i256, i1>"));
 }
 
 test "compiler marks payload-bearing narrow error unions for wide lowering in HIR" {
@@ -10200,6 +10200,67 @@ test "compiler lowers enum fields inside struct declarations to integer wire typ
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Status\">"));
 }
 
+test "compiler abi emits enum wire type matching declared repr width" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\
+        \\contract C {
+        \\    pub fn set(status: Status) -> Status {
+        \\        return status;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    var saw_set = false;
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "set")) continue;
+        try testing.expectEqual(@as(usize, 1), callable.inputs.len);
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+        const input = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("uint8", input.wire_type.?);
+        try testing.expectEqualStrings("uint8", output.wire_type.?);
+        const repr = contract_abi.findType(input.repr_type.?) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("uint8", repr.wire_type.?);
+        saw_set = true;
+    }
+    try testing.expect(saw_set);
+}
+
+test "compiler abi emits uint256 for enum without declared repr" {
+    const source_text =
+        \\enum Status { Active, Paused }
+        \\
+        \\contract C {
+        \\    pub fn set(status: Status) -> Status {
+        \\        return status;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "set")) continue;
+        const input = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("uint256", input.wire_type.?);
+        try testing.expectEqualStrings("uint256", output.wire_type.?);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "compiler lowers std coinbase and msg value builtins" {
     const source_text =
         \\comptime const std = @import("std");
@@ -13776,6 +13837,39 @@ test "verification supports multi-error Result match without degradation" {
 
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification distinguishes multi-error variants end-to-end without degradation" {
+    const source_text =
+        \\error InsufficientBalance;
+        \\error Unauthorized;
+        \\
+        \\contract Sample {
+        \\    fn decide(flag: bool) -> !u256 | InsufficientBalance | Unauthorized {
+        \\        if (flag) {
+        \\            return error.InsufficientBalance();
+        \\        }
+        \\        return error.Unauthorized();
+        \\    }
+        \\
+        \\    pub fn classify(flag: bool) -> u256
+        \\        ensures((flag && result == 1) || (!flag && result == 2))
+        \\    {
+        \\        return match (decide(flag)) {
+        \\            Ok(_) => 0,
+        \\            InsufficientBalance => 1,
+        \\            Unauthorized => 2,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "classify");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
     try testing.expect(!result.degraded);
 }
 

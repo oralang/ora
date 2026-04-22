@@ -3516,6 +3516,10 @@ const TypeChecker = struct {
             try self.instantiated_enums.append(self.arena, .{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
+                .repr_type = if (enum_item.base_type) |type_expr|
+                    try self.resolveTypeExprWithBindings(type_expr, bindings)
+                else
+                    null,
             });
         }
 

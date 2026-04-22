@@ -78,6 +78,7 @@ pub const InstantiatedStruct = struct {
 pub const InstantiatedEnum = struct {
     template_item_id: ast.ItemId,
     mangled_name: []const u8,
+    repr_type: ?Type = null,
 };
 
 pub const InstantiatedBitfieldField = struct {

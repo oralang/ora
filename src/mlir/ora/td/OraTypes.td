@@ -203,16 +203,17 @@ def Ora_FunctionType : Ora_Type<"Function", "function"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-// Error union type - result type !T
+// Error union type - result type !T with optional declared error set
 def Ora_ErrorUnionType : Ora_Type<"ErrorUnion", "error_union"> {
   let summary = "Error union type";
   let description = [{
     Error union type representing a result that can be an error.
-    Syntax: `!ora.error_union<success_type>`
+    Syntax: `!ora.error_union<success_type[, error_type...]>`
   }];
   
-  let parameters = (ins "Type":$successType);
-  let assemblyFormat = "`<` $successType `>`";
+  let parameters = (ins "Type":$successType,
+                        ArrayRefParameter<"Type">:$errorTypes);
+  let hasCustomAssemblyFormat = 1;
 }
 
 //===----------------------------------------------------------------------===//

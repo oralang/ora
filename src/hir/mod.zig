@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const sema_model = @import("../sema/model.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -11,6 +12,7 @@ const hir_locals = @import("locals.zig");
 const module_lowering = @import("module_lowering.zig");
 const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 
 pub const abi = @import("abi.zig");
 
@@ -349,7 +351,20 @@ const Lowerer = struct {
             },
             .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
-            .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
+            .ErrorUnion => |error_union| blk: {
+                const payload_type = self.lowerTypeExpr(error_union.payload);
+                var error_types: std.ArrayList(mlir.MlirType) = .{};
+                for (error_union.errors) |error_type_expr| {
+                    error_types.append(self.allocator, self.lowerTypeExpr(error_type_expr)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
+                }
+                break :blk mlir.oraErrorUnionTypeGetWithErrors(
+                    self.context,
+                    payload_type,
+                    error_types.items.len,
+                    if (error_types.items.len == 0) null else error_types.items.ptr,
+                );
+            },
             .Error => self.recordTypeFallback(.syntax_error_type, self.typeExprRange(type_expr_id)),
         };
     }
@@ -421,16 +436,16 @@ const Lowerer = struct {
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
             .bitfield => support.defaultIntegerType(self.context),
-            .enum_ => support.defaultIntegerType(self.context),
+            .enum_ => |named| self.lowerEnumSemaType(named.name, range),
             .named => |named| if (self.substitutedType(named.name)) |substituted|
                 self.lowerSemaType(substituted, range)
             else blk: {
                 if (self.item_index.lookup(named.name)) |item_id| {
-                    if (self.file.item(item_id).* == .Enum) break :blk support.defaultIntegerType(self.context);
+                    if (self.file.item(item_id).* == .Enum) break :blk self.lowerEnumSemaType(named.name, range);
                 }
                 break :blk mlir.oraStructTypeGet(self.context, support.strRef(named.name));
             },
-            .error_union => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerSemaType(error_union.payload_type.*, range)),
+            .error_union => |error_union| self.lowerErrorUnionSemaType(error_union, range),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => |function| blk: {
                 var param_types: std.ArrayList(mlir.MlirType) = .{};
@@ -482,6 +497,37 @@ const Lowerer = struct {
                 );
             },
         };
+    }
+
+    fn lowerEnumSemaType(self: *Lowerer, name: []const u8, range: source.TextRange) mlir.MlirType {
+        if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
+            if (instantiated.repr_type) |repr| return self.lowerSemaType(repr, range);
+            return support.defaultIntegerType(self.context);
+        }
+        const item_id = self.item_index.lookup(name) orelse return support.defaultIntegerType(self.context);
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return support.defaultIntegerType(self.context),
+        };
+        const base_type = enum_item.base_type orelse return support.defaultIntegerType(self.context);
+        const repr = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, base_type) catch
+            return self.recordTypeFallback(.unsupported_syntax_type, range);
+        return self.lowerSemaType(repr, range);
+    }
+
+    fn lowerErrorUnionSemaType(self: *Lowerer, error_union: sema_model.ErrorUnionType, range: source.TextRange) mlir.MlirType {
+        const payload_type = self.lowerSemaType(error_union.payload_type.*, range);
+        var error_types: std.ArrayList(mlir.MlirType) = .{};
+        for (error_union.error_types) |error_type| {
+            error_types.append(self.allocator, self.lowerSemaType(error_type, range)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraErrorUnionTypeGetWithErrors(
+            self.context,
+            payload_type,
+            error_types.items.len,
+            if (error_types.items.len == 0) null else error_types.items.ptr,
+        );
     }
 
     pub fn lowerNamedPathType(self: *Lowerer, name: []const u8) mlir.MlirType {
@@ -1045,7 +1091,12 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
             else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
-        return mlir.oraErrorUnionTypeGet(lowerer.context, payload_type);
+        const error_type = switch (generic.args[1]) {
+            .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
+            else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
+        };
+        var error_types = [_]mlir.MlirType{error_type};
+        return mlir.oraErrorUnionTypeGetWithErrors(lowerer.context, payload_type, error_types.len, &error_types);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
         const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;

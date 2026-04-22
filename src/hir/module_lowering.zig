@@ -211,7 +211,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn lowerInstantiatedEnumDecl(self: *Lowerer, instantiated: sema.InstantiatedEnum, parent_block: mlir.MlirBlock) anyerror!void {
             const template_item = self.file.item(instantiated.template_item_id).Enum;
             const loc = self.location(template_item.range);
-            const repr_type = defaultIntegerType(self.context);
+            const repr_type = if (instantiated.repr_type) |resolved|
+                self.lowerSemaType(resolved, template_item.range)
+            else
+                defaultIntegerType(self.context);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(instantiated.mangled_name), repr_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
@@ -966,7 +969,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn lowerEnumDecl(self: *Lowerer, item_id: ast.ItemId, enum_item: ast.EnumItem, parent_block: mlir.MlirBlock) anyerror!void {
             if (enum_item.is_generic) return;
             const loc = self.location(enum_item.range);
-            const repr_type = defaultIntegerType(self.context);
+            const repr_type = try @This().lowerEnumReprType(self, enum_item);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(enum_item.name), repr_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
@@ -985,6 +988,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .enum_, enum_item.name, enum_item.range, op);
+        }
+
+        fn lowerEnumReprType(self: *Lowerer, enum_item: ast.EnumItem) anyerror!mlir.MlirType {
+            const type_expr = enum_item.base_type orelse return defaultIntegerType(self.context);
+            return self.lowerSemaType(
+                try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr),
+                enum_item.range,
+            );
         }
 
         pub fn lowerLogDecl(self: *Lowerer, item_id: ast.ItemId, log_decl: ast.LogDeclItem, parent_block: mlir.MlirBlock) anyerror!void {
@@ -1203,7 +1214,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             return switch (ty) {
-                .bool, .address, .string, .bytes, .integer, .enum_ => abi_support.canonicalAbiType(self.allocator, ty),
+                .bool, .address, .string, .bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
+                .enum_ => |named| @This().abiLayoutForNamedEnum(self, named.name),
                 .bitfield => |named| @This().abiLayoutForNamedBitfield(self, named.name),
                 .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
                 .error_union => |error_union| blk: {
@@ -1340,15 +1352,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn abiLayoutForNamedType(self: *Lowerer, name: []const u8) anyerror![]const u8 {
-            if (self.typecheck.instantiatedEnumByName(name)) |_| {
-                return self.allocator.dupe(u8, "uint32");
-            }
+            if (self.typecheck.instantiatedEnumByName(name)) |_| return @This().abiLayoutForNamedEnum(self, name);
             if (self.typecheck.instantiatedBitfieldByName(name)) |bitfield| {
                 return @This().abiLayoutForBitfieldBaseType(self, bitfield.base_type);
             }
             const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
             return switch (self.file.item(item_id).*) {
-                .Enum => self.allocator.dupe(u8, "uint32"),
+                .Enum => @This().abiLayoutForNamedEnum(self, name),
                 .Bitfield => |bitfield| @This().abiLayoutForBitfieldBaseTypeExpr(self, bitfield.base_type),
                 .ErrorDecl => |error_decl| blk: {
                     if (error_decl.parameters.len == 0) break :blk self.allocator.dupe(u8, "uint256");
@@ -1373,6 +1383,21 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn abiLayoutForNamedBitfield(self: *Lowerer, name: []const u8) anyerror![]const u8 {
             return @This().abiLayoutForNamedType(self, name);
+        }
+
+        fn abiLayoutForNamedEnum(self: *Lowerer, name: []const u8) anyerror![]const u8 {
+            if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
+                if (instantiated.repr_type) |repr| return @This().abiLayoutForType(self, repr);
+                return self.allocator.dupe(u8, "uint256");
+            }
+            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
+            return switch (self.file.item(item_id).*) {
+                .Enum => |enum_item| if (enum_item.base_type) |base_type|
+                    @This().abiLayoutForTypeExpr(self, base_type)
+                else
+                    self.allocator.dupe(u8, "uint256"),
+                else => error.UnsupportedAbiType,
+            };
         }
 
         fn abiLayoutForBitfieldBaseType(self: *Lowerer, base_type: ?sema.Type) anyerror![]const u8 {
