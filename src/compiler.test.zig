@@ -13899,6 +13899,20 @@ test "verification supports named error payload Result roundtrip without degrada
     }
 }
 
+test "verification supports multi-error try propagation without degradation" {
+    const path = "ora-example/corpus/types/error/error_propagation.ora";
+    const functions = [_][]const u8{ "validate", "compute", "validate_then_compute", "outer" };
+
+    for (functions) |function_name| {
+        var result = try verifyExampleWithoutDegradation(path, function_name, false, 5_000);
+        defer result.deinit(testing.allocator);
+
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.errors_len);
+        try testing.expect(!result.degraded);
+    }
+}
+
 test "verification supports Result is_err on pure helper call without degradation" {
     const source_text =
         \\comptime const std = @import("std");

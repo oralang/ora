@@ -5648,6 +5648,37 @@ pub const Encoder = struct {
         return result;
     }
 
+    fn encodeErrorUnionFromDiscriminant(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        eu: ErrorUnionSort,
+        discriminant: z3.Z3_ast,
+        op_id: usize,
+    ) EncodeError!?z3.Z3_ast {
+        const discriminant_sort = z3.Z3_get_sort(self.context.ctx, discriminant);
+        if (z3.Z3_get_sort_kind(self.context.ctx, discriminant_sort) != z3.Z3_BV_SORT) return null;
+        if (eu.error_variants.len == 1 and mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) return null;
+
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, discriminant_sort);
+        var result: ?z3.Z3_ast = null;
+        for (eu.error_variants) |variant| {
+            const sym_name = errorVariantSymbolName(variant) orelse
+                return try self.degradeToUndef(eu.sort, "error_err", op_id, "missing error variant symbol name");
+            const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse
+                return try self.degradeToUndef(eu.sort, "error_err", op_id, "failed to resolve error declaration id");
+            const id_ast = try self.encodeIntegerConstant(error_id, width);
+            const is_variant = z3.Z3_mk_eq(self.context.ctx, discriminant, id_ast);
+            const payload = try self.encodeErrorIdValueForSymbol(mlir_op, sym_name, variant.payload_sort, op_id);
+            const wrapped = z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{payload});
+            if (result) |current| {
+                result = z3.Z3_mk_ite(self.context.ctx, is_variant, wrapped, current);
+            } else {
+                result = wrapped;
+            }
+        }
+        return result;
+    }
+
     fn encodeErrorUnionOp(self: *Encoder, op_name: []const u8, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
         if (operands.len < 1) return error.InvalidOperandCount;
         const op_id = @intFromPtr(mlir_op.ptr);
@@ -5670,10 +5701,14 @@ pub const Encoder = struct {
             if (mlir.oraTypeIsNull(success_type)) return error.UnsupportedOperation;
             const eu = try self.getErrorUnionSort(result_type, success_type);
             const payload_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
-            const variant = findErrorVariantForType(eu, payload_type) orelse
-                return try self.degradeToUndef(eu.sort, "error_err", op_id, "error payload type not in error_union error set");
-            const err_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, variant.payload_sort, "error_err", op_id);
-            return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
+            if (findErrorVariantForType(eu, payload_type)) |variant| {
+                const err_val = try self.coerceTypedAstToSortOrUndef(operands[0], payload_type, variant.payload_sort, "error_err", op_id);
+                return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
+            }
+            if (try self.encodeErrorUnionFromDiscriminant(mlir_op, eu, operands[0], op_id)) |wrapped| {
+                return wrapped;
+            }
+            return try self.degradeToUndef(eu.sort, "error_err", op_id, "error payload type not in error_union error set");
         }
 
         const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -5883,6 +5918,10 @@ pub const Encoder = struct {
 
     fn encodeErrorIdValue(self: *Encoder, mlir_op: mlir.MlirOperation, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
         const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "missing error symbol name");
+        return try self.encodeErrorIdValueForSymbol(mlir_op, sym_name, target_sort, op_id);
+    }
+
+    fn encodeErrorIdValueForSymbol(self: *Encoder, mlir_op: mlir.MlirOperation, sym_name: []const u8, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
         const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "failed to resolve error declaration id");
         if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) == z3.Z3_BV_SORT) {
             const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
