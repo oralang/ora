@@ -139,6 +139,33 @@ pub const Encoder = struct {
         }
     };
 
+    const AdtVariant = struct {
+        name: []u8,
+        ctor: z3.Z3_func_decl,
+        tester: z3.Z3_func_decl,
+        projection: z3.Z3_func_decl,
+        payload_sort: z3.Z3_sort,
+        payload_type: mlir.MlirType,
+        payload_is_unit: bool,
+    };
+
+    const AdtSort = struct {
+        sort: z3.Z3_sort,
+        variants: []AdtVariant,
+
+        fn deinit(self: *AdtSort, allocator: std.mem.Allocator) void {
+            for (self.variants) |variant| allocator.free(variant.name);
+            allocator.free(self.variants);
+        }
+
+        fn findVariant(self: AdtSort, name: []const u8) ?AdtVariant {
+            for (self.variants) |variant| {
+                if (std.mem.eql(u8, variant.name, name)) return variant;
+            }
+            return null;
+        }
+    };
+
     context: *Context,
     allocator: std.mem.Allocator,
     verify_calls: bool,
@@ -197,6 +224,8 @@ pub const Encoder = struct {
     product_sorts: std.StringHashMap(ProductSort),
     /// Cache of tag-only enum datatype sorts.
     enum_sorts: std.StringHashMap(EnumSort),
+    /// Cache of payload-carrying ADT datatype sorts.
+    adt_sorts: std.StringHashMap(AdtSort),
     /// Stack of active quantified variable bindings (innermost binding last).
     quantified_bindings: std.ArrayList(QuantifiedBinding),
     /// Active branch assumptions used during pure-return extraction.
@@ -235,6 +264,7 @@ pub const Encoder = struct {
             .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
+            .adt_sorts = std.StringHashMap(AdtSort).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
             .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
         };
@@ -823,6 +853,115 @@ pub const Encoder = struct {
         };
         try self.enum_sorts.put(key, enum_sort);
         return enum_sort;
+    }
+
+    fn getAdtSort(self: *Encoder, adt_type: mlir.MlirType) EncodeError!AdtSort {
+        if (!mlir.oraTypeIsAAdt(adt_type)) return error.UnsupportedOperation;
+
+        const printed_key = try self.printMlirTypeOwned(adt_type);
+        defer self.allocator.free(printed_key);
+        const key = std.mem.trim(u8, printed_key, " \t\n\r");
+        if (self.adt_sorts.get(key)) |cached| return cached;
+        const stored_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(stored_key);
+
+        const adt_name_ref = mlir.oraAdtTypeGetName(adt_type);
+        if (adt_name_ref.data == null or adt_name_ref.length == 0) return error.UnsupportedOperation;
+        const adt_name = adt_name_ref.data[0..adt_name_ref.length];
+        const variant_count: usize = @intCast(mlir.oraAdtTypeGetNumVariants(adt_type));
+        if (variant_count == 0) return error.UnsupportedOperation;
+
+        const datatype_hash = std.hash.Wyhash.hash(0, key);
+        const datatype_name = try std.fmt.allocPrint(self.allocator, "ora.adt.{s}.{x}", .{ adt_name, datatype_hash });
+        defer self.allocator.free(datatype_name);
+        const datatype_symbol = try self.mkSymbol(datatype_name);
+
+        var constructors = try self.allocator.alloc(z3.Z3_constructor, variant_count);
+        defer self.allocator.free(constructors);
+        var variants = try self.allocator.alloc(AdtVariant, variant_count);
+        errdefer self.allocator.free(variants);
+        for (variants) |*variant| {
+            variant.* = .{
+                .name = &.{},
+                .ctor = undefined,
+                .tester = undefined,
+                .projection = undefined,
+                .payload_sort = undefined,
+                .payload_type = mlir.MlirType{ .ptr = null },
+                .payload_is_unit = false,
+            };
+        }
+        errdefer {
+            for (variants) |variant| {
+                if (variant.name.len != 0) self.allocator.free(variant.name);
+            }
+        }
+
+        for (0..variant_count) |index| {
+            const variant_ref = mlir.oraAdtTypeGetVariantName(adt_type, index);
+            if (variant_ref.data == null or variant_ref.length == 0) return error.UnsupportedOperation;
+            const variant_name = variant_ref.data[0..variant_ref.length];
+            const payload_type = mlir.oraAdtTypeGetVariantPayloadType(adt_type, index);
+            if (mlir.oraTypeIsNull(payload_type)) return error.UnsupportedOperation;
+            const payload_is_unit = mlir.oraTypeIsANone(payload_type);
+            variants[index].name = try self.allocator.dupe(u8, variant_name);
+            variants[index].payload_type = payload_type;
+            variants[index].payload_is_unit = payload_is_unit;
+
+            const ctor_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ datatype_name, variant_name });
+            defer self.allocator.free(ctor_name);
+            const tester_name = try std.fmt.allocPrint(self.allocator, "{s}.is_{s}", .{ datatype_name, variant_name });
+            defer self.allocator.free(tester_name);
+            if (payload_is_unit) {
+                constructors[index] = z3.Z3_mk_constructor(
+                    self.context.ctx,
+                    try self.mkSymbol(ctor_name),
+                    try self.mkSymbol(tester_name),
+                    0,
+                    null,
+                    null,
+                    null,
+                );
+            } else {
+                const payload_sort = try self.encodeMLIRType(payload_type);
+                variants[index].payload_sort = payload_sort;
+                var field_names = [_]z3.Z3_symbol{try self.mkSymbol("payload")};
+                var field_sorts = [_]z3.Z3_sort{payload_sort};
+                var sort_refs = [_]c_uint{0};
+                constructors[index] = z3.Z3_mk_constructor(
+                    self.context.ctx,
+                    try self.mkSymbol(ctor_name),
+                    try self.mkSymbol(tester_name),
+                    1,
+                    field_names[0..].ptr,
+                    field_sorts[0..].ptr,
+                    sort_refs[0..].ptr,
+                );
+            }
+        }
+        defer for (constructors) |constructor| z3.Z3_del_constructor(self.context.ctx, constructor);
+
+        const sort = z3.Z3_mk_datatype(self.context.ctx, datatype_symbol, @intCast(constructors.len), constructors.ptr);
+        for (0..variant_count) |index| {
+            var ctor: z3.Z3_func_decl = undefined;
+            var tester: z3.Z3_func_decl = undefined;
+            if (variants[index].payload_is_unit) {
+                z3.Z3_query_constructor(self.context.ctx, constructors[index], 0, &ctor, &tester, null);
+            } else {
+                var accessors: [1]z3.Z3_func_decl = undefined;
+                z3.Z3_query_constructor(self.context.ctx, constructors[index], 1, &ctor, &tester, &accessors);
+                variants[index].projection = accessors[0];
+            }
+            variants[index].ctor = ctor;
+            variants[index].tester = tester;
+        }
+
+        const adt_sort = AdtSort{
+            .sort = sort,
+            .variants = variants,
+        };
+        try self.adt_sorts.put(stored_key, adt_sort);
+        return adt_sort;
     }
 
     fn createProductSortFromFields(
@@ -1756,6 +1895,12 @@ pub const Encoder = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.enum_sorts.deinit();
+        var adt_it = self.adt_sorts.iterator();
+        while (adt_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.adt_sorts.deinit();
         for (self.quantified_bindings.items) |binding| {
             self.allocator.free(binding.name);
         }
@@ -1937,6 +2082,44 @@ pub const Encoder = struct {
                 .sort = source.sort,
                 .ctor = source.ctor,
                 .fields = fields,
+            });
+        }
+    }
+
+    fn copyAdtSortRegistryFrom(self: *Encoder, other: *const Encoder) !void {
+        var it = other.adt_sorts.iterator();
+        while (it.next()) |entry| {
+            const key_text = entry.key_ptr.*;
+            if (self.adt_sorts.contains(key_text)) continue;
+
+            const key = try self.allocator.dupe(u8, key_text);
+            errdefer self.allocator.free(key);
+
+            const source = entry.value_ptr.*;
+            var variants = try self.allocator.alloc(AdtVariant, source.variants.len);
+            errdefer self.allocator.free(variants);
+
+            var copied: usize = 0;
+            errdefer {
+                for (0..copied) |i| self.allocator.free(variants[i].name);
+            }
+
+            for (source.variants, 0..) |variant, index| {
+                variants[index] = .{
+                    .name = try self.allocator.dupe(u8, variant.name),
+                    .ctor = variant.ctor,
+                    .tester = variant.tester,
+                    .projection = variant.projection,
+                    .payload_sort = variant.payload_sort,
+                    .payload_type = variant.payload_type,
+                    .payload_is_unit = variant.payload_is_unit,
+                };
+                copied += 1;
+            }
+
+            try self.adt_sorts.put(key, .{
+                .sort = source.sort,
+                .variants = variants,
             });
         }
     }
@@ -4345,6 +4528,11 @@ pub const Encoder = struct {
             return enum_sort.sort;
         }
 
+        if (mlir.oraTypeIsAAdt(mlir_type)) {
+            const adt_sort = try self.getAdtSort(mlir_type);
+            return adt_sort.sort;
+        }
+
         if (mlir.oraTypeIsIntegerType(mlir_type)) {
             const builtin = mlir.oraTypeToBuiltin(mlir_type);
             const width = mlir.oraIntegerTypeGetWidth(builtin);
@@ -5078,6 +5266,58 @@ pub const Encoder = struct {
             const enum_sort = try self.getEnumSortByName(enum_name);
             const variant = enum_sort.findVariant(variant_name) orelse return error.UnsupportedOperation;
             return z3.Z3_mk_app(self.context.ctx, variant.ctor, 0, null);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.adt.construct")) {
+            if (mlir.oraOperationGetNumResults(mlir_op) < 1) return error.UnsupportedOperation;
+            const variant_name = self.getStringAttr(mlir_op, "variant_name") orelse return error.UnsupportedOperation;
+            const result_type = mlir.oraValueGetType(mlir.oraOperationGetResult(mlir_op, 0));
+            const adt_sort = try self.getAdtSort(result_type);
+            const variant = adt_sort.findVariant(variant_name) orelse return error.UnsupportedOperation;
+            if (variant.payload_is_unit) {
+                if (operands.len != 0) return error.InvalidOperandCount;
+                return z3.Z3_mk_app(self.context.ctx, variant.ctor, 0, null);
+            }
+            if (operands.len != 1) return error.InvalidOperandCount;
+            return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{operands[0]});
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.adt.tag")) {
+            if (operands.len != 1 or mlir.oraOperationGetNumResults(mlir_op) < 1) return error.InvalidOperandCount;
+            const value_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+            const result_type = mlir.oraValueGetType(mlir.oraOperationGetResult(mlir_op, 0));
+            const result_sort = try self.encodeMLIRType(result_type);
+            if (z3.Z3_get_sort_kind(self.context.ctx, result_sort) != z3.Z3_BV_SORT) {
+                return try self.degradeToUndef(result_sort, "adt_tag", @intFromPtr(mlir_op.ptr), "adt.tag result must be a bitvector integer");
+            }
+            const width = z3.Z3_get_bv_sort_size(self.context.ctx, result_sort);
+            const adt_sort = try self.getAdtSort(value_type);
+            var result: ?z3.Z3_ast = null;
+            for (adt_sort.variants, 0..) |variant, index| {
+                const index_ast = try self.encodeIntegerConstant(index, width);
+                if (result) |current| {
+                    const is_variant = z3.Z3_mk_app(self.context.ctx, variant.tester, 1, &[_]z3.Z3_ast{operands[0]});
+                    result = z3.Z3_mk_ite(self.context.ctx, is_variant, index_ast, current);
+                } else {
+                    result = index_ast;
+                }
+            }
+            return result orelse error.UnsupportedOperation;
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.adt.payload")) {
+            if (operands.len != 1) return error.InvalidOperandCount;
+            const variant_name = self.getStringAttr(mlir_op, "variant_name") orelse return error.UnsupportedOperation;
+            const value_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+            const adt_sort = try self.getAdtSort(value_type);
+            const variant = adt_sort.findVariant(variant_name) orelse return error.UnsupportedOperation;
+            if (variant.payload_is_unit) return error.UnsupportedOperation;
+            return z3.Z3_mk_app(self.context.ctx, variant.projection, 1, &[_]z3.Z3_ast{operands[0]});
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.adt.match_arm")) {
+            self.noteDegradationAtOp(mlir_op, "ora.adt.match_arm must be lowered before SMT encoding");
+            return error.UnsupportedOperation;
         }
 
         if (std.mem.eql(u8, op_name, "ora.i160.to.addr")) {
@@ -6792,6 +7032,7 @@ pub const Encoder = struct {
         }
         try self.copyProductSortRegistryFrom(&summary_encoder);
         try self.copyErrorUnionRegistryFrom(&summary_encoder);
+        try self.copyAdtSortRegistryFrom(&summary_encoder);
 
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);

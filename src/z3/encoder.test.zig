@@ -235,6 +235,61 @@ test "tag-only enum constructors are scoped by enum sort" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "ADT construct tag and payload encode as datatype constructors" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const text =
+        \\module {
+        \\  func.func @f(%payload: !ora.int<256, false>) -> !ora.int<256, false> {
+        \\    %event = ora.adt.construct "Value"(%payload) : (!ora.int<256, false>) -> !ora.adt<"Event", ("Empty", none), ("Value", !ora.int<256, false>)>
+        \\    %tag = ora.adt.tag %event : !ora.adt<"Event", ("Empty", none), ("Value", !ora.int<256, false>)> -> !ora.int<256, false>
+        \\    %extracted = ora.adt.payload %event, "Value" : !ora.adt<"Event", ("Empty", none), ("Value", !ora.int<256, false>)> -> !ora.int<256, false>
+        \\    func.return %extracted : !ora.int<256, false>
+        \\  }
+        \\}
+    ;
+    const module = mlir.oraModuleCreateParse(mlir_ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(!mlir.oraModuleIsNull(module));
+
+    const module_body = mlir.oraModuleGetBody(module);
+    const func_op = mlir.oraBlockGetFirstOperation(module_body);
+    const func_region = mlir.oraOperationGetRegion(func_op, 0);
+    const func_block = mlir.oraRegionGetFirstBlock(func_region);
+    const payload_arg = mlir.oraBlockGetArgument(func_block, 0);
+
+    const construct_op = mlir.oraBlockGetFirstOperation(func_block);
+    const tag_op = mlir.oraOperationGetNextInBlock(construct_op);
+    const payload_op = mlir.oraOperationGetNextInBlock(tag_op);
+
+    const payload_arg_ast = try encoder.encodeValue(payload_arg);
+    const extracted = try encoder.encodeOperation(payload_op);
+    const tag = try encoder.encodeOperation(tag_op);
+
+    var payload_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer payload_solver.deinit();
+    payload_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, extracted, payload_arg_ast)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), payload_solver.check());
+
+    const tag_sort = z3.Z3_get_sort(z3_ctx.ctx, tag);
+    const tag_width = z3.Z3_get_bv_sort_size(z3_ctx.ctx, tag_sort);
+    const one = try encoder.encodeIntegerConstant(1, tag_width);
+    var tag_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer tag_solver.deinit();
+    tag_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, tag, one)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), tag_solver.check());
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "error_union uses distinct constructors for declared error payload types" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

@@ -82,6 +82,19 @@ namespace
         return std::nullopt;
     }
 
+    static bool isNarrowAdt(ora::AdtType type)
+    {
+        if (type.getVariantNames().size() > 256)
+            return false;
+        for (Type payloadType : type.getPayloadTypes())
+        {
+            auto widthOpt = getOraBitWidth(payloadType);
+            if (!widthOpt || *widthOpt > 248)
+                return false;
+        }
+        return true;
+    }
+
     static bool isNarrowErrorUnion(ora::ErrorUnionType type)
     {
         auto widthOpt = getOraBitWidth(type.getSuccessType());
@@ -462,6 +475,16 @@ namespace mlir
                 if (!ctx) {
                     return Type();
                 }
+                return sir::U256Type::get(ctx); });
+
+            // Narrow payload-carrying ADTs pack as (payload << 8) | variant_tag.
+            // Wide ADTs deliberately have no fallback until the split-carrier
+            // layout is implemented.
+            addConversion([](ora::AdtType type) -> Type
+                          {
+                auto *ctx = type.getDialect().getContext();
+                if (!ctx || !isNarrowAdt(type))
+                    return Type();
                 return sir::U256Type::get(ctx); });
 
             // ora.error_union<T> → sir.u256 or (sir.u256, carrier(T)) depending on payload width

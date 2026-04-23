@@ -1864,6 +1864,120 @@ MlirStringRef oraStructTypeGetName(MlirType structType)
     }
 }
 
+MlirType oraAdtTypeGet(
+    MlirContext ctx,
+    MlirStringRef adtName,
+    size_t numVariants,
+    const MlirStringRef *variantNames,
+    const MlirType *payloadTypes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        StringRef nameRef = unwrap(adtName);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        if ((numVariants > 0) && (!variantNames || !payloadTypes))
+        {
+            return {nullptr};
+        }
+
+        Builder builder(context);
+        auto adtNameAttr = builder.getStringAttr(nameRef);
+        SmallVector<StringRef> variantNameRefs;
+        SmallVector<Type> payloadTypeRefs;
+        variantNameRefs.reserve(numVariants);
+        payloadTypeRefs.reserve(numVariants);
+        for (size_t i = 0; i < numVariants; ++i)
+        {
+            Type payloadType = unwrap(payloadTypes[i]);
+            if (!payloadType)
+                return {nullptr};
+            variantNameRefs.push_back(builder.getStringAttr(unwrap(variantNames[i])).getValue());
+            payloadTypeRefs.push_back(payloadType);
+        }
+
+        auto adtType = ora::AdtType::get(context, adtNameAttr.getValue(), variantNameRefs, payloadTypeRefs);
+        return wrap(adtType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirStringRef oraAdtTypeGetName(MlirType adtType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = type.getName();
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
+size_t oraAdtTypeGetNumVariants(MlirType adtType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return 0;
+        return type.getVariantNames().size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirStringRef oraAdtTypeGetVariantName(MlirType adtType, size_t index)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto names = type.getVariantNames();
+        if (index >= names.size())
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = names[index];
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirType oraAdtTypeGetVariantPayloadType(MlirType adtType, size_t index)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return {nullptr};
+        auto payloadTypes = type.getPayloadTypes();
+        if (index >= payloadTypes.size())
+            return {nullptr};
+        return wrap(payloadTypes[index]);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 size_t oraStructTypeGetFieldCountInScope(MlirOperation anchorOp, MlirType structType)
 {
     try
@@ -5694,6 +5808,19 @@ bool oraTypeIsAEnum(MlirType type)
     {
         Type ty = unwrap(type);
         return ty && llvm::isa<ora::EnumType>(ty);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool oraTypeIsAAdt(MlirType type)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        return ty && llvm::isa<ora::AdtType>(ty);
     }
     catch (...)
     {

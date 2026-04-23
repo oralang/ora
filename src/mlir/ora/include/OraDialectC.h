@@ -338,6 +338,27 @@ extern "C"
     /// Returns a null/empty string ref if the type is not !ora.struct<...>.
     MLIR_CAPI_EXPORTED MlirStringRef oraStructTypeGetName(MlirType structType);
 
+    /// Create an Ora ADT type !ora.adt<"adt_name", ("Variant", payload_type), ...>
+    MLIR_CAPI_EXPORTED MlirType oraAdtTypeGet(
+        MlirContext ctx,
+        MlirStringRef adtName,
+        size_t numVariants,
+        const MlirStringRef *variantNames,
+        const MlirType *payloadTypes);
+
+    /// Return the symbolic name for an Ora ADT type.
+    /// Returns a null/empty string ref if the type is not !ora.adt<...>.
+    MLIR_CAPI_EXPORTED MlirStringRef oraAdtTypeGetName(MlirType adtType);
+
+    /// Return the number of variants in an Ora ADT type.
+    MLIR_CAPI_EXPORTED size_t oraAdtTypeGetNumVariants(MlirType adtType);
+
+    /// Return the variant name at `index`, or a null/empty ref if invalid.
+    MLIR_CAPI_EXPORTED MlirStringRef oraAdtTypeGetVariantName(MlirType adtType, size_t index);
+
+    /// Return the variant payload type at `index`, or null if invalid.
+    MLIR_CAPI_EXPORTED MlirType oraAdtTypeGetVariantPayloadType(MlirType adtType, size_t index);
+
     /// Look up the number of fields for an Ora struct type using the nearest
     /// in-scope ora.struct.decl visible from `anchorOp`.
     /// Returns 0 if the type is not an Ora struct or no declaration is found.
@@ -1439,6 +1460,9 @@ extern "C"
 
     /// Query: is enum type
     MLIR_CAPI_EXPORTED bool oraTypeIsAEnum(MlirType type);
+
+    /// Query: is ADT type
+    MLIR_CAPI_EXPORTED bool oraTypeIsAAdt(MlirType type);
 
     /// Get representation type from enum type
     MLIR_CAPI_EXPORTED MlirType oraEnumTypeGetReprType(MlirType enumType);

@@ -94,6 +94,42 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        /// ora.adt.construct → packed ADT carrier.
+        class ConvertAdtConstructOp : public OpConversionPattern<ora::AdtConstructOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtConstructOp op,
+                typename ora::AdtConstructOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        /// ora.adt.tag → low-byte tag extraction.
+        class ConvertAdtTagOp : public OpConversionPattern<ora::AdtTagOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtTagOp op,
+                typename ora::AdtTagOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        /// ora.adt.payload → packed payload extraction.
+        class ConvertAdtPayloadOp : public OpConversionPattern<ora::AdtPayloadOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtPayloadOp op,
+                typename ora::AdtPayloadOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         /// ora.struct_field_store → sir.addptr + sir.store.
         class ConvertStructFieldStoreOp : public OpConversionPattern<ora::StructFieldStoreOp>
         {

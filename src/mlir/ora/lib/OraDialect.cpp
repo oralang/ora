@@ -273,6 +273,65 @@ namespace mlir
             printer << "\">";
         }
 
+        // AdtType: !ora.adt<"adt_name", ("Variant", payload_type), ...>
+        ::mlir::Type AdtType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            std::string name;
+            if (parser.parseString(&name))
+                return {};
+
+            ::llvm::SmallVector<::llvm::StringRef> variantNames;
+            ::llvm::SmallVector<::mlir::Type> payloadTypes;
+
+            while (parser.parseOptionalComma().succeeded())
+            {
+                if (parser.parseLParen())
+                    return {};
+
+                std::string variantName;
+                if (parser.parseString(&variantName))
+                    return {};
+
+                if (parser.parseComma())
+                    return {};
+
+                ::mlir::Type payloadType;
+                if (parser.parseType(payloadType))
+                    return {};
+
+                if (parser.parseRParen())
+                    return {};
+
+                variantNames.push_back(parser.getBuilder().getStringAttr(variantName).getValue());
+                payloadTypes.push_back(payloadType);
+            }
+
+            if (parser.parseGreater())
+                return {};
+
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return AdtType::get(parser.getContext(), nameRef, variantNames, payloadTypes);
+        }
+
+        void AdtType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<\"";
+            printer << getName();
+            printer << "\"";
+            auto variantNames = getVariantNames();
+            auto payloadTypes = getPayloadTypes();
+            for (size_t i = 0; i < variantNames.size(); ++i)
+            {
+                printer << ", (\"" << variantNames[i] << "\", ";
+                printer.printType(payloadTypes[i]);
+                printer << ")";
+            }
+            printer << ">";
+        }
+
         // AnonymousStructType: !ora.struct_anon<("field", type), ...>
         ::mlir::Type AnonymousStructType::parse(::mlir::AsmParser &parser)
         {
@@ -962,6 +1021,124 @@ namespace mlir
                                      << " does not match field '" << getFieldName()
                                      << "' type " << fieldType;
             }
+
+            return success();
+        }
+
+        static ::mlir::LogicalResult getAdtVariantInfo(
+            ::mlir::Operation *op,
+            AdtType adtType,
+            ::llvm::StringRef variantName,
+            size_t &variantIndex,
+            ::mlir::Type &payloadType)
+        {
+            auto variantNames = adtType.getVariantNames();
+            auto payloadTypes = adtType.getPayloadTypes();
+            if (variantNames.size() != payloadTypes.size())
+            {
+                return op->emitError() << "ADT type '" << adtType.getName()
+                                       << "' has malformed variant metadata";
+            }
+
+            for (size_t i = 0; i < variantNames.size(); ++i)
+            {
+                if (variantNames[i] == variantName)
+                {
+                    variantIndex = i;
+                    payloadType = payloadTypes[i];
+                    return success();
+                }
+            }
+
+            return op->emitError() << "unknown variant '" << variantName
+                                   << "' on ADT '" << adtType.getName() << "'";
+        }
+
+        ::mlir::LogicalResult AdtConstructOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getResult().getType());
+            if (!adtType)
+                return emitOpError("result type must be !ora.adt<...>");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
+
+            if (llvm::isa<::mlir::NoneType>(payloadType))
+            {
+                if (!getPayloadValues().empty())
+                {
+                    return emitOpError() << "unit variant '" << getVariantName()
+                                         << "' expects no payload operands";
+                }
+                return success();
+            }
+
+            if (getPayloadValues().size() != 1)
+            {
+                return emitOpError() << "variant '" << getVariantName()
+                                     << "' expects exactly one payload operand";
+            }
+
+            if (getPayloadValues().front().getType() != payloadType)
+            {
+                return emitOpError() << "payload operand type " << getPayloadValues().front().getType()
+                                     << " does not match variant '" << getVariantName()
+                                     << "' payload type " << payloadType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtTagOp::verify()
+        {
+            auto resultType = getResult().getType();
+            if (!llvm::isa<ora::IntegerType, ::mlir::IntegerType>(resultType))
+            {
+                return emitOpError() << "result type must be an integer tag type, got " << resultType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtPayloadOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getValue().getType());
+            if (!adtType)
+                return emitOpError("operand must have !ora.adt<...> type");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
+
+            if (llvm::isa<::mlir::NoneType>(payloadType))
+            {
+                return emitOpError() << "unit variant '" << getVariantName()
+                                     << "' has no payload to extract";
+            }
+
+            if (getResult().getType() != payloadType)
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match variant '" << getVariantName()
+                                     << "' payload type " << payloadType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtMatchArmOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getValue().getType());
+            if (!adtType)
+                return emitOpError("operand must have !ora.adt<...> type");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
 
             return success();
         }

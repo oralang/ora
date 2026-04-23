@@ -154,6 +154,20 @@ def Ora_StructType : Ora_Type<"Struct", "struct"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+// ADT type - named algebraic data type for payload-carrying enums
+def Ora_AdtType : Ora_Type<"Adt", "adt"> {
+  let summary = "Named algebraic data type";
+  let description = [{
+    Named algebraic data type with ordered variants and payload types.
+    Syntax: `!ora.adt<"adt_name", ("Variant", payload_type), ...>`
+  }];
+
+  let parameters = (ins "StringRef":$name,
+                        ArrayRefParameter<"StringRef">:$variantNames,
+                        ArrayRefParameter<"Type">:$payloadTypes);
+  let hasCustomAssemblyFormat = 1;
+}
+
 // Anonymous struct type - structural product with named fields
 def Ora_AnonymousStructType : Ora_Type<"AnonymousStruct", "struct_anon"> {
   let summary = "Anonymous struct type";

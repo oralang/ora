@@ -1041,6 +1041,74 @@ def Ora_EnumConstantOp : Ora_PureOp<"enum_constant"> {
 }
 
 //===----------------------------------------------------------------------===//
+// ADT Operations
+//===----------------------------------------------------------------------===//
+
+def Ora_AdtValueType : TypeConstraint<
+  CPred<"::llvm::isa<ora::AdtType>($_self)">,
+  "ora.adt">;
+
+def Ora_AdtConstructOp : Ora_PureOp<"adt.construct"> {
+  let summary = "Construct an ADT variant";
+  let description = [{
+    Constructs a payload-carrying enum/ADT value by variant name.
+
+    Example:
+    ```mlir
+    %event = ora.adt.construct "Value"(%payload) : (!ora.int<256, false>) -> !ora.adt<"Event", ("Value", !ora.int<256, false>)>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$variant_name, Variadic<AnyType>:$payload_values);
+  let results = (outs Ora_AdtValueType:$result);
+
+  let assemblyFormat = "$variant_name `(` $payload_values `)` attr-dict `:` functional-type($payload_values, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_AdtTagOp : Ora_PureOp<"adt.tag"> {
+  let summary = "Extract an ADT variant tag";
+  let description = [{
+    Extracts the integer tag/discriminant from an ADT value.
+  }];
+
+  let arguments = (ins Ora_AdtValueType:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_AdtPayloadOp : Ora_PureOp<"adt.payload"> {
+  let summary = "Extract an ADT variant payload";
+  let description = [{
+    Extracts a payload value from an ADT value for the named variant. For Phase
+    2b each variant has a single payload type; multi-field source payloads are
+    represented by tuple or anonymous-struct payload types.
+  }];
+
+  let arguments = (ins Ora_AdtValueType:$value, StrAttr:$variant_name);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value `,` $variant_name attr-dict `:` type($value) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_AdtMatchArmOp : Ora_Op<"adt.match_arm"> {
+  let summary = "ADT match arm marker";
+  let description = [{
+    Represents one lowered ADT match arm for the named variant. Phase 3 will
+    produce this from source-level structural matches; Phase 2b introduces the
+    verifiable IR surface.
+  }];
+
+  let arguments = (ins Ora_AdtValueType:$value, StrAttr:$variant_name);
+  let regions = (region AnyRegion:$body);
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Struct Operations
 //===----------------------------------------------------------------------===//
 

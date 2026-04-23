@@ -1003,6 +1003,9 @@ public:
         patterns.add<ConvertMLoad8Op>(typeConverter, ctx);
         patterns.add<ConvertMStore8Op>(typeConverter, ctx);
         patterns.add<ConvertEnumConstantOp>(typeConverter, ctx);
+        patterns.add<ConvertAdtConstructOp>(typeConverter, ctx);
+        patterns.add<ConvertAdtTagOp>(typeConverter, ctx);
+        patterns.add<ConvertAdtPayloadOp>(typeConverter, ctx);
         patterns.add<ConvertStructFieldStoreOp>(typeConverter, ctx);
         patterns.add<ConvertDestructureOp>(typeConverter, ctx);
         // Ops that pass through or erase.
