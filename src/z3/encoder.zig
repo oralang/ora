@@ -5049,8 +5049,33 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.enum_constant")) {
             const enum_name = self.getStringAttr(mlir_op, "enum_name") orelse return error.UnsupportedOperation;
-            const enum_sort = try self.getEnumSortByName(enum_name);
             const variant_name = self.getStringAttr(mlir_op, "variant_name") orelse return error.UnsupportedOperation;
+            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+            const result_type = mlir.oraValueGetType(result_value);
+            if (!mlir.oraTypeIsAEnum(result_type)) {
+                const result_sort = try self.encodeMLIRType(result_type);
+                const result_kind = z3.Z3_get_sort_kind(self.context.ctx, result_sort);
+                if (result_kind == z3.Z3_BV_SORT) {
+                    const ordinal_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.enum_ordinal", 16));
+                    if (mlir.oraAttributeIsNull(ordinal_attr)) return error.UnsupportedOperation;
+                    const ordinal = self.parseConstAttrValue(ordinal_attr, 256) orelse return error.UnsupportedOperation;
+                    const width = z3.Z3_get_bv_sort_size(self.context.ctx, result_sort);
+                    return try self.encodeIntegerConstant(ordinal, width);
+                }
+                if (result_kind == z3.Z3_BOOL_SORT) {
+                    const ordinal_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.enum_ordinal", 16));
+                    if (mlir.oraAttributeIsNull(ordinal_attr)) return error.UnsupportedOperation;
+                    const ordinal = self.parseConstAttrValue(ordinal_attr, 256) orelse return error.UnsupportedOperation;
+                    return if (ordinal != 0) z3.Z3_mk_true(self.context.ctx) else z3.Z3_mk_false(self.context.ctx);
+                }
+                if (result_kind == z3.Z3_SEQ_SORT) {
+                    const token = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_name, variant_name });
+                    defer self.allocator.free(token);
+                    return try self.encodeByteSequence(token);
+                }
+                return try self.degradeToUndef(result_sort, "enum_constant", @intFromPtr(mlir_op.ptr), "unsupported enum constant result sort");
+            }
+            const enum_sort = try self.getEnumSortByName(enum_name);
             const variant = enum_sort.findVariant(variant_name) orelse return error.UnsupportedOperation;
             return z3.Z3_mk_app(self.context.ctx, variant.ctor, 0, null);
         }

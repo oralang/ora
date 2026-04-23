@@ -10201,6 +10201,42 @@ test "compiler lowers enum fields inside struct declarations to integer wire typ
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "!ora.struct<\"Status\">"));
 }
 
+test "verification supports enum constants in stored struct fields without degradation" {
+    const source_text =
+        \\enum Status { Pending, Filled }
+        \\enum ErrorCode: string { InvalidInput, Unauthorized }
+        \\
+        \\struct Order {
+        \\    id: u256,
+        \\    amount: u256,
+        \\    status: Status,
+        \\}
+        \\
+        \\contract C {
+        \\    storage var orders: map<u256, Order>;
+        \\    storage var last_error: ErrorCode;
+        \\
+        \\    pub fn create(id: u256, amount: u256) -> u256 {
+        \\        let order: Order = Order {
+        \\            id: id,
+        \\            amount: amount,
+        \\            status: Status.Pending,
+        \\        };
+        \\        orders[id] = order;
+        \\        last_error = ErrorCode.InvalidInput;
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "create");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
 test "compiler abi emits enum wire type matching declared repr width" {
     const source_text =
         \\enum Status: u8 { Active, Paused }
