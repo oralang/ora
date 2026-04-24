@@ -143,6 +143,117 @@ static FailureOr<unsigned> getAdtVariantIndex(ora::AdtType type, StringRef varia
     return failure();
 }
 
+static FailureOr<std::pair<Value, Value>> getNormalizedAdtParts(
+    PatternRewriter &rewriter,
+    Location loc,
+    Value adtValue)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    if (auto cast = adtValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        auto kind = cast->getAttrOfType<StringAttr>("ora.materialization_kind");
+        if (kind && kind.getValue() == "normalized_adt" && cast.getNumOperands() == 2)
+        {
+            Value tag = cast.getOperand(0);
+            Value payload = cast.getOperand(1);
+            if (!llvm::isa<sir::U256Type>(tag.getType()))
+                tag = rewriter.create<sir::BitcastOp>(loc, u256Type, tag);
+            if (!llvm::isa<sir::U256Type>(payload.getType()))
+                payload = rewriter.create<sir::BitcastOp>(loc, u256Type, payload);
+            return std::make_pair(tag, payload);
+        }
+    }
+    return failure();
+}
+
+static FailureOr<std::pair<Value, Value>> getNormalizedAdtPartsFromAdaptor(
+    PatternRewriter &rewriter,
+    Location loc,
+    ValueRange values)
+{
+    if (values.size() != 2)
+        return failure();
+    return std::make_pair(
+        ensureU256(rewriter, loc, values[0]),
+        ensureU256(rewriter, loc, values[1]));
+}
+
+static LogicalResult convertAdtTagCommon(
+    ora::AdtTagOp op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter)
+{
+    ORA_DEBUG_PREFIX("OraToSIR", "ConvertAdtTagOp operands=" << operands.size() << " valueType=" << op.getValue().getType());
+    FailureOr<std::pair<Value, Value>> parts = failure();
+    if (operands.size() == 2)
+        parts = getNormalizedAdtPartsFromAdaptor(rewriter, op.getLoc(), ValueRange(operands));
+    if (failed(parts))
+        parts = getNormalizedAdtParts(rewriter, op.getLoc(), op.getValue());
+    if (failed(parts))
+        return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier");
+    rewriter.replaceOp(op, parts->first);
+    return success();
+}
+
+static LogicalResult convertAdtPayloadCommon(
+    ora::AdtPayloadOp op,
+    ArrayRef<Value> operands,
+    const TypeConverter *typeConverter,
+    ConversionPatternRewriter &rewriter)
+{
+    ORA_DEBUG_PREFIX("OraToSIR", "ConvertAdtPayloadOp operands=" << operands.size() << " valueType=" << op.getValue().getType() << " resultType=" << op.getResult().getType());
+    auto adtType = llvm::dyn_cast<ora::AdtType>(op.getValue().getType());
+    if (!adtType)
+        return rewriter.notifyMatchFailure(op, "expected !ora.adt payload source");
+
+    auto variantIndex = getAdtVariantIndex(adtType, op.getVariantName());
+    if (failed(variantIndex))
+        return rewriter.notifyMatchFailure(op, "unknown ADT variant");
+
+    Type payloadType = adtType.getPayloadTypes()[*variantIndex];
+    if (llvm::isa<mlir::NoneType>(payloadType))
+        return rewriter.notifyMatchFailure(op, "unit ADT variant has no payload");
+
+    FailureOr<std::pair<Value, Value>> parts = failure();
+    if (operands.size() == 2)
+        parts = getNormalizedAdtPartsFromAdaptor(rewriter, op.getLoc(), ValueRange(operands));
+    if (failed(parts))
+        parts = getNormalizedAdtParts(rewriter, op.getLoc(), op.getValue());
+    if (failed(parts))
+        return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier");
+
+    Value payload = parts->second;
+    Type loweredType = Type();
+    if (typeConverter)
+        loweredType = typeConverter->convertType(op.getResult().getType());
+    if (!loweredType)
+        loweredType = op.getResult().getType();
+
+    if (payload.getType() != loweredType)
+    {
+        auto loc = op.getLoc();
+        if (llvm::isa<sir::PtrType>(loweredType))
+        {
+            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        }
+        else if (llvm::isa<sir::U256Type>(loweredType))
+        {
+            payload = ensureU256(rewriter, loc, payload);
+        }
+        else if (llvm::isa<mlir::IntegerType>(loweredType))
+        {
+            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        }
+        else
+        {
+            return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
+        }
+    }
+
+    rewriter.replaceOp(op, payload);
+    return success();
+}
+
 static Value makeU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
@@ -334,6 +445,25 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
+    auto resultType = op.getResult().getType();
+    if (auto stringValueAttr = op->getAttrOfType<mlir::StringAttr>("ora.enum_string_value"))
+    {
+        auto stringType = ora::StringType::get(rewriter.getContext());
+        if (resultType == stringType)
+        {
+            rewriter.replaceOpWithNewOp<ora::StringConstantOp>(op, resultType, stringValueAttr);
+            return success();
+        }
+    }
+    if (auto bytesValueAttr = op->getAttrOfType<mlir::StringAttr>("ora.enum_bytes_value"))
+    {
+        auto bytesType = ora::BytesType::get(rewriter.getContext());
+        if (resultType == bytesType)
+        {
+            rewriter.replaceOpWithNewOp<ora::BytesConstantOp>(op, resultType, bytesValueAttr);
+            return success();
+        }
+    }
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     int64_t discriminant = -1;
@@ -382,8 +512,26 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
             std::string key = op.getEnumName().str();
             key.push_back('.');
             key += op.getVariantName().str();
-            if (auto valueAttr = llvm::dyn_cast_or_null<mlir::IntegerAttr>(enumDict.get(key)))
-                discriminant = valueAttr.getInt();
+            if (auto valueAttr = enumDict.get(key))
+            {
+                if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
+                    discriminant = intAttr.getInt();
+                else if (auto strAttr = llvm::dyn_cast<mlir::StringAttr>(valueAttr))
+                {
+                    auto stringType = ora::StringType::get(rewriter.getContext());
+                    auto bytesType = ora::BytesType::get(rewriter.getContext());
+                    if (resultType == stringType)
+                    {
+                        rewriter.replaceOpWithNewOp<ora::StringConstantOp>(op, resultType, strAttr);
+                        return success();
+                    }
+                    if (resultType == bytesType)
+                    {
+                        rewriter.replaceOpWithNewOp<ora::BytesConstantOp>(op, resultType, strAttr);
+                        return success();
+                    }
+                }
+            }
         }
     }
     if (discriminant < 0)
@@ -396,9 +544,10 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
 }
 
 // ---------------------------------------------------------------------------
-// ora.adt.* → narrow packed carrier
-// Packed layout: low 8 bits store the variant ordinal; remaining bits store
-// the payload shifted left by 8. Wide ADT lowering intentionally fails closed.
+// ora.adt.* → split ADT carrier
+// Runtime layout: (tag: u256, payload_carrier: u256). Aggregate payloads flow
+// through payload_carrier as pointers bitcast to u256; scalar payloads stay as
+// plain u256 values.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     ora::AdtConstructOp op,
@@ -406,73 +555,46 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto adtType = llvm::dyn_cast<ora::AdtType>(op.getResult().getType());
-    if (!adtType || !isNarrowAdt(adtType))
-        return rewriter.notifyMatchFailure(op, "only narrow !ora.adt lowering is implemented");
+    if (!adtType)
+        return rewriter.notifyMatchFailure(op, "expected !ora.adt result type");
 
     auto variantIndex = getAdtVariantIndex(adtType, op.getVariantName());
     if (failed(variantIndex))
         return rewriter.notifyMatchFailure(op, "unknown ADT variant");
 
     auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     Value tag = makeU256Const(rewriter, loc, *variantIndex);
-    if (adaptor.getPayloadValues().empty())
+    Value payload = makeU256Const(rewriter, loc, 0);
+    if (!adaptor.getPayloadValues().empty())
     {
-        rewriter.replaceOp(op, tag);
-        return success();
+        if (adaptor.getPayloadValues().size() != 1)
+            return rewriter.notifyMatchFailure(op, "ADT construct expects zero or one payload operand");
+        payload = ensureU256(rewriter, loc, adaptor.getPayloadValues().front());
     }
-    if (adaptor.getPayloadValues().size() != 1)
-        return rewriter.notifyMatchFailure(op, "narrow ADT construct expects zero or one payload operand");
-
-    Value shift = makeU256Const(rewriter, loc, 8);
-    Value payload = ensureU256(rewriter, loc, adaptor.getPayloadValues().front());
-    Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, shift, payload);
-    Value packed = rewriter.create<sir::OrOp>(loc, u256Type, shifted, tag);
-    rewriter.replaceOp(op, packed);
+    rewriter.replaceOp(op, ValueRange{tag, payload});
     return success();
 }
 
 LogicalResult ConvertAdtTagOp::matchAndRewrite(
-    ora::AdtTagOp op,
-    typename ora::AdtTagOp::Adaptor adaptor,
+    Operation *operation,
+    ArrayRef<Value> operands,
     ConversionPatternRewriter &rewriter) const
 {
-    if (!llvm::isa<ora::AdtType>(op.getValue().getType()))
+    auto op = llvm::dyn_cast<ora::AdtTagOp>(operation);
+    if (!op)
         return failure();
-
-    auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value mask = makeU256Const(rewriter, loc, 0xff);
-    Value value = ensureU256(rewriter, loc, adaptor.getValue());
-    Value tag = rewriter.create<sir::AndOp>(loc, u256Type, value, mask);
-    rewriter.replaceOp(op, tag);
-    return success();
+    return convertAdtTagCommon(op, operands, rewriter);
 }
 
 LogicalResult ConvertAdtPayloadOp::matchAndRewrite(
-    ora::AdtPayloadOp op,
-    typename ora::AdtPayloadOp::Adaptor adaptor,
+    Operation *operation,
+    ArrayRef<Value> operands,
     ConversionPatternRewriter &rewriter) const
 {
-    auto adtType = llvm::dyn_cast<ora::AdtType>(op.getValue().getType());
-    if (!adtType || !isNarrowAdt(adtType))
-        return rewriter.notifyMatchFailure(op, "only narrow !ora.adt payload lowering is implemented");
-
-    auto variantIndex = getAdtVariantIndex(adtType, op.getVariantName());
-    if (failed(variantIndex))
-        return rewriter.notifyMatchFailure(op, "unknown ADT variant");
-
-    Type payloadType = adtType.getPayloadTypes()[*variantIndex];
-    if (llvm::isa<mlir::NoneType>(payloadType))
-        return rewriter.notifyMatchFailure(op, "unit ADT variant has no payload");
-
-    auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value shift = makeU256Const(rewriter, loc, 8);
-    Value value = ensureU256(rewriter, loc, adaptor.getValue());
-    Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, shift, value);
-    rewriter.replaceOp(op, payload);
-    return success();
+    auto op = llvm::dyn_cast<ora::AdtPayloadOp>(operation);
+    if (!op)
+        return failure();
+    return convertAdtPayloadCommon(op, operands, getTypeConverter(), rewriter);
 }
 
 // ---------------------------------------------------------------------------

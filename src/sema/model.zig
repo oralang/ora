@@ -79,6 +79,19 @@ pub const InstantiatedEnum = struct {
     template_item_id: ast.ItemId,
     mangled_name: []const u8,
     repr_type: ?Type = null,
+    variants: []const InstantiatedEnumVariant = &.{},
+};
+
+pub const InstantiatedEnumVariant = struct {
+    name: []const u8,
+    payload_type: ?Type = null,
+    explicit_value: ?ExplicitEnumValue = null,
+};
+
+pub const ExplicitEnumValue = union(enum) {
+    integer: i64,
+    string: []const u8,
+    bytes: []const u8,
 };
 
 pub const InstantiatedBitfieldField = struct {

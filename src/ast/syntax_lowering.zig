@@ -290,6 +290,8 @@ pub fn mixin(Builder: type) type {
                         try variants.append(self.allocator, .{
                             .range = variant_node.range(),
                             .name = if (token) |name_token| tokenText(name_token) else "",
+                            .payload = try Lowering.lowerEnumVariantPayloadNode(self, variant_node),
+                            .value = Lowering.lowerEnumVariantValueToken(variant_node),
                         });
                     },
                 }
@@ -303,6 +305,78 @@ pub fn mixin(Builder: type) type {
                 .base_type = if (base_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .variants = try variants.toOwnedSlice(self.allocator),
             } });
+        }
+
+        fn lowerEnumVariantPayloadNode(self: *Builder, node: SyntaxNode) !nodes.EnumVariantPayload {
+            var named_fields: std.ArrayList(nodes.EnumVariantPayloadField) = .{};
+            var positional_types: std.ArrayList(TypeExprId) = .{};
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |child_node| {
+                        if (child_node.kind() == .AnonymousStructField) {
+                            const field_name_token = nthDirectIdentifierLikeToken(child_node, 0) orelse {
+                                _ = try Lowering.malformedType(self, child_node, "missing enum variant payload field name");
+                                continue;
+                            };
+                            const field_type = firstDirectTypeChild(child_node) orelse {
+                                _ = try Lowering.malformedType(self, child_node, "missing enum variant payload field type");
+                                continue;
+                            };
+                            try named_fields.append(self.allocator, .{
+                                .range = child_node.range(),
+                                .name = tokenText(field_name_token),
+                                .type_expr = try Lowering.lowerTypeNode(self, field_type),
+                            });
+                        } else if (isTypeKind(child_node.kind())) {
+                            try positional_types.append(self.allocator, try Lowering.lowerTypeNode(self, child_node));
+                        }
+                    },
+                }
+            }
+
+            if (named_fields.items.len != 0) {
+                return .{ .named = try named_fields.toOwnedSlice(self.allocator) };
+            }
+            if (positional_types.items.len != 0) {
+                return .{ .positional = try positional_types.toOwnedSlice(self.allocator) };
+            }
+            return .none;
+        }
+
+        fn lowerEnumVariantValueToken(node: SyntaxNode) ?nodes.EnumVariantValue {
+            var saw_equal = false;
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .node => {},
+                    .token => |token| {
+                        if (token.kind() == .Equal) {
+                            saw_equal = true;
+                            continue;
+                        }
+                        if (!saw_equal) continue;
+                        switch (token.kind()) {
+                            .IntegerLiteral, .BinaryLiteral, .HexLiteral => return .{ .Integer = .{
+                                .range = token.range(),
+                                .text = tokenText(token),
+                            } },
+                            .StringLiteral, .RawStringLiteral, .CharacterLiteral => return .{ .String = .{
+                                .range = token.range(),
+                                .text = stripQuotes(tokenText(token)),
+                            } },
+                            .BytesLiteral => return .{ .Bytes = .{
+                                .range = token.range(),
+                                .text = stripBytesLiteral(tokenText(token)),
+                            } },
+                            else => return null,
+                        }
+                    },
+                }
+            }
+            return null;
         }
 
         fn lowerTraitItemNode(self: *Builder, node: SyntaxNode) !ItemId {
@@ -846,6 +920,7 @@ pub fn mixin(Builder: type) type {
             const callee_expr = try Lowering.lowerExpressionNode(self, callee_node);
             const ctor_name = switch (Support.exprRef(self, callee_expr).*) {
                 .Name => |name| name.name,
+                .Field => null,
                 else => return null,
             };
 
@@ -862,11 +937,11 @@ pub fn mixin(Builder: type) type {
                 } }));
             }
 
-            if (std.mem.eql(u8, ctor_name, "Ok")) {
+            if (ctor_name != null and std.mem.eql(u8, ctor_name.?, "Ok")) {
                 if (bindings.items.len != 1) return null;
                 return .{ .Ok = bindings.items[0] };
             }
-            if (std.mem.eql(u8, ctor_name, "Err")) {
+            if (ctor_name != null and std.mem.eql(u8, ctor_name.?, "Err")) {
                 if (bindings.items.len != 1) return null;
                 return .{ .Err = bindings.items[0] };
             }

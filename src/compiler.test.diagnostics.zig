@@ -204,6 +204,37 @@ test "compiler rejects error returns with wrong payload types" {
     try testing.expect(typecheck.diagnostics.items.items.len != 0);
 }
 
+test "compiler rejects mixed explicit and implicit string enum values" {
+    const source_text =
+        \\enum ErrorCode : string {
+        \\    InvalidInput = "ERR_INVALID_INPUT",
+        \\    Legacy,
+        \\    Unauthorized = "ERR_UNAUTHORIZED",
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "string enums with explicit values must assign every variant explicitly"));
+}
+
+test "compiler rejects bytes enums without explicit values for every variant" {
+    const source_text =
+        \\enum Signature : bytes {
+        \\    A = hex"deadbeef",
+        \\    B,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "bytes enums currently require explicit values for every variant"));
+}
+
 test "compiler reports impl syntax errors for missing body and missing for" {
     const source_text =
         \\impl ERC20 Token {
@@ -552,3 +583,30 @@ test "compiler rejects invalid constructor shape" {
     try testing.expect(!module_typecheck.diagnostics.isEmpty());
 }
 
+test "compiler rejects public ABI signatures using payload-carrying enums" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\contract Entry {
+        \\    pub fn accept(value: Event) -> u256 {
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "unsupported ABI type");
+}
+
+test "compiler rejects directly recursive payload-carrying enums" {
+    const source_text =
+        \\enum Tree {
+        \\    Leaf,
+        \\    Node(Tree),
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "recursive runtime ADTs must use slice or map indirection");
+}

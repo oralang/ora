@@ -408,3 +408,26 @@ test "compiler syntax splits nested generic closing tokens" {
     try testing.expectEqual(@as(usize, 1), inner_close.range().end - inner_close.range().start);
 }
 
+test "compiler syntax parses payload-carrying enum variants" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u8, u16),
+        \\    Named { code: u8, amount: u256 },
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const enum_item = nthChildNodeOfKind(root, .EnumItem, 0).?;
+
+    try testing.expect(nthChildNodeOfKind(enum_item, .EnumVariant, 0) != null);
+    try testing.expect(containsNodeOfKind(nthChildNodeOfKind(enum_item, .EnumVariant, 1).?, .PathType));
+    try testing.expect(containsNodeOfKind(nthChildNodeOfKind(enum_item, .EnumVariant, 2).?, .PathType));
+    try testing.expect(containsNodeOfKind(nthChildNodeOfKind(enum_item, .EnumVariant, 3).?, .AnonymousStructField));
+}

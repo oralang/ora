@@ -4865,6 +4865,87 @@ MlirOperation oraEnumConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStr
     }
 }
 
+MlirOperation oraAdtConstructOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef variantName,
+    const MlirValue *payloadValues,
+    size_t numPayloadValues,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        SmallVector<Value> payloadRefs;
+        payloadRefs.reserve(numPayloadValues);
+        for (size_t i = 0; i < numPayloadValues; ++i)
+            payloadRefs.push_back(unwrap(payloadValues[i]));
+
+        OpBuilder builder(context);
+        auto variantNameAttr = StringAttr::get(context, unwrap(variantName));
+        auto op = builder.create<ora::AdtConstructOp>(location, resultTy, variantNameAttr, payloadRefs);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAdtTagOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue value,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+        Value input = unwrap(value);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::AdtTagOp>(location, resultTy, input);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAdtPayloadOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue value,
+    MlirStringRef variantName,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value input = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto variantNameAttr = StringAttr::get(context, unwrap(variantName));
+        auto op = builder.create<ora::AdtPayloadOp>(location, resultTy, input, variantNameAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraStructDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name)
 {
     try

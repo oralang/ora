@@ -1149,6 +1149,30 @@ extern "C"
         MlirStringRef variantName,
         MlirType resultType);
 
+    /// Create an ora.adt.construct operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtConstructOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef variantName,
+        const MlirValue *payloadValues,
+        size_t numPayloadValues,
+        MlirType resultType);
+
+    /// Create an ora.adt.tag operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtTagOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.adt.payload operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtPayloadOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirStringRef variantName,
+        MlirType resultType);
+
     /// Create an ora.struct.decl operation
     MLIR_CAPI_EXPORTED MlirOperation oraStructDeclOpCreate(
         MlirContext ctx,

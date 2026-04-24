@@ -5257,6 +5257,18 @@ pub const Encoder = struct {
                     return if (ordinal != 0) z3.Z3_mk_true(self.context.ctx) else z3.Z3_mk_false(self.context.ctx);
                 }
                 if (result_kind == z3.Z3_SEQ_SORT) {
+                    const string_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.enum_string_value", 21));
+                    if (!mlir.oraAttributeIsNull(string_attr)) {
+                        const value = mlir.oraStringAttrGetValue(string_attr);
+                        return try self.encodeByteSequence(value.data[0..value.length]);
+                    }
+                    const bytes_attr = mlir.oraOperationGetAttributeByName(mlir_op, mlir.oraStringRefCreate("ora.enum_bytes_value", 20));
+                    if (!mlir.oraAttributeIsNull(bytes_attr)) {
+                        const value = mlir.oraStringAttrGetValue(bytes_attr);
+                        const bytes = try self.decodeBytesHexLiteral(value.data[0..value.length]);
+                        defer self.allocator.free(bytes);
+                        return try self.encodeByteSequence(bytes);
+                    }
                     const token = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_name, variant_name });
                     defer self.allocator.free(token);
                     return try self.encodeByteSequence(token);

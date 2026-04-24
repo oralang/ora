@@ -107,26 +107,28 @@ namespace mlir
         };
 
         /// ora.adt.tag → low-byte tag extraction.
-        class ConvertAdtTagOp : public OpConversionPattern<ora::AdtTagOp>
+        class ConvertAdtTagOp : public ConversionPattern
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertAdtTagOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, ora::AdtTagOp::getOperationName(), 1, ctx) {}
 
             LogicalResult matchAndRewrite(
-                ora::AdtTagOp op,
-                typename ora::AdtTagOp::Adaptor adaptor,
+                Operation *op,
+                ArrayRef<Value> operands,
                 ConversionPatternRewriter &rewriter) const override;
         };
 
         /// ora.adt.payload → packed payload extraction.
-        class ConvertAdtPayloadOp : public OpConversionPattern<ora::AdtPayloadOp>
+        class ConvertAdtPayloadOp : public ConversionPattern
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertAdtPayloadOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, ora::AdtPayloadOp::getOperationName(), 1, ctx) {}
 
             LogicalResult matchAndRewrite(
-                ora::AdtPayloadOp op,
-                typename ora::AdtPayloadOp::Adaptor adaptor,
+                Operation *op,
+                ArrayRef<Value> operands,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

@@ -363,6 +363,78 @@ test "compiler lowers enum variant access through real enum constant op" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.field_access\""));
 }
 
+test "compiler lowers explicit integer enum values and continued ordinals" {
+    const source_text =
+        \\enum Status : u8 {
+        \\    Pending = 3,
+        \\    Active,
+        \\    Completed = 9,
+        \\    Cancelled,
+        \\}
+        \\
+        \\pub fn current() -> Status {
+        \\    return Status.Cancelled;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.has_explicit_values = true"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [3 : i8, 4 : i8, 9 : i8, 10 : i8]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_ordinal = 10 : i256"));
+}
+
+test "compiler lowers explicit string enum values through enum metadata and constant attrs" {
+    const source_text =
+        \\enum ErrorCode : string {
+        \\    InvalidInput = "ERR_INVALID_INPUT",
+        \\    Unauthorized = "ERR_UNAUTHORIZED",
+        \\}
+        \\
+        \\pub fn current() -> ErrorCode {
+        \\    return ErrorCode.InvalidInput;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [\"ERR_INVALID_INPUT\", \"ERR_UNAUTHORIZED\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_string_value = \"ERR_INVALID_INPUT\""));
+}
+
+test "compiler lowers explicit bytes enum values through enum metadata and constant attrs" {
+    const source_text =
+        \\enum Signature : bytes {
+        \\    A = hex"deadbeef",
+        \\    B = hex"c0ffee",
+        \\}
+        \\
+        \\pub fn current() -> Signature {
+        \\    return Signature.B;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [\"deadbeef\", \"c0ffee\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_bytes_value = \"c0ffee\""));
+}
+
 test "compiler lowers struct field mutation through real field update op" {
     const source_text =
         \\struct Pair {
@@ -2396,3 +2468,157 @@ test "compiler lowers while loops with typed carried locals without explicit ini
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.while_placeholder"));
 }
 
+test "compiler lowers payload-carrying enum types as ADT types" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn accept(value: Event) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.adt<\"Event\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "(\"Empty\", none)"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Value\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
+}
+
+test "compiler lowers generic payload-carrying enum instances as ADT types" {
+    const source_text =
+        \\enum Option(comptime T: type) {
+        \\    None,
+        \\    Some(T),
+        \\}
+        \\
+        \\fn accept(value: Option<u256>) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "!ora.adt<\"Option__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Some\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
+}
+
+test "compiler lowers payload-carrying enum constructors to ADT construct ops" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn empty() -> Event {
+        \\    return Event.Empty;
+        \\}
+        \\
+        \\fn value(v: u256) -> Event {
+        \\    return Event.Value(v);
+        \\}
+        \\
+        \\fn pair(a: u256, b: u256) -> Event {
+        \\    return Event.Pair(a, b);
+        \\}
+        \\
+        \\fn named(code: u256, amount: u256) -> Event {
+        \\    return Event.Named(code, amount);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "ora.adt.construct"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_create"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_init"));
+}
+
+test "compiler lowers payload-carrying enum variant switch to ADT tag" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Value => 1,
+        \\        Event.Pair => 2,
+        \\        Event.Named => 3,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}
+
+test "compiler lowers payload-carrying enum match bindings to ADT payload extracts" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Value(value) => value,
+        \\        Event.Pair(lhs, rhs) => lhs + rhs,
+        \\        Event.Named(code, amount) => amount + code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 3, "ora.adt.payload"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}

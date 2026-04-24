@@ -67,6 +67,56 @@ test "verification supports enum constants in stored struct fields without degra
     try testing.expect(!result.degraded);
 }
 
+test "verification supports explicit string enum storage roundtrip without degradation" {
+    const source_text =
+        \\enum ErrorCode : string {
+        \\    InvalidInput = "ERR_INVALID_INPUT",
+        \\    Unauthorized = "ERR_UNAUTHORIZED",
+        \\}
+        \\
+        \\contract C {
+        \\    storage var last_error: ErrorCode;
+        \\
+        \\    pub fn remember() -> bool
+        \\        ensures last_error == ErrorCode.InvalidInput
+        \\    {
+        \\        last_error = ErrorCode.InvalidInput;
+        \\        return last_error == ErrorCode.InvalidInput;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "remember");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports explicit bytes enum storage roundtrip without degradation" {
+    const source_text =
+        \\enum Signature : bytes {
+        \\    A = hex"deadbeef",
+        \\    B = hex"c0ffee",
+        \\}
+        \\
+        \\contract C {
+        \\    storage var sig: Signature;
+        \\
+        \\    pub fn remember() -> bool
+        \\        ensures sig == Signature.B
+        \\    {
+        \\        sig = Signature.B;
+        \\        return sig == Signature.B;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "remember");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports native string and bytes len field access under bounded byte-sequence model" {
     const source_text =
         \\pub fn same_string_len(text: string) -> bool
@@ -960,4 +1010,3 @@ test "verification supports Result is_err on pure helper call without degradatio
     try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
     try testing.expect(!result.degraded);
 }
-

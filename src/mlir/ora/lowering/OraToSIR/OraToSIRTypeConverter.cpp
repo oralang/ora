@@ -23,6 +23,7 @@ namespace
     static constexpr const char *kMatPtrView = "ptr_view";
     static constexpr const char *kMatAddressForward = "address_forward";
     static constexpr const char *kMatNormalizedErrorUnion = "normalized_error_union";
+    static constexpr const char *kMatNormalizedAdt = "normalized_adt";
 
     static Value createTaggedCast(OpBuilder &builder,
                                   Location loc,
@@ -82,19 +83,6 @@ namespace
         return std::nullopt;
     }
 
-    static bool isNarrowAdt(ora::AdtType type)
-    {
-        if (type.getVariantNames().size() > 256)
-            return false;
-        for (Type payloadType : type.getPayloadTypes())
-        {
-            auto widthOpt = getOraBitWidth(payloadType);
-            if (!widthOpt || *widthOpt > 248)
-                return false;
-        }
-        return true;
-    }
-
     static bool isNarrowErrorUnion(ora::ErrorUnionType type)
     {
         auto widthOpt = getOraBitWidth(type.getSuccessType());
@@ -110,6 +98,13 @@ namespace
         if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                       mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
             return sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        return sir::U256Type::get(ctx);
+    }
+
+    static Type getAdtPayloadCarrierType(MLIRContext *ctx)
+    {
+        if (!ctx)
+            return Type();
         return sir::U256Type::get(ctx);
     }
 
@@ -477,15 +472,24 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
-            // Narrow payload-carrying ADTs pack as (payload << 8) | variant_tag.
-            // Wide ADTs deliberately have no fallback until the split-carrier
-            // layout is implemented.
-            addConversion([](ora::AdtType type) -> Type
+            // ADTs use a u256 carrier at the type-conversion boundary. Concrete
+            // construct/payload rewrites still fail closed for layouts that the
+            // current packed representation cannot model exactly.
+            // ora.adt<T...> -> (sir.u256 tag, sir.u256 payload_carrier).
+            // Aggregate payloads flow through the payload carrier as pointers
+            // bitcast to u256; scalar payloads remain plain u256 values.
+            addConversion([](ora::AdtType type, SmallVectorImpl<Type> &results) -> LogicalResult
                           {
                 auto *ctx = type.getDialect().getContext();
-                if (!ctx || !isNarrowAdt(type))
-                    return Type();
-                return sir::U256Type::get(ctx); });
+                if (!ctx)
+                    return failure();
+                results.push_back(sir::U256Type::get(ctx));
+                results.push_back(getAdtPayloadCarrierType(ctx));
+                return success(); });
+            addConversion([](ora::AdtType type) -> Type
+                          {
+                (void)type;
+                return Type(); });
 
             // ora.error_union<T> → sir.u256 or (sir.u256, carrier(T)) depending on payload width
             addConversion([](ora::ErrorUnionType type, SmallVectorImpl<Type> &results) -> LogicalResult
@@ -942,6 +946,15 @@ namespace mlir
                                              return Value();
                                          return createTaggedCast(builder, loc, type, inputs, kMatNormalizedErrorUnion);
                                      });
+            addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto adtType = dyn_cast<ora::AdtType>(type);
+                                         if (!adtType)
+                                             return Value();
+                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedAdt);
+                                     });
             addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
                                          if (inputs.size() != 2)
@@ -950,6 +963,15 @@ namespace mlir
                                          if (!errType)
                                              return Value();
                                          return createTaggedCast(builder, loc, type, inputs, kMatNormalizedErrorUnion);
+                                     });
+            addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto adtType = dyn_cast<ora::AdtType>(type);
+                                         if (!adtType)
+                                             return Value();
+                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedAdt);
                                      });
 
             // Wide error union 1:N splitting: ora.error_union → (sir.u256, carrier(T)).
@@ -982,6 +1004,24 @@ namespace mlir
                                          Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, bitcast, off);
                                          Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
                                          return SmallVector<Value>{tag, payload};
+                                     });
+            addTargetMaterialization([](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs, Location loc) -> SmallVector<Value>
+                                     {
+                                         (void)builder;
+                                         (void)loc;
+                                         if (resultTypes.size() != 2 || inputs.size() != 1)
+                                             return {};
+                                         Value input = inputs[0];
+                                         auto adtType = dyn_cast<ora::AdtType>(input.getType());
+                                         if (!adtType)
+                                             return {};
+                                         if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                                         {
+                                             auto kind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+                                             if (kind && kind.getValue() == kMatNormalizedAdt && cast.getNumOperands() == 2)
+                                                 return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
+                                         }
+                                         return {};
                                      });
 
             // Allow memref -> sir.ptr materialization during memref lowering.

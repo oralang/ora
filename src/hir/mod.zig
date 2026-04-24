@@ -503,6 +503,7 @@ const Lowerer = struct {
 
     fn lowerEnumSemaType(self: *Lowerer, name: []const u8, range: source.TextRange) mlir.MlirType {
         if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
+            if (enumInstHasPayload(instantiated)) return self.lowerInstantiatedEnumAdtType(instantiated, range);
             if (instantiated.repr_type) |repr| return self.lowerSemaType(repr, range);
             return support.defaultIntegerType(self.context);
         }
@@ -511,10 +512,109 @@ const Lowerer = struct {
             .Enum => |enum_item| enum_item,
             else => return support.defaultIntegerType(self.context),
         };
+        if (enumItemHasPayload(enum_item)) return self.lowerEnumAdtType(enum_item, range);
         const base_type = enum_item.base_type orelse return support.defaultIntegerType(self.context);
         const repr = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, base_type) catch
             return self.recordTypeFallback(.unsupported_syntax_type, range);
         return self.lowerSemaType(repr, range);
+    }
+
+    fn enumItemHasPayload(enum_item: ast.EnumItem) bool {
+        for (enum_item.variants) |variant| {
+            switch (variant.payload) {
+                .none => {},
+                else => return true,
+            }
+        }
+        return false;
+    }
+
+    fn enumInstHasPayload(instantiated: sema.InstantiatedEnum) bool {
+        for (instantiated.variants) |variant| {
+            if (variant.payload_type != null) return true;
+        }
+        return false;
+    }
+
+    fn lowerInstantiatedEnumAdtType(self: *Lowerer, instantiated: sema.InstantiatedEnum, range: source.TextRange) mlir.MlirType {
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
+        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        for (instantiated.variants) |variant| {
+            variant_names.append(self.allocator, support.strRef(variant.name)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+            payload_types.append(
+                self.allocator,
+                if (variant.payload_type) |payload| self.lowerSemaType(payload, range) else mlir.oraNoneTypeCreate(self.context),
+            ) catch return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraAdtTypeGet(
+            self.context,
+            support.strRef(instantiated.mangled_name),
+            variant_names.items.len,
+            if (variant_names.items.len == 0) null else variant_names.items.ptr,
+            if (payload_types.items.len == 0) null else payload_types.items.ptr,
+        );
+    }
+
+    fn lowerEnumAdtType(self: *Lowerer, enum_item: ast.EnumItem, range: source.TextRange) mlir.MlirType {
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
+        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        for (enum_item.variants) |variant| {
+            variant_names.append(self.allocator, support.strRef(variant.name)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+            payload_types.append(self.allocator, self.lowerEnumVariantPayloadType(variant.payload, variant.range)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraAdtTypeGet(
+            self.context,
+            support.strRef(enum_item.name),
+            variant_names.items.len,
+            if (variant_names.items.len == 0) null else variant_names.items.ptr,
+            if (payload_types.items.len == 0) null else payload_types.items.ptr,
+        );
+    }
+
+    fn lowerEnumVariantPayloadType(self: *Lowerer, payload: ast.EnumVariantPayload, range: source.TextRange) mlir.MlirType {
+        return switch (payload) {
+            .none => mlir.oraNoneTypeCreate(self.context),
+            .positional => |types| blk: {
+                if (types.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
+                if (types.len == 1) break :blk self.lowerEnumPayloadTypeExpr(types[0], range);
+                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                for (types) |type_expr| {
+                    element_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(type_expr, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    element_types.items.len,
+                    if (element_types.items.len == 0) null else element_types.items.ptr,
+                );
+            },
+            .named => |fields| blk: {
+                if (fields.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
+                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                for (fields) |field| {
+                    field_names.append(self.allocator, support.strRef(field.name)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                    field_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(field.type_expr, field.range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk mlir.oraAnonymousStructTypeGet(
+                    self.context,
+                    field_types.items.len,
+                    if (field_names.items.len == 0) null else field_names.items.ptr,
+                    if (field_types.items.len == 0) null else field_types.items.ptr,
+                );
+            },
+        };
+    }
+
+    fn lowerEnumPayloadTypeExpr(self: *Lowerer, type_expr: ast.TypeExprId, range: source.TextRange) mlir.MlirType {
+        const ty = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr) catch
+            return self.recordTypeFallback(.unsupported_syntax_type, range);
+        return self.lowerSemaType(ty, range);
     }
 
     fn lowerErrorUnionSemaType(self: *Lowerer, error_union: sema_model.ErrorUnionType, range: source.TextRange) mlir.MlirType {

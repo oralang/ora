@@ -557,6 +557,26 @@ pub const LogField = struct {
 pub const EnumVariant = struct {
     range: source.TextRange,
     name: []const u8,
+    payload: EnumVariantPayload = .none,
+    value: ?EnumVariantValue = null,
+};
+
+pub const EnumVariantValue = union(enum) {
+    Integer: TypeIntegerLiteral,
+    String: StringLiteralExpr,
+    Bytes: BytesLiteralExpr,
+};
+
+pub const EnumVariantPayload = union(enum) {
+    none,
+    positional: []const TypeExprId,
+    named: []const EnumVariantPayloadField,
+};
+
+pub const EnumVariantPayloadField = struct {
+    range: source.TextRange,
+    name: []const u8,
+    type_expr: TypeExprId,
 };
 
 pub const TraitMethod = struct {

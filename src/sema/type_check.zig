@@ -914,8 +914,11 @@ const TypeChecker = struct {
                 }
             },
             .Struct => |struct_item| try self.validateRuntimeAdtCycleForStruct(item_id, struct_item),
-            // D9: enum variants are tag-only today. When payload-carrying enums add
-            // variant type expressions, run the same runtime ADT cycle check here.
+            .Enum => |enum_item| {
+                try self.validateEnumVariantPayloadTypes(enum_item);
+                try self.validateEnumVariantValues(enum_item);
+                try self.validateRuntimeAdtCycleForEnum(item_id, enum_item);
+            },
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
@@ -941,6 +944,138 @@ const TypeChecker = struct {
                     "struct '{s}' has recursive field '{s}' through '{s}'; recursive runtime ADTs must use slice or map indirection",
                     .{ struct_item.name, field.name, cycle_name },
                 );
+            }
+        }
+    }
+
+    fn validateEnumVariantPayloadTypes(self: *TypeChecker, enum_item: ast.EnumItem) anyerror!void {
+        if (enum_item.is_generic) return;
+        for (enum_item.variants) |variant| {
+            switch (variant.payload) {
+                .none => {},
+                .positional => |types| for (types) |type_expr| {
+                    _ = try self.resolveTypeExpr(type_expr);
+                },
+                .named => |fields| for (fields) |field| {
+                    _ = try self.resolveTypeExpr(field.type_expr);
+                },
+            }
+        }
+    }
+
+    fn validateEnumVariantValues(self: *TypeChecker, enum_item: ast.EnumItem) anyerror!void {
+        if (enum_item.is_generic) return;
+
+        var repr_type: Type = .{ .integer = .{} };
+        if (enum_item.base_type) |type_expr| {
+            repr_type = try self.resolveTypeExpr(type_expr);
+        }
+
+        var explicit_count: usize = 0;
+        for (enum_item.variants) |variant| {
+            if (variant.value != null) explicit_count += 1;
+        }
+
+        switch (repr_type.kind()) {
+            .integer => {
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |value| switch (value) {
+                        .Integer => |literal| {
+                            _ = parseEnumVariantIntegerLiteral(literal.text) orelse {
+                                try self.emitRangeError(
+                                    literal.range,
+                                    "explicit enum variant value must be a valid integer literal",
+                                    .{},
+                                );
+                                continue;
+                            };
+                        },
+                        else => try self.emitRangeError(
+                            variant.range,
+                            "explicit values for integer enums must be integer literals",
+                            .{},
+                        ),
+                    };
+                }
+            },
+            .string => {
+                if (explicit_count != 0 and explicit_count != enum_item.variants.len) {
+                    try self.emitRangeError(
+                        enum_item.range,
+                        "string enums with explicit values must assign every variant explicitly",
+                        .{},
+                    );
+                }
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |value| switch (value) {
+                        .String => {},
+                        else => try self.emitRangeError(
+                            variant.range,
+                            "explicit values for string enums must be string literals",
+                            .{},
+                        ),
+                    };
+                }
+            },
+            .bytes => {
+                if (explicit_count != enum_item.variants.len) {
+                    try self.emitRangeError(
+                        enum_item.range,
+                        "bytes enums currently require explicit values for every variant",
+                        .{},
+                    );
+                }
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |value| switch (value) {
+                        .Bytes => {},
+                        else => try self.emitRangeError(
+                            variant.range,
+                            "explicit values for bytes enums must be bytes literals",
+                            .{},
+                        ),
+                    };
+                }
+            },
+            else => {
+                for (enum_item.variants) |variant| {
+                    if (variant.value != null) {
+                        try self.emitRangeError(
+                            variant.range,
+                            "explicit enum variant values currently require integer, string, or bytes enum representations",
+                            .{},
+                        );
+                    }
+                }
+            },
+        }
+    }
+
+    fn validateRuntimeAdtCycleForEnum(self: *TypeChecker, item_id: ast.ItemId, enum_item: ast.EnumItem) anyerror!void {
+        var active = std.ArrayList(ast.ItemId){};
+        defer active.deinit(self.arena);
+        try active.append(self.arena, item_id);
+
+        for (enum_item.variants) |variant| {
+            switch (variant.payload) {
+                .none => {},
+                .positional => |types| for (types) |type_expr| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(type_expr, active.items)) |cycle_name| {
+                        try self.emitRangeError(
+                            variant.range,
+                            "enum '{s}' has recursive variant '{s}' through '{s}'; recursive runtime ADTs must use slice or map indirection",
+                            .{ enum_item.name, variant.name, cycle_name },
+                        );
+                    }
+                },
+                .named => |fields| for (fields) |field| {
+                    if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, active.items)) |cycle_name| {
+                        try self.emitRangeError(
+                            field.range,
+                            "enum '{s}' has recursive variant '{s}' through '{s}'; recursive runtime ADTs must use slice or map indirection",
+                            .{ enum_item.name, variant.name, cycle_name },
+                        );
+                    }
+                },
             }
         }
     }
@@ -1005,6 +1140,24 @@ const TypeChecker = struct {
 
                 for (struct_item.fields) |field| {
                     if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, next_active.items)) |cycle_name| return cycle_name;
+                }
+            },
+            .Enum => |enum_item| {
+                var next_active = std.ArrayList(ast.ItemId){};
+                defer next_active.deinit(self.arena);
+                try next_active.appendSlice(self.arena, active);
+                try next_active.append(self.arena, item_id);
+
+                for (enum_item.variants) |variant| {
+                    switch (variant.payload) {
+                        .none => {},
+                        .positional => |types| for (types) |type_expr| {
+                            if (try self.typeExprContainsActiveRuntimeAdt(type_expr, next_active.items)) |cycle_name| return cycle_name;
+                        },
+                        .named => |fields| for (fields) |field| {
+                            if (try self.typeExprContainsActiveRuntimeAdt(field.type_expr, next_active.items)) |cycle_name| return cycle_name;
+                        },
+                    }
                 }
             },
             .TypeAlias => |type_alias| {
@@ -1078,7 +1231,8 @@ const TypeChecker = struct {
         return switch (ty) {
             .unknown => true,
             .void => position == .output,
-            .bool, .address, .string, .bytes, .integer, .enum_, .bitfield => true,
+            .bool, .address, .string, .bytes, .integer, .bitfield => true,
+            .enum_ => |named| !self.enumHasPayload(named.name),
             .refinement => |refinement| self.publicAbiSupportsType(refinement.base_type.*, position),
             .array => |array| self.publicAbiSupportsType(array.element_type.*, position),
             .slice => |slice| self.publicAbiSupportsType(slice.element_type.*, position),
@@ -1136,7 +1290,8 @@ const TypeChecker = struct {
             .named => |named| blk: {
                 const item_id = self.item_index.lookup(named.name) orelse break :blk false;
                 break :blk switch (self.file.item(item_id).*) {
-                    .Enum, .Bitfield => true,
+                    .Enum => !self.enumHasPayload(named.name),
+                    .Bitfield => true,
                     else => false,
                 };
             },
@@ -1146,7 +1301,8 @@ const TypeChecker = struct {
 
     fn publicAbiStaticWordCount(self: *const TypeChecker, ty: Type) ?usize {
         return switch (ty) {
-            .bool, .address, .integer, .enum_, .bitfield => 1,
+            .bool, .address, .integer, .bitfield => 1,
+            .enum_ => |named| if (self.enumHasPayload(named.name)) null else 1,
             .refinement => |refinement| self.publicAbiStaticWordCount(refinement.base_type.*),
             .tuple => |elements| blk: {
                 var total: usize = 0;
@@ -1174,7 +1330,8 @@ const TypeChecker = struct {
                 if (parseIntegerSpelling(named.name) != null) break :blk 1;
                 const item_id = self.item_index.lookup(named.name) orelse break :blk null;
                 break :blk switch (self.file.item(item_id).*) {
-                    .Enum, .Bitfield => 1,
+                    .Enum => if (self.enumHasPayload(named.name)) null else 1,
+                    .Bitfield => 1,
                     .Struct => self.publicAbiStaticWordCountForStructDecl(named.name),
                     .Contract => self.publicAbiStaticWordCountForContractDecl(named.name),
                     .ErrorDecl => |error_decl| blk2: {
@@ -1705,7 +1862,7 @@ const TypeChecker = struct {
                         },
                         .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
                         .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
-                        .NamedError => |named_error| try self.assignNamedErrorMatchPatternType(named_error, condition_type, arm.range),
+                        .NamedError => |named_error| try self.assignConstructorMatchPatternType(named_error, condition_type, arm.range),
                         .Else => {},
                     }
                     try self.visitBody(arm.body);
@@ -1863,7 +2020,7 @@ const TypeChecker = struct {
                         },
                         .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
                         .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
-                        .NamedError => |named_error| try self.assignNamedErrorMatchPatternType(named_error, condition_type, arm.range),
+                        .NamedError => |named_error| try self.assignConstructorMatchPatternType(named_error, condition_type, arm.range),
                         .Else => {},
                     }
                     try self.visitExpr(arm.value);
@@ -1974,7 +2131,9 @@ const TypeChecker = struct {
                 self.call_resolutions[expr_id.index()] = self.importedFunctionCallResolution(call);
                 const result_type = self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
-                if (self.calleeErrorDeclItem(call.callee)) |item_id| {
+                if (try self.checkEnumVariantConstructorCall(expr_id, call)) {
+                    return;
+                } else if (self.calleeErrorDeclItem(call.callee)) |item_id| {
                     const error_decl = self.file.item(item_id).ErrorDecl;
                     if (error_decl.parameters.len != call.args.len) {
                         try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ error_decl.parameters.len, call.args.len });
@@ -2152,6 +2311,7 @@ const TypeChecker = struct {
         if (self.importedCallReturnType(call)) |result| return result;
         if (self.genericCallReturnType(call)) |result| return result;
         if (self.externProxyCallReturnType(call)) |result| return result;
+        if (self.enumVariantConstructorInfo(call.callee)) |info| return info.enum_type;
         if (self.calleeErrorDeclItem(call.callee)) |item_id| {
             return self.item_types[item_id.index()];
         }
@@ -2164,6 +2324,101 @@ const TypeChecker = struct {
         const return_types = callee_type.returnTypes();
         if (return_types.len > 0) return return_types[0];
         return .{ .void = {} };
+    }
+
+    const EnumVariantConstructorInfo = struct {
+        enum_type: Type,
+        payload_type: ?Type,
+    };
+
+    fn enumVariantConstructorInfo(self: *TypeChecker, callee: ast.ExprId) ?EnumVariantConstructorInfo {
+        const field = switch (self.file.expression(callee).*) {
+            .Group => |group| return self.enumVariantConstructorInfo(group.expr),
+            .Field => |field| field,
+            else => return null,
+        };
+        const enum_type = self.expr_types[field.base.index()];
+        if (enum_type.kind() != .enum_) return null;
+        const enum_name = enum_type.enum_.name;
+        if (self.instantiatedEnumByName(enum_name)) |instantiated| {
+            for (instantiated.variants) |variant| {
+                if (std.mem.eql(u8, variant.name, field.name)) {
+                    return .{ .enum_type = enum_type, .payload_type = variant.payload_type };
+                }
+            }
+            return null;
+        }
+        const item_id = self.item_index.lookup(enum_name) orelse return null;
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return null,
+        };
+        for (enum_item.variants) |variant| {
+            if (std.mem.eql(u8, variant.name, field.name)) {
+                return .{
+                    .enum_type = enum_type,
+                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn checkEnumVariantConstructorCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !bool {
+        const info = self.enumVariantConstructorInfo(call.callee) orelse return false;
+        const payload_type = info.payload_type orelse {
+            if (call.args.len != 0) {
+                try self.emitExprError(expr_id, "expected 0 arguments, found {d}", .{call.args.len});
+            }
+            return true;
+        };
+
+        switch (payload_type) {
+            .tuple => |elements| {
+                if (elements.len != call.args.len) {
+                    try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ elements.len, call.args.len });
+                    return true;
+                }
+                for (elements, call.args) |expected, arg| {
+                    const actual = self.expr_types[arg.index()];
+                    if (!typesAssignable(expected, actual) and actual.kind() != .unknown) {
+                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
+                            diagnosticTypeDisplayName(self, expected),
+                            diagnosticTypeDisplayName(self, actual),
+                        });
+                    }
+                }
+            },
+            .anonymous_struct => |struct_type| {
+                if (struct_type.fields.len != call.args.len) {
+                    try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ struct_type.fields.len, call.args.len });
+                    return true;
+                }
+                for (struct_type.fields, call.args) |field, arg| {
+                    const actual = self.expr_types[arg.index()];
+                    if (!typesAssignable(field.ty, actual) and actual.kind() != .unknown) {
+                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
+                            diagnosticTypeDisplayName(self, field.ty),
+                            diagnosticTypeDisplayName(self, actual),
+                        });
+                    }
+                }
+            },
+            else => {
+                if (call.args.len != 1) {
+                    try self.emitExprError(expr_id, "expected 1 arguments, found {d}", .{call.args.len});
+                    return true;
+                }
+                const actual = self.expr_types[call.args[0].index()];
+                if (!typesAssignable(payload_type, actual) and actual.kind() != .unknown) {
+                    try self.emitExprError(call.args[0], "expected type '{s}', found '{s}'", .{
+                        diagnosticTypeDisplayName(self, payload_type),
+                        diagnosticTypeDisplayName(self, actual),
+                    });
+                }
+            },
+        }
+        return true;
     }
 
     fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
@@ -3520,10 +3775,61 @@ const TypeChecker = struct {
                     try self.resolveTypeExprWithBindings(type_expr, bindings)
                 else
                     null,
+                .variants = try self.resolveEnumVariantPayloads(enum_item, bindings),
             });
         }
 
         return .{ .enum_ = .{ .name = mangled_name } };
+    }
+
+    fn resolveEnumVariantPayloads(
+        self: *TypeChecker,
+        enum_item: ast.EnumItem,
+        bindings: []const GenericTypeBinding,
+    ) anyerror![]const model.InstantiatedEnumVariant {
+        const variants = try self.arena.alloc(model.InstantiatedEnumVariant, enum_item.variants.len);
+        for (enum_item.variants, 0..) |variant, index| {
+            variants[index] = .{
+                .name = variant.name,
+                .payload_type = try self.resolveEnumVariantPayloadType(variant.payload, bindings),
+                .explicit_value = if (variant.value) |value| switch (value) {
+                    .Integer => |literal| if (parseEnumVariantIntegerLiteral(literal.text)) |parsed| .{ .integer = parsed } else null,
+                    .String => |literal| .{ .string = literal.text },
+                    .Bytes => |literal| .{ .bytes = literal.text },
+                } else null,
+            };
+        }
+        return variants;
+    }
+
+    fn resolveEnumVariantPayloadType(
+        self: *TypeChecker,
+        payload: ast.EnumVariantPayload,
+        bindings: []const GenericTypeBinding,
+    ) anyerror!?Type {
+        return switch (payload) {
+            .none => null,
+            .positional => |types| blk: {
+                if (types.len == 0) break :blk null;
+                if (types.len == 1) break :blk try self.resolveTypeExprWithBindings(types[0], bindings);
+                const elements = try self.arena.alloc(Type, types.len);
+                for (types, 0..) |type_expr, index| {
+                    elements[index] = try self.resolveTypeExprWithBindings(type_expr, bindings);
+                }
+                break :blk .{ .tuple = elements };
+            },
+            .named => |fields| blk: {
+                if (fields.len == 0) break :blk null;
+                const resolved_fields = try self.arena.alloc(model.AnonymousStructField, fields.len);
+                for (fields, 0..) |field, index| {
+                    resolved_fields[index] = .{
+                        .name = field.name,
+                        .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
+                    };
+                }
+                break :blk .{ .anonymous_struct = .{ .fields = resolved_fields } };
+            },
+        };
     }
 
     fn genericTypeBindingsForEnum(
@@ -3551,6 +3857,24 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
         }
         return null;
+    }
+
+    fn enumHasPayload(self: *const TypeChecker, name: []const u8) bool {
+        if (self.instantiatedEnumByName(name)) |instantiated| {
+            for (instantiated.variants) |variant| {
+                if (variant.payload_type != null) return true;
+            }
+            return false;
+        }
+        const item_id = self.item_index.lookup(name) orelse return false;
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return false,
+        };
+        for (enum_item.variants) |variant| {
+            if (variant.payload != .none) return true;
+        }
+        return false;
     }
 
     fn instantiateGenericBitfield(
@@ -5975,6 +6299,80 @@ const TypeChecker = struct {
         }
     }
 
+    fn assignConstructorMatchPatternType(
+        self: *TypeChecker,
+        constructor: ast.NamedErrorSwitchPattern,
+        condition_type: Type,
+        range: source.TextRange,
+    ) !void {
+        try self.visitExpr(constructor.callee);
+
+        if (condition_type.kind() == .enum_) {
+            const info = self.enumVariantConstructorInfo(constructor.callee) orelse {
+                for (constructor.bindings) |pattern_id| {
+                    self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                }
+                try self.emitRangeError(range, "ADT match pattern requires a variant from the matched enum", .{});
+                return;
+            };
+            if (!typesAssignable(condition_type, info.enum_type) and !typesAssignable(info.enum_type, condition_type)) {
+                for (constructor.bindings) |pattern_id| {
+                    self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                }
+                try self.emitRangeError(range, "ADT match pattern variant does not belong to the matched enum", .{});
+                return;
+            }
+
+            const payload_type = info.payload_type orelse {
+                for (constructor.bindings) |pattern_id| {
+                    self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .void = {} });
+                }
+                try self.emitRangeError(range, "payloadless ADT variants cannot bind a payload", .{});
+                return;
+            };
+
+            switch (payload_type) {
+                .tuple => |elements| {
+                    if (elements.len != constructor.bindings.len) {
+                        for (constructor.bindings) |pattern_id| {
+                            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                        }
+                        try self.emitRangeError(range, "ADT tuple payload bindings must match the payload field count", .{});
+                        return;
+                    }
+                    for (elements, constructor.bindings) |element_type, pattern_id| {
+                        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(element_type);
+                    }
+                },
+                .anonymous_struct => |struct_type| {
+                    if (struct_type.fields.len != constructor.bindings.len) {
+                        for (constructor.bindings) |pattern_id| {
+                            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                        }
+                        try self.emitRangeError(range, "ADT named payload bindings must match the payload field count", .{});
+                        return;
+                    }
+                    for (struct_type.fields, constructor.bindings) |field, pattern_id| {
+                        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(field.ty);
+                    }
+                },
+                else => {
+                    if (constructor.bindings.len != 1) {
+                        for (constructor.bindings) |pattern_id| {
+                            self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                        }
+                        try self.emitRangeError(range, "ADT scalar payload match patterns must bind exactly one value", .{});
+                        return;
+                    }
+                    self.pattern_types[constructor.bindings[0].index()] = LocatedType.unlocated(payload_type);
+                },
+            }
+            return;
+        }
+
+        try self.assignNamedErrorMatchPatternType(constructor, condition_type, range);
+    }
+
     const NamedErrorPatternInfo = struct {
         item_id: ast.ItemId,
         has_payload: bool,
@@ -6069,7 +6467,14 @@ const TypeChecker = struct {
         var saw_regular_pattern = false;
         for (arms) |arm| {
             switch (arm.pattern) {
-                .Ok, .Err, .NamedError => saw_error_union_pattern = true,
+                .Ok, .Err => saw_error_union_pattern = true,
+                .NamedError => {
+                    if (condition_type.kind() == .enum_) {
+                        saw_regular_pattern = true;
+                    } else {
+                        saw_error_union_pattern = true;
+                    }
+                },
                 .Expr => {
                     if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
                         saw_error_union_pattern = true;
@@ -6354,6 +6759,13 @@ fn integerLiteralType(text: []const u8) Type {
         return .{ .integer = integer };
     }
     return .{ .integer = .{} };
+}
+
+fn parseEnumVariantIntegerLiteral(text: []const u8) ?i64 {
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x")) 16 else if (std.mem.startsWith(u8, trimmed, "0b")) 2 else 10;
+    const digits = if (base == 10) trimmed else trimmed[2..];
+    return std.fmt.parseInt(i64, digits, base) catch null;
 }
 
 fn integerTypeSuffix(text: []const u8) ?model.IntegerType {

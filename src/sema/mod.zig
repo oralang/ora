@@ -14,6 +14,7 @@ pub const NamedItem = model.NamedItem;
 pub const InstantiatedStruct = model.InstantiatedStruct;
 pub const InstantiatedStructField = model.InstantiatedStructField;
 pub const InstantiatedEnum = model.InstantiatedEnum;
+pub const ExplicitEnumValue = model.ExplicitEnumValue;
 pub const InstantiatedBitfield = model.InstantiatedBitfield;
 pub const InstantiatedBitfieldField = model.InstantiatedBitfieldField;
 pub const TraitMethodSignature = model.TraitMethodSignature;

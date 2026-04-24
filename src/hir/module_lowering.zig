@@ -209,6 +209,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerInstantiatedEnumDecl(self: *Lowerer, instantiated: sema.InstantiatedEnum, parent_block: mlir.MlirBlock) anyerror!void {
+            if (@This().instantiatedEnumHasPayload(instantiated)) return;
             const template_item = self.file.item(instantiated.template_item_id).Enum;
             const loc = self.location(template_item.range);
             const repr_type = if (instantiated.repr_type) |resolved|
@@ -221,15 +222,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (template_item.variants.len > 0) {
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
+                var has_explicit_values = false;
+                var next_value: i64 = 0;
                 for (template_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
-                    variant_values[index] = mlir.oraIntegerAttrCreateI64FromType(repr_type, @intCast(index));
+                    const value_attr = try @This().lowerInstantiatedEnumVariantValue(self, instantiated, variant.name, instantiated.variants[index].explicit_value, repr_type, &next_value, &has_explicit_values);
+                    variant_values[index] = value_attr;
                 }
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_names"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_names.len), variant_names.ptr));
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_values"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_values.len), variant_values.ptr));
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, has_explicit_values));
+            } else {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, false));
             }
             mlir.oraOperationSetAttributeByName(op, strRef("ora.enum_decl"), mlir.oraBoolAttrCreate(self.context, true));
-            mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, false));
 
             appendOp(parent_block, op);
         }
@@ -968,6 +974,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerEnumDecl(self: *Lowerer, item_id: ast.ItemId, enum_item: ast.EnumItem, parent_block: mlir.MlirBlock) anyerror!void {
             if (enum_item.is_generic) return;
+            if (@This().enumItemHasPayload(enum_item)) return;
             const loc = self.location(enum_item.range);
             const repr_type = try @This().lowerEnumReprType(self, enum_item);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(enum_item.name), repr_type);
@@ -976,15 +983,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (enum_item.variants.len > 0) {
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
+                var has_explicit_values = false;
+                var next_value: i64 = 0;
                 for (enum_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
-                    variant_values[index] = mlir.oraIntegerAttrCreateI64FromType(repr_type, @intCast(index));
+                    variant_values[index] = try @This().lowerEnumVariantValue(self, enum_item, variant, repr_type, &next_value, &has_explicit_values);
                 }
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_names"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_names.len), variant_names.ptr));
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_values"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_values.len), variant_values.ptr));
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, has_explicit_values));
+            } else {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, false));
             }
             mlir.oraOperationSetAttributeByName(op, strRef("ora.enum_decl"), mlir.oraBoolAttrCreate(self.context, true));
-            mlir.oraOperationSetAttributeByName(op, strRef("ora.has_explicit_values"), mlir.oraBoolAttrCreate(self.context, false));
 
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .enum_, enum_item.name, enum_item.range, op);
@@ -996,6 +1007,108 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr),
                 enum_item.range,
             );
+        }
+
+        fn lowerEnumVariantValue(
+            self: *Lowerer,
+            enum_item: ast.EnumItem,
+            variant: ast.EnumVariant,
+            repr_type: mlir.MlirType,
+            next_value: *i64,
+            has_explicit_values: *bool,
+        ) anyerror!mlir.MlirAttribute {
+            if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
+                const text = if (variant.value) |value| blk: {
+                    has_explicit_values.* = true;
+                    break :blk switch (value) {
+                        .String => |literal| literal.text,
+                        else => "",
+                    };
+                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_item.name, variant.name });
+                return mlir.oraStringAttrCreate(self.context, strRef(text));
+            }
+            if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
+                const text = if (variant.value) |value| blk: {
+                    has_explicit_values.* = true;
+                    break :blk switch (value) {
+                        .Bytes => |literal| literal.text,
+                        else => "",
+                    };
+                } else "";
+                return mlir.oraStringAttrCreate(self.context, strRef(text));
+            }
+
+            const resolved_value = if (variant.value) |value| blk: {
+                has_explicit_values.* = true;
+                break :blk switch (value) {
+                    .Integer => |literal| support.parseIntLiteral(literal.text) orelse 0,
+                    else => 0,
+                };
+            } else blk: {
+                break :blk next_value.*;
+            };
+            next_value.* = resolved_value + 1;
+            return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
+        }
+
+        fn lowerInstantiatedEnumVariantValue(
+            self: *Lowerer,
+            instantiated: sema.InstantiatedEnum,
+            variant_name: []const u8,
+            explicit_value: ?sema.ExplicitEnumValue,
+            repr_type: mlir.MlirType,
+            next_value: *i64,
+            has_explicit_values: *bool,
+        ) anyerror!mlir.MlirAttribute {
+            if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
+                const text = if (explicit_value) |value| blk: {
+                    has_explicit_values.* = true;
+                    break :blk switch (value) {
+                        .string => |literal| literal,
+                        else => "",
+                    };
+                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ instantiated.mangled_name, variant_name });
+                return mlir.oraStringAttrCreate(self.context, strRef(text));
+            }
+            if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
+                const text = if (explicit_value) |value| blk: {
+                    has_explicit_values.* = true;
+                    break :blk switch (value) {
+                        .bytes => |literal| literal,
+                        else => "",
+                    };
+                } else "";
+                return mlir.oraStringAttrCreate(self.context, strRef(text));
+            }
+
+            const resolved_value = if (explicit_value) |value| blk: {
+                has_explicit_values.* = true;
+                break :blk switch (value) {
+                    .integer => |literal| literal,
+                    else => 0,
+                };
+            } else blk: {
+                break :blk next_value.*;
+            };
+            next_value.* = resolved_value + 1;
+            return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
+        }
+
+        fn enumItemHasPayload(enum_item: ast.EnumItem) bool {
+            for (enum_item.variants) |variant| {
+                switch (variant.payload) {
+                    .none => {},
+                    else => return true,
+                }
+            }
+            return false;
+        }
+
+        fn instantiatedEnumHasPayload(instantiated: sema.InstantiatedEnum) bool {
+            for (instantiated.variants) |variant| {
+                if (variant.payload_type != null) return true;
+            }
+            return false;
         }
 
         pub fn lowerLogDecl(self: *Lowerer, item_id: ast.ItemId, log_decl: ast.LogDeclItem, parent_block: mlir.MlirBlock) anyerror!void {
@@ -1387,15 +1500,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn abiLayoutForNamedEnum(self: *Lowerer, name: []const u8) anyerror![]const u8 {
             if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
+                if (@This().instantiatedEnumHasPayload(instantiated)) return error.UnsupportedAbiType;
                 if (instantiated.repr_type) |repr| return @This().abiLayoutForType(self, repr);
                 return self.allocator.dupe(u8, "uint256");
             }
             const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
             return switch (self.file.item(item_id).*) {
-                .Enum => |enum_item| if (enum_item.base_type) |base_type|
-                    @This().abiLayoutForTypeExpr(self, base_type)
-                else
-                    self.allocator.dupe(u8, "uint256"),
+                .Enum => |enum_item| blk: {
+                    if (@This().enumItemHasPayload(enum_item)) break :blk error.UnsupportedAbiType;
+                    break :blk if (enum_item.base_type) |base_type|
+                        @This().abiLayoutForTypeExpr(self, base_type)
+                    else
+                        self.allocator.dupe(u8, "uint256");
+                },
                 else => error.UnsupportedAbiType,
             };
         }

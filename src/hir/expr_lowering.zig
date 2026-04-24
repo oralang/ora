@@ -936,7 +936,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn createCompareOp(self: *FunctionLowerer, loc: mlir.MlirLocation, predicate: []const u8, lhs: mlir.MlirValue, rhs: mlir.MlirValue) mlir.MlirOperation {
             const lhs_type = mlir.oraValueGetType(lhs);
             const rhs_type = mlir.oraValueGetType(rhs);
-            if (mlir.oraTypeIsAddressType(lhs_type) or mlir.oraTypeIsAddressType(rhs_type)) {
+            const string_ty = stringType(self.parent.context);
+            const bytes_ty = bytesType(self.parent.context);
+            if (mlir.oraTypeIsAddressType(lhs_type) or
+                mlir.oraTypeIsAddressType(rhs_type) or
+                mlir.oraTypeEqual(lhs_type, string_ty) or
+                mlir.oraTypeEqual(rhs_type, string_ty) or
+                mlir.oraTypeEqual(lhs_type, bytes_ty) or
+                mlir.oraTypeEqual(rhs_type, bytes_ty))
+            {
                 return mlir.oraCmpOpCreate(self.parent.context, loc, strRef(predicate), lhs, rhs, boolType(self.parent.context));
             }
             return mlir.oraArithCmpIOpCreate(self.parent.context, loc, cmpPredicate(predicate), lhs, rhs);
@@ -999,6 +1007,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerAssociatedImplMethodCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerErrorDeclCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerResultConstructorCall(self, expr_id, call, locals)) |value| return value;
+            if (try @This().lowerAdtConstructorCall(self, expr_id, call, locals)) |value| return value;
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
@@ -1181,6 +1190,95 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraOperationSetAttributeByName(err_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             return appendValueOp(self.block, err_op);
+        }
+
+        fn lowerAdtConstructorCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
+            const field = switch (self.parent.file.expression(call.callee).*) {
+                .Group => |group| switch (self.parent.file.expression(group.expr).*) {
+                    .Field => |field| field,
+                    else => return null,
+                },
+                .Field => |field| field,
+                else => return null,
+            };
+            const result_type = self.parent.lowerExprType(expr_id);
+            if (!mlir.oraTypeIsAAdt(result_type)) return null;
+
+            const payload_type = @This().adtVariantPayloadType(result_type, field.name) orelse return null;
+            var payload_values: std.ArrayList(mlir.MlirValue) = .{};
+            if (!mlir.oraTypeIsANone(payload_type)) {
+                try payload_values.append(self.parent.allocator, try @This().lowerAdtPayloadValue(self, call, payload_type, locals));
+            }
+
+            const op = mlir.oraAdtConstructOpCreate(
+                self.parent.context,
+                self.parent.location(call.range),
+                strRef(field.name),
+                if (payload_values.items.len == 0) null else payload_values.items.ptr,
+                payload_values.items.len,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn lowerAdtPayloadValue(
+            self: *FunctionLowerer,
+            call: ast.CallExpr,
+            payload_type: mlir.MlirType,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const tuple_count = mlir.oraTupleTypeGetNumElements(payload_type);
+            if (tuple_count != 0) {
+                var elements: std.ArrayList(mlir.MlirValue) = .{};
+                for (call.args, 0..) |arg, index| {
+                    const element_type = mlir.oraTupleTypeGetElementType(payload_type, index);
+                    const raw = try self.lowerExpr(arg, locals);
+                    try elements.append(self.parent.allocator, try self.convertValueForFlow(raw, element_type, exprRange(self.parent.file, arg)));
+                }
+                const op = mlir.oraTupleCreateOpCreate(
+                    self.parent.context,
+                    self.parent.location(call.range),
+                    if (elements.items.len == 0) null else elements.items.ptr,
+                    elements.items.len,
+                    payload_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(payload_type);
+            if (field_count != 0) {
+                var fields: std.ArrayList(mlir.MlirValue) = .{};
+                for (call.args, 0..) |arg, index| {
+                    const field_type = mlir.oraAnonymousStructTypeGetFieldType(payload_type, index);
+                    const raw = try self.lowerExpr(arg, locals);
+                    try fields.append(self.parent.allocator, try self.convertValueForFlow(raw, field_type, exprRange(self.parent.file, arg)));
+                }
+                const op = mlir.oraStructInitOpCreate(
+                    self.parent.context,
+                    self.parent.location(call.range),
+                    if (fields.items.len == 0) null else fields.items.ptr,
+                    fields.items.len,
+                    payload_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            const raw = try self.lowerExpr(call.args[0], locals);
+            return self.convertValueForFlow(raw, payload_type, exprRange(self.parent.file, call.args[0]));
+        }
+
+        fn adtVariantPayloadType(adt_type: mlir.MlirType, variant_name: []const u8) ?mlir.MlirType {
+            const count = mlir.oraAdtTypeGetNumVariants(adt_type);
+            for (0..count) |index| {
+                const name_ref = mlir.oraAdtTypeGetVariantName(adt_type, index);
+                if (std.mem.eql(u8, name_ref.data[0..name_ref.length], variant_name)) {
+                    return mlir.oraAdtTypeGetVariantPayloadType(adt_type, index);
+                }
+            }
+            return null;
         }
 
         fn lowerResultBuiltinCall(
@@ -2833,7 +2931,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             if (base_type == .enum_) {
-                if (@This().enumFieldOrdinal(self, field.base, field.name)) |ordinal| {
+                if (@This().enumFieldExists(self, field.base, field.name)) {
+                    if (mlir.oraTypeIsAAdt(result_type)) {
+                        const payload_type = @This().adtVariantPayloadType(result_type, field.name) orelse
+                            return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
+                        if (!mlir.oraTypeIsANone(payload_type)) {
+                            return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
+                        }
+                        const op = mlir.oraAdtConstructOpCreate(
+                            self.parent.context,
+                            self.parent.location(field.range),
+                            strRef(field.name),
+                            null,
+                            0,
+                            result_type,
+                        );
+                        if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        return error.MlirOperationCreationFailed;
+                    }
                     const enum_name = base_type.name() orelse
                         return appendValueOp(self.block, try self.createAggregatePlaceholder("ora.field_access", field.range, &.{}, result_type));
                     const op = mlir.oraEnumConstantOpCreate(
@@ -2844,11 +2959,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         result_type,
                     );
                     if (!mlir.oraOperationIsNull(op)) {
-                        mlir.oraOperationSetAttributeByName(
-                            op,
-                            strRef("ora.enum_ordinal"),
-                            mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.parent.context), ordinal),
-                        );
+                        try @This().attachEnumConstantValueAttrs(self, op, field.base, field.name, result_type);
                         return appendValueOp(self.block, op);
                     }
                     return error.MlirOperationCreationFailed;
@@ -2974,16 +3085,140 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return null;
         }
 
+        fn enumFieldExists(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) bool {
+            const base_type = self.parent.typecheck.exprType(base_expr);
+            const enum_name = base_type.name() orelse return false;
+            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                for (instantiated.variants) |variant| {
+                    if (std.mem.eql(u8, variant.name, field_name)) return true;
+                }
+                return false;
+            }
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |item| item,
+                else => return false,
+            };
+            for (enum_item.variants) |variant| {
+                if (std.mem.eql(u8, variant.name, field_name)) return true;
+            }
+            return false;
+        }
+
+        fn attachEnumConstantValueAttrs(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            base_expr: ast.ExprId,
+            field_name: []const u8,
+            result_type: mlir.MlirType,
+        ) anyerror!void {
+            if (mlir.oraTypeEqual(result_type, stringType(self.parent.context))) {
+                const value = try @This().enumFieldStringValue(self, base_expr, field_name) orelse return;
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.enum_string_value"), mlir.oraStringAttrCreate(self.parent.context, strRef(value)));
+                return;
+            }
+            if (mlir.oraTypeEqual(result_type, bytesType(self.parent.context))) {
+                const value = try @This().enumFieldBytesValue(self, base_expr, field_name) orelse return;
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.enum_bytes_value"), mlir.oraStringAttrCreate(self.parent.context, strRef(value)));
+                return;
+            }
+            if (@This().enumFieldOrdinal(self, base_expr, field_name)) |ordinal| {
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.enum_ordinal"),
+                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.parent.context), ordinal),
+                );
+            }
+        }
+
         fn enumFieldOrdinal(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) ?i64 {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
+            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                var next_value: i64 = 0;
+                for (instantiated.variants) |variant| {
+                    const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
+                        .integer => |literal| literal,
+                        else => next_value,
+                    } else next_value;
+                    if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+                    next_value = resolved_value + 1;
+                }
+                return null;
+            }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
             const enum_item = switch (self.parent.file.item(item_id).*) {
                 .Enum => |item| item,
                 else => return null,
             };
-            for (enum_item.variants, 0..) |variant, index| {
-                if (std.mem.eql(u8, variant.name, field_name)) return @intCast(index);
+            var next_value: i64 = 0;
+            for (enum_item.variants) |variant| {
+                const resolved_value = if (variant.value) |literal| switch (literal) {
+                    .Integer => |int_lit| support.parseIntLiteral(int_lit.text) orelse next_value,
+                    else => next_value,
+                } else next_value;
+                if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+                next_value = resolved_value + 1;
+            }
+            return null;
+        }
+
+        fn enumFieldStringValue(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) anyerror!?[]const u8 {
+            const base_type = self.parent.typecheck.exprType(base_expr);
+            const enum_name = base_type.name() orelse return null;
+            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                for (instantiated.variants) |variant| {
+                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
+                    if (variant.explicit_value) |explicit| switch (explicit) {
+                        .string => |literal| return literal,
+                        else => return null,
+                    };
+                    return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
+                }
+                return null;
+            }
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |item| item,
+                else => return null,
+            };
+            for (enum_item.variants) |variant| {
+                if (!std.mem.eql(u8, variant.name, field_name)) continue;
+                if (variant.value) |literal| switch (literal) {
+                    .String => |str_lit| return str_lit.text,
+                    else => return null,
+                };
+                return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
+            }
+            return null;
+        }
+
+        fn enumFieldBytesValue(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) anyerror!?[]const u8 {
+            const base_type = self.parent.typecheck.exprType(base_expr);
+            const enum_name = base_type.name() orelse return null;
+            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                for (instantiated.variants) |variant| {
+                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
+                    if (variant.explicit_value) |explicit| switch (explicit) {
+                        .bytes => |literal| return literal,
+                        else => return null,
+                    };
+                    return null;
+                }
+                return null;
+            }
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |item| item,
+                else => return null,
+            };
+            for (enum_item.variants) |variant| {
+                if (!std.mem.eql(u8, variant.name, field_name)) continue;
+                if (variant.value) |literal| switch (literal) {
+                    .Bytes => |bytes_lit| return bytes_lit.text,
+                    else => return null,
+                };
+                return null;
             }
             return null;
         }

@@ -966,7 +966,7 @@ const Parser = struct {
                 try children.append(self.allocator, .{ .token = self.bump() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseMemberNode(SyntaxKind.EnumVariant, "expected enum variant") });
+            try children.append(self.allocator, .{ .node = try self.parseEnumVariantNode() });
         }
 
         if (self.at(.RightBrace)) {
@@ -1071,6 +1071,70 @@ const Parser = struct {
         }
 
         return self.finishNode(kind, children.items);
+    }
+
+    fn parseEnumVariantNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Identifier)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected enum variant");
+            return self.finishNode(SyntaxKind.EnumVariant, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (!self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                while (self.at(.Comma)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    if (self.at(.RightParen)) break;
+                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                }
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after enum variant payload");
+            }
+        } else if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightBrace)) {
+                if (self.at(.Comma) or self.at(.Semicolon)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    continue;
+                }
+                try children.append(self.allocator, .{ .node = try self.parseAnonymousStructFieldNode() });
+            }
+            if (self.at(.RightBrace)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected '}' after enum variant payload");
+            }
+        }
+
+        if (self.at(.Equal)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (self.at(.IntegerLiteral) or
+                self.at(.BinaryLiteral) or
+                self.at(.HexLiteral) or
+                self.at(.StringLiteral) or
+                self.at(.RawStringLiteral) or
+                self.at(.CharacterLiteral) or
+                self.at(.BytesLiteral))
+            {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("explicit enum variant values currently support integer, string, or bytes literals only");
+                while (!self.at(.Eof) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
+                    try children.append(self.allocator, try self.parseElement(null));
+                }
+            }
+        }
+
+        return self.finishNode(SyntaxKind.EnumVariant, children.items);
     }
 
     fn parseStructFieldNode(self: *Parser) anyerror!green.GreenNodeId {
