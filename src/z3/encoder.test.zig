@@ -157,6 +157,11 @@ test "tag-only enum constants encode as distinct datatype constructors" {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const enum_decl = mlir.oraEnumDeclOpCreate(mlir_ctx, loc, stringRef("Status"), i256_ty);
+    mlir.oraOperationSetAttributeByName(
+        enum_decl,
+        stringRef("sym_name"),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("Status")),
+    );
     const variant_names = [_]mlir.MlirAttribute{
         mlir.oraStringAttrCreate(mlir_ctx, stringRef("Active")),
         mlir.oraStringAttrCreate(mlir_ctx, stringRef("Paused")),

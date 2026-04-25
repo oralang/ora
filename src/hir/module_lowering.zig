@@ -1018,37 +1018,53 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             has_explicit_values: *bool,
         ) anyerror!mlir.MlirAttribute {
             if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
-                const text = if (variant.value) |value| blk: {
+                const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk switch (value) {
-                        .String => |literal| literal.text,
-                        else => "",
-                    };
+                    break :blk @This().enumStringValue(self, expr_id) orelse "";
                 } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_item.name, variant.name });
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
             if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
-                const text = if (variant.value) |value| blk: {
+                const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk switch (value) {
-                        .Bytes => |literal| literal.text,
-                        else => "",
-                    };
+                    break :blk @This().enumBytesValue(self, expr_id) orelse "";
                 } else "";
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
 
-            const resolved_value = if (variant.value) |value| blk: {
+            const resolved_value = if (variant.value) |expr_id| blk: {
                 has_explicit_values.* = true;
-                break :blk switch (value) {
-                    .Integer => |literal| support.parseIntLiteral(literal.text) orelse 0,
-                    else => 0,
-                };
+                break :blk @This().enumIntegerValue(self, expr_id) orelse 0;
             } else blk: {
                 break :blk next_value.*;
             };
             next_value.* = resolved_value + 1;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
+        }
+
+        fn enumIntegerValue(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
+            const value = self.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                .boolean => |boolean| if (boolean) 1 else 0,
+                else => null,
+            };
+        }
+
+        fn enumStringValue(self: *Lowerer, expr_id: ast.ExprId) ?[]const u8 {
+            const value = self.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .string => |string| string,
+                else => null,
+            };
+        }
+
+        fn enumBytesValue(self: *Lowerer, expr_id: ast.ExprId) ?[]const u8 {
+            return switch (self.file.expression(expr_id).*) {
+                .BytesLiteral => |literal| literal.text,
+                .Group => |group| @This().enumBytesValue(self, group.expr),
+                else => null,
+            };
         }
 
         fn lowerInstantiatedEnumVariantValue(

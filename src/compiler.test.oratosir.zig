@@ -111,6 +111,82 @@ test "compiler converts tuple top-level const items through OraToSIR" {
     try expectNoResidualOraRuntimeOps(sir_text);
 }
 
+test "compiler converts aggregate ADT payload matches through compiler-managed payload handles" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn sum(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Pair(lhs, rhs) => lhs + rhs,
+        \\        Event.Named(code, amount) => code + amount,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    // Function takes the wide ADT carrier as two u256 args (v0=tag, v1=payload handle).
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn sum:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "entry v0 v1"));
+    // Both Pair and Named payloads are 2-tuples dereferenced through the handle:
+    // mload256 v1 (lhs/code) plus mload256 (v1+0x20) (rhs/amount). With both
+    // variants taking that path, expect at least four mload256 reads and at
+    // least two const 0x20 offsets.
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "const 0x20"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler converts nested ADT fields through compiler-managed handle storage" {
+    const source_text =
+        \\struct Holder {
+        \\    event: Event,
+        \\}
+        \\
+        \\enum Event {
+        \\    Empty,
+        \\    Pair(u256, u256),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn read_pair(holder: Holder) -> u256 {
+        \\    return switch (holder.event) {
+        \\        Event.Empty => 0,
+        \\        Event.Pair(lhs, rhs) => lhs + rhs,
+        \\        Event.Named(code, amount) => code + amount,
+        \\    };
+        \\}
+        \\
+        \\fn forward(event: Event) -> Event {
+        \\    return event;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(rendered.len != 0);
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts native string and bytes len field access through OraToSIR" {
     const source_text =
         \\pub fn string_len(text: string) -> u256 {
@@ -406,4 +482,3 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         try expectNoResidualOraRuntimeOps(rendered);
     }
 }
-

@@ -2546,6 +2546,43 @@ static FailureOr<std::pair<Value, Value>> getNormalizedAdtPartsFromValue(
     return failure();
 }
 
+static bool usesAggregateAdtPayloadHandle(Type type)
+{
+    return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                     mlir::MemRefType, mlir::UnrankedMemRefType>(type);
+}
+
+static LogicalResult decodeAdtPayloadFromCarrier(
+    Operation *op,
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    Type payloadType,
+    Type loweredType,
+    Value &payload)
+{
+    if (usesAggregateAdtPayloadHandle(payloadType))
+    {
+        if (!llvm::isa<sir::PtrType>(loweredType))
+            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle lowering");
+        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        return success();
+    }
+
+    if (payload.getType() == loweredType)
+        return success();
+    if (llvm::isa<sir::U256Type>(loweredType))
+    {
+        payload = ensureU256(rewriter, loc, payload);
+        return success();
+    }
+    if (llvm::isa<mlir::IntegerType>(loweredType))
+    {
+        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        return success();
+    }
+    return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
+}
+
 static LogicalResult convertAdtTagCommon(
     ora::AdtTagOp op,
     ArrayRef<Value> operands,
@@ -2601,26 +2638,8 @@ static LogicalResult convertAdtPayloadCommon(
         if (Type converted = typeConverter->convertType(loweredType))
             loweredType = converted;
 
-    if (payload.getType() != loweredType)
-    {
-        auto loc = op.getLoc();
-        if (llvm::isa<sir::PtrType>(loweredType))
-        {
-            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        }
-        else if (llvm::isa<sir::U256Type>(loweredType))
-        {
-            payload = ensureU256(rewriter, loc, payload);
-        }
-        else if (llvm::isa<mlir::IntegerType>(loweredType))
-        {
-            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        }
-        else
-        {
-            return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
-        }
-    }
+    if (failed(decodeAdtPayloadFromCarrier(op, rewriter, op.getLoc(), payloadType, loweredType, payload)))
+        return failure();
 
     rewriter.replaceOp(op, payload);
     return success();
@@ -3691,6 +3710,44 @@ static LogicalResult convertOraReturn(
         }
     }
 
+    if (llvm::isa<ora::AdtType>(origType))
+    {
+        SmallVector<Value, 2> parts;
+        if (operands.size() == 2)
+        {
+            parts.push_back(ensureU256(rewriter, loc, operands[0]));
+            parts.push_back(ensureU256(rewriter, loc, operands[1]));
+        }
+        else
+        {
+            Value adtValue = retVal;
+            if (failed(materializeSplitAdtValue(rewriter, loc, adtValue, parts)) || parts.size() != 2)
+            {
+                if (op.getNumOperands() == 1)
+                {
+                    parts.clear();
+                    if (failed(materializeSplitAdtValue(rewriter, loc, op.getOperand(0), parts)) || parts.size() != 2)
+                        return rewriter.notifyMatchFailure(op, "ADT return expects split carrier");
+                }
+                else
+                {
+                    return rewriter.notifyMatchFailure(op, "ADT return expects split carrier");
+                }
+            }
+        }
+
+        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
+        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+        Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
+        rewriter.create<sir::StoreOp>(loc, mem, parts[0]);
+        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+        Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
+        rewriter.create<sir::StoreOp>(loc, mem2, parts[1]);
+        rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     if (auto structType = llvm::dyn_cast<ora::StructType>(origType);
         structType && !isPayloadlessErrorStruct(origType, op.getOperation()))
     {
@@ -4594,6 +4651,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     static constexpr StringLiteral kMatAddressForward("address_forward");
     static constexpr StringLiteral kMatNormalizedErrorUnion("normalized_error_union");
     static constexpr StringLiteral kMatNormalizedAdt("normalized_adt");
+    static constexpr StringLiteral kMatAdtHandleView("adt_handle_view");
 
     if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
     {
@@ -4658,6 +4716,24 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
                     {
                         Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
                         Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
+                        rewriter.replaceOp(op, {tag, payload});
+                        return success();
+                    }
+                    if (ora::hasMaterializationKind(cast, kMatAdtHandleView) && cast.getNumOperands() == 1)
+                    {
+                        auto u256Ty = sir::U256Type::get(rewriter.getContext());
+                        auto ptrTy = sir::PtrType::get(rewriter.getContext(), 1);
+                        auto ui64Ty = mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned);
+                        Value handle = cast.getOperand(0);
+                        if (llvm::isa<sir::U256Type>(handle.getType()))
+                            handle = rewriter.create<sir::BitcastOp>(loc, ptrTy, handle);
+                        else if (!llvm::isa<sir::PtrType>(handle.getType()))
+                            return failure();
+
+                        Value tag = rewriter.create<sir::LoadOp>(loc, u256Ty, handle);
+                        Value offset = rewriter.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(ui64Ty, 32));
+                        Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, ptrTy, handle, offset);
+                        Value payload = rewriter.create<sir::LoadOp>(loc, u256Ty, payloadPtr);
                         rewriter.replaceOp(op, {tag, payload});
                         return success();
                     }

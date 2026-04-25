@@ -3153,10 +3153,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             var next_value: i64 = 0;
             for (enum_item.variants) |variant| {
-                const resolved_value = if (variant.value) |literal| switch (literal) {
-                    .Integer => |int_lit| support.parseIntLiteral(int_lit.text) orelse next_value,
-                    else => next_value,
-                } else next_value;
+                const resolved_value = if (variant.value) |expr_id| @This().enumIntegerValue(self, expr_id) orelse next_value else next_value;
                 if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
                 next_value = resolved_value + 1;
             }
@@ -3184,10 +3181,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             for (enum_item.variants) |variant| {
                 if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |literal| switch (literal) {
-                    .String => |str_lit| return str_lit.text,
-                    else => return null,
-                };
+                if (variant.value) |expr_id| return @This().enumStringValue(self, expr_id);
                 return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
             }
             return null;
@@ -3214,13 +3208,35 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             for (enum_item.variants) |variant| {
                 if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |literal| switch (literal) {
-                    .Bytes => |bytes_lit| return bytes_lit.text,
-                    else => return null,
-                };
+                if (variant.value) |expr_id| return @This().enumBytesValue(self, expr_id);
                 return null;
             }
             return null;
+        }
+
+        fn enumIntegerValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                .boolean => |boolean| if (boolean) 1 else 0,
+                else => null,
+            };
+        }
+
+        fn enumStringValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .string => |string| string,
+                else => null,
+            };
+        }
+
+        fn enumBytesValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .BytesLiteral => |literal| literal.text,
+                .Group => |group| @This().enumBytesValue(self, group.expr),
+                else => null,
+            };
         }
 
         fn lowerBuiltinFieldExpr(

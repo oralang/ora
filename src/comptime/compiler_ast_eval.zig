@@ -162,6 +162,40 @@ const ConstEvaluator = struct {
                 for (function.clauses) |clause| _ = self.evalExpr(clause.expr) catch null;
                 self.visitBody(function.body);
             },
+            .Enum => |enum_item| {
+                self.required_comptime_depth += 1;
+                defer self.required_comptime_depth -= 1;
+                self.env.pushScope(false) catch return;
+                defer self.env.popScope();
+                var next_value: i64 = 0;
+                for (enum_item.variants) |variant| {
+                    var bound_value: ?ConstValue = null;
+                    if (variant.value) |expr_id| {
+                        const value = self.evalExpr(expr_id) catch null;
+                        self.values[expr_id.index()] = value;
+                        bound_value = value;
+                    } else {
+                        bound_value = .{ .integer = std.math.big.int.Managed.initSet(self.allocator, next_value) catch return };
+                    }
+                    if (bound_value) |value| {
+                        var exported_value = value;
+                        switch (value) {
+                            .integer => |integer| {
+                                if (integer.toInt(i64)) |small| {
+                                    next_value = small + 1;
+                                } else |_| {}
+                            },
+                            .boolean => |boolean| {
+                                const integer_value: i64 = if (boolean) 1 else 0;
+                                exported_value = .{ .integer = std.math.big.int.Managed.initSet(self.allocator, integer_value) catch return };
+                                next_value = integer_value + 1;
+                            },
+                            else => {},
+                        }
+                        self.bindName(variant.name, exported_value) catch {};
+                    }
+                }
+            },
             .Field => |field| {
                 if (field.value) |expr_id| {
                     self.required_comptime_depth += 1;

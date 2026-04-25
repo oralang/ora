@@ -291,7 +291,7 @@ pub fn mixin(Builder: type) type {
                             .range = variant_node.range(),
                             .name = if (token) |name_token| tokenText(name_token) else "",
                             .payload = try Lowering.lowerEnumVariantPayloadNode(self, variant_node),
-                            .value = Lowering.lowerEnumVariantValueToken(variant_node),
+                            .value = try Lowering.lowerEnumVariantValueExpr(self, variant_node),
                         });
                     },
                 }
@@ -346,32 +346,17 @@ pub fn mixin(Builder: type) type {
             return .none;
         }
 
-        fn lowerEnumVariantValueToken(node: SyntaxNode) ?nodes.EnumVariantValue {
+        fn lowerEnumVariantValueExpr(self: *Builder, node: SyntaxNode) !?nodes.EnumVariantValue {
             var saw_equal = false;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
-                    .node => {},
+                    .node => |child_node| {
+                        if (saw_equal and isExprKind(child_node.kind())) return try Lowering.lowerExpressionNode(self, child_node);
+                    },
                     .token => |token| {
                         if (token.kind() == .Equal) {
                             saw_equal = true;
-                            continue;
-                        }
-                        if (!saw_equal) continue;
-                        switch (token.kind()) {
-                            .IntegerLiteral, .BinaryLiteral, .HexLiteral => return .{ .Integer = .{
-                                .range = token.range(),
-                                .text = tokenText(token),
-                            } },
-                            .StringLiteral, .RawStringLiteral, .CharacterLiteral => return .{ .String = .{
-                                .range = token.range(),
-                                .text = stripQuotes(tokenText(token)),
-                            } },
-                            .BytesLiteral => return .{ .Bytes = .{
-                                .range = token.range(),
-                                .text = stripBytesLiteral(tokenText(token)),
-                            } },
-                            else => return null,
                         }
                     },
                 }

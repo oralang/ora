@@ -235,6 +235,40 @@ test "compiler rejects bytes enums without explicit values for every variant" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "bytes enums currently require explicit values for every variant"));
 }
 
+test "compiler parses enum explicit value expressions without syntax diagnostics" {
+    const source_text =
+        \\contract T {
+        \\    enum TestEnum {
+        \\        Value1 = 5,
+        \\        Value2 = 10 + 20,
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expectEqual(@as(usize, 0), diags.items.items.len);
+}
+
+test "compiler rejects non-comptime enum explicit value expressions" {
+    const source_text =
+        \\storage var seed: u256;
+        \\
+        \\enum Bad {
+        \\    A = seed + 1,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "explicit values for integer enums must be compile-time integer expressions"));
+}
+
 test "compiler reports impl syntax errors for missing body and missing for" {
     const source_text =
         \\impl ERC20 Token {

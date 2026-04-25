@@ -24,6 +24,7 @@ namespace
     static constexpr const char *kMatAddressForward = "address_forward";
     static constexpr const char *kMatNormalizedErrorUnion = "normalized_error_union";
     static constexpr const char *kMatNormalizedAdt = "normalized_adt";
+    static constexpr const char *kMatAdtHandleView = "adt_handle_view";
 
     static Value createTaggedCast(OpBuilder &builder,
                                   Location loc,
@@ -472,12 +473,17 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
-            // ADTs use a u256 carrier at the type-conversion boundary. Concrete
-            // construct/payload rewrites still fail closed for layouts that the
-            // current packed representation cannot model exactly.
-            // ora.adt<T...> -> (sir.u256 tag, sir.u256 payload_carrier).
-            // Aggregate payloads flow through the payload carrier as pointers
-            // bitcast to u256; scalar payloads remain plain u256 values.
+            // ADTs use a two-word compiler-runtime carrier at the conversion
+            // boundary: (tag_word: sir.u256, payload_word: sir.u256).
+            //
+            // The payload word is exact, not best-effort:
+            // - scalar payload variants store their payload bits inline
+            // - aggregate payload variants store a compiler-managed handle
+            //   (ptr-backed tuple/struct/string/bytes/memref value) bitcast to
+            //   sir.u256 at the ADT boundary
+            //
+            // Concrete construct/payload rewrites still fail closed for shapes
+            // that do not lower into one of those two cases exactly.
             addConversion([](ora::AdtType type, SmallVectorImpl<Type> &results) -> LogicalResult
                           {
                 auto *ctx = type.getDialect().getContext();
@@ -1008,7 +1014,6 @@ namespace mlir
             addTargetMaterialization([](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs, Location loc) -> SmallVector<Value>
                                      {
                                          (void)builder;
-                                         (void)loc;
                                          if (resultTypes.size() != 2 || inputs.size() != 1)
                                              return {};
                                          Value input = inputs[0];
@@ -1020,6 +1025,22 @@ namespace mlir
                                              auto kind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
                                              if (kind && kind.getValue() == kMatNormalizedAdt && cast.getNumOperands() == 2)
                                                  return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
+                                             if (kind && kind.getValue() == kMatAdtHandleView && cast.getNumOperands() == 1)
+                                             {
+                                                 auto u256 = sir::U256Type::get(builder.getContext());
+                                                 auto ptrType = sir::PtrType::get(builder.getContext(), 1);
+                                                 auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                                 Value handle = cast.getOperand(0);
+                                                 if (llvm::isa<sir::U256Type>(handle.getType()))
+                                                     handle = builder.create<sir::BitcastOp>(loc, ptrType, handle);
+                                                 else if (!llvm::isa<sir::PtrType>(handle.getType()))
+                                                     return {};
+                                                 Value tag = builder.create<sir::LoadOp>(loc, resultTypes[0], handle);
+                                                 Value off = builder.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64, 32));
+                                                 Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, handle, off);
+                                                 Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
+                                                 return SmallVector<Value>{tag, payload};
+                                             }
                                          }
                                          return {};
                                      });

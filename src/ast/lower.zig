@@ -139,7 +139,14 @@ const Validator = struct {
                 }
                 try self.validateBitfieldFields(bitfield.fields);
             },
-            .Enum => |enum_item| try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'"),
+            .Enum => |enum_item| {
+                try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'");
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |value| {
+                        _ = try self.expectExpr(value, variant.range, "enum variant references invalid value expression id");
+                    }
+                }
+            },
             .Trait => |trait_item| {
                 var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
                 defer seen.deinit();

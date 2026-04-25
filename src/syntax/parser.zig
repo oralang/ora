@@ -1081,6 +1081,9 @@ const Parser = struct {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportHere("expected enum variant");
+            if (!self.at(.Eof) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
             return self.finishNode(SyntaxKind.EnumVariant, children.items);
         }
 
@@ -1117,20 +1120,10 @@ const Parser = struct {
 
         if (self.at(.Equal)) {
             try children.append(self.allocator, .{ .token = self.bump() });
-            if (self.at(.IntegerLiteral) or
-                self.at(.BinaryLiteral) or
-                self.at(.HexLiteral) or
-                self.at(.StringLiteral) or
-                self.at(.RawStringLiteral) or
-                self.at(.CharacterLiteral) or
-                self.at(.BytesLiteral))
-            {
-                try children.append(self.allocator, .{ .token = self.bump() });
+            if (self.at(.Eof) or self.at(.Comma) or self.at(.Semicolon) or self.at(.RightBrace)) {
+                try self.reportHere("expected enum variant value");
             } else {
-                try self.reportHere("explicit enum variant values currently support integer, string, or bytes literals only");
-                while (!self.at(.Eof) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
-                    try children.append(self.allocator, try self.parseElement(null));
-                }
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .RightBrace }) });
             }
         }
 

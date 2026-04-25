@@ -561,11 +561,7 @@ pub const EnumVariant = struct {
     value: ?EnumVariantValue = null,
 };
 
-pub const EnumVariantValue = union(enum) {
-    Integer: TypeIntegerLiteral,
-    String: StringLiteralExpr,
-    Bytes: BytesLiteralExpr,
-};
+pub const EnumVariantValue = ExprId;
 
 pub const EnumVariantPayload = union(enum) {
     none,

@@ -546,6 +546,8 @@ static LogicalResult normalizeResidualAdtExtractOps(ModuleOp module)
         Value payload = split.getResult(1);
         Type resultType = op.getType();
 
+        // Aggregate ADT payloads are carried as compiler-managed ptr-backed
+        // values encoded into the payload word at the ADT boundary.
         if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                       mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
         {
@@ -1862,6 +1864,7 @@ public:
                 {
                     return ora::hasMaterializationKind(op, "normalized_error_union") ||
                            ora::hasMaterializationKind(op, "normalized_adt") ||
+                           ora::hasMaterializationKind(op, "adt_handle_view") ||
                            ora::hasMaterializationKind(op, "none_forward") ||
                            ora::hasMaterializationKind(op, "ptr_view") ||
                            ora::hasMaterializationKind(op, "address_forward") ||
@@ -1914,13 +1917,14 @@ public:
             module.walk([&](mlir::UnrealizedConversionCastOp op)
                         {
                 if (ora::hasMaterializationKind(op, "normalized_error_union") ||
-                    ora::hasMaterializationKind(op, "normalized_adt"))
+                    ora::hasMaterializationKind(op, "normalized_adt") ||
+                    ora::hasMaterializationKind(op, "adt_handle_view"))
                     return;
                 if (op.getNumOperands() != 1 || op.getNumResults() != 1)
                     return;
-                if (!llvm::isa<sir::PtrType>(op.getOperand(0).getType()))
+                if (!llvm::isa<sir::PtrType, sir::U256Type>(op.getOperand(0).getType()))
                     return;
-                if (llvm::isa<ora::StructType, ora::TupleType, ora::StringType, ora::BytesType>(op.getResult(0).getType()))
+                if (llvm::isa<ora::StructType, ora::TupleType, ora::StringType, ora::BytesType, ora::AdtType>(op.getResult(0).getType()))
                     aggregateViewCasts.push_back(op); });
             for (auto castOp : aggregateViewCasts)
             {
@@ -2030,6 +2034,7 @@ public:
                 {
                     if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
                         ora::hasMaterializationKind(castOp, "normalized_adt") ||
+                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
                         ora::hasMaterializationKind(castOp, "ptr_view") ||
                         ora::hasMaterializationKind(castOp, "address_forward") ||
                         ora::hasMaterializationKind(castOp, "wide_error_union_join") ||
@@ -2048,6 +2053,7 @@ public:
                 {
                     if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
                         ora::hasMaterializationKind(castOp, "normalized_adt") ||
+                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
                         ora::hasMaterializationKind(castOp, "ptr_view") ||
                         ora::hasMaterializationKind(castOp, "address_forward") ||
                         ora::hasMaterializationKind(castOp, "wide_error_union_join") ||
@@ -2100,6 +2106,7 @@ public:
                     auto castOp = llvm::cast<mlir::UnrealizedConversionCastOp>(op);
                     if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
                         ora::hasMaterializationKind(castOp, "normalized_adt") ||
+                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
                         ora::hasMaterializationKind(castOp, "ptr_view") ||
                         ora::hasMaterializationKind(castOp, "address_forward") ||
                         ora::hasMaterializationKind(castOp, "wide_error_union_join") ||

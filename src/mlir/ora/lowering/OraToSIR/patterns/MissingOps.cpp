@@ -135,6 +135,62 @@ static bool isNarrowAdt(ora::AdtType type)
     return true;
 }
 
+static bool usesAggregateAdtPayloadHandle(Type type)
+{
+    return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                     mlir::MemRefType, mlir::UnrankedMemRefType>(type);
+}
+
+static FailureOr<Value> lowerAdtPayloadToCarrier(
+    PatternRewriter &rewriter,
+    Location loc,
+    Type payloadType,
+    Value payloadValue)
+{
+    if (!usesAggregateAdtPayloadHandle(payloadType))
+        return ensureU256(rewriter, loc, payloadValue);
+
+    if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
+        return ensureU256(rewriter, loc, payloadValue);
+
+    if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        if (cast.getNumOperands() == 1 && llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
+            return ensureU256(rewriter, loc, cast.getOperand(0));
+
+    return failure();
+}
+
+static LogicalResult decodeAdtPayloadFromCarrier(
+    Operation *op,
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    Type payloadType,
+    Type loweredType,
+    Value &payload)
+{
+    if (usesAggregateAdtPayloadHandle(payloadType))
+    {
+        if (!llvm::isa<sir::PtrType>(loweredType))
+            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle lowering");
+        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        return success();
+    }
+
+    if (payload.getType() == loweredType)
+        return success();
+    if (llvm::isa<sir::U256Type>(loweredType))
+    {
+        payload = ensureU256(rewriter, loc, payload);
+        return success();
+    }
+    if (llvm::isa<mlir::IntegerType>(loweredType))
+    {
+        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
+        return success();
+    }
+    return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
+}
+
 static FailureOr<unsigned> getAdtVariantIndex(ora::AdtType type, StringRef variantName)
 {
     for (auto [index, name] : llvm::enumerate(type.getVariantNames()))
@@ -229,26 +285,8 @@ static LogicalResult convertAdtPayloadCommon(
     if (!loweredType)
         loweredType = op.getResult().getType();
 
-    if (payload.getType() != loweredType)
-    {
-        auto loc = op.getLoc();
-        if (llvm::isa<sir::PtrType>(loweredType))
-        {
-            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        }
-        else if (llvm::isa<sir::U256Type>(loweredType))
-        {
-            payload = ensureU256(rewriter, loc, payload);
-        }
-        else if (llvm::isa<mlir::IntegerType>(loweredType))
-        {
-            payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        }
-        else
-        {
-            return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
-        }
-    }
+    if (failed(decodeAdtPayloadFromCarrier(op, rewriter, op.getLoc(), payloadType, loweredType, payload)))
+        return failure();
 
     rewriter.replaceOp(op, payload);
     return success();
@@ -545,9 +583,11 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
 
 // ---------------------------------------------------------------------------
 // ora.adt.* → split ADT carrier
-// Runtime layout: (tag: u256, payload_carrier: u256). Aggregate payloads flow
-// through payload_carrier as pointers bitcast to u256; scalar payloads stay as
-// plain u256 values.
+// Compiler-runtime layout: (tag_word: u256, payload_word: u256).
+// Scalar payload variants store their payload inline in payload_word.
+// Aggregate payload variants store a compiler-managed handle in payload_word,
+// where the handle is a ptr-backed tuple/struct/string/bytes/memref value
+// lowered elsewhere in OraToSIR and bitcast to u256 at the ADT boundary.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     ora::AdtConstructOp op,
@@ -569,7 +609,10 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     {
         if (adaptor.getPayloadValues().size() != 1)
             return rewriter.notifyMatchFailure(op, "ADT construct expects zero or one payload operand");
-        payload = ensureU256(rewriter, loc, adaptor.getPayloadValues().front());
+        auto carrier = lowerAdtPayloadToCarrier(rewriter, loc, adtType.getPayloadTypes()[*variantIndex], adaptor.getPayloadValues().front());
+        if (failed(carrier))
+            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle carrier");
+        payload = *carrier;
     }
     rewriter.replaceOp(op, ValueRange{tag, payload});
     return success();

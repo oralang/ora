@@ -979,23 +979,36 @@ const TypeChecker = struct {
         switch (repr_type.kind()) {
             .integer => {
                 for (enum_item.variants) |variant| {
-                    if (variant.value) |value| switch (value) {
-                        .Integer => |literal| {
-                            _ = parseEnumVariantIntegerLiteral(literal.text) orelse {
+                    if (variant.value) |expr_id| {
+                        const value = self.const_eval.values[expr_id.index()] orelse {
+                            try self.emitRangeError(
+                                self.exprRange(expr_id),
+                                "explicit values for integer enums must be compile-time integer expressions",
+                                .{},
+                            );
+                            continue;
+                        };
+                        switch (value) {
+                            .integer => |integer| {
+                                if (!integerValueFitsType(integer, repr_type.integer)) {
+                                    try self.emitRangeError(
+                                        self.exprRange(expr_id),
+                                        "explicit enum variant value does not fit enum representation type '{s}'",
+                                        .{diagnosticTypeDisplayName(self, repr_type)},
+                                    );
+                                }
+                            },
+                            .boolean => {},
+                            else => {
                                 try self.emitRangeError(
-                                    literal.range,
-                                    "explicit enum variant value must be a valid integer literal",
+                                    self.exprRange(expr_id),
+                                    "explicit values for integer enums must be compile-time integer expressions",
                                     .{},
                                 );
                                 continue;
-                            };
-                        },
-                        else => try self.emitRangeError(
-                            variant.range,
-                            "explicit values for integer enums must be integer literals",
-                            .{},
-                        ),
-                    };
+                            },
+                        }
+                    }
                 }
             },
             .string => {
@@ -1007,14 +1020,23 @@ const TypeChecker = struct {
                     );
                 }
                 for (enum_item.variants) |variant| {
-                    if (variant.value) |value| switch (value) {
-                        .String => {},
-                        else => try self.emitRangeError(
-                            variant.range,
-                            "explicit values for string enums must be string literals",
-                            .{},
-                        ),
-                    };
+                    if (variant.value) |expr_id| {
+                        const value = self.const_eval.values[expr_id.index()] orelse {
+                            try self.emitRangeError(
+                                self.exprRange(expr_id),
+                                "explicit values for string enums must be compile-time string expressions",
+                                .{},
+                            );
+                            continue;
+                        };
+                        if (value != .string) {
+                            try self.emitRangeError(
+                                self.exprRange(expr_id),
+                                "explicit values for string enums must be compile-time string expressions",
+                                .{},
+                            );
+                        }
+                    }
                 }
             },
             .bytes => {
@@ -1026,14 +1048,15 @@ const TypeChecker = struct {
                     );
                 }
                 for (enum_item.variants) |variant| {
-                    if (variant.value) |value| switch (value) {
-                        .Bytes => {},
-                        else => try self.emitRangeError(
-                            variant.range,
-                            "explicit values for bytes enums must be bytes literals",
-                            .{},
-                        ),
-                    };
+                    if (variant.value) |expr_id| {
+                        if (enumBytesLiteralText(self.file, expr_id) == null) {
+                            try self.emitRangeError(
+                                self.exprRange(expr_id),
+                                "explicit values for bytes enums must be bytes literals",
+                                .{},
+                            );
+                        }
+                    }
                 }
             },
             else => {
@@ -3792,14 +3815,21 @@ const TypeChecker = struct {
             variants[index] = .{
                 .name = variant.name,
                 .payload_type = try self.resolveEnumVariantPayloadType(variant.payload, bindings),
-                .explicit_value = if (variant.value) |value| switch (value) {
-                    .Integer => |literal| if (parseEnumVariantIntegerLiteral(literal.text)) |parsed| .{ .integer = parsed } else null,
-                    .String => |literal| .{ .string = literal.text },
-                    .Bytes => |literal| .{ .bytes = literal.text },
-                } else null,
+                .explicit_value = if (variant.value) |expr_id| self.explicitEnumValueFromExpr(expr_id) else null,
             };
         }
         return variants;
+    }
+
+    fn explicitEnumValueFromExpr(self: *TypeChecker, expr_id: ast.ExprId) ?model.ExplicitEnumValue {
+        if (enumBytesLiteralText(self.file, expr_id)) |bytes| return .{ .bytes = bytes };
+        const value = self.const_eval.values[expr_id.index()] orelse return null;
+        return switch (value) {
+            .integer => |integer| .{ .integer = integer.toInt(i64) catch return null },
+            .boolean => |boolean| .{ .integer = if (boolean) 1 else 0 },
+            .string => |string| .{ .string = string },
+            else => null,
+        };
     }
 
     fn resolveEnumVariantPayloadType(
@@ -6766,6 +6796,14 @@ fn parseEnumVariantIntegerLiteral(text: []const u8) ?i64 {
     const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x")) 16 else if (std.mem.startsWith(u8, trimmed, "0b")) 2 else 10;
     const digits = if (base == 10) trimmed else trimmed[2..];
     return std.fmt.parseInt(i64, digits, base) catch null;
+}
+
+fn enumBytesLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const u8 {
+    return switch (file.expression(expr_id).*) {
+        .BytesLiteral => |literal| literal.text,
+        .Group => |group| enumBytesLiteralText(file, group.expr),
+        else => null,
+    };
 }
 
 fn integerTypeSuffix(text: []const u8) ?model.IntegerType {

@@ -147,6 +147,15 @@ const Resolver = struct {
                     try self.resolveItem(method_id, &impl_env);
                 }
             },
+            .Enum => |enum_item| {
+                var enum_env = try Env.init(self.arena, env);
+                for (enum_item.variants) |variant| {
+                    try enum_env.bindings.put(variant.name, .{ .item = item_id });
+                }
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |expr_id| try self.resolveExpr(expr_id, &enum_env);
+                }
+            },
             .Field => |field| {
                 if (field.value) |expr_id| try self.resolveExpr(expr_id, env);
             },

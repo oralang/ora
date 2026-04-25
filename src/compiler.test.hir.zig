@@ -389,6 +389,30 @@ test "compiler lowers explicit integer enum values and continued ordinals" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_ordinal = 10 : i256"));
 }
 
+test "compiler lowers compile-time integer enum value expressions" {
+    const source_text =
+        \\enum Status : u8 {
+        \\    Pending = 3,
+        \\    Active = 10 + 20,
+        \\    Completed,
+        \\}
+        \\
+        \\pub fn current() -> Status {
+        \\    return Status.Completed;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [3 : i8, 30 : i8, 31 : i8]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_ordinal = 31 : i256"));
+}
+
 test "compiler lowers explicit string enum values through enum metadata and constant attrs" {
     const source_text =
         \\enum ErrorCode : string {
