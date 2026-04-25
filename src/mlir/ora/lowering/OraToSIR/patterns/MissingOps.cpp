@@ -150,6 +150,10 @@ static FailureOr<Value> lowerAdtPayloadToCarrier(
     if (!usesAggregateAdtPayloadHandle(payloadType))
         return ensureU256(rewriter, loc, payloadValue);
 
+    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+    if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
+        return ensureU256(rewriter, loc, *ptr);
+
     if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
         return ensureU256(rewriter, loc, payloadValue);
 

@@ -187,6 +187,88 @@ test "compiler converts nested ADT fields through compiler-managed handle storag
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts source scalar ADT constructors through OraToSIR" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\fn choose(flag: bool) -> Event {
+        \\    if (flag) {
+        \\        return Event.Value(7);
+        \\    }
+        \\    return Event.Pair(2, 3);
+        \\}
+        \\
+        \\fn classify(flag: bool) -> u256 {
+        \\    return switch (choose(flag)) {
+        \\        Event.Empty => 0,
+        \\        Event.Value(value) => value,
+        \\        Event.Pair(lhs, rhs) => lhs + rhs,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn choose:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn classify:"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler converts source aggregate ADT constructors through OraToSIR" {
+    const source_text =
+        \\struct Receipt {
+        \\    code: u256,
+        \\    amount: u256,
+        \\}
+        \\
+        \\enum Event {
+        \\    Empty,
+        \\    Wrapped(Receipt),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn choose(flag: bool) -> Event {
+        \\    if (flag) {
+        \\        return Event.Wrapped(Receipt { code: 10, amount: 20 });
+        \\    }
+        \\    return Event.Named(5, 6);
+        \\}
+        \\
+        \\fn project(flag: bool) -> u256 {
+        \\    return switch (choose(flag)) {
+        \\        Event.Empty => 0,
+        \\        Event.Wrapped(receipt) => receipt.code,
+        \\        Event.Named(code, amount) => amount,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn choose:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn project:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload256"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts native string and bytes len field access through OraToSIR" {
     const source_text =
         \\pub fn string_len(text: string) -> u256 {

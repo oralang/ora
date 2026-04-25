@@ -925,6 +925,97 @@ test "verification distinguishes multi-error variants end-to-end without degrada
     try testing.expect(!result.degraded);
 }
 
+test "verification supports symbolic scalar payload enum match without degradation" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\contract PayloadEnumScalarMatch {
+        \\    fn choose(flag: bool) -> Event {
+        \\        if (flag) {
+        \\            return Event.Value(7);
+        \\        }
+        \\        return Event.Pair(2, 3);
+        \\    }
+        \\
+        \\    pub fn classify(flag: bool) -> u256 {
+        \\        let value = switch (choose(flag)) {
+        \\            Event.Empty => 0,
+        \\            Event.Value(value) => value,
+        \\            Event.Pair(lhs, rhs) => lhs,
+        \\        };
+        \\        if (flag) {
+        \\            assert(value == 7, "Value payload should be preserved");
+        \\        } else {
+        \\            assert(value == 2, "Pair payload should be preserved");
+        \\        }
+        \\        return value;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "classify");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification supports symbolic aggregate payload enum match without degradation" {
+    const source_text =
+        \\struct Receipt {
+        \\    code: u256,
+        \\    amount: u256,
+        \\}
+        \\
+        \\enum Event {
+        \\    Empty,
+        \\    Wrapped(Receipt),
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\contract PayloadEnumAggregateMatch {
+        \\    fn choose(flag: bool) -> Event {
+        \\        if (flag) {
+        \\            let receipt: Receipt = Receipt {
+        \\                code: 10,
+        \\                amount: 4,
+        \\            };
+        \\            return Event.Wrapped(receipt);
+        \\        }
+        \\        return Event.Named(3, 6);
+        \\    }
+        \\
+        \\    pub fn project(flag: bool) -> u256 {
+        \\        let value = switch (choose(flag)) {
+        \\            Event.Empty => 0,
+        \\            Event.Wrapped(receipt) => receipt.code,
+        \\            Event.Named(code, amount) => amount,
+        \\        };
+        \\        if (flag) {
+        \\            assert(value == 10, "Wrapped struct payload should be preserved");
+        \\        } else {
+        \\            assert(value == 6, "Named aggregate payload should be preserved");
+        \\        }
+        \\        return value;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "project");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports named error payload Result match without degradation" {
     const path = "ora-example/corpus/control-flow/match/result_named_error_payload_match.ora";
     const function_name = "project";

@@ -634,6 +634,54 @@ test "compiler rejects public ABI signatures using payload-carrying enums" {
     try expectDiagnosticProbeContains(source_text, .typecheck, "unsupported ABI type");
 }
 
+test "compiler rejects payload enum constructors with wrong arity" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\fn bad() -> Event {
+        \\    return Event.Pair(1);
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "expected 2 arguments, found 1");
+}
+
+test "compiler rejects payload enum constructors with wrong payload type" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\fn bad(flag: bool) -> Event {
+        \\    return Event.Value(flag);
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "expected type 'u256', found 'bool'");
+}
+
+test "compiler rejects payload enum match patterns with wrong destructure arity" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\fn bad(value: Event) -> u256 {
+        \\    return switch (value) {
+        \\        Event.Empty => 0,
+        \\        Event.Pair(one) => one,
+        \\    };
+        \\}
+    ;
+
+    try expectDiagnosticProbeContains(source_text, .typecheck, "ADT tuple payload bindings must match the payload field count");
+}
+
 test "compiler rejects directly recursive payload-carrying enums" {
     const source_text =
         \\enum Tree {

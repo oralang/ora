@@ -490,6 +490,7 @@ static void buildWideErrorUnionReturnFromParts(
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type);
+static bool usesAggregateAdtPayloadHandle(Type type);
 static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
@@ -539,12 +540,67 @@ static std::optional<Value> materializeNarrowErrorUnionPackedValue(
     return std::nullopt;
 }
 
+static FailureOr<unsigned> getAdtVariantIndex(ora::AdtType type, StringRef variantName)
+{
+    for (auto [index, name] : llvm::enumerate(type.getVariantNames()))
+        if (name == variantName)
+            return static_cast<unsigned>(index);
+    return failure();
+}
+
 static LogicalResult materializeSplitAdtValue(
     PatternRewriter &rewriter,
     Location loc,
     Value value,
     SmallVectorImpl<Value> &out)
 {
+    if (auto constructOp = value.getDefiningOp<ora::AdtConstructOp>())
+    {
+        auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
+        if (!adtType)
+            return failure();
+
+        auto variantIndex = getAdtVariantIndex(adtType, constructOp.getVariantName());
+        if (failed(variantIndex))
+            return failure();
+
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+        auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+        Value tag = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(*variantIndex)));
+        Value payload = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, 0));
+
+        auto payloadValues = constructOp.getPayloadValues();
+        if (!payloadValues.empty())
+        {
+            if (payloadValues.size() != 1)
+                return failure();
+            Type payloadType = adtType.getPayloadTypes()[*variantIndex];
+            Value payloadValue = payloadValues.front();
+            if (usesAggregateAdtPayloadHandle(payloadType))
+            {
+                auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue);
+                if (!ptr)
+                    return failure();
+                payload = ensureU256(rewriter, loc, *ptr);
+            }
+            else
+            {
+                payload = ensureU256(rewriter, loc, payloadValue);
+            }
+        }
+
+        out.push_back(tag);
+        out.push_back(payload);
+        return success();
+    }
+
     auto castOp = value.getDefiningOp<mlir::UnrealizedConversionCastOp>();
     if (!castOp || !ora::hasMaterializationKind(castOp, "normalized_adt"))
         return failure();

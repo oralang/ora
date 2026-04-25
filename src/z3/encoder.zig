@@ -4396,7 +4396,8 @@ pub const Encoder = struct {
             }
         }
 
-        const exhaustive_without_default = metadata.default_case_index == null and self.switchCasesCoverI1Domain(scrutinee_value, metadata);
+        const exhaustive_without_default = metadata.default_case_index == null and
+            (self.switchCasesCoverI1Domain(scrutinee_value, metadata) or self.switchCasesCoverAdtTagDomain(scrutinee_value, metadata));
 
         var merged = blk: {
             if (default_expr) |expr| break :blk expr;
@@ -4439,6 +4440,40 @@ pub const Encoder = struct {
             if (value == 1) saw_one = true;
         }
         return saw_zero and saw_one;
+    }
+
+    fn switchCasesCoverAdtTagDomain(
+        self: *Encoder,
+        scrutinee_value: mlir.MlirValue,
+        metadata: SwitchCaseMetadata,
+    ) bool {
+        if (!mlir.oraValueIsAOpResult(scrutinee_value)) return false;
+        const owner = mlir.oraOpResultGetOwner(scrutinee_value);
+        if (!self.operationNameEq(owner, "ora.adt.tag")) return false;
+        if (mlir.oraOperationGetNumOperands(owner) < 1) return false;
+
+        const adt_value = mlir.oraOperationGetOperand(owner, 0);
+        const adt_type = mlir.oraValueGetType(adt_value);
+        if (!mlir.oraTypeIsAAdt(adt_type)) return false;
+
+        const variant_count = mlir.oraAdtTypeGetNumVariants(adt_type);
+        if (variant_count == 0) return false;
+
+        const seen = self.allocator.alloc(bool, variant_count) catch return false;
+        defer self.allocator.free(seen);
+        @memset(seen, false);
+
+        for (metadata.case_kinds, metadata.case_values) |kind, value| {
+            if (kind != 0 or value < 0) return false;
+            const index: usize = @intCast(value);
+            if (index >= variant_count) return false;
+            seen[index] = true;
+        }
+
+        for (seen) |covered| {
+            if (!covered) return false;
+        }
+        return true;
     }
 
     fn encodeOperationOperandsWithMode(

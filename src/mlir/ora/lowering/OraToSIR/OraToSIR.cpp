@@ -1070,7 +1070,6 @@ public:
         patterns.add<ConvertMLoad8Op>(typeConverter, ctx);
         patterns.add<ConvertMStore8Op>(typeConverter, ctx);
         patterns.add<ConvertEnumConstantOp>(typeConverter, ctx);
-        patterns.add<ConvertAdtConstructOp>(typeConverter, ctx);
         patterns.add<ConvertStructFieldStoreOp>(typeConverter, ctx);
         patterns.add<ConvertDestructureOp>(typeConverter, ctx);
         // Ops that pass through or erase.
@@ -1118,6 +1117,7 @@ public:
         target.addLegalOp<ora::SwitchOp>();
         target.addLegalOp<ora::TupleCreateOp>();
         target.addLegalOp<ora::TupleExtractOp>();
+        target.addLegalOp<ora::AdtConstructOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
         if (!enable_struct)
         {
@@ -1654,6 +1654,7 @@ public:
             phase4Patterns.add<ConvertStructInstantiateOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertAdtConstructOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructFieldUpdateOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertStructDeclOp>(typeConverter, ctx);
@@ -1718,6 +1719,7 @@ public:
             phase4Target.addIllegalOp<ora::SwitchOp>();
             phase4Target.addIllegalOp<ora::StructInitOp>();
             phase4Target.addIllegalOp<ora::StructInstantiateOp>();
+            phase4Target.addIllegalOp<ora::AdtConstructOp>();
             phase4Target.addIllegalOp<ora::StructFieldExtractOp>();
             phase4Target.addIllegalOp<ora::StructFieldUpdateOp>();
             phase4Target.addIllegalOp<ora::StructDeclOp>();
