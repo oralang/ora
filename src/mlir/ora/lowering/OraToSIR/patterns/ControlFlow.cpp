@@ -4541,6 +4541,345 @@ LogicalResult NormalizeAdtPayloadOp::matchAndRewrite(
     return success();
 }
 
+// ---------------------------------------------------------------------------
+// ConvertUnrealizedConversionCastOp helpers
+//
+// Every helper takes the same context (op, input, resultType, loc, rewriter).
+// Kind-keyed handlers return std::optional<LogicalResult>:
+//   - nullopt   = "I didn't apply, try the next thing"
+//   - success() = "I handled it, op replaced"
+//   - failure() = "this kind matched but the shape is wrong; give up"
+// Generic shape handlers return std::optional<LogicalResult> with the same
+// convention; the dispatcher chains them.
+// ---------------------------------------------------------------------------
+namespace
+{
+    using CastHandlerResult = std::optional<LogicalResult>;
+
+    struct CastCtx
+    {
+        mlir::UnrealizedConversionCastOp op;
+        Value input;
+        Type resultType;
+        Location loc;
+        ConversionPatternRewriter &rewriter;
+    };
+
+    static CastHandlerResult castAddressForward(CastCtx &c)
+    {
+        if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1)
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return failure();
+    }
+
+    static CastHandlerResult castPtrView(CastCtx &c)
+    {
+        if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
+            llvm::isa<sir::PtrType>(c.input.getType()))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return failure();
+    }
+
+    static CastHandlerResult castNormalizedErrorUnion(CastCtx &c)
+    {
+        if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1)
+        {
+            Value packed = ensureU256(c.rewriter, c.loc, c.input);
+            c.rewriter.replaceOp(c.op, packed);
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castNormalizedAdt(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 2)
+            return std::nullopt;
+        auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
+        if (c.op.getResult(0).getType() != u256Ty || c.op.getResult(1).getType() != u256Ty)
+            return failure();
+
+        auto cast = c.input.getDefiningOp<mlir::UnrealizedConversionCastOp>();
+        if (!cast)
+            return std::nullopt;
+        if (ora::hasMaterializationKind(cast, mat_kind::kNormalizedAdt) && cast.getNumOperands() == 2)
+        {
+            Value tag = ensureU256(c.rewriter, c.loc, cast.getOperand(0));
+            Value payload = ensureU256(c.rewriter, c.loc, cast.getOperand(1));
+            c.rewriter.replaceOp(c.op, {tag, payload});
+            return success();
+        }
+        if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
+        {
+            Value handle = cast.getOperand(0);
+            if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
+                return failure();
+            auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, c.loc, handle);
+            c.rewriter.replaceOp(c.op, {tag, payload});
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    // Common body for the "split into (tag, payload-carrier)" cast — used by
+    // both the kWideErrorUnionSplit kind handler and the generic 1->2 shape
+    // handler that mops up wide error-union splits without an explicit kind.
+    static CastHandlerResult splitFromTaggedTwoOperandCast(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 2)
+            return std::nullopt;
+        auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
+        if (c.op.getResult(0).getType() != u256Ty)
+            return std::nullopt;
+
+        Type payloadType = c.op.getResult(1).getType();
+        if (auto cast = c.input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() == 2)
+            {
+                Value tag = ensureU256(c.rewriter, c.loc, cast.getOperand(0));
+                Value payload = cast.getOperand(1);
+                if (payload.getType() != payloadType)
+                {
+                    if (llvm::isa<sir::PtrType>(payloadType))
+                        payload = c.rewriter.create<sir::BitcastOp>(c.loc, payloadType, payload);
+                    else if (llvm::isa<sir::U256Type>(payloadType))
+                        payload = ensureU256(c.rewriter, c.loc, payload);
+                    else
+                        return failure();
+                }
+                c.rewriter.replaceOp(c.op, {tag, payload});
+                return success();
+            }
+        }
+
+        if (c.input.getType() == u256Ty && payloadType == u256Ty)
+        {
+            Value packed = ensureU256(c.rewriter, c.loc, c.input);
+            auto u256IntTy = mlir::IntegerType::get(c.rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+            Value one = c.rewriter.create<sir::ConstOp>(c.loc, u256Ty,
+                                                        mlir::IntegerAttr::get(u256IntTy, 1));
+            Value tag = c.rewriter.create<sir::AndOp>(c.loc, u256Ty, packed, one);
+            Value payload = c.rewriter.create<sir::ShrOp>(c.loc, u256Ty, packed, one);
+            c.rewriter.replaceOp(c.op, {tag, payload});
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castWideErrorUnionSplit(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 2)
+            return failure();
+        auto result = splitFromTaggedTwoOperandCast(c);
+        // The kind handler is exclusive: any non-success result means failure.
+        if (result && succeeded(*result))
+            return success();
+        return failure();
+    }
+
+    using KindHandler = CastHandlerResult (*)(CastCtx &);
+    static CastHandlerResult dispatchKind(StringRef kind, CastCtx &c)
+    {
+        struct Entry { StringRef kind; KindHandler fn; };
+        static const Entry table[] = {
+            {mat_kind::kAddressForward, castAddressForward},
+            {mat_kind::kPtrView, castPtrView},
+            {mat_kind::kNormalizedErrorUnion, castNormalizedErrorUnion},
+            {mat_kind::kNormalizedAdt, castNormalizedAdt},
+            {mat_kind::kWideErrorUnionSplit, castWideErrorUnionSplit},
+        };
+        for (const auto &e : table)
+            if (kind == e.kind)
+                return e.fn(c);
+        return std::nullopt;
+    }
+
+    static bool isOraRefinementType(Type ty)
+    {
+        return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
+                         ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(ty);
+    }
+
+    static CastHandlerResult castRefinementBridge(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        const bool resIsRefinement = isOraRefinementType(c.resultType);
+        const bool inIsRefinement = isOraRefinementType(c.input.getType());
+        if (resIsRefinement && !inIsRefinement)
+        {
+            auto cast = c.rewriter.create<ora::BaseToRefinementOp>(c.loc, c.resultType, c.input);
+            c.rewriter.replaceOp(c.op, cast.getResult());
+            return success();
+        }
+        if (!resIsRefinement && inIsRefinement)
+        {
+            auto cast = c.rewriter.create<ora::RefinementToBaseOp>(c.loc, c.resultType, c.input);
+            c.rewriter.replaceOp(c.op, cast.getResult());
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castAddressIndexBridge(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (llvm::isa<sir::U256Type>(c.resultType) && llvm::isa<mlir::IndexType>(c.input.getType()))
+        {
+            auto i256 = mlir::IntegerType::get(c.rewriter.getContext(), 256);
+            Value asI256 = c.rewriter.create<arith::IndexCastOp>(c.loc, i256, c.input);
+            Value asU256 = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, asI256);
+            c.rewriter.replaceOp(c.op, asU256);
+            return success();
+        }
+        if (llvm::isa<sir::U256Type>(c.resultType) &&
+            llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.input.getType()))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.resultType) &&
+            llvm::isa<sir::U256Type>(c.input.getType()))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castMemrefPtrBridge(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (llvm::isa<sir::PtrType>(c.resultType) &&
+            llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(c.input.getType()))
+        {
+            auto cast = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
+            c.rewriter.replaceOp(c.op, cast.getResult());
+            return success();
+        }
+        if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(c.resultType) &&
+            llvm::isa<sir::PtrType>(c.input.getType()))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castDynamicAggregateView(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (llvm::isa<mlir::NoneType>(c.resultType))
+        {
+            auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
+            auto u256IntTy = mlir::IntegerType::get(c.rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+            Value zero = c.rewriter.create<sir::ConstOp>(c.loc, u256Ty,
+                                                         mlir::IntegerAttr::get(u256IntTy, 0));
+            c.rewriter.replaceOp(c.op, zero);
+            return success();
+        }
+        if (llvm::isa<ora::StringType, ora::BytesType>(c.resultType) &&
+            llvm::isa<sir::PtrType>(c.input.getType()))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castPayloadlessErrorStruct(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (llvm::isa<ora::StructType>(c.resultType) &&
+            llvm::isa<sir::U256Type>(c.input.getType()) &&
+            isPayloadlessErrorStruct(c.resultType, c.op))
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        return std::nullopt;
+    }
+
+    static CastHandlerResult castNarrowErrorUnionPack1to1(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.resultType);
+        if (!errType)
+            return std::nullopt;
+        if (!isNarrowErrorUnion(errType))
+            return failure();
+        Value packed = ensureU256(c.rewriter, c.loc, c.input);
+        c.rewriter.replaceOp(c.op, packed);
+        return success();
+    }
+
+    static CastHandlerResult castNarrowErrorUnionPack2to1(CastCtx &c,
+                                                          mlir::UnrealizedConversionCastOp::Adaptor adaptor)
+    {
+        if (c.op.getNumOperands() != 2 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.resultType);
+        if (!errType)
+            return std::nullopt;
+        if (!isNarrowErrorUnion(errType))
+            return failure();
+        auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
+        auto u256IntTy = mlir::IntegerType::get(c.rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+        Value tag = ensureU256(c.rewriter, c.loc, adaptor.getOperands()[0]);
+        Value payload = ensureU256(c.rewriter, c.loc, adaptor.getOperands()[1]);
+        Value one = c.rewriter.create<sir::ConstOp>(c.loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
+        Value shifted = c.rewriter.create<sir::ShlOp>(c.loc, u256Ty, payload, one);
+        Value packed = c.rewriter.create<sir::OrOp>(c.loc, u256Ty, shifted, tag);
+        c.rewriter.replaceOp(c.op, packed);
+        return success();
+    }
+
+    static CastHandlerResult castGenericFallback(CastCtx &c)
+    {
+        if (c.input.getType() == c.resultType)
+        {
+            c.rewriter.replaceOp(c.op, c.input);
+            return success();
+        }
+        if (llvm::isa<sir::U256Type>(c.resultType))
+        {
+            Value packed = ensureU256(c.rewriter, c.loc, c.input);
+            c.rewriter.replaceOp(c.op, packed);
+            return success();
+        }
+        if (llvm::isa<sir::PtrType>(c.resultType))
+        {
+            if (auto materialized = ora::materializePtrCarrierFromOraValue(c.rewriter, c.loc, c.resultType, c.input))
+            {
+                c.rewriter.replaceOp(c.op, *materialized);
+                return success();
+            }
+            Value casted = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
+            c.rewriter.replaceOp(c.op, casted);
+            return success();
+        }
+        if (llvm::isa<mlir::IntegerType>(c.resultType))
+        {
+            Value casted = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
+            c.rewriter.replaceOp(c.op, casted);
+            return success();
+        }
+        return failure();
+    }
+} // namespace
+
 LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     mlir::UnrealizedConversionCastOp op,
     mlir::UnrealizedConversionCastOp::Adaptor adaptor,
@@ -4557,335 +4896,40 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         op.getNumResults() < 1 || op.getNumResults() > 2)
         return failure();
 
-    Value input = adaptor.getOperands().front();
-    Type resultType = op.getResult(0).getType();
-    auto loc = op.getLoc();
+    CastCtx c{op, adaptor.getOperands().front(), op.getResult(0).getType(), op.getLoc(), rewriter};
 
+    // 1. Kind-keyed dispatch. If a kind-handler returns a definite result
+    // (success/failure), short-circuit; nullopt falls through to the generic
+    // shape handlers below.
     if (auto kindAttr = op->getAttrOfType<StringAttr>(kOraMaterializationKindAttr))
+        if (auto r = dispatchKind(kindAttr.getValue(), c))
+            return *r;
+
+    // 2. Shape/type-driven handlers. Each returns nullopt if it doesn't apply,
+    // or a definite success/failure if it does.
+    auto tryHandlers = [&](std::initializer_list<CastHandlerResult (*)(CastCtx &)> hs)
+        -> CastHandlerResult
     {
-        auto kind = kindAttr.getValue();
-        if (kind == mat_kind::kAddressForward)
-        {
-            if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-            {
-                rewriter.replaceOp(op, input);
-                return success();
-            }
-            return failure();
-        }
+        for (auto fn : hs)
+            if (auto r = fn(c))
+                return r;
+        return std::nullopt;
+    };
+    if (auto r = tryHandlers({castRefinementBridge,
+                              castAddressIndexBridge,
+                              castMemrefPtrBridge,
+                              castDynamicAggregateView,
+                              castPayloadlessErrorStruct,
+                              castNarrowErrorUnionPack1to1}))
+        return *r;
+    if (auto r = castNarrowErrorUnionPack2to1(c, adaptor))
+        return *r;
+    if (auto r = splitFromTaggedTwoOperandCast(c))
+        return *r;
 
-        if (kind == mat_kind::kPtrView)
-        {
-            if (op.getNumOperands() == 1 && op.getNumResults() == 1 &&
-                llvm::isa<sir::PtrType>(input.getType()))
-            {
-                rewriter.replaceOp(op, input);
-                return success();
-            }
-            return failure();
-        }
-
-        if (kind == mat_kind::kNormalizedErrorUnion)
-        {
-            if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-            {
-                Value packed = ensureU256(rewriter, loc, input);
-                rewriter.replaceOp(op, packed);
-                return success();
-            }
-        }
-
-        if (kind == mat_kind::kNormalizedAdt)
-        {
-            if (op.getNumOperands() == 1 && op.getNumResults() == 2)
-            {
-                auto u256Ty = sir::U256Type::get(rewriter.getContext());
-                if (op.getResult(0).getType() != u256Ty || op.getResult(1).getType() != u256Ty)
-                    return failure();
-
-                if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (ora::hasMaterializationKind(cast, mat_kind::kNormalizedAdt) && cast.getNumOperands() == 2)
-                    {
-                        Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
-                        Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
-                        rewriter.replaceOp(op, {tag, payload});
-                        return success();
-                    }
-                    if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
-                    {
-                        Value handle = cast.getOperand(0);
-                        if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
-                            return failure();
-                        auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(rewriter, loc, handle);
-                        rewriter.replaceOp(op, {tag, payload});
-                        return success();
-                    }
-                }
-            }
-        }
-
-        if (kind == mat_kind::kWideErrorUnionSplit)
-        {
-            if (op.getNumOperands() == 1 && op.getNumResults() == 2)
-            {
-                auto u256Ty = sir::U256Type::get(rewriter.getContext());
-                if (op.getResult(0).getType() != u256Ty)
-                    return failure();
-
-                Type payloadType = op.getResult(1).getType();
-
-                if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (cast.getNumOperands() == 2)
-                    {
-                        Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
-                        Value payload = cast.getOperand(1);
-                        if (payload.getType() != payloadType)
-                        {
-                            if (llvm::isa<sir::PtrType>(payloadType))
-                                payload = rewriter.create<sir::BitcastOp>(loc, payloadType, payload);
-                            else if (llvm::isa<sir::U256Type>(payloadType))
-                                payload = ensureU256(rewriter, loc, payload);
-                            else
-                                return failure();
-                        }
-                        rewriter.replaceOp(op, {tag, payload});
-                        return success();
-                    }
-                }
-
-                if (input.getType() == u256Ty && payloadType == u256Ty)
-                {
-                    Value packed = ensureU256(rewriter, loc, input);
-                    auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-                    Value one = rewriter.create<sir::ConstOp>(loc, u256Ty,
-                                                              mlir::IntegerAttr::get(u256IntTy, 1));
-                    Value tag = rewriter.create<sir::AndOp>(loc, u256Ty, packed, one);
-                    Value payload = rewriter.create<sir::ShrOp>(loc, u256Ty, packed, one);
-                    rewriter.replaceOp(op, {tag, payload});
-                    return success();
-                }
-            }
-            return failure();
-        }
-    }
-
-    // Refinement materializations: route through ora.{base_to_refinement,refinement_to_base}
-    // so phase5 patterns can erase them.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        auto isRefinement = [](Type ty) {
-            return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
-                             ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(ty);
-        };
-
-        if (isRefinement(resultType) && !isRefinement(input.getType()))
-        {
-            auto cast = rewriter.create<ora::BaseToRefinementOp>(loc, resultType, input);
-            rewriter.replaceOp(op, cast.getResult());
-            return success();
-        }
-
-        if (!isRefinement(resultType) && isRefinement(input.getType()))
-        {
-            auto cast = rewriter.create<ora::RefinementToBaseOp>(loc, resultType, input);
-            rewriter.replaceOp(op, cast.getResult());
-            return success();
-        }
-    }
-
-    // Address → sir.u256: strip address materialization cast.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (llvm::isa<sir::U256Type>(resultType) &&
-            llvm::isa<mlir::IndexType>(input.getType()))
-        {
-            auto i256 = mlir::IntegerType::get(rewriter.getContext(), 256);
-            Value asI256 = rewriter.create<arith::IndexCastOp>(loc, i256, input);
-            Value asU256 = rewriter.create<sir::BitcastOp>(loc, resultType, asI256);
-            rewriter.replaceOp(op, asU256);
-            return success();
-        }
-        if (llvm::isa<sir::U256Type>(resultType) &&
-            llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
-        {
-            rewriter.replaceOp(op, input);
-            return success();
-        }
-        // sir.u256 → address: same, just forward the value.
-        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(resultType) &&
-            llvm::isa<sir::U256Type>(input.getType()))
-        {
-            rewriter.replaceOp(op, input);
-            return success();
-        }
-    }
-
-    // Memref → ptr materialization during memref lowering.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (llvm::isa<sir::PtrType>(resultType) &&
-            llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
-        {
-            auto cast = rewriter.create<sir::BitcastOp>(loc, resultType, input);
-            rewriter.replaceOp(op, cast.getResult());
-            return success();
-        }
-    }
-
-    // Ptr-backed dynamic aggregates: the Ora view is just the underlying carrier.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (llvm::isa<mlir::NoneType>(resultType))
-        {
-            auto u256Ty = sir::U256Type::get(rewriter.getContext());
-            auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-            Value zero = rewriter.create<sir::ConstOp>(loc, u256Ty,
-                                                       mlir::IntegerAttr::get(u256IntTy, 0));
-            rewriter.replaceOp(op, zero);
-            return success();
-        }
-
-        if (llvm::isa<ora::StringType, ora::BytesType>(resultType) &&
-            llvm::isa<sir::PtrType>(input.getType()))
-        {
-            rewriter.replaceOp(op, input);
-            return success();
-        }
-    }
-
-    // Cancel ptr -> memref materialization: memrefs are just ptrs in SIR.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
-            llvm::isa<sir::PtrType>(input.getType()))
-        {
-            rewriter.replaceOp(op, input);
-            return success();
-        }
-    }
-
-    // Strip u256 -> payloadless ora.error struct materializations.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (llvm::isa<ora::StructType>(resultType) &&
-            llvm::isa<sir::U256Type>(input.getType()) &&
-            isPayloadlessErrorStruct(resultType, op))
-        {
-            rewriter.replaceOp(op, input);
-            return success();
-        }
-    }
-
-    // Handle ora.error_union without normalized attribute: treat as packed u256.
-    if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-    {
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
-        {
-            if (!isNarrowErrorUnion(errType))
-                return failure();
-            Value packed = ensureU256(rewriter, loc, input);
-            rewriter.replaceOp(op, packed);
-            return success();
-        }
-    }
-
-    // Narrow error_union materialization from (tag, payload): pack to u256.
-    if (op.getNumOperands() == 2 && op.getNumResults() == 1)
-    {
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
-        {
-            if (!isNarrowErrorUnion(errType))
-                return failure();
-            auto u256Ty = sir::U256Type::get(rewriter.getContext());
-            auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-            Value tag = ensureU256(rewriter, loc, adaptor.getOperands()[0]);
-            Value payload = ensureU256(rewriter, loc, adaptor.getOperands()[1]);
-            Value one = rewriter.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
-            Value shifted = rewriter.create<sir::ShlOp>(loc, u256Ty, payload, one);
-            Value packed = rewriter.create<sir::OrOp>(loc, u256Ty, shifted, tag);
-            rewriter.replaceOp(op, packed);
-            return success();
-        }
-    }
-
-    // Wide error_union materialization: split into (tag, payload-carrier).
-    if (op.getNumOperands() == 1 && op.getNumResults() == 2)
-    {
-        auto u256Ty = sir::U256Type::get(rewriter.getContext());
-        if (op.getResult(0).getType() == u256Ty)
-        {
-            Type payloadType = op.getResult(1).getType();
-
-            if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-            {
-                if (cast.getNumOperands() == 2)
-                {
-                    Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
-                    Value payload = cast.getOperand(1);
-                    if (payload.getType() != payloadType)
-                    {
-                        if (llvm::isa<sir::PtrType>(payloadType))
-                            payload = rewriter.create<sir::BitcastOp>(loc, payloadType, payload);
-                        else if (llvm::isa<sir::U256Type>(payloadType))
-                            payload = ensureU256(rewriter, loc, payload);
-                        else
-                            return failure();
-                    }
-                    rewriter.replaceOp(op, {tag, payload});
-                    return success();
-                }
-            }
-
-            if (input.getType() == u256Ty && payloadType == u256Ty)
-            {
-                Value packed = ensureU256(rewriter, loc, input);
-                auto u256IntTy = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-                Value one = rewriter.create<sir::ConstOp>(loc, u256Ty,
-                                                          mlir::IntegerAttr::get(u256IntTy, 1));
-                Value tag = rewriter.create<sir::AndOp>(loc, u256Ty, packed, one);
-                Value payload = rewriter.create<sir::ShrOp>(loc, u256Ty, packed, one);
-                rewriter.replaceOp(op, {tag, payload});
-                return success();
-            }
-        }
-    }
-
-    // Disable wide error_union packing to keep tag/payload in separate words.
-
-    if (input.getType() == resultType)
-    {
-        rewriter.replaceOp(op, input);
-        return success();
-    }
-
-    if (llvm::isa<sir::U256Type>(resultType))
-    {
-        Value packed = ensureU256(rewriter, loc, input);
-        rewriter.replaceOp(op, packed);
-        return success();
-    }
-
-    if (llvm::isa<sir::PtrType>(resultType))
-    {
-        if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, loc, resultType, input))
-        {
-            rewriter.replaceOp(op, *materialized);
-            return success();
-        }
-        Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, input);
-        rewriter.replaceOp(op, casted);
-        return success();
-    }
-
-    if (llvm::isa<mlir::IntegerType>(resultType))
-    {
-        Value casted = rewriter.create<sir::BitcastOp>(loc, resultType, input);
-        rewriter.replaceOp(op, casted);
-        return success();
-    }
-
+    // 3. Final fallback for unkeyed 1:1 casts.
+    if (auto r = castGenericFallback(c))
+        return *r;
     return failure();
 }
 
