@@ -3499,6 +3499,323 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
     return success();
 }
 
+// ---------------------------------------------------------------------------
+// convertOraReturn helpers
+//
+// Each handler dispatches one origType / shape and returns:
+//   - nullopt   = "doesn't apply, try the next handler"
+//   - success() = "lowered the return, op erased"
+//   - failure() = "applies but the carrier shape is wrong; give up"
+// ---------------------------------------------------------------------------
+namespace
+{
+    using ReturnHandlerResult = std::optional<LogicalResult>;
+
+    struct ReturnCtx
+    {
+        ora::ReturnOp op;
+        ArrayRef<Value> operands;
+        Value &retVal;        // reference; preprocessing rewrites may mutate
+        Type origType;
+        const TypeConverter *tc;
+        PatternRewriter &rewriter;
+        Location loc;
+        Type u256Type;
+        Type ptrType;
+        Type ui64Type;
+    };
+
+    // Strip a single-operand normalized error_union cast off the return value
+    // so that a narrow error_union return sees the packed u256 directly.
+    static void unpackNarrowErrorUnionRetVal(ReturnCtx &c)
+    {
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
+        if (!errType)
+            return;
+        if (!isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(c.retVal))
+            return;
+        auto cast = c.retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>();
+        if (!cast || !isNormalizedErrorUnionCast(cast) || cast.getNumOperands() != 1)
+            return;
+        c.retVal = ensureU256(c.rewriter, c.loc, cast.getOperand(0));
+    }
+
+    // Strip a u256-backed materialization cast off a payloadless ora.error
+    // struct return so the operand reaches its packed form.
+    static void unwrapPayloadlessErrorStructRetVal(ReturnCtx &c)
+    {
+        if (!isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
+            return;
+        auto cast = c.retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>();
+        if (!cast || cast.getNumOperands() != 1)
+            return;
+        if (llvm::isa<sir::U256Type>(cast.getOperand(0).getType()))
+            c.retVal = cast.getOperand(0);
+    }
+
+    // Wide ora.error_union (non-narrow or force-wide). Lowers to a pair-store
+    // ABI return: malloc 64, store tag at +0, payload at +32.
+    static ReturnHandlerResult returnWideErrorUnion(ReturnCtx &c)
+    {
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
+        if (!errType)
+            return std::nullopt;
+        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(c.retVal))
+            return std::nullopt;
+
+        auto eraseAndOk = [&]() -> LogicalResult {
+            c.rewriter.eraseOp(c.op);
+            return success();
+        };
+
+        if (c.operands.size() == 1)
+        {
+            if (auto cast = c.operands[0].getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (cast.getNumOperands() == 2)
+                {
+                    buildWideErrorUnionReturnFromParts(
+                        c.rewriter, c.loc, cast.getOperand(0), cast.getOperand(1),
+                        c.ptrType, c.u256Type, c.ui64Type);
+                    return eraseAndOk();
+                }
+            }
+        }
+        if (c.operands.size() == 2)
+        {
+            buildWideErrorUnionReturnFromParts(
+                c.rewriter, c.loc, c.operands[0], c.operands[1],
+                c.ptrType, c.u256Type, c.ui64Type);
+            return eraseAndOk();
+        }
+
+        SmallVector<Value> parts;
+        if (succeeded(materializeWideErrorUnion(c.rewriter, c.loc, c.op.getOperand(0), parts)) &&
+            parts.size() == 2)
+        {
+            buildWideErrorUnionReturnFromParts(
+                c.rewriter, c.loc, parts[0], parts[1],
+                c.ptrType, c.u256Type, c.ui64Type);
+            return eraseAndOk();
+        }
+
+        // Fallback: treat operand as ok payload unless explicitly marked error_id.
+        Value payload = ensureU256(c.rewriter, c.loc, c.op.getOperand(0));
+        Value tag = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 0));
+        if (auto cst = c.op.getOperand(0).getDefiningOp<sir::ConstOp>())
+        {
+            if (cst->hasAttr("ora.error_id"))
+                tag = c.rewriter.create<sir::ConstOp>(
+                    c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 1));
+        }
+        buildWideErrorUnionReturnFromParts(
+            c.rewriter, c.loc, tag, payload, c.ptrType, c.u256Type, c.ui64Type);
+        return eraseAndOk();
+    }
+
+    // Build (basePtr, sizeConst) and emit sir.return; the helper handles the
+    // common ADT pair return ABI: malloc kAdtCarrierSize, store tag/payload.
+    static LogicalResult emitAdtPairReturn(ReturnCtx &c, Value tag, Value payload)
+    {
+        Value mem = ora::adt_helpers::materializeAdtHandle(c.rewriter, c.loc, tag, payload);
+        Value sizeConst = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type,
+            mlir::IntegerAttr::get(c.ui64Type, ora::adt_helpers::kAdtCarrierSize));
+        c.rewriter.create<sir::ReturnOp>(c.loc, mem, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    static ReturnHandlerResult returnAdt(ReturnCtx &c)
+    {
+        if (!llvm::isa<ora::AdtType>(c.origType))
+            return std::nullopt;
+
+        SmallVector<Value, 2> parts;
+        if (c.operands.size() == 2)
+        {
+            parts.push_back(ensureU256(c.rewriter, c.loc, c.operands[0]));
+            parts.push_back(ensureU256(c.rewriter, c.loc, c.operands[1]));
+        }
+        else if (failed(materializeSplitAdtValue(c.rewriter, c.loc, c.retVal, parts)) || parts.size() != 2)
+        {
+            parts.clear();
+            if (c.op.getNumOperands() != 1 ||
+                failed(materializeSplitAdtValue(c.rewriter, c.loc, c.op.getOperand(0), parts)) ||
+                parts.size() != 2)
+                return c.rewriter.notifyMatchFailure(c.op, "ADT return expects split carrier");
+        }
+        return emitAdtPairReturn(c, parts[0], parts[1]);
+    }
+
+    // Resolve an ora.struct return — needs (fieldCount * 32) byte size and a
+    // ptr-typed retVal. The field count comes from the StructDecl, the
+    // StructInit, or the StructInstantiate that produced the operand.
+    static ReturnHandlerResult returnStruct(ReturnCtx &c)
+    {
+        auto structType = llvm::dyn_cast<ora::StructType>(c.origType);
+        if (!structType || isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
+            return std::nullopt;
+
+        FailureOr<uint64_t> fieldCount = getStructFieldCount(c.op.getOperation(), structType.getName());
+        if (failed(fieldCount))
+        {
+            if (auto initOp = c.op.getOperand(0).getDefiningOp<ora::StructInitOp>())
+                fieldCount = static_cast<uint64_t>(initOp.getFieldValues().size());
+            else if (auto instOp = c.op.getOperand(0).getDefiningOp<ora::StructInstantiateOp>())
+                fieldCount = static_cast<uint64_t>(instOp.getFieldValues().size());
+        }
+
+        Value sizeConst;
+        if (succeeded(fieldCount))
+            sizeConst = c.rewriter.create<sir::ConstOp>(
+                c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, (*fieldCount) * 32ULL));
+
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            c.retVal = materializeReturnPtrCarrier(c.rewriter, c.loc, c.tc, c.origType, c.ptrType, c.retVal);
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            return c.rewriter.notifyMatchFailure(c.op, "struct return expects SIR ptr value");
+
+        if (!sizeConst)
+            if (auto mallocOp = c.retVal.getDefiningOp<sir::MallocOp>())
+                sizeConst = mallocOp.getSize();
+        if (!sizeConst)
+            return c.rewriter.notifyMatchFailure(c.op, "failed to resolve struct byte size");
+
+        c.rewriter.create<sir::ReturnOp>(c.loc, c.retVal, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    static ReturnHandlerResult returnTuple(ReturnCtx &c)
+    {
+        auto tupleType = llvm::dyn_cast<ora::TupleType>(c.origType);
+        if (!tupleType)
+            return std::nullopt;
+
+        const uint64_t byteSize = static_cast<uint64_t>(tupleType.getElementTypes().size()) * 32ULL;
+        Value sizeConst = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, byteSize));
+
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            c.retVal = materializeReturnPtrCarrier(c.rewriter, c.loc, c.tc, c.origType, c.ptrType, c.retVal);
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            return c.rewriter.notifyMatchFailure(c.op, "tuple return expects SIR ptr value");
+
+        c.rewriter.create<sir::ReturnOp>(c.loc, c.retVal, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    // Two-operand fallback: same ABI as the ADT path, used for anything that
+    // arrives at the dispatcher already split into (tag, payload).
+    static ReturnHandlerResult returnTaggedPair(ReturnCtx &c)
+    {
+        if (c.operands.size() != 2)
+            return std::nullopt;
+        return emitAdtPairReturn(c, c.operands[0], c.operands[1]);
+    }
+
+    static ReturnHandlerResult returnDynamicBytes(ReturnCtx &c)
+    {
+        if (!llvm::isa<ora::StringType, ora::BytesType>(c.origType))
+            return std::nullopt;
+
+        // Return ABI for dynamic bytes: ptr + (len + 32).
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+        {
+            if (!c.tc)
+                return c.rewriter.notifyMatchFailure(c.op, "missing type converter");
+            Type convertedType = c.tc->convertType(c.retVal.getType());
+            if (convertedType && convertedType != c.retVal.getType())
+                c.retVal = c.rewriter.create<sir::BitcastOp>(c.loc, convertedType, c.retVal);
+        }
+
+        Value length = c.rewriter.create<sir::LoadOp>(c.loc, c.u256Type, c.retVal);
+        Value wordSize = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 32));
+        Value sizeConst = c.rewriter.create<sir::AddOp>(c.loc, c.u256Type, length, wordSize);
+        c.rewriter.create<sir::ReturnOp>(c.loc, c.retVal, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    static ReturnHandlerResult returnStaticMemref(ReturnCtx &c)
+    {
+        auto memref = llvm::dyn_cast<mlir::MemRefType>(c.origType);
+        if (!memref || !memref.hasStaticShape())
+            return std::nullopt;
+
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            c.retVal = materializeReturnPtrCarrier(c.rewriter, c.loc, c.tc, c.origType, c.ptrType, c.retVal);
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            return c.rewriter.notifyMatchFailure(c.op, "static memref return expects SIR ptr value");
+
+        auto wordCount = getStaticMemRefWordCount(c.origType);
+        if (failed(wordCount))
+            return c.rewriter.notifyMatchFailure(c.op, "failed to resolve static memref return size");
+
+        Value sizeConst = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, (*wordCount) * 32ULL));
+        c.rewriter.create<sir::ReturnOp>(c.loc, c.retVal, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    static ReturnHandlerResult returnSlice(ReturnCtx &c)
+    {
+        const bool isUnranked = llvm::isa<mlir::UnrankedMemRefType>(c.origType);
+        const bool isDynamic = llvm::isa<mlir::MemRefType>(c.origType) &&
+                               !llvm::cast<mlir::MemRefType>(c.origType).hasStaticShape();
+        if (!isUnranked && !isDynamic)
+            return std::nullopt;
+
+        if (!llvm::isa<sir::PtrType>(c.retVal.getType()))
+            c.retVal = materializeReturnPtrCarrier(c.rewriter, c.loc, c.tc, c.origType, c.ptrType, c.retVal);
+
+        Value length = c.rewriter.create<sir::LoadOp>(c.loc, c.u256Type, c.retVal);
+        Value wordSize = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 32));
+        Value lenBytes = c.rewriter.create<sir::MulOp>(c.loc, c.u256Type, length, wordSize);
+        Value sizeConst = c.rewriter.create<sir::AddOp>(c.loc, c.u256Type, lenBytes, wordSize);
+        c.rewriter.create<sir::ReturnOp>(c.loc, c.retVal, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
+    // Default: scalar EVM-word return. Coerce retVal to sir.u256, malloc 32,
+    // store, return.
+    static LogicalResult returnScalarFallback(ReturnCtx &c)
+    {
+        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(c.retVal.getType()))
+        {
+            if (intType.getWidth() == 1)
+                c.retVal = toCondU256(c.rewriter, c.loc, c.retVal);
+        }
+
+        if (!llvm::isa<sir::U256Type>(c.retVal.getType()))
+        {
+            if (!c.tc)
+                return c.rewriter.notifyMatchFailure(c.op, "missing type converter");
+            Type convertedType = c.tc->convertType(c.retVal.getType());
+            if (convertedType && convertedType != c.retVal.getType())
+                c.retVal = c.rewriter.create<sir::BitcastOp>(c.loc, convertedType, c.retVal);
+            else
+                c.retVal = c.rewriter.create<sir::BitcastOp>(c.loc, c.u256Type, c.retVal);
+        }
+        c.retVal = ensureU256(c.rewriter, c.loc, c.retVal);
+
+        Value sizeConst = c.rewriter.create<sir::ConstOp>(
+            c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 32));
+        Value mem = c.rewriter.create<sir::MallocOp>(c.loc, c.ptrType, sizeConst);
+        c.rewriter.create<sir::StoreOp>(c.loc, mem, c.retVal);
+        c.rewriter.create<sir::ReturnOp>(c.loc, mem, sizeConst);
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+} // namespace
+
 static LogicalResult convertOraReturn(
     ora::ReturnOp op,
     ArrayRef<Value> operands,
@@ -3508,17 +3825,15 @@ static LogicalResult convertOraReturn(
     DBG("ConvertReturnOp: matching return at " << op.getLoc());
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
-
     if (!ctx)
-    {
         return rewriter.notifyMatchFailure(op, "null context");
-    }
 
     ctx->getOrLoadDialect<sir::SIRDialect>();
     rewriter.setInsertionPoint(op);
+
     if (operands.empty())
     {
-        // Void return - use sir.iret with no operands (internal return)
+        // Void return — sir.iret with no operands.
         rewriter.create<sir::IRetOp>(loc, ValueRange{});
         rewriter.eraseOp(op);
         return success();
@@ -3526,321 +3841,44 @@ static LogicalResult convertOraReturn(
 
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-
     if (!u256Type || !ptrType)
         return rewriter.notifyMatchFailure(op, "failed to create SIR types");
 
     Value retVal = operands[0];
     if (!retVal)
         return rewriter.notifyMatchFailure(op, "null return operand");
+
+    // Use the operand's declared type. For returns inside scf.if merge blocks
+    // the operand may have been remapped, so prefer the actual operand value's
+    // type when available, falling back to the original op operand.
+    Type origType = (op.getNumOperands() > 0) ? op.getOperand(0).getType() : retVal.getType();
     auto ui64Type = mlir::IntegerType::get(ctx, evm::kU64Bits, mlir::IntegerType::Unsigned);
 
-    // Use the operand's type. For returns inside scf.if merge blocks the
-    // operand may have been remapped, so prefer the actual operand value's
-    // type when available, falling back to the original op operand.
-    Type origType;
-    if (op.getNumOperands() > 0)
-        origType = op.getOperand(0).getType();
-    else
-        origType = retVal.getType();
-    const bool is_bytes_return = llvm::isa<ora::StringType, ora::BytesType>(origType);
-    const bool is_static_memref_return = llvm::isa<mlir::MemRefType>(origType) &&
-                                         llvm::cast<mlir::MemRefType>(origType).hasStaticShape();
-    const bool is_slice_return = llvm::isa<mlir::UnrankedMemRefType>(origType) ||
-                                 (llvm::isa<mlir::MemRefType>(origType) &&
-                                  !llvm::cast<mlir::MemRefType>(origType).hasStaticShape());
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
-    {
-        const bool useWideCarrier = !isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal);
-        if (!useWideCarrier)
-        {
-            if (auto cast = retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-            {
-                if (isNormalizedErrorUnionCast(cast) && cast.getNumOperands() == 1)
-                {
-                    retVal = ensureU256(rewriter, loc, cast.getOperand(0));
-                }
-            }
-        }
-    }
-    else if (isPayloadlessErrorStruct(origType, op.getOperation()))
-    {
-        if (auto cast = retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        {
-            if (cast.getNumOperands() == 1 && llvm::isa<sir::U256Type>(cast.getOperand(0).getType()))
-                retVal = cast.getOperand(0);
-        }
-    }
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
-    {
-        if (!isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(retVal))
-        {
-            if (operands.size() == 1)
-            {
-                if (auto cast = operands[0].getDefiningOp<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (cast.getNumOperands() == 2)
-                    {
-                        buildWideErrorUnionReturnFromParts(
-                            rewriter, loc, cast.getOperand(0), cast.getOperand(1), ptrType, u256Type, ui64Type);
-                        rewriter.eraseOp(op);
-                        return success();
-                    }
-                }
-            }
-            if (operands.size() == 2)
-            {
-                buildWideErrorUnionReturnFromParts(
-                    rewriter, loc, operands[0], operands[1], ptrType, u256Type, ui64Type);
-                rewriter.eraseOp(op);
-                return success();
-            }
+    ReturnCtx c{op, operands, retVal, origType, tc, rewriter, loc, u256Type, ptrType, ui64Type};
 
-            SmallVector<Value> parts;
-            if (failed(materializeWideErrorUnion(rewriter, loc, op.getOperand(0), parts)) || parts.size() != 2)
-            {
-                // Fallback: treat operand as ok payload unless explicitly marked error_id.
-                Value payload = ensureU256(rewriter, loc, op.getOperand(0));
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value tag = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
-                if (auto cst = op.getOperand(0).getDefiningOp<sir::ConstOp>())
-                {
-                    if (cst->hasAttr("ora.error_id"))
-                        tag = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
-                }
+    // Preprocessing: peel narrow error_union / payloadless-error-struct
+    // materialization casts off retVal so handlers see the packed form.
+    unpackNarrowErrorUnionRetVal(c);
+    unwrapPayloadlessErrorStructRetVal(c);
 
-                buildWideErrorUnionReturnFromParts(
-                    rewriter, loc, tag, payload, ptrType, u256Type, ui64Type);
-                rewriter.eraseOp(op);
-                return success();
-            }
+    // Type-driven dispatch. First match wins; nullopt means "not my shape".
+    using ReturnHandler = ReturnHandlerResult (*)(ReturnCtx &);
+    static const ReturnHandler kHandlers[] = {
+        returnWideErrorUnion,
+        returnAdt,
+        returnStruct,
+        returnTuple,
+        returnTaggedPair,
+        returnDynamicBytes,
+        returnStaticMemref,
+        returnSlice,
+    };
+    for (auto fn : kHandlers)
+        if (auto r = fn(c))
+            return *r;
 
-            buildWideErrorUnionReturnFromParts(
-                rewriter, loc, parts[0], parts[1], ptrType, u256Type, ui64Type);
-            rewriter.eraseOp(op);
-            return success();
-        }
-    }
-
-    if (llvm::isa<ora::AdtType>(origType))
-    {
-        SmallVector<Value, 2> parts;
-        if (operands.size() == 2)
-        {
-            parts.push_back(ensureU256(rewriter, loc, operands[0]));
-            parts.push_back(ensureU256(rewriter, loc, operands[1]));
-        }
-        else
-        {
-            Value adtValue = retVal;
-            if (failed(materializeSplitAdtValue(rewriter, loc, adtValue, parts)) || parts.size() != 2)
-            {
-                if (op.getNumOperands() == 1)
-                {
-                    parts.clear();
-                    if (failed(materializeSplitAdtValue(rewriter, loc, op.getOperand(0), parts)) || parts.size() != 2)
-                        return rewriter.notifyMatchFailure(op, "ADT return expects split carrier");
-                }
-                else
-                {
-                    return rewriter.notifyMatchFailure(op, "ADT return expects split carrier");
-                }
-            }
-        }
-
-        Value mem = ora::adt_helpers::materializeAdtHandle(
-            rewriter, loc, parts[0], parts[1]);
-        Value sizeConst = rewriter.create<sir::ConstOp>(
-            loc, u256Type,
-            mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize));
-        rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (auto structType = llvm::dyn_cast<ora::StructType>(origType);
-        structType && !isPayloadlessErrorStruct(origType, op.getOperation()))
-    {
-        FailureOr<uint64_t> fieldCount = getStructFieldCount(op.getOperation(), structType.getName());
-        if (failed(fieldCount))
-        {
-            if (auto initOp = op.getOperand(0).getDefiningOp<ora::StructInitOp>())
-            {
-                fieldCount = static_cast<uint64_t>(initOp.getFieldValues().size());
-            }
-            else if (auto instOp = op.getOperand(0).getDefiningOp<ora::StructInstantiateOp>())
-            {
-                fieldCount = static_cast<uint64_t>(instOp.getFieldValues().size());
-            }
-        }
-        Value sizeConst;
-        if (succeeded(fieldCount))
-        {
-            const uint64_t byteSize = (*fieldCount) * 32ULL;
-            auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
-            sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-        }
-
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-        {
-            retVal = materializeReturnPtrCarrier(rewriter, loc, tc, origType, ptrType, retVal);
-        }
-
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-            return rewriter.notifyMatchFailure(op, "struct return expects SIR ptr value");
-
-        if (!sizeConst)
-        {
-            if (auto mallocOp = retVal.getDefiningOp<sir::MallocOp>())
-            {
-                sizeConst = mallocOp.getSize();
-            }
-        }
-
-        if (!sizeConst)
-            return rewriter.notifyMatchFailure(op, "failed to resolve struct byte size");
-
-        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (auto tupleType = llvm::dyn_cast<ora::TupleType>(origType))
-    {
-        Value sizeConst;
-        const uint64_t byteSize = static_cast<uint64_t>(tupleType.getElementTypes().size()) * 32ULL;
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
-        sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-        {
-            retVal = materializeReturnPtrCarrier(rewriter, loc, tc, origType, ptrType, retVal);
-        }
-
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-            return rewriter.notifyMatchFailure(op, "tuple return expects SIR ptr value");
-
-        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (operands.size() == 2)
-    {
-        Value mem = ora::adt_helpers::materializeAdtHandle(
-            rewriter, loc, operands[0], operands[1]);
-        Value sizeConst = rewriter.create<sir::ConstOp>(
-            loc, u256Type,
-            mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize));
-        rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (is_bytes_return)
-    {
-        // Return ABI for dynamic bytes: ptr + (len + 32)
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-        {
-            if (!tc)
-                return rewriter.notifyMatchFailure(op, "missing type converter");
-            Type convertedType = tc->convertType(retVal.getType());
-            if (convertedType && convertedType != retVal.getType())
-            {
-                retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
-            }
-        }
-
-        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, retVal);
-        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-        Value sizeConst = rewriter.create<sir::AddOp>(loc, u256Type, length, wordSize);
-
-        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (is_static_memref_return)
-    {
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-        {
-            retVal = materializeReturnPtrCarrier(rewriter, loc, tc, origType, ptrType, retVal);
-        }
-
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-            return rewriter.notifyMatchFailure(op, "static memref return expects SIR ptr value");
-
-        auto wordCount = getStaticMemRefWordCount(origType);
-        if (failed(wordCount))
-            return rewriter.notifyMatchFailure(op, "failed to resolve static memref return size");
-
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, (*wordCount) * 32ULL);
-        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-
-        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    if (is_slice_return)
-    {
-        if (!llvm::isa<sir::PtrType>(retVal.getType()))
-        {
-            retVal = materializeReturnPtrCarrier(rewriter, loc, tc, origType, ptrType, retVal);
-        }
-
-        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, retVal);
-        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-        Value lenBytes = rewriter.create<sir::MulOp>(loc, u256Type, length, wordSize);
-        Value sizeConst = rewriter.create<sir::AddOp>(loc, u256Type, lenBytes, wordSize);
-
-        rewriter.create<sir::ReturnOp>(loc, retVal, sizeConst);
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    // Ensure the value is SIR u256 type (adaptor should have already converted it)
-    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(retVal.getType()))
-    {
-        if (intType.getWidth() == 1)
-        {
-            retVal = toCondU256(rewriter, loc, retVal);
-        }
-    }
-
-    if (!llvm::isa<sir::U256Type>(retVal.getType()))
-    {
-        // Type converter should have handled this, but fallback to bitcast if needed
-        if (!tc)
-            return rewriter.notifyMatchFailure(op, "missing type converter");
-        Type convertedType = tc->convertType(retVal.getType());
-        if (convertedType && convertedType != retVal.getType())
-        {
-            retVal = rewriter.create<sir::BitcastOp>(loc, convertedType, retVal);
-        }
-        else
-        {
-            // Force conversion to u256
-            retVal = rewriter.create<sir::BitcastOp>(loc, u256Type, retVal);
-        }
-    }
-    // Ensure scalar ABI return payload is always an EVM word.
-    retVal = ensureU256(rewriter, loc, retVal);
-
-    // Default return size is 32 bytes (EVM word)
-    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 32);
-    Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-
-    // Allocate memory
-    Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
-
-    // Store the return value into memory
-    rewriter.create<sir::StoreOp>(loc, mem, retVal);
-
-    // Replace func.return with sir.return %ptr, %len (EVM RETURN op)
-    rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
-    rewriter.eraseOp(op);
-    return success();
+    // Scalar EVM-word default.
+    return returnScalarFallback(c);
 }
 
 // -----------------------------------------------------------------------------
