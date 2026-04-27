@@ -2841,6 +2841,40 @@ test "compiler const eval compares enum constants" {
     try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
 }
 
+test "compiler const eval matches payload-carrying enum variants" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\pub fn folded() -> u256 {
+        \\    return comptime {
+        \\        let event = Event.Pair(2, 3);
+        \\        let folded = switch (event) {
+        \\            Event.Empty => 0,
+        \\            Event.Value(value) => value,
+        \\            Event.Pair(lhs, rhs) => lhs + rhs,
+        \\        };
+        \\        folded;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 5), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval compares address literals" {
     const source_text =
         \\pub fn same() -> bool {

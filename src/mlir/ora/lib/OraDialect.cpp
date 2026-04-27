@@ -179,7 +179,8 @@ namespace mlir
                 const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
                 const int64_t defaultIndex = defaultIndexAttr ? defaultIndexAttr.getInt() : -1;
 
-                for (size_t i = 0; i < op.getCases().size(); ++i)
+                const size_t numRegions = op->getNumRegions();
+                for (size_t i = 0; i < numRegions; ++i)
                 {
                     p.printNewline();
                     p << "  ";
@@ -208,7 +209,7 @@ namespace mlir
                     }
 
                     p << " => ";
-                    auto &region = op.getCases()[i];
+                    auto &region = op->getRegion(i);
                     if (region.empty())
                     {
                         p << "{}";
@@ -263,7 +264,8 @@ namespace mlir
             if (parser.parseGreater())
                 return {};
 
-            return StructType::get(parser.getContext(), name);
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return StructType::get(parser.getContext(), nameRef);
         }
 
         void StructType::print(::mlir::AsmPrinter &printer) const
@@ -412,7 +414,8 @@ namespace mlir
             if (parser.parseGreater())
                 return {};
 
-            return EnumType::get(parser.getContext(), name, reprType);
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return EnumType::get(parser.getContext(), nameRef, reprType);
         }
 
         void EnumType::print(::mlir::AsmPrinter &printer) const

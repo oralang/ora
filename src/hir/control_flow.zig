@@ -829,10 +829,31 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (switch_stmt.label != null) {
                 return @This().lowerLabeledSwitchStmt(self, switch_stmt, locals);
             }
-            const raw_condition = try self.lowerExpr(switch_stmt.condition, locals);
+            const raw_condition = try @This().lowerSwitchRawCondition(self, switch_stmt.condition, locals);
             const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_stmt.range);
             if (try @This().lowerErrorUnionMatchStmt(self, switch_stmt, condition, locals)) |terminated| return terminated;
             return @This().lowerSwitchStmtWithCondition(self, switch_stmt, raw_condition, condition, locals);
+        }
+
+        fn lowerSwitchRawCondition(self: *FunctionLowerer, condition_expr: ast.ExprId, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            switch (self.parent.file.expression(condition_expr).*) {
+                .BoolLiteral => |literal| {
+                    const op = createIntegerConstant(
+                        self.parent.context,
+                        self.parent.location(literal.range),
+                        defaultIntegerType(self.parent.context),
+                        if (literal.value) 1 else 0,
+                    );
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, op);
+                },
+                else => {},
+            }
+
+            const raw_condition = try self.lowerExpr(condition_expr, locals);
+            if (!mlir.oraValueIsNull(raw_condition) and !mlir.oraTypeIsNull(mlir.oraValueGetType(raw_condition))) return raw_condition;
+
+            return error.MlirOperationCreationFailed;
         }
 
         fn lowerSwitchCondition(self: *FunctionLowerer, condition: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
@@ -1384,7 +1405,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerSwitchExpr(self: *FunctionLowerer, expr_id: ast.ExprId, switch_expr: ast.SwitchExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            const raw_condition = try self.lowerExpr(switch_expr.condition, locals);
+            const raw_condition = try @This().lowerSwitchRawCondition(self, switch_expr.condition, locals);
             const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_expr.range);
             if (try @This().lowerErrorUnionMatchExpr(self, expr_id, switch_expr, condition, locals)) |value| return value;
             const pattern_data = (try self.buildSwitchExprPatternData(switch_expr)) orelse {
@@ -1867,6 +1888,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            switch (self.parent.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| return support.parseIntLiteral(literal.text),
+                .BoolLiteral => |literal| return if (literal.value) 1 else 0,
+                else => {},
+            }
             if (self.parent.const_eval.values[expr_id.index()]) |value| {
                 return switch (value) {
                     .integer => |integer| integer.toInt(i64) catch null,

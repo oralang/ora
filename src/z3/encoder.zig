@@ -779,8 +779,10 @@ pub const Encoder = struct {
         if (!mlir.oraTypeIsAEnum(ty)) return null;
         const type_text = try self.printMlirTypeOwned(ty);
         defer self.allocator.free(type_text);
-        const enum_name = parseEnumTypeName(type_text) orelse return error.UnsupportedOperation;
-        return try self.getEnumSortByName(enum_name);
+        const enum_name = self.resolveRegisteredEnumName(type_text) orelse
+            parseEnumTypeName(type_text) orelse return error.UnsupportedOperation;
+        const canonical_name = self.resolveRegisteredEnumName(enum_name) orelse enum_name;
+        return try self.getEnumSortByName(canonical_name);
     }
 
     fn getEnumSortByName(self: *Encoder, enum_name: []const u8) EncodeError!EnumSort {
@@ -12339,10 +12341,30 @@ pub const Encoder = struct {
                 if (quoted.len > 0) return quoted;
             }
         }
-        const comma = std.mem.indexOfScalar(u8, body, ',') orelse body.len;
-        const inner = std.mem.trim(u8, body[0..comma], " \t\n\r\"");
+        const separator = std.mem.indexOfAny(u8, body, ",:") orelse body.len;
+        const inner = std.mem.trim(u8, body[0..separator], " \t\n\r\"@");
         if (inner.len == 0) return null;
         return inner;
+    }
+
+    fn resolveRegisteredEnumName(self: *Encoder, query: []const u8) ?[]const u8 {
+        if (self.enum_decl_ops.contains(query)) return query;
+
+        const trimmed = std.mem.trim(u8, query, " \t\n\r\"@");
+        if (trimmed.len > 0 and self.enum_decl_ops.contains(trimmed)) return trimmed;
+
+        if (std.mem.lastIndexOfAny(u8, trimmed, ".:")) |sep| {
+            const suffix = trimmed[sep + 1 ..];
+            if (suffix.len > 0 and self.enum_decl_ops.contains(suffix)) return suffix;
+        }
+
+        var it = self.enum_decl_ops.iterator();
+        while (it.next()) |entry| {
+            const registered = entry.key_ptr.*;
+            if (registered.len > 0 and std.mem.endsWith(u8, trimmed, registered)) return registered;
+            if (registered.len > 0 and std.mem.indexOf(u8, trimmed, registered) != null) return registered;
+        }
+        return null;
     }
 
     fn resolveRegisteredStructName(self: *Encoder, query: []const u8) ?[]const u8 {
