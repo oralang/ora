@@ -106,32 +106,6 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        /// ora.adt.tag → low-byte tag extraction.
-        class ConvertAdtTagOp : public ConversionPattern
-        {
-        public:
-            ConvertAdtTagOp(const TypeConverter &converter, MLIRContext *ctx)
-                : ConversionPattern(converter, ora::AdtTagOp::getOperationName(), 1, ctx) {}
-
-            LogicalResult matchAndRewrite(
-                Operation *op,
-                ArrayRef<Value> operands,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
-        /// ora.adt.payload → packed payload extraction.
-        class ConvertAdtPayloadOp : public ConversionPattern
-        {
-        public:
-            ConvertAdtPayloadOp(const TypeConverter &converter, MLIRContext *ctx)
-                : ConversionPattern(converter, ora::AdtPayloadOp::getOperationName(), 1, ctx) {}
-
-            LogicalResult matchAndRewrite(
-                Operation *op,
-                ArrayRef<Value> operands,
-                ConversionPatternRewriter &rewriter) const override;
-        };
-
         /// ora.struct_field_store → sir.addptr + sir.store.
         class ConvertStructFieldStoreOp : public OpConversionPattern<ora::StructFieldStoreOp>
         {

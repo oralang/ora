@@ -485,28 +485,6 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     return success();
 }
 
-LogicalResult ConvertAdtTagOp::matchAndRewrite(
-    Operation *operation,
-    ArrayRef<Value> operands,
-    ConversionPatternRewriter &rewriter) const
-{
-    auto op = llvm::dyn_cast<ora::AdtTagOp>(operation);
-    if (!op)
-        return failure();
-    return ora::adt_helpers::convertAdtTagCommon(op, operands, rewriter);
-}
-
-LogicalResult ConvertAdtPayloadOp::matchAndRewrite(
-    Operation *operation,
-    ArrayRef<Value> operands,
-    ConversionPatternRewriter &rewriter) const
-{
-    auto op = llvm::dyn_cast<ora::AdtPayloadOp>(operation);
-    if (!op)
-        return failure();
-    return ora::adt_helpers::convertAdtPayloadCommon(op, operands, getTypeConverter(), rewriter);
-}
-
 // ---------------------------------------------------------------------------
 // ora.struct_field_store → sir.addptr + sir.store
 // ---------------------------------------------------------------------------

@@ -44,6 +44,17 @@ static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
 }
 
+// Flatten OneToN-adapted operands into a single SmallVector<Value>.
+// Templated so it works with each pattern's own OneToNOpAdaptor type alias.
+template <typename AdaptorT>
+static SmallVector<Value, 4> flattenOneToNOperands(AdaptorT adaptor)
+{
+    SmallVector<Value, 4> out;
+    for (ValueRange range : adaptor.getOperands())
+        out.append(range.begin(), range.end());
+    return out;
+}
+
 static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structName)
 {
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -2376,10 +2387,7 @@ LogicalResult ConvertErrorIsErrorOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 4> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
-    return convertErrorIsError(op, flatOperands, getTypeConverter(), rewriter);
+    return convertErrorIsError(op, flattenOneToNOperands(adaptor), getTypeConverter(), rewriter);
 }
 
 // -----------------------------------------------------------------------------
@@ -2579,10 +2587,7 @@ LogicalResult ConvertErrorUnwrapOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 4> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
-    return convertErrorExtractCommon(op, flatOperands, getTypeConverter(), rewriter);
+    return convertErrorExtractCommon(op, flattenOneToNOperands(adaptor), getTypeConverter(), rewriter);
 }
 
 LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
@@ -2590,8 +2595,7 @@ LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
     typename ora::ErrorGetErrorOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 2> flatOperands;
-    flatOperands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
+    SmallVector<Value, 2> flatOperands(adaptor.getOperands().begin(), adaptor.getOperands().end());
     return convertErrorExtractCommon(op, flatOperands, getTypeConverter(), rewriter);
 }
 
@@ -2600,10 +2604,7 @@ LogicalResult ConvertErrorGetErrorOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 4> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
-    return convertErrorExtractCommon(op, flatOperands, getTypeConverter(), rewriter);
+    return convertErrorExtractCommon(op, flattenOneToNOperands(adaptor), getTypeConverter(), rewriter);
 }
 
 LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
@@ -2611,8 +2612,7 @@ LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
     typename ora::AdtTagOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 2> flatOperands;
-    flatOperands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
+    SmallVector<Value, 2> flatOperands(adaptor.getOperands().begin(), adaptor.getOperands().end());
     return ora::adt_helpers::convertAdtTagCommon(op, flatOperands, rewriter);
 }
 
@@ -2621,10 +2621,7 @@ LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 4> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
-    return ora::adt_helpers::convertAdtTagCommon(op, flatOperands, rewriter);
+    return ora::adt_helpers::convertAdtTagCommon(op, flattenOneToNOperands(adaptor), rewriter);
 }
 
 LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
@@ -2632,8 +2629,7 @@ LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
     typename ora::AdtPayloadOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 2> flatOperands;
-    flatOperands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
+    SmallVector<Value, 2> flatOperands(adaptor.getOperands().begin(), adaptor.getOperands().end());
     return ora::adt_helpers::convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
 }
 
@@ -2642,10 +2638,7 @@ LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
     OneToNOpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    SmallVector<Value, 4> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
-    return ora::adt_helpers::convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
+    return ora::adt_helpers::convertAdtPayloadCommon(op, flattenOneToNOperands(adaptor), getTypeConverter(), rewriter);
 }
 
 // -----------------------------------------------------------------------------
@@ -3879,13 +3872,10 @@ LogicalResult ConvertReturnOp::matchAndRewrite(
     if (payloadless_only and !opUsesPayloadlessErrorStruct(op))
         return failure();
 
-    SmallVector<Value> flatOperands;
-    for (ValueRange range : adaptor.getOperands())
-        flatOperands.append(range.begin(), range.end());
+    auto flatOperands = flattenOneToNOperands(adaptor);
     if (flatOperands.empty() && op.getNumOperands() != 0)
         flatOperands.append(op.getOperands().begin(), op.getOperands().end());
-    auto result = convertOraReturn(op, flatOperands, getTypeConverter(), rewriter);
-    return result;
+    return convertOraReturn(op, flatOperands, getTypeConverter(), rewriter);
 }
 
 LogicalResult ConvertReturnOpPre::matchAndRewrite(
