@@ -1894,93 +1894,50 @@ public:
                 }
             }
 
-            // Cleanup: strip any remaining normalized error_union casts.
-            SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;
-            module.walk([&](mlir::UnrealizedConversionCastOp op)
-                        {
+            // Cleanup: collapse every surviving unrealized cast.
+            //   - 1:1 cast → forward operand and erase.
+            //   - normalized_error_union / normalized_adt with all u256 operands
+            //     → users have been rewired earlier; just erase the carrier.
+            // Earlier "kind-specific preservation" walks were redundant because
+            // the catch-all 1:1 forward already swept those kinds.
+            auto isNormalizedU256Pack = [](mlir::UnrealizedConversionCastOp op) {
                 if (!ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) &&
                     !ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt))
-                    return;
+                    return false;
                 if (op.getNumResults() != 1)
-                    return;
-                if (!llvm::all_of(op.getOperands(), [](Value operand) { return llvm::isa<sir::U256Type>(operand.getType()); }))
-                    return;
-                normalizedCasts.push_back(op); });
-            for (auto castOp : normalizedCasts)
+                    return false;
+                return llvm::all_of(op.getOperands(),
+                                    [](Value v) { return llvm::isa<sir::U256Type>(v.getType()); });
+            };
+            SmallVector<mlir::UnrealizedConversionCastOp, 32> castsToDrop;
+            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+                if ((op.getNumOperands() == 1 && op.getNumResults() == 1) || isNormalizedU256Pack(op))
+                    castsToDrop.push_back(op);
+            });
+            for (auto castOp : castsToDrop)
             {
-                if (castOp.getNumOperands() == 1)
-                {
+                if (castOp.getNumOperands() == 1 && castOp.getNumResults() == 1)
                     castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
-                }
                 castOp.erase();
             }
 
-            // Cleanup: strip remaining trivial ptr-backed aggregate view casts.
-            SmallVector<mlir::UnrealizedConversionCastOp, 16> aggregateViewCasts;
-            module.walk([&](mlir::UnrealizedConversionCastOp op)
-                        {
-                if (ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) ||
-                    ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt) ||
-                    ora::hasMaterializationKind(op, mat_kind::kAdtHandleView))
-                    return;
-                if (op.getNumOperands() != 1 || op.getNumResults() != 1)
-                    return;
-                if (!llvm::isa<sir::PtrType, sir::U256Type>(op.getOperand(0).getType()))
-                    return;
-                if (llvm::isa<ora::StructType, ora::TupleType, ora::StringType, ora::BytesType, ora::AdtType>(op.getResult(0).getType()))
-                    aggregateViewCasts.push_back(op); });
-            for (auto castOp : aggregateViewCasts)
-            {
-                castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
-                castOp.erase();
-            }
-
-            // Cleanup: strip residual refinement ops (materializations may create them).
-            SmallVector<ora::BaseToRefinementOp, 8> residualB2R;
-            SmallVector<ora::RefinementToBaseOp, 8> residualR2B;
-            module.walk([&](ora::BaseToRefinementOp op)
-                        { residualB2R.push_back(op); });
-            module.walk([&](ora::RefinementToBaseOp op)
-                        { residualR2B.push_back(op); });
-            for (auto op : residualB2R)
-            {
-                op.getResult().replaceAllUsesWith(op.getValue());
-                op.erase();
-            }
-            for (auto op : residualR2B)
-            {
-                op.getResult().replaceAllUsesWith(op.getValue());
-                op.erase();
-            }
-
-            // Cleanup: strip sir.bitcast ops whose result is an Ora refinement type.
-            // These are created by source materializations during conversion.
-            auto isOraRefinement = [](Type t)
-            {
+            // Cleanup: strip residual refinement bridges and refinement-typed
+            // sir.bitcast results created by source materializations.
+            auto isOraRefinement = [](Type t) {
                 return llvm::isa<ora::MinValueType, ora::MaxValueType, ora::InRangeType,
                                  ora::ScaledType, ora::ExactType, ora::NonZeroAddressType>(t);
             };
-            SmallVector<sir::BitcastOp, 16> refinementBitcasts;
-            module.walk([&](sir::BitcastOp op)
-                        {
-                if (isOraRefinement(op.getResult().getType()))
-                    refinementBitcasts.push_back(op); });
-            for (auto op : refinementBitcasts)
+            SmallVector<Operation *, 16> refinementOps;
+            module.walk([&](Operation *op) {
+                if (isa<ora::BaseToRefinementOp, ora::RefinementToBaseOp>(op))
+                    refinementOps.push_back(op);
+                else if (auto bc = dyn_cast<sir::BitcastOp>(op); bc && isOraRefinement(bc.getResult().getType()))
+                    refinementOps.push_back(op);
+            });
+            for (auto *op : refinementOps)
             {
-                op.getResult().replaceAllUsesWith(op.getOperand());
-                op.erase();
-            }
-
-            // Cleanup: strip all remaining 1:1 unrealized_conversion_casts.
-            SmallVector<mlir::UnrealizedConversionCastOp, 16> trailingCasts;
-            module.walk([&](mlir::UnrealizedConversionCastOp op)
-                        {
-                if (op.getNumOperands() == 1 && op.getNumResults() == 1)
-                    trailingCasts.push_back(op); });
-            for (auto castOp : trailingCasts)
-            {
-                castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
-                castOp.erase();
+                op->getResult(0).replaceAllUsesWith(op->getOperand(0));
+                op->erase();
             }
 
             // Cleanup: replace sir.icall to error constructors with sir.const.
@@ -2029,44 +1986,32 @@ public:
                 }
             }
 
-            // Verify no unrealized casts remain.
+            // Verify no unrealized casts remain. Kinds that survive on
+            // purpose (e.g. carriers consumed by later phases) are excluded.
+            auto isPreservedMaterializationKind = [](mlir::UnrealizedConversionCastOp castOp) {
+                return ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
+                       ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit);
+            };
+            const bool debug = mlir::ora::isDebugEnabled();
             bool leftoverUnrealized = false;
-            if (mlir::ora::isDebugEnabled())
+            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
             {
-                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
-                        continue;
-                    leftoverUnrealized = true;
-                    llvm::errs() << "[OraToSIR] Phase4 post-scan: unrealized cast at "
-                                 << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                                 << " results=" << castOp.getNumResults() << "\n";
-                }
-                llvm::errs().flush();
-            }
-            else
-            {
-                for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
-                        continue;
-                    (void)castOp;
-                    leftoverUnrealized = true;
+                if (isPreservedMaterializationKind(castOp))
+                    continue;
+                leftoverUnrealized = true;
+                if (!debug)
                     break;
-                }
+                llvm::errs() << "[OraToSIR] Phase4 post-scan: unrealized cast at "
+                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                             << " results=" << castOp.getNumResults() << "\n";
             }
+            if (debug)
+                llvm::errs().flush();
             if (leftoverUnrealized)
             {
                 module.emitError("[OraToSIR] Phase4 post-scan: unrealized casts remain");
@@ -2102,32 +2047,21 @@ public:
                 llvm::errs().flush();
             }
             int64_t unrealizedByName = 0;
-            module.walk([&](Operation *op)
-                        {
-                if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
-                {
-                    auto castOp = llvm::cast<mlir::UnrealizedConversionCastOp>(op);
-                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
-                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
-                        return;
-                    ++unrealizedByName;
-                    if (mlir::ora::isDebugEnabled())
-                    {
-                        llvm::errs() << "[OraToSIR] Phase4 name-scan: unrealized cast at "
-                                     << op->getLoc() << " operands=" << op->getNumOperands()
-                                     << " results=" << op->getNumResults();
-                        if (op->getNumOperands() > 0)
-                            llvm::errs() << " in=" << op->getOperand(0).getType();
-                        if (op->getNumResults() > 0)
-                            llvm::errs() << " out=" << op->getResult(0).getType();
-                        llvm::errs() << "\n";
-                    }
-                } });
+            module.walk([&](mlir::UnrealizedConversionCastOp castOp) {
+                if (isPreservedMaterializationKind(castOp))
+                    return;
+                ++unrealizedByName;
+                if (!debug)
+                    return;
+                llvm::errs() << "[OraToSIR] Phase4 name-scan: unrealized cast at "
+                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                             << " results=" << castOp.getNumResults();
+                if (castOp.getNumOperands() > 0)
+                    llvm::errs() << " in=" << castOp.getOperand(0).getType();
+                if (castOp.getNumResults() > 0)
+                    llvm::errs() << " out=" << castOp.getResult(0).getType();
+                llvm::errs() << "\n";
+            });
             if (mlir::ora::isDebugEnabled())
             {
                 llvm::errs() << "[OraToSIR] Post-Phase4: name-scan done (count=" << unrealizedByName << ")\n";
