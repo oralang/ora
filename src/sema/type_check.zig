@@ -1891,7 +1891,7 @@ const TypeChecker = struct {
                     try self.visitBody(arm.body);
                 }
                 if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
-                try self.requireExhaustiveErrorUnionMatch(condition_type, switch_stmt.arms, switch_stmt.else_body != null, switch_stmt.range);
+                try self.requireExhaustiveSumMatch(condition_type, switch_stmt.arms, switch_stmt.else_body != null, switch_stmt.range);
             },
             .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
@@ -2075,7 +2075,7 @@ const TypeChecker = struct {
                 }
                 if (saw_mismatch) result_type = .{ .unknown = {} };
                 self.expr_types[expr_id.index()] = result_type;
-                try self.requireExhaustiveErrorUnionMatch(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
+                try self.requireExhaustiveSumMatch(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
             },
             .Comptime => |comptime_expr| {
                 try self.visitBody(comptime_expr.body);
@@ -6439,16 +6439,31 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn requireExhaustiveErrorUnionMatch(
+    fn requireExhaustiveSumMatch(
         self: *TypeChecker,
         condition_type: Type,
         arms: anytype,
         has_else: bool,
         range: source.TextRange,
     ) !void {
-        if (condition_type.kind() != .error_union) return;
         if (has_else) return;
 
+        switch (condition_type.kind()) {
+            .error_union => {
+                if (!self.errorUnionPatternsAreExhaustive(condition_type, arms)) {
+                    try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{});
+                }
+            },
+            .enum_ => {
+                if (!self.enumPatternsAreExhaustive(condition_type, arms)) {
+                    try self.emitRangeError(range, "match on enum must cover all variants or provide else", .{});
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn errorUnionPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
         var seen_ok = false;
         var seen_err = false;
         var all_named_errors_covered = true;
@@ -6487,9 +6502,74 @@ const TypeChecker = struct {
             }
         }
 
-        if (!(seen_ok and (seen_err or all_named_errors_covered))) {
-            try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{});
+        return seen_ok and (seen_err or all_named_errors_covered);
+    }
+
+    fn enumPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
+        const enum_name = condition_type.name() orelse return false;
+        const variant_count = if (self.instantiatedEnumByName(enum_name)) |instantiated|
+            instantiated.variants.len
+        else blk: {
+            const item_id = self.item_index.lookup(enum_name) orelse return false;
+            const enum_item = switch (self.file.item(item_id).*) {
+                .Enum => |enum_item| enum_item,
+                else => return false,
+            };
+            break :blk enum_item.variants.len;
+        };
+
+        var seen = std.AutoHashMap(usize, void).init(self.arena);
+        defer seen.deinit();
+
+        for (arms) |arm| {
+            if (arm.pattern == .Else) return true;
+            const variant_index = self.enumPatternVariantIndex(condition_type, arm.pattern) orelse return false;
+            seen.put(variant_index, {}) catch return false;
         }
+
+        return seen.count() == variant_count;
+    }
+
+    fn enumPatternVariantIndex(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern) ?usize {
+        const callee = switch (pattern) {
+            .Expr => |expr_id| switch (self.file.expression(expr_id).*) {
+                .Call => |call| call.callee,
+                else => expr_id,
+            },
+            .NamedError => |named_error| named_error.callee,
+            else => return null,
+        };
+
+        const field = switch (self.file.expression(callee).*) {
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Field => |field| field,
+                else => return null,
+            },
+            .Field => |field| field,
+            else => return null,
+        };
+
+        const variant_enum_type = self.expr_types[field.base.index()];
+        if (variant_enum_type.kind() != .enum_) return null;
+        if (!typesAssignable(condition_type, variant_enum_type) and !typesAssignable(variant_enum_type, condition_type)) return null;
+
+        const enum_name = variant_enum_type.name() orelse return null;
+        if (self.instantiatedEnumByName(enum_name)) |instantiated| {
+            for (instantiated.variants, 0..) |variant, index| {
+                if (std.mem.eql(u8, variant.name, field.name)) return index;
+            }
+            return null;
+        }
+
+        const item_id = self.item_index.lookup(enum_name) orelse return null;
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return null,
+        };
+        for (enum_item.variants, 0..) |variant, index| {
+            if (std.mem.eql(u8, variant.name, field.name)) return index;
+        }
+        return null;
     }
 
     fn validateMatchPatternFamily(self: *TypeChecker, condition_type: Type, arms: anytype, range: source.TextRange) !void {

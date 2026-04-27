@@ -1017,7 +1017,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
-            var all_cases_terminate = @This().switchIsExhaustive(self, switch_stmt);
+            var all_cases_terminate = @This().switchPatternsAreExhaustive(
+                self,
+                switch_stmt.condition,
+                switch_stmt.arms,
+                switch_stmt.else_body != null,
+            );
             for (switch_stmt.arms, 0..) |arm, case_index| {
                 const arm_terminated = try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.pattern, raw_condition, arm.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and arm_terminated;
@@ -1053,53 +1058,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return all_cases_terminate;
         }
 
-        fn switchIsExhaustive(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt) bool {
-            if (switch_stmt.else_body != null) return true;
+        fn switchPatternsAreExhaustive(
+            self: *FunctionLowerer,
+            condition_expr: ast.ExprId,
+            arms: anytype,
+            has_else: bool,
+        ) bool {
+            if (has_else) return true;
 
-            const condition_type = self.parent.typecheck.exprType(switch_stmt.condition);
+            const condition_type = self.parent.typecheck.exprType(condition_expr);
             if (condition_type.kind() == .bool) {
                 var seen_true = false;
                 var seen_false = false;
-                for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| {
-                            const value = self.switchPatternValue(pattern_expr) orelse continue;
-                            if (value == 0) seen_false = true;
-                            if (value == 1) seen_true = true;
-                        },
-                        .NamedError => |named_error| {
-                            const value = self.switchPatternValue(named_error.callee) orelse return false;
-                            if (value == 0) seen_false = true;
-                            if (value == 1) seen_true = true;
-                        },
-                        .Ok, .Err => return false,
-                        else => return false,
-                    }
+                for (arms) |arm| {
+                    const value = @This().switchPatternOrdinal(self, arm.pattern) orelse return false;
+                    if (value == 0) seen_false = true;
+                    if (value == 1) seen_true = true;
                 }
                 return seen_true and seen_false;
             }
 
+            if (condition_type.kind() == .error_union) {
+                return @This().errorUnionPatternsAreExhaustive(self, condition_expr, condition_type, arms);
+            }
+
             const enum_name = condition_type.name() orelse return false;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                var seen = std.AutoHashMap(i64, void).init(self.parent.allocator);
-                defer seen.deinit();
-
-                for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| {
-                            const value = self.switchPatternValue(pattern_expr) orelse return false;
-                            seen.put(value, {}) catch return false;
-                        },
-                        .NamedError => |named_error| {
-                            const value = self.switchPatternValue(named_error.callee) orelse return false;
-                            seen.put(value, {}) catch return false;
-                        },
-                        .Ok, .Err => return false,
-                        else => return false,
-                    }
-                }
-
-                return seen.count() == instantiated.variants.len;
+                return @This().enumPatternsAreExhaustive(self, arms, instantiated.variants.len);
             }
 
             const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
@@ -1108,25 +1093,62 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => return false,
             };
 
+            return @This().enumPatternsAreExhaustive(self, arms, enum_item.variants.len);
+        }
+
+        fn switchPatternOrdinal(self: *FunctionLowerer, pattern: ast.SwitchPattern) ?i64 {
+            return switch (pattern) {
+                .Expr => |pattern_expr| self.switchPatternValue(pattern_expr),
+                .NamedError => |named_error| self.switchPatternValue(named_error.callee),
+                else => null,
+            };
+        }
+
+        fn enumPatternsAreExhaustive(self: *FunctionLowerer, arms: anytype, variant_count: usize) bool {
             var seen = std.AutoHashMap(i64, void).init(self.parent.allocator);
             defer seen.deinit();
 
-            for (switch_stmt.arms) |arm| {
-                switch (arm.pattern) {
-                    .Expr => |pattern_expr| {
-                        const value = self.switchPatternValue(pattern_expr) orelse return false;
-                        seen.put(value, {}) catch return false;
-                    },
-                    .NamedError => |named_error| {
-                        const value = self.switchPatternValue(named_error.callee) orelse return false;
-                        seen.put(value, {}) catch return false;
-                    },
-                    .Ok, .Err => return false,
-                    else => return false,
-                }
+            for (arms) |arm| {
+                const value = @This().switchPatternOrdinal(self, arm.pattern) orelse return false;
+                seen.put(value, {}) catch return false;
             }
 
-            return seen.count() == enum_item.variants.len;
+            return seen.count() == variant_count;
+        }
+
+        fn errorUnionPatternsAreExhaustive(
+            self: *FunctionLowerer,
+            condition_expr: ast.ExprId,
+            condition_type: anytype,
+            arms: anytype,
+        ) bool {
+            var seen_ok = false;
+            var seen_err = false;
+            for (arms) |arm| {
+                switch (arm.pattern) {
+                    .Ok => seen_ok = true,
+                    .Err => seen_err = true,
+                    .NamedError => {},
+                    else => {},
+                }
+            }
+            if (seen_ok and seen_err) return true;
+            if (!seen_ok) return false;
+
+            for (condition_type.errorTypes()) |error_type| {
+                const error_name = error_type.name() orelse return false;
+                var found = false;
+                for (arms) |arm| {
+                    const item_id = @This().matchPatternNamedErrorDeclItem(self, condition_expr, arm.pattern) orelse continue;
+                    const item = self.parent.file.item(item_id).*;
+                    if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+            return true;
         }
 
         fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
@@ -1480,7 +1502,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             if (arm_index >= switch_expr.arms.len) {
                 if (switch_expr.else_expr) |else_expr| return self.lowerExpr(else_expr, locals);
-                if (@This().switchExprHasExhaustiveErrorUnionPatterns(self, switch_expr)) {
+                if (@This().switchPatternsAreExhaustive(
+                    self,
+                    switch_expr.condition,
+                    switch_expr.arms,
+                    switch_expr.else_expr != null,
+                )) {
                     return self.defaultValue(self.parent.lowerExprType(expr_id), switch_expr.range);
                 }
                 const op = try self.createAggregatePlaceholder("ora.match_expr", switch_expr.range, &.{condition}, self.parent.lowerExprType(expr_id));
@@ -1537,40 +1564,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return false;
-        }
-
-        fn switchExprHasExhaustiveErrorUnionPatterns(self: *FunctionLowerer, switch_expr: ast.SwitchExpr) bool {
-            if (switch_expr.else_expr != null) return true;
-            const condition_type = self.parent.typecheck.exprType(switch_expr.condition);
-            if (condition_type.kind() != .error_union) return false;
-
-            var seen_ok = false;
-            var seen_err = false;
-            for (switch_expr.arms) |arm| {
-                switch (arm.pattern) {
-                    .Ok => seen_ok = true,
-                    .Err => seen_err = true,
-                    .NamedError => {},
-                    else => {},
-                }
-            }
-            if (seen_ok and seen_err) return true;
-            if (!seen_ok) return false;
-
-            for (condition_type.errorTypes()) |error_type| {
-                const error_name = error_type.name() orelse return false;
-                var found = false;
-                for (switch_expr.arms) |arm| {
-                    const item_id = @This().matchPatternNamedErrorDeclItem(self, switch_expr.condition, arm.pattern) orelse continue;
-                    const item = self.parent.file.item(item_id).*;
-                    if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return false;
-            }
-            return true;
         }
 
         fn lowerErrorUnionMatchCondition(

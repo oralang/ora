@@ -205,6 +205,48 @@ test "compiler rejects non-exhaustive error-union match expressions without else
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match on Result/error union must cover both Ok(...) and Err(...), or provide else"));
 }
 
+test "compiler rejects non-exhaustive tag-only enum match expressions without else" {
+    const source_text =
+        \\enum State {
+        \\    Open,
+        \\    Closed,
+        \\}
+        \\
+        \\pub fn run(state: State) -> u256 {
+        \\    return match (state) {
+        \\        State.Open => 1,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match on enum must cover all variants or provide else"));
+}
+
+test "compiler rejects non-exhaustive payload enum match expressions without else" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\pub fn run(event: Event) -> u256 {
+        \\    return match (event) {
+        \\        Event.Value(value) => value,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match on enum must cover all variants or provide else"));
+}
+
 test "compiler rejects mixed Result match patterns and ordinary value patterns" {
     const source_text =
         \\error Failure;
@@ -2490,4 +2532,3 @@ test "SMT expected-failure probes match between sequential and parallel verifica
         try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
 }
-
