@@ -1,4 +1,5 @@
 #include "patterns/ControlFlow.h"
+#include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
@@ -490,7 +491,6 @@ static void buildWideErrorUnionReturnFromParts(
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type);
-static bool usesAggregateAdtPayloadHandle(Type type);
 static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
@@ -540,14 +540,6 @@ static std::optional<Value> materializeNarrowErrorUnionPackedValue(
     return std::nullopt;
 }
 
-static FailureOr<unsigned> getAdtVariantIndex(ora::AdtType type, StringRef variantName)
-{
-    for (auto [index, name] : llvm::enumerate(type.getVariantNames()))
-        if (name == variantName)
-            return static_cast<unsigned>(index);
-    return failure();
-}
-
 static LogicalResult materializeSplitAdtValue(
     PatternRewriter &rewriter,
     Location loc,
@@ -560,7 +552,7 @@ static LogicalResult materializeSplitAdtValue(
         if (!adtType)
             return failure();
 
-        auto variantIndex = getAdtVariantIndex(adtType, constructOp.getVariantName());
+        auto variantIndex = ora::adt_helpers::getAdtVariantIndex(adtType, constructOp.getVariantName());
         if (failed(variantIndex))
             return failure();
 
@@ -583,7 +575,7 @@ static LogicalResult materializeSplitAdtValue(
                 return failure();
             Type payloadType = adtType.getPayloadTypes()[*variantIndex];
             Value payloadValue = payloadValues.front();
-            if (usesAggregateAdtPayloadHandle(payloadType))
+            if (ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
             {
                 auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue);
                 if (!ptr)
@@ -601,14 +593,11 @@ static LogicalResult materializeSplitAdtValue(
         return success();
     }
 
-    auto castOp = value.getDefiningOp<mlir::UnrealizedConversionCastOp>();
-    if (!castOp || !ora::hasMaterializationKind(castOp, "normalized_adt"))
+    auto parts = ora::adt_helpers::getNormalizedAdtPartsFromValue(rewriter, loc, value);
+    if (failed(parts))
         return failure();
-    if (castOp.getNumOperands() != 2)
-        return failure();
-
-    out.push_back(ensureU256(rewriter, loc, castOp.getOperand(0)));
-    out.push_back(ensureU256(rewriter, loc, castOp.getOperand(1)));
+    out.push_back(parts->first);
+    out.push_back(parts->second);
     return success();
 }
 
@@ -2573,133 +2562,6 @@ static LogicalResult convertErrorExtractCommon(
     return success();
 }
 
-static FailureOr<std::pair<Value, Value>> getNormalizedAdtPartsFromOperands(
-    PatternRewriter &rewriter,
-    Location loc,
-    ArrayRef<Value> operands)
-{
-    if (operands.size() != 2)
-        return failure();
-    return std::make_pair(
-        ensureU256(rewriter, loc, operands[0]),
-        ensureU256(rewriter, loc, operands[1]));
-}
-
-static FailureOr<std::pair<Value, Value>> getNormalizedAdtPartsFromValue(
-    PatternRewriter &rewriter,
-    Location loc,
-    Value value)
-{
-    if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-    {
-        if (ora::hasMaterializationKind(cast, "normalized_adt") && cast.getNumOperands() == 2)
-        {
-            return std::make_pair(
-                ensureU256(rewriter, loc, cast.getOperand(0)),
-                ensureU256(rewriter, loc, cast.getOperand(1)));
-        }
-    }
-    return failure();
-}
-
-static bool usesAggregateAdtPayloadHandle(Type type)
-{
-    return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
-                     mlir::MemRefType, mlir::UnrankedMemRefType>(type);
-}
-
-static LogicalResult decodeAdtPayloadFromCarrier(
-    Operation *op,
-    ConversionPatternRewriter &rewriter,
-    Location loc,
-    Type payloadType,
-    Type loweredType,
-    Value &payload)
-{
-    if (usesAggregateAdtPayloadHandle(payloadType))
-    {
-        if (!llvm::isa<sir::PtrType>(loweredType))
-            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle lowering");
-        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        return success();
-    }
-
-    if (payload.getType() == loweredType)
-        return success();
-    if (llvm::isa<sir::U256Type>(loweredType))
-    {
-        payload = ensureU256(rewriter, loc, payload);
-        return success();
-    }
-    if (llvm::isa<mlir::IntegerType>(loweredType))
-    {
-        payload = rewriter.create<sir::BitcastOp>(loc, loweredType, ensureU256(rewriter, loc, payload));
-        return success();
-    }
-    return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
-}
-
-static LogicalResult convertAdtTagCommon(
-    ora::AdtTagOp op,
-    ArrayRef<Value> operands,
-    ConversionPatternRewriter &rewriter)
-{
-    auto parts = getNormalizedAdtPartsFromOperands(rewriter, op.getLoc(), operands);
-    if (failed(parts))
-        parts = getNormalizedAdtPartsFromValue(rewriter, op.getLoc(), op.getValue());
-    if (failed(parts))
-        return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier");
-
-    rewriter.replaceOp(op, parts->first);
-    return success();
-}
-
-static LogicalResult convertAdtPayloadCommon(
-    ora::AdtPayloadOp op,
-    ArrayRef<Value> operands,
-    const TypeConverter *typeConverter,
-    ConversionPatternRewriter &rewriter)
-{
-    auto adtType = llvm::dyn_cast<ora::AdtType>(op.getValue().getType());
-    if (!adtType)
-        return rewriter.notifyMatchFailure(op, "expected !ora.adt payload source");
-
-    auto variantNames = adtType.getVariantNames();
-    auto payloadTypes = adtType.getPayloadTypes();
-    unsigned variantIndex = payloadTypes.size();
-    for (auto [index, name] : llvm::enumerate(variantNames))
-    {
-        if (name == op.getVariantName())
-        {
-            variantIndex = index;
-            break;
-        }
-    }
-    if (variantIndex >= payloadTypes.size())
-        return rewriter.notifyMatchFailure(op, "unknown ADT variant");
-
-    Type payloadType = payloadTypes[variantIndex];
-    if (llvm::isa<mlir::NoneType>(payloadType))
-        return rewriter.notifyMatchFailure(op, "unit ADT variant has no payload");
-
-    auto parts = getNormalizedAdtPartsFromOperands(rewriter, op.getLoc(), operands);
-    if (failed(parts))
-        parts = getNormalizedAdtPartsFromValue(rewriter, op.getLoc(), op.getValue());
-    if (failed(parts))
-        return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier");
-
-    Value payload = parts->second;
-    Type loweredType = op.getResult().getType();
-    if (typeConverter)
-        if (Type converted = typeConverter->convertType(loweredType))
-            loweredType = converted;
-
-    if (failed(decodeAdtPayloadFromCarrier(op, rewriter, op.getLoc(), payloadType, loweredType, payload)))
-        return failure();
-
-    rewriter.replaceOp(op, payload);
-    return success();
-}
 
 LogicalResult ConvertErrorUnwrapOp::matchAndRewrite(
     ora::ErrorUnwrapOp op,
@@ -2750,7 +2612,7 @@ LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
 {
     SmallVector<Value, 2> flatOperands;
     flatOperands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
-    return convertAdtTagCommon(op, flatOperands, rewriter);
+    return ora::adt_helpers::convertAdtTagCommon(op, flatOperands, rewriter);
 }
 
 LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
@@ -2761,7 +2623,7 @@ LogicalResult ConvertAdtTagOneToNOp::matchAndRewrite(
     SmallVector<Value, 4> flatOperands;
     for (ValueRange range : adaptor.getOperands())
         flatOperands.append(range.begin(), range.end());
-    return convertAdtTagCommon(op, flatOperands, rewriter);
+    return ora::adt_helpers::convertAdtTagCommon(op, flatOperands, rewriter);
 }
 
 LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
@@ -2771,7 +2633,7 @@ LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
 {
     SmallVector<Value, 2> flatOperands;
     flatOperands.append(adaptor.getOperands().begin(), adaptor.getOperands().end());
-    return convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
+    return ora::adt_helpers::convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
 }
 
 LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
@@ -2782,7 +2644,7 @@ LogicalResult ConvertAdtPayloadOneToNOp::matchAndRewrite(
     SmallVector<Value, 4> flatOperands;
     for (ValueRange range : adaptor.getOperands())
         flatOperands.append(range.begin(), range.end());
-    return convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
+    return ora::adt_helpers::convertAdtPayloadCommon(op, flatOperands, getTypeConverter(), rewriter);
 }
 
 // -----------------------------------------------------------------------------
