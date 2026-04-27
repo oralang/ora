@@ -1,4 +1,5 @@
 #include "OraToSIRTypeConverter.h"
+#include "OraMaterializationKinds.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -19,13 +20,6 @@ using namespace sir;
 
 namespace
 {
-    static constexpr const char *kOraMaterializationKindAttr = "ora.materialization_kind";
-    static constexpr const char *kMatPtrView = "ptr_view";
-    static constexpr const char *kMatAddressForward = "address_forward";
-    static constexpr const char *kMatNormalizedErrorUnion = "normalized_error_union";
-    static constexpr const char *kMatNormalizedAdt = "normalized_adt";
-    static constexpr const char *kMatAdtHandleView = "adt_handle_view";
-
     static Value createTaggedCast(OpBuilder &builder,
                                   Location loc,
                                   Type type,
@@ -664,11 +658,11 @@ namespace mlir
                                             if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(input.getType()))
                                             {
                                                 (void)tensorType;
-                                                return createTaggedCast(builder, loc, type, input, kMatAddressForward);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                             if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
                                             {
-                                                return createTaggedCast(builder, loc, type, input, kMatAddressForward);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                         }
 
@@ -676,7 +670,7 @@ namespace mlir
                                          {
                                              if (llvm::isa<ora::StringType, ora::BytesType>(input.getType()))
                                              {
-                                                 return createTaggedCast(builder, loc, type, input, kMatPtrView);
+                                                 return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                              }
                                              if (auto materialized = materializePtrCarrierFromOraValue(builder, loc, type, input))
                                                  return *materialized;
@@ -950,7 +944,7 @@ namespace mlir
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
                                          if (!errType)
                                              return Value();
-                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedErrorUnion);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedErrorUnion);
                                      });
             addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -959,7 +953,7 @@ namespace mlir
                                          auto adtType = dyn_cast<ora::AdtType>(type);
                                          if (!adtType)
                                              return Value();
-                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedAdt);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedAdt);
                                      });
             addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -968,7 +962,7 @@ namespace mlir
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
                                          if (!errType)
                                              return Value();
-                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedErrorUnion);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedErrorUnion);
                                      });
             addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -977,7 +971,7 @@ namespace mlir
                                          auto adtType = dyn_cast<ora::AdtType>(type);
                                          if (!adtType)
                                              return Value();
-                                         return createTaggedCast(builder, loc, type, inputs, kMatNormalizedAdt);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedAdt);
                                      });
 
             // Wide error union 1:N splitting: ora.error_union → (sir.u256, carrier(T)).
@@ -1023,9 +1017,9 @@ namespace mlir
                                          if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
                                          {
                                              auto kind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
-                                             if (kind && kind.getValue() == kMatNormalizedAdt && cast.getNumOperands() == 2)
+                                             if (kind && kind.getValue() == mat_kind::kNormalizedAdt && cast.getNumOperands() == 2)
                                                  return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
-                                             if (kind && kind.getValue() == kMatAdtHandleView && cast.getNumOperands() == 1)
+                                             if (kind && kind.getValue() == mat_kind::kAdtHandleView && cast.getNumOperands() == 1)
                                              {
                                                  auto u256 = sir::U256Type::get(builder.getContext());
                                                  auto ptrType = sir::PtrType::get(builder.getContext(), 1);
@@ -1134,7 +1128,7 @@ namespace mlir
                                                         return Value();
                                                     }
                                                 }
-                                                return createTaggedCast(builder, loc, type, packed, kMatNormalizedErrorUnion);
+                                                return createTaggedCast(builder, loc, type, packed, mat_kind::kNormalizedErrorUnion);
                                             }
                                         }
 
@@ -1150,13 +1144,13 @@ namespace mlir
                                             }
                                             if (llvm::isa<sir::PtrType>(input.getType()))
                                             {
-                                                return createTaggedCast(builder, loc, type, input, kMatPtrView);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                             }
                                         }
 
                                         if (llvm::isa<ora::TupleType>(type) && llvm::isa<sir::PtrType>(input.getType()))
                                         {
-                                            return createTaggedCast(builder, loc, type, input, kMatPtrView);
+                                            return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                         }
 
                                         // ptr -> memref: memrefs are ptrs in SIR, forward via bitcast.
@@ -1171,13 +1165,13 @@ namespace mlir
                                         {
                                             if (llvm::isa<sir::U256Type>(input.getType()))
                                             {
-                                                return createTaggedCast(builder, loc, type, input, kMatAddressForward);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                         }
 
                                         if (llvm::isa<ora::StringType, ora::BytesType>(type))
                                         {
-                                            return createTaggedCast(builder, loc, type, input, kMatPtrView);
+                                            return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                         }
 
                                         // Refinement types erase to their base representation;

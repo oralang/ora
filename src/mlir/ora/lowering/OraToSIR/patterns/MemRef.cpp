@@ -1,5 +1,6 @@
 #include "patterns/MemRef.h"
 #include "patterns/Naming.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 #include "OraDialect.h"
@@ -62,7 +63,7 @@ static bool hasMaterializationKind(Operation *op, llvm::StringRef kind)
 {
     if (!op)
         return false;
-    if (auto attr = op->getAttrOfType<mlir::StringAttr>("ora.materialization_kind"))
+    if (auto attr = op->getAttrOfType<mlir::StringAttr>(kOraMaterializationKindAttr))
         return attr.getValue() == kind;
     return false;
 }
@@ -248,7 +249,7 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     {
         if (cast.getNumOperands() == 2)
         {
-            if (!narrowCarrier && !hasMaterializationKind(cast, "normalized_error_union"))
+            if (!narrowCarrier && !hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion))
                 return failure();
             consumedCast = cast;
             Value tag = ensureI256(cast.getOperand(0));

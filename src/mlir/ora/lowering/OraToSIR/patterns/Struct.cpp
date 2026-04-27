@@ -1,5 +1,6 @@
 #include "Struct.h"
 
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -11,9 +12,6 @@ using namespace mlir::ora;
 
 namespace
 {
-    static constexpr llvm::StringLiteral kMatNormalizedAdt("normalized_adt");
-    static constexpr llvm::StringLiteral kMatAdtHandleView("adt_handle_view");
-
     static LogicalResult getStructFieldsFromDecl(ora::StructDeclOp structDecl, SmallVectorImpl<StringRef> &names, SmallVectorImpl<Type> &types)
     {
         auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
@@ -137,7 +135,7 @@ namespace
 
         if (auto castOp = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
         {
-            if (ora::hasMaterializationKind(castOp, kMatNormalizedAdt) && castOp.getNumOperands() == 2)
+            if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) && castOp.getNumOperands() == 2)
             {
                 Value sizeVal = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 64));
                 Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, sizeVal);
@@ -288,7 +286,7 @@ LogicalResult ConvertTupleExtractOp::matchAndRewrite(
     {
         if (llvm::isa<ora::AdtType>(op.getResult().getType()))
         {
-            Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, kMatAdtHandleView);
+            Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
             rewriter.replaceOp(op, view);
             return success();
         }
@@ -307,7 +305,7 @@ LogicalResult ConvertTupleExtractOp::matchAndRewrite(
 
     if (llvm::isa<ora::AdtType>(op.getResult().getType()))
     {
-        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, kMatAdtHandleView);
+        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
         rewriter.replaceOp(op, view);
         return success();
     }
@@ -381,7 +379,7 @@ LogicalResult LateLowerTupleExtractOp::matchAndRewrite(
     }
     if (llvm::isa<ora::AdtType>(op.getResult().getType()))
     {
-        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, kMatAdtHandleView);
+        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
         rewriter.replaceOp(op, view);
         return success();
     }
@@ -506,7 +504,7 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     {
         if (llvm::isa<ora::AdtType>(expected))
         {
-            Value view = ora::createMaterializationCast(rewriter, loc, expected, raw, kMatAdtHandleView);
+            Value view = ora::createMaterializationCast(rewriter, loc, expected, raw, mat_kind::kAdtHandleView);
             rewriter.replaceOp(op, view);
             return success();
         }

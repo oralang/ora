@@ -1,5 +1,6 @@
 #include "OraToSIR.h"
 #include "OraToSIRTypeConverter.h"
+#include "OraMaterializationKinds.h"
 #include "OraDebug.h"
 
 // Include pattern headers
@@ -282,9 +283,9 @@ namespace
                 changed = true;
                 StringRef materializationKind;
                 if (llvm::isa<ora::ErrorUnionType>(origType))
-                    materializationKind = "wide_error_union_split";
+                    materializationKind = mat_kind::kWideErrorUnionSplit;
                 else if (llvm::isa<ora::AdtType>(origType))
-                    materializationKind = "normalized_adt";
+                    materializationKind = mat_kind::kNormalizedAdt;
                 else
                     return failure();
 
@@ -530,9 +531,9 @@ static LogicalResult normalizeResidualAdtExtractOps(ModuleOp module)
             continue;
         rewriter.setInsertionPoint(op);
         auto split = ora::createMaterializationCastOp(
-            rewriter, op.getLoc(), TypeRange{u256Type, u256Type}, ValueRange{op.getValue()}, "normalized_adt");
+            rewriter, op.getLoc(), TypeRange{u256Type, u256Type}, ValueRange{op.getValue()}, mat_kind::kNormalizedAdt);
         Value replacement = ora::createMaterializationCast(
-            rewriter, op.getLoc(), op.getType(), split.getResult(0), "payload_forward");
+            rewriter, op.getLoc(), op.getType(), split.getResult(0), mat_kind::kPayloadForward);
         rewriter.replaceOp(op, replacement);
     }
 
@@ -542,7 +543,7 @@ static LogicalResult normalizeResidualAdtExtractOps(ModuleOp module)
             continue;
         rewriter.setInsertionPoint(op);
         auto split = ora::createMaterializationCastOp(
-            rewriter, op.getLoc(), TypeRange{u256Type, u256Type}, ValueRange{op.getValue()}, "normalized_adt");
+            rewriter, op.getLoc(), TypeRange{u256Type, u256Type}, ValueRange{op.getValue()}, mat_kind::kNormalizedAdt);
         Value payload = split.getResult(1);
         Type resultType = op.getType();
 
@@ -552,13 +553,13 @@ static LogicalResult normalizeResidualAdtExtractOps(ModuleOp module)
                       mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
         {
             Value payloadPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, payload);
-            auto view = ora::createMaterializationCast(rewriter, op.getLoc(), resultType, payloadPtr, "ptr_view");
+            auto view = ora::createMaterializationCast(rewriter, op.getLoc(), resultType, payloadPtr, mat_kind::kPtrView);
             rewriter.replaceOp(op, view);
             continue;
         }
 
         Value replacement = ora::createMaterializationCast(
-            rewriter, op.getLoc(), resultType, payload, "payload_forward");
+            rewriter, op.getLoc(), resultType, payload, mat_kind::kPayloadForward);
         rewriter.replaceOp(op, replacement);
     }
 
@@ -1864,14 +1865,14 @@ public:
             castCleanupTarget.addDynamicallyLegalOp<mlir::UnrealizedConversionCastOp>(
                 [](mlir::UnrealizedConversionCastOp op)
                 {
-                    return ora::hasMaterializationKind(op, "normalized_error_union") ||
-                           ora::hasMaterializationKind(op, "normalized_adt") ||
-                           ora::hasMaterializationKind(op, "adt_handle_view") ||
-                           ora::hasMaterializationKind(op, "none_forward") ||
-                           ora::hasMaterializationKind(op, "ptr_view") ||
-                           ora::hasMaterializationKind(op, "address_forward") ||
-                           ora::hasMaterializationKind(op, "wide_error_union_join") ||
-                           ora::hasMaterializationKind(op, "wide_error_union_split");
+                    return ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) ||
+                           ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt) ||
+                           ora::hasMaterializationKind(op, mat_kind::kAdtHandleView) ||
+                           ora::hasMaterializationKind(op, mat_kind::kNoneForward) ||
+                           ora::hasMaterializationKind(op, mat_kind::kPtrView) ||
+                           ora::hasMaterializationKind(op, mat_kind::kAddressForward) ||
+                           ora::hasMaterializationKind(op, mat_kind::kWideErrorUnionJoin) ||
+                           ora::hasMaterializationKind(op, mat_kind::kWideErrorUnionSplit);
                 });
 
             if (failed(applyFullConversion(module, castCleanupTarget, std::move(castCleanupPatterns))))
@@ -1897,8 +1898,8 @@ public:
             SmallVector<mlir::UnrealizedConversionCastOp, 8> normalizedCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op)
                         {
-                if (!ora::hasMaterializationKind(op, "normalized_error_union") &&
-                    !ora::hasMaterializationKind(op, "normalized_adt"))
+                if (!ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) &&
+                    !ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt))
                     return;
                 if (op.getNumResults() != 1)
                     return;
@@ -1918,9 +1919,9 @@ public:
             SmallVector<mlir::UnrealizedConversionCastOp, 16> aggregateViewCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op)
                         {
-                if (ora::hasMaterializationKind(op, "normalized_error_union") ||
-                    ora::hasMaterializationKind(op, "normalized_adt") ||
-                    ora::hasMaterializationKind(op, "adt_handle_view"))
+                if (ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) ||
+                    ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt) ||
+                    ora::hasMaterializationKind(op, mat_kind::kAdtHandleView))
                     return;
                 if (op.getNumOperands() != 1 || op.getNumResults() != 1)
                     return;
@@ -2034,13 +2035,13 @@ public:
             {
                 for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
                 {
-                    if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
-                        ora::hasMaterializationKind(castOp, "normalized_adt") ||
-                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
-                        ora::hasMaterializationKind(castOp, "ptr_view") ||
-                        ora::hasMaterializationKind(castOp, "address_forward") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_join") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_split"))
+                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
                         continue;
                     leftoverUnrealized = true;
                     llvm::errs() << "[OraToSIR] Phase4 post-scan: unrealized cast at "
@@ -2053,13 +2054,13 @@ public:
             {
                 for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
                 {
-                    if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
-                        ora::hasMaterializationKind(castOp, "normalized_adt") ||
-                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
-                        ora::hasMaterializationKind(castOp, "ptr_view") ||
-                        ora::hasMaterializationKind(castOp, "address_forward") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_join") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_split"))
+                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
                         continue;
                     (void)castOp;
                     leftoverUnrealized = true;
@@ -2106,13 +2107,13 @@ public:
                 if (op->getName().getStringRef() == "builtin.unrealized_conversion_cast")
                 {
                     auto castOp = llvm::cast<mlir::UnrealizedConversionCastOp>(op);
-                    if (ora::hasMaterializationKind(castOp, "normalized_error_union") ||
-                        ora::hasMaterializationKind(castOp, "normalized_adt") ||
-                        ora::hasMaterializationKind(castOp, "adt_handle_view") ||
-                        ora::hasMaterializationKind(castOp, "ptr_view") ||
-                        ora::hasMaterializationKind(castOp, "address_forward") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_join") ||
-                        ora::hasMaterializationKind(castOp, "wide_error_union_split"))
+                    if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
+                        ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit))
                         return;
                     ++unrealizedByName;
                     if (mlir::ora::isDebugEnabled())
@@ -2154,8 +2155,8 @@ public:
             SmallVector<mlir::UnrealizedConversionCastOp, 8> deadNormalizedFinalCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op)
                         {
-                            if (!ora::hasMaterializationKind(op, "normalized_error_union") &&
-                                !ora::hasMaterializationKind(op, "normalized_adt"))
+                            if (!ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) &&
+                                !ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt))
                                 return;
                             if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
                                 deadNormalizedFinalCasts.push_back(op);

@@ -1,6 +1,7 @@
 #include "patterns/ControlFlow.h"
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -228,7 +229,7 @@ static Value phase0PackErrorUnion(
         loc,
         TypeRange{errorUnionType},
         ValueRange{packed});
-    cast->setAttr("ora.materialization_kind", rewriter.getStringAttr("normalized_error_union"));
+    cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kNormalizedErrorUnion));
     return cast.getResult(0);
 }
 
@@ -248,7 +249,7 @@ static Value phase0BuildWideErrorUnion(
         u256Type,
         mlir::IntegerAttr::get(u256IntType, isError ? 1 : 0));
     return ora::createMaterializationCast(
-        rewriter, loc, errorUnionType, ValueRange{tag, payload}, "wide_error_union_join");
+        rewriter, loc, errorUnionType, ValueRange{tag, payload}, mat_kind::kWideErrorUnionJoin);
 }
 
 static mlir::UnrealizedConversionCastOp createWideErrorUnionSplitCast(
@@ -258,14 +259,14 @@ static mlir::UnrealizedConversionCastOp createWideErrorUnionSplitCast(
     TypeRange resultTypes)
 {
     auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, resultTypes, ValueRange{input});
-    cast->setAttr("ora.materialization_kind", rewriter.getStringAttr("wide_error_union_split"));
+    cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kWideErrorUnionSplit));
     return cast;
 }
 
 static bool isNormalizedErrorUnionCast(mlir::UnrealizedConversionCastOp castOp)
 {
-    if (auto kind = castOp->getAttrOfType<StringAttr>("ora.materialization_kind"))
-        return kind.getValue() == "normalized_error_union";
+    if (auto kind = castOp->getAttrOfType<StringAttr>(kOraMaterializationKindAttr))
+        return kind.getValue() == mat_kind::kNormalizedErrorUnion;
     return false;
 }
 
@@ -308,7 +309,7 @@ static Value adaptErrorPayloadToResultType(
                 else
                 {
                     elemValue = ora::createMaterializationCast(
-                        rewriter, loc, elemType, elemValue, "payload_forward");
+                        rewriter, loc, elemType, elemValue, mat_kind::kPayloadForward);
                 }
             }
             return rewriter.create<ora::TupleCreateOp>(loc, tupleType, ValueRange{elemValue}).getResult();
@@ -339,7 +340,7 @@ static Value adaptErrorPayloadToResultType(
     }
 
     return ora::createMaterializationCast(
-        rewriter, loc, resultType, replacement, "payload_forward");
+        rewriter, loc, resultType, replacement, mat_kind::kPayloadForward);
 }
 
 static Value buildIsErrorFromTag(
@@ -379,7 +380,7 @@ static Value createPtrViewMaterializationCast(
     Value input)
 {
     auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
-    cast->setAttr("ora.materialization_kind", rewriter.getStringAttr("ptr_view"));
+    cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));
     return cast.getResult(0);
 }
 
@@ -454,7 +455,7 @@ static LogicalResult remapWideErrorUnionUser(
                         loc,
                         cast.getResult(1).getType(),
                         castPayload,
-                        "payload_forward");
+                        mat_kind::kPayloadForward);
             }
             rewriter.replaceOp(cast, ValueRange{tag, castPayload});
             return success();
@@ -2242,7 +2243,7 @@ static LogicalResult convertErrorIsError(
         if (llvm::isa<sir::U256Type>(value.getType()))
             return rewriter.create<sir::BitcastOp>(loc, i256Type, value);
         return ora::createMaterializationCast(
-            rewriter, loc, i256Type, value, "integer_forward");
+            rewriter, loc, i256Type, value, mat_kind::kIntegerForward);
     };
 
     if (mlir::ora::isDebugEnabled())
@@ -2345,7 +2346,7 @@ static LogicalResult convertErrorIsError(
             // Fallback for narrow packed forms that were not adapted by the converter.
             auto i256Type = mlir::IntegerType::get(ctx, 256);
             Value packed = ora::createMaterializationCast(
-                rewriter, loc, i256Type, op.getValue(), "integer_forward");
+                rewriter, loc, i256Type, op.getValue(), mat_kind::kIntegerForward);
             Value packedU256 = ensureU256(rewriter, loc, packed);
             Value masked = rewriter.create<sir::AndOp>(loc, u256Type, packedU256, one);
             isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
@@ -4523,9 +4524,9 @@ LogicalResult NormalizeAdtTagOp::matchAndRewrite(
     splitTypes.push_back(sir::U256Type::get(ctx));
 
     auto split = ora::createMaterializationCastOp(
-        rewriter, op.getLoc(), TypeRange(splitTypes), ValueRange{op.getValue()}, "normalized_adt");
+        rewriter, op.getLoc(), TypeRange(splitTypes), ValueRange{op.getValue()}, mat_kind::kNormalizedAdt);
     Value replacement = ora::createMaterializationCast(
-        rewriter, op.getLoc(), op.getType(), split.getResult(0), "payload_forward");
+        rewriter, op.getLoc(), op.getType(), split.getResult(0), mat_kind::kPayloadForward);
     rewriter.replaceOp(op, replacement);
     return success();
 }
@@ -4540,7 +4541,7 @@ LogicalResult NormalizeAdtPayloadOp::matchAndRewrite(
     splitTypes.push_back(sir::U256Type::get(ctx));
 
     auto split = ora::createMaterializationCastOp(
-        rewriter, op.getLoc(), TypeRange(splitTypes), ValueRange{op.getValue()}, "normalized_adt");
+        rewriter, op.getLoc(), TypeRange(splitTypes), ValueRange{op.getValue()}, mat_kind::kNormalizedAdt);
     Value payload = split.getResult(1);
     Type resultType = op.getType();
 
@@ -4554,7 +4555,7 @@ LogicalResult NormalizeAdtPayloadOp::matchAndRewrite(
     }
 
     Value replacement = ora::createMaterializationCast(
-        rewriter, op.getLoc(), resultType, payload, "payload_forward");
+        rewriter, op.getLoc(), resultType, payload, mat_kind::kPayloadForward);
     rewriter.replaceOp(op, replacement);
     return success();
 }
@@ -4564,13 +4565,6 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     mlir::UnrealizedConversionCastOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    static constexpr StringLiteral kOraMaterializationKindAttr("ora.materialization_kind");
-    static constexpr StringLiteral kMatPtrView("ptr_view");
-    static constexpr StringLiteral kMatAddressForward("address_forward");
-    static constexpr StringLiteral kMatNormalizedErrorUnion("normalized_error_union");
-    static constexpr StringLiteral kMatNormalizedAdt("normalized_adt");
-    static constexpr StringLiteral kMatAdtHandleView("adt_handle_view");
-
     if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
     {
         rewriter.eraseOp(op);
@@ -4589,7 +4583,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     if (auto kindAttr = op->getAttrOfType<StringAttr>(kOraMaterializationKindAttr))
     {
         auto kind = kindAttr.getValue();
-        if (kind == kMatAddressForward)
+        if (kind == mat_kind::kAddressForward)
         {
             if (op.getNumOperands() == 1 && op.getNumResults() == 1)
             {
@@ -4599,7 +4593,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
             return failure();
         }
 
-        if (kind == kMatPtrView)
+        if (kind == mat_kind::kPtrView)
         {
             if (op.getNumOperands() == 1 && op.getNumResults() == 1 &&
                 llvm::isa<sir::PtrType>(input.getType()))
@@ -4610,7 +4604,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
             return failure();
         }
 
-        if (kind == kMatNormalizedErrorUnion)
+        if (kind == mat_kind::kNormalizedErrorUnion)
         {
             if (op.getNumOperands() == 1 && op.getNumResults() == 1)
             {
@@ -4620,7 +4614,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
             }
         }
 
-        if (kind == kMatNormalizedAdt)
+        if (kind == mat_kind::kNormalizedAdt)
         {
             if (op.getNumOperands() == 1 && op.getNumResults() == 2)
             {
@@ -4630,14 +4624,14 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
 
                 if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
                 {
-                    if (ora::hasMaterializationKind(cast, "normalized_adt") && cast.getNumOperands() == 2)
+                    if (ora::hasMaterializationKind(cast, mat_kind::kNormalizedAdt) && cast.getNumOperands() == 2)
                     {
                         Value tag = ensureU256(rewriter, loc, cast.getOperand(0));
                         Value payload = ensureU256(rewriter, loc, cast.getOperand(1));
                         rewriter.replaceOp(op, {tag, payload});
                         return success();
                     }
-                    if (ora::hasMaterializationKind(cast, kMatAdtHandleView) && cast.getNumOperands() == 1)
+                    if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
                     {
                         auto u256Ty = sir::U256Type::get(rewriter.getContext());
                         auto ptrTy = sir::PtrType::get(rewriter.getContext(), 1);
@@ -4659,7 +4653,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
             }
         }
 
-        if (kind == "wide_error_union_split")
+        if (kind == mat_kind::kWideErrorUnionSplit)
         {
             if (op.getNumOperands() == 1 && op.getNumResults() == 2)
             {

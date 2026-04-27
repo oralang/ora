@@ -1,6 +1,7 @@
 #include "patterns/AdtCarrierHelpers.h"
 
 #include "OraDialect.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "SIR/SIRDialect.h"
 
@@ -64,7 +65,7 @@ namespace mlir
                                            Value value)
             {
                 auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>();
-                if (!cast || !ora::hasMaterializationKind(cast, "normalized_adt"))
+                if (!cast || !ora::hasMaterializationKind(cast, ora::mat_kind::kNormalizedAdt))
                     return failure();
                 if (cast.getNumOperands() != 2)
                     return failure();
