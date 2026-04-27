@@ -4599,32 +4599,55 @@ namespace
 
     static CastHandlerResult castNormalizedAdt(CastCtx &c)
     {
+        // normalized_adt is a 1->2 split (ora.adt -> (u256 tag, u256 payload)).
+        // Anything that survives Phase 0 normalization with this kind must be
+        // resolved here — never let it fall through to the generic narrow
+        // (payload<<1)|tag decode, which is invalid for ADTs (Event has more
+        // than 2 variants and aggregate payloads cannot be packed in 248 bits).
         if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 2)
-            return std::nullopt;
+            return failure();
         auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
         if (c.op.getResult(0).getType() != u256Ty || c.op.getResult(1).getType() != u256Ty)
             return failure();
 
-        auto cast = c.input.getDefiningOp<mlir::UnrealizedConversionCastOp>();
-        if (!cast)
-            return std::nullopt;
-        if (ora::hasMaterializationKind(cast, mat_kind::kNormalizedAdt) && cast.getNumOperands() == 2)
+        // Case 1: input was packed by an earlier normalized_adt cast holding
+        // (tag, payload) directly — forward both words.
+        if (auto cast = c.input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
         {
-            Value tag = ensureU256(c.rewriter, c.loc, cast.getOperand(0));
-            Value payload = ensureU256(c.rewriter, c.loc, cast.getOperand(1));
+            if (ora::hasMaterializationKind(cast, mat_kind::kNormalizedAdt) && cast.getNumOperands() == 2)
+            {
+                Value tag = ensureU256(c.rewriter, c.loc, cast.getOperand(0));
+                Value payload = ensureU256(c.rewriter, c.loc, cast.getOperand(1));
+                c.rewriter.replaceOp(c.op, {tag, payload});
+                return success();
+            }
+            // Case 2: input came from struct_field_extract through an
+            // adt_handle_view cast — the underlying value is a handle pointer.
+            if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
+            {
+                Value handle = cast.getOperand(0);
+                if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
+                    return failure();
+                auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, c.loc, handle);
+                c.rewriter.replaceOp(c.op, {tag, payload});
+                return success();
+            }
+        }
+
+        // Case 3: input is a bare u256 / sir.ptr handle (e.g. the
+        // adt_handle_view cast was elided by a prior cleanup, or the value
+        // arrives directly from a sir.load on a struct field). Treat as a
+        // handle pointer and dereference.
+        if (llvm::isa<sir::U256Type, sir::PtrType>(c.input.getType()))
+        {
+            auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, c.loc, c.input);
             c.rewriter.replaceOp(c.op, {tag, payload});
             return success();
         }
-        if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
-        {
-            Value handle = cast.getOperand(0);
-            if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
-                return failure();
-            auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, c.loc, handle);
-            c.rewriter.replaceOp(c.op, {tag, payload});
-            return success();
-        }
-        return std::nullopt;
+
+        // Input still typed ora.adt — its producer hasn't been converted yet.
+        // Fail so the dialect conversion driver retries this cast later.
+        return failure();
     }
 
     // Common body for the "split into (tag, payload-carrier)" cast — used by

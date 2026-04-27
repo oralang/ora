@@ -183,7 +183,19 @@ test "compiler converts nested ADT fields through compiler-managed handle storag
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
 
-    try testing.expect(rendered.len != 0);
+    // The struct stores a handle pointer to a 64-byte (tag, payload) carrier.
+    // Reading holder.event must dereference the handle:
+    //   v1 = mload256 v0           ; load handle pointer from struct field
+    //   v2 = mload256 v1           ; load tag word at offset 0
+    //   ... = mload256 (v1 + 0x20) ; load payload word at offset 32
+    // NEVER apply a narrow `& 1` / `>> 1` decode of the loaded field —
+    // Event has 3 variants and aggregate payloads, so narrow packing is
+    // invalid (the Named arm becomes unreachable).
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn read_pair:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "v1 = mload256 v0"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "v2 = mload256 v1"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "= and v1 "));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "= shr v1 "));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
