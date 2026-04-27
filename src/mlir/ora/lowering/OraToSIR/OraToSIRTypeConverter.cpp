@@ -1,5 +1,6 @@
 #include "OraToSIRTypeConverter.h"
 #include "OraMaterializationKinds.h"
+#include "patterns/AdtCarrierHelpers.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -1021,18 +1022,10 @@ namespace mlir
                                                  return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
                                              if (kind && kind.getValue() == mat_kind::kAdtHandleView && cast.getNumOperands() == 1)
                                              {
-                                                 auto u256 = sir::U256Type::get(builder.getContext());
-                                                 auto ptrType = sir::PtrType::get(builder.getContext(), 1);
-                                                 auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
                                                  Value handle = cast.getOperand(0);
-                                                 if (llvm::isa<sir::U256Type>(handle.getType()))
-                                                     handle = builder.create<sir::BitcastOp>(loc, ptrType, handle);
-                                                 else if (!llvm::isa<sir::PtrType>(handle.getType()))
+                                                 if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
                                                      return {};
-                                                 Value tag = builder.create<sir::LoadOp>(loc, resultTypes[0], handle);
-                                                 Value off = builder.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64, 32));
-                                                 Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, handle, off);
-                                                 Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
+                                                 auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(builder, loc, handle);
                                                  return SmallVector<Value>{tag, payload};
                                              }
                                          }

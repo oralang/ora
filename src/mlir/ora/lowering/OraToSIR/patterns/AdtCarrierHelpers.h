@@ -1,12 +1,14 @@
 #pragma once
 
 #include "OraDialect.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include <cstdint>
 #include <utility>
 
 namespace mlir
@@ -15,6 +17,27 @@ namespace mlir
     {
         namespace adt_helpers
         {
+
+            // The wide ADT carrier is two back-to-back u256 words in memory:
+            // tag at offset 0, payload at offset 32, total 64 bytes.
+            inline constexpr uint64_t kAdtCarrierSize = 64;
+            inline constexpr uint64_t kAdtPayloadOffset = 32;
+
+            // Allocate a 64-byte handle, store `tag` at offset 0 and `payload`
+            // at offset 32, and return the base pointer (sir.ptr<1>). Both
+            // operands are coerced to sir.u256 if needed.
+            ::mlir::Value materializeAdtHandle(::mlir::OpBuilder &builder,
+                                               ::mlir::Location loc,
+                                               ::mlir::Value tag,
+                                               ::mlir::Value payload);
+
+            // View `handle` as a base pointer to a 64-byte ADT carrier and load
+            // (tag, payload). Accepts `handle` as sir.ptr<1> or sir.u256
+            // (a u256 is bitcast to ptr first). Loads are typed sir.u256.
+            std::pair<::mlir::Value, ::mlir::Value>
+            loadAdtPartsFromHandle(::mlir::OpBuilder &builder,
+                                   ::mlir::Location loc,
+                                   ::mlir::Value handle);
 
             // Aggregate ADT payloads (tuples, structs, strings, bytes, memrefs)
             // ride the wide ADT carrier as a compiler-managed handle pointer.

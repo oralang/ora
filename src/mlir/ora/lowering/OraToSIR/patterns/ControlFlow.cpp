@@ -3655,13 +3655,11 @@ static LogicalResult convertOraReturn(
             }
         }
 
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
-        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-        Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
-        rewriter.create<sir::StoreOp>(loc, mem, parts[0]);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-        Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
-        rewriter.create<sir::StoreOp>(loc, mem2, parts[1]);
+        Value mem = ora::adt_helpers::materializeAdtHandle(
+            rewriter, loc, parts[0], parts[1]);
+        Value sizeConst = rewriter.create<sir::ConstOp>(
+            loc, u256Type,
+            mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize));
         rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
         rewriter.eraseOp(op);
         return success();
@@ -3736,18 +3734,11 @@ static LogicalResult convertOraReturn(
 
     if (operands.size() == 2)
     {
-        Value tag = ensureU256(rewriter, loc, operands[0]);
-        Value payload = ensureU256(rewriter, loc, operands[1]);
-
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
-        Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-        Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
-
-        rewriter.create<sir::StoreOp>(loc, mem, tag);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-        Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
-        rewriter.create<sir::StoreOp>(loc, mem2, payload);
-
+        Value mem = ora::adt_helpers::materializeAdtHandle(
+            rewriter, loc, operands[0], operands[1]);
+        Value sizeConst = rewriter.create<sir::ConstOp>(
+            loc, u256Type,
+            mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize));
         rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
         rewriter.eraseOp(op);
         return success();
@@ -4633,19 +4624,10 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
                     }
                     if (ora::hasMaterializationKind(cast, mat_kind::kAdtHandleView) && cast.getNumOperands() == 1)
                     {
-                        auto u256Ty = sir::U256Type::get(rewriter.getContext());
-                        auto ptrTy = sir::PtrType::get(rewriter.getContext(), 1);
-                        auto ui64Ty = mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned);
                         Value handle = cast.getOperand(0);
-                        if (llvm::isa<sir::U256Type>(handle.getType()))
-                            handle = rewriter.create<sir::BitcastOp>(loc, ptrTy, handle);
-                        else if (!llvm::isa<sir::PtrType>(handle.getType()))
+                        if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
                             return failure();
-
-                        Value tag = rewriter.create<sir::LoadOp>(loc, u256Ty, handle);
-                        Value offset = rewriter.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(ui64Ty, 32));
-                        Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, ptrTy, handle, offset);
-                        Value payload = rewriter.create<sir::LoadOp>(loc, u256Ty, payloadPtr);
+                        auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(rewriter, loc, handle);
                         rewriter.replaceOp(op, {tag, payload});
                         return success();
                     }

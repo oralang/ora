@@ -3,6 +3,7 @@
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
+#include "patterns/AdtCarrierHelpers.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -130,19 +131,13 @@ namespace
     {
         auto *ctx = rewriter.getContext();
         auto u256Type = sir::U256Type::get(ctx);
-        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
         if (auto castOp = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
         {
             if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) && castOp.getNumOperands() == 2)
             {
-                Value sizeVal = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 64));
-                Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, sizeVal);
-                rewriter.create<sir::StoreOp>(loc, basePtr, castOp.getOperand(0));
-                Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-                Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-                rewriter.create<sir::StoreOp>(loc, payloadPtr, castOp.getOperand(1));
+                Value basePtr = ora::adt_helpers::materializeAdtHandle(
+                    rewriter, loc, castOp.getOperand(0), castOp.getOperand(1));
                 return rewriter.create<sir::BitcastOp>(loc, u256Type, basePtr).getResult();
             }
 
