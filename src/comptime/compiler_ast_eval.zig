@@ -557,15 +557,16 @@ const ConstEvaluator = struct {
                 break :blk CtValue{ .tuple_ref = heap_id };
             },
             .StructLiteral => |struct_literal| blk: {
+                const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
                 const fields = try self.allocator.alloc(CtAggregate.StructField, struct_literal.fields.len);
                 for (struct_literal.fields, 0..) |field, idx| {
                     _ = try self.evalExprImpl(field.value, use_cache);
+                    const field_index = self.structFieldIndex(type_id, field.name) orelse break :blk null;
                     fields[idx] = .{
-                        .field_id = @intCast(idx),
+                        .field_id = @intCast(field_index),
                         .value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null,
                     };
                 }
-                const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
                 const heap_id = try self.env.heap.allocStruct(type_id, fields);
                 break :blk CtValue{ .struct_ref = heap_id };
             },
@@ -640,8 +641,7 @@ const ConstEvaluator = struct {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
                         const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
-                        if (field_index >= struct_data.fields.len) break :blk_field null;
-                        break :blk_field struct_data.fields[field_index].value;
+                        break :blk_field self.structFieldValue(struct_data, field_index);
                     },
                     .string_ref => |heap_id| blk_field: {
                         if (!(std.mem.eql(u8, field.name, "length") or std.mem.eql(u8, field.name, "len"))) break :blk_field null;
@@ -1050,6 +1050,59 @@ const ConstEvaluator = struct {
             if (std.mem.eql(u8, field.name, field_name)) return idx;
         }
         return null;
+    }
+
+    fn structFieldValue(self: *ConstEvaluator, struct_data: CtAggregate.StructData, field_index: usize) ?CtValue {
+        _ = self;
+        const field_id: comptime_mod.FieldId = @intCast(field_index);
+        for (struct_data.fields) |field| {
+            if (field.field_id == field_id) return field.value;
+        }
+        return null;
+    }
+
+    fn readPatternCtValue(self: *ConstEvaluator, pattern_id: ast.PatternId) anyerror!?CtValue {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| self.env.lookupValue(name.name),
+            .Field => |field| blk: {
+                const base = (try self.readPatternCtValue(field.base)) orelse break :blk null;
+                break :blk switch (base) {
+                    .struct_ref => |heap_id| blk_field: {
+                        const struct_data = self.env.heap.getStruct(heap_id);
+                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
+                        break :blk_field self.structFieldValue(struct_data, field_index);
+                    },
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn writePatternCtValue(self: *ConstEvaluator, pattern_id: ast.PatternId, value: CtValue) anyerror!bool {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| {
+                try self.env.set(name.name, value);
+                return true;
+            },
+            .Field => |field| {
+                const base = (try self.readPatternCtValue(field.base)) orelse return false;
+                const updated = try self.updateStructFieldCtValue(base, field.name, value) orelse return false;
+                return try self.writePatternCtValue(field.base, updated);
+            },
+            else => return false,
+        }
+    }
+
+    fn updateStructFieldCtValue(self: *ConstEvaluator, base: CtValue, field_name: []const u8, value: CtValue) anyerror!?CtValue {
+        return switch (base) {
+            .struct_ref => |heap_id| blk: {
+                const struct_data = self.env.heap.getStruct(heap_id);
+                const field_index = self.structFieldIndex(struct_data.type_id, field_name) orelse break :blk null;
+                break :blk CtValue{ .struct_ref = try self.env.heap.setStructField(heap_id, @intCast(field_index), value) };
+            },
+            else => null,
+        };
     }
 
     fn lookupNamedItem(self: *ConstEvaluator, name: []const u8) ?ast.ItemId {
@@ -2582,8 +2635,8 @@ const ConstEvaluator = struct {
                     }
                 },
                 .Assign => |assign| {
-                    const value = (try self.evalComptimeAssign(assign)) orelse return .{ .value = null };
-                    last_value = (try constToCtValue(value)) orelse null;
+                    const value = try self.evalComptimeAssign(assign);
+                    last_value = if (value) |const_value| (try constToCtValue(const_value)) orelse null else null;
                 },
                 .Break => return .break_loop,
                 .Continue => return .continue_loop,
@@ -2970,9 +3023,12 @@ const ConstEvaluator = struct {
         } orelse return null;
         switch (self.file.pattern(assign.target).*) {
             .Name => |name| {
+                if (assign.op == .assign) {
+                    try self.env.set(name.name, rhs_ct);
+                    return rhs_const;
+                }
                 const rhs = rhs_const orelse return null;
                 const value = switch (assign.op) {
-                    .assign => rhs,
                     .add_assign => (try evalBinary(self.allocator, .add, try self.readBoundName(name.name), rhs)) orelse return null,
                     .sub_assign => (try evalBinary(self.allocator, .sub, try self.readBoundName(name.name), rhs)) orelse return null,
                     .mul_assign => (try evalBinary(self.allocator, .mul, try self.readBoundName(name.name), rhs)) orelse return null,
@@ -2987,6 +3043,7 @@ const ConstEvaluator = struct {
                     .wrapping_add_assign => (try evalBinary(self.allocator, .wrapping_add, try self.readBoundName(name.name), rhs)) orelse return null,
                     .wrapping_sub_assign => (try evalBinary(self.allocator, .wrapping_sub, try self.readBoundName(name.name), rhs)) orelse return null,
                     .wrapping_mul_assign => (try evalBinary(self.allocator, .wrapping_mul, try self.readBoundName(name.name), rhs)) orelse return null,
+                    .assign => unreachable,
                 };
                 const ct_value = (try constToCtValue(value)) orelse return null;
                 try self.env.set(name.name, ct_value);
@@ -3001,8 +3058,8 @@ const ConstEvaluator = struct {
                 const struct_data = self.env.heap.getStruct(heap_id);
                 for (destructure.fields) |field| {
                     const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
-                    if (field_index >= struct_data.fields.len) return null;
-                    try self.bindPatternCtValue(field.binding, struct_data.fields[field_index].value);
+                    const field_value = self.structFieldValue(struct_data, field_index) orelse return null;
+                    try self.bindPatternCtValue(field.binding, field_value);
                 }
                 return rhs_const;
             },
@@ -3128,59 +3185,42 @@ const ConstEvaluator = struct {
                 });
             },
             .Field => |field| {
-                const rhs = rhs_const orelse return null;
-                const base_name = switch (self.file.pattern(field.base).*) {
-                    .Name => |name| name.name,
+                const base_value = (try self.readPatternCtValue(field.base)) orelse return null;
+
+                const struct_data = switch (base_value) {
+                    .struct_ref => |heap_id| self.env.heap.getStruct(heap_id),
                     else => return null,
                 };
-                const base_slot = self.env.lookup(base_name) orelse return null;
-                const base_value = self.env.read(base_slot);
-
-                const updated = switch (base_value) {
-                    .struct_ref => |heap_id| blk: {
-                        const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk null;
-                        if (field_index >= struct_data.fields.len) break :blk null;
-
-                        const next_value = switch (assign.op) {
-                            .assign => rhs_ct,
-                            else => blk_op: {
-                                const current = (try ctValueToConstValue(self.allocator, &self.env.heap, struct_data.fields[field_index].value)) orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
-                                break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
-                            },
-                        } orelse return null;
-
-                        break :blk CtValue{ .struct_ref = try self.env.heap.setStructField(heap_id, @intCast(field_index), next_value) };
+                const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                const current_field = self.structFieldValue(struct_data, field_index) orelse return null;
+                const next_value = switch (assign.op) {
+                    .assign => rhs_ct,
+                    else => blk_op: {
+                        const rhs = rhs_const orelse break :blk_op null;
+                        const current = (try ctValueToConstValue(self.allocator, &self.env.heap, current_field)) orelse break :blk_op null;
+                        const computed = switch (assign.op) {
+                            .add_assign => try evalBinary(self.allocator, .add, current, rhs),
+                            .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
+                            .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
+                            .div_assign => try evalBinary(self.allocator, .div, current, rhs),
+                            .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
+                            .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
+                            .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
+                            .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
+                            .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
+                            .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
+                            .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
+                            .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
+                            .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
+                            .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
+                            .assign => unreachable,
+                        } orelse break :blk_op null;
+                        break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                     },
-                    else => return null,
                 } orelse return null;
 
-                self.env.update(base_slot, updated);
-                return try ctValueToConstValue(self.allocator, &self.env.heap, switch (updated) {
-                    .struct_ref => |heap_id| blk: {
-                        const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
-                        break :blk struct_data.fields[field_index].value;
-                    },
-                    else => unreachable,
-                });
+                if (!try self.writePatternCtValue(assign.target, next_value)) return null;
+                return try ctValueToConstValue(self.allocator, &self.env.heap, next_value);
             },
             else => return null,
         }

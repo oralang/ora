@@ -2768,6 +2768,43 @@ test "compiler const eval applies compound assignment to struct fields" {
     try testing.expectEqual(@as(i128, 12), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval mutates nested struct fields by declared field id" {
+    const source_text =
+        \\struct Pair {
+        \\    first: u256;
+        \\    second: u256;
+        \\}
+        \\
+        \\struct Holder {
+        \\    pair: Pair;
+        \\    marker: u256;
+        \\}
+        \\
+        \\pub fn get() -> u256 {
+        \\    return comptime {
+        \\        let holder = Holder {
+        \\            marker: 100,
+        \\            pair: Pair { second: 2, first: 1 },
+        \\        };
+        \\        holder.pair.second += 40;
+        \\        holder.pair.first + holder.pair.second + holder.marker;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 143), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval reads string length and indexing" {
     const source_text =
         \\pub fn get() -> u256 {
