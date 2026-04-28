@@ -522,7 +522,7 @@ const ConstEvaluator = struct {
             .Group => |group| try self.evalExprCtValueImpl(group.expr, use_cache, true),
             .Call => |call| if (try self.evalResultConstructorCallCtValue(call, use_cache)) |result_value|
                 result_value
-            else if (try self.evalEnumConstructorCallCtValue(call, use_cache)) |enum_value|
+            else if (try self.evalEnumConstructorCallCtValue(expr_id, call, use_cache)) |enum_value|
                 enum_value
             else if (try self.evalErrorDeclCallCtValue(call, use_cache)) |error_value|
                 error_value
@@ -562,9 +562,13 @@ const ConstEvaluator = struct {
                 for (struct_literal.fields, 0..) |field, idx| {
                     _ = try self.evalExprImpl(field.value, use_cache);
                     const field_index = self.structFieldIndex(type_id, field.name) orelse break :blk null;
+                    const value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null;
+                    if (try self.structLiteralFieldType(expr_id, field.name)) |field_type| {
+                        if (!try self.validateCtValueForType(value, field_type, field.range)) break :blk null;
+                    }
                     fields[idx] = .{
                         .field_id = @intCast(field_index),
-                        .value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null,
+                        .value = value,
                     };
                 }
                 const heap_id = try self.env.heap.allocStruct(type_id, fields);
@@ -935,12 +939,16 @@ const ConstEvaluator = struct {
         } };
     }
 
-    fn evalEnumConstructorCallCtValue(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
+    fn evalEnumConstructorCallCtValue(self: *ConstEvaluator, expr_id: ast.ExprId, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
         const variant_ref = self.enumVariantRefFromExpr(call.callee) orelse return null;
         const payload_id: ?comptime_mod.HeapId = if (call.args.len == 0) null else blk: {
             const elems = try self.allocator.alloc(CtValue, call.args.len);
             for (call.args, 0..) |arg, index| {
-                elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
+                const value = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
+                if (try self.enumVariantPayloadArgType(expr_id, variant_ref, index)) |arg_type| {
+                    if (!try self.validateCtValueForType(value, arg_type, self.exprRange(arg))) return null;
+                }
+                elems[index] = value;
             }
             break :blk try self.env.heap.allocTuple(elems);
         };
@@ -1050,6 +1058,172 @@ const ConstEvaluator = struct {
             if (std.mem.eql(u8, field.name, field_name)) return idx;
         }
         return null;
+    }
+
+    fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?model.Type {
+        const typecheck = (try self.currentTypeCheckResult()) orelse return null;
+        const expr_type = typecheck.exprType(expr_id);
+        if (expr_type != .struct_) return null;
+
+        if (typecheck.instantiatedStructByName(expr_type.struct_.name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (std.mem.eql(u8, field.name, field_name)) return field.ty;
+            }
+            return null;
+        }
+
+        const item_id = self.lookupNamedItem(expr_type.struct_.name) orelse return null;
+        const item = self.file.item(item_id).*;
+        if (item != .Struct) return null;
+        for (item.Struct.fields) |field| {
+            if (std.mem.eql(u8, field.name, field_name)) return try self.modelTypeFromTypeExpr(field.type_expr);
+        }
+        return null;
+    }
+
+    fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?model.Type {
+        const typecheck = (try self.currentTypeCheckResult()) orelse return null;
+        const expr_type = typecheck.exprType(expr_id);
+        if (expr_type == .enum_) {
+            if (typecheck.instantiatedEnumByName(expr_type.enum_.name)) |instantiated| {
+                if (variant_ref.variant_id >= instantiated.variants.len) return null;
+                return enumPayloadArgTypeFromModel(instantiated.variants[variant_ref.variant_id].payload_type, arg_index);
+            }
+        }
+
+        const item = self.file.item(variant_ref.item_id).*;
+        if (item != .Enum or variant_ref.variant_id >= item.Enum.variants.len) return null;
+        return try self.enumPayloadArgTypeFromAst(item.Enum.variants[variant_ref.variant_id].payload, arg_index);
+    }
+
+    fn enumPayloadArgTypeFromModel(payload_type: ?model.Type, arg_index: usize) ?model.Type {
+        const payload = payload_type orelse return null;
+        return switch (payload) {
+            .tuple => |elements| if (arg_index < elements.len) elements[arg_index] else null,
+            .anonymous_struct => |struct_type| if (arg_index < struct_type.fields.len) struct_type.fields[arg_index].ty else null,
+            else => if (arg_index == 0) payload else null,
+        };
+    }
+
+    fn enumPayloadArgTypeFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload, arg_index: usize) !?model.Type {
+        return switch (payload) {
+            .none => null,
+            .positional => |types| if (arg_index < types.len) try self.modelTypeFromTypeExpr(types[arg_index]) else null,
+            .named => |fields| if (arg_index < fields.len) try self.modelTypeFromTypeExpr(fields[arg_index].type_expr) else null,
+        };
+    }
+
+    fn modelTypeFromTypeExpr(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !?model.Type {
+        return switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| blk: {
+                if (integerTypeFromName(path.name)) |integer| break :blk model.Type{ .integer = integer };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "address")) break :blk model.Type{ .address = {} };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "bool")) break :blk model.Type{ .bool = {} };
+                break :blk null;
+            },
+            .Generic => |generic| blk: {
+                if (!isKnownRefinementName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
+                const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
+                const base_ptr = try self.allocator.create(model.Type);
+                base_ptr.* = base_type;
+                break :blk model.Type{ .refinement = .{
+                    .name = generic.name,
+                    .base_type = base_ptr,
+                    .args = generic.args,
+                } };
+            },
+            else => null,
+        };
+    }
+
+    fn isKnownRefinementName(name: []const u8) bool {
+        return std.mem.eql(u8, name, "MinValue") or
+            std.mem.eql(u8, name, "MaxValue") or
+            std.mem.eql(u8, name, "InRange") or
+            std.mem.eql(u8, name, "NonZero") or
+            std.mem.eql(u8, name, "NonZeroAddress") or
+            std.mem.eql(u8, name, "Scaled") or
+            std.mem.eql(u8, name, "Exact") or
+            std.mem.eql(u8, name, "BasisPoints");
+    }
+
+    fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: model.Type, range: source.TextRange) !bool {
+        return switch (ty) {
+            .refinement => |refinement| try self.validateCtValueForRefinement(value, refinement, range),
+            else => true,
+        };
+    }
+
+    fn validateCtValueForRefinement(self: *ConstEvaluator, value: CtValue, refinement: model.RefinementType, range: source.TextRange) !bool {
+        const valid = if (std.mem.eql(u8, refinement.name, "MinValue")) blk: {
+            const min = refinementU256Arg(refinement.args, 1) orelse break :blk true;
+            const integer = switch (value) {
+                .integer => |integer| integer,
+                else => break :blk true,
+            };
+            break :blk integer >= min;
+        } else if (std.mem.eql(u8, refinement.name, "MaxValue")) blk: {
+            const max = refinementU256Arg(refinement.args, 1) orelse break :blk true;
+            const integer = switch (value) {
+                .integer => |integer| integer,
+                else => break :blk true,
+            };
+            break :blk integer <= max;
+        } else if (std.mem.eql(u8, refinement.name, "InRange")) blk: {
+            const min = refinementU256Arg(refinement.args, 1) orelse break :blk true;
+            const max = refinementU256Arg(refinement.args, 2) orelse break :blk true;
+            const integer = switch (value) {
+                .integer => |integer| integer,
+                else => break :blk true,
+            };
+            break :blk integer >= min and integer <= max;
+        } else if (std.mem.eql(u8, refinement.name, "NonZero")) blk: {
+            const integer = switch (value) {
+                .integer => |integer| integer,
+                else => break :blk true,
+            };
+            break :blk integer != 0;
+        } else if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) blk: {
+            const address = switch (value) {
+                .address => |address| address,
+                else => break :blk true,
+            };
+            break :blk address != 0;
+        } else true;
+
+        if (valid) return true;
+        self.recordCtError(error_mod.CtError.withReason(
+            .not_comptime,
+            self.sourceSpan(range),
+            "comptime refinement violation",
+            try self.refinementExpectation(refinement),
+        ));
+        return false;
+    }
+
+    fn refinementExpectation(self: *ConstEvaluator, refinement: model.RefinementType) ![]const u8 {
+        if (std.mem.eql(u8, refinement.name, "MinValue")) {
+            const min = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected MinValue");
+            return std.fmt.allocPrint(self.allocator, "expected MinValue value >= {d}", .{min});
+        }
+        if (std.mem.eql(u8, refinement.name, "MaxValue")) {
+            const max = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected MaxValue");
+            return std.fmt.allocPrint(self.allocator, "expected MaxValue value <= {d}", .{max});
+        }
+        if (std.mem.eql(u8, refinement.name, "InRange")) {
+            const min = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected InRange");
+            const max = refinementU256Arg(refinement.args, 2) orelse return self.allocator.dupe(u8, "expected InRange");
+            return std.fmt.allocPrint(self.allocator, "expected InRange value between {d} and {d}", .{ min, max });
+        }
+        return std.fmt.allocPrint(self.allocator, "expected {s}", .{refinement.name});
+    }
+
+    fn refinementU256Arg(args: []const ast.TypeArg, index: usize) ?u256 {
+        if (index >= args.len) return null;
+        return switch (args[index]) {
+            .Integer => |integer| std.fmt.parseInt(u256, integer.text, 10) catch null,
+            else => null,
+        };
     }
 
     fn structFieldValue(self: *ConstEvaluator, struct_data: CtAggregate.StructData, field_index: usize) ?CtValue {
@@ -1986,7 +2160,7 @@ const ConstEvaluator = struct {
         switch (self.file.expression(expr_id).*) {
             .Call => |call| {
                 if (try self.evalResultConstructorCallCtValue(call, use_cache)) |ct_value| return ct_value;
-                if (try self.evalEnumConstructorCallCtValue(call, use_cache)) |ct_value| return ct_value;
+                if (try self.evalEnumConstructorCallCtValue(expr_id, call, use_cache)) |ct_value| return ct_value;
                 if (try self.evalErrorDeclCallCtValue(call, use_cache)) |ct_value| return ct_value;
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| return ct_value;
                 if (self.last_error != null) return null;

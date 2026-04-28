@@ -2189,6 +2189,51 @@ test "compiler const eval generic calls can return value-generic refinement alia
     try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval rejects invalid refinement struct field construction" {
+    const source_text =
+        \\struct Box {
+        \\    value: MinValue<u256, 10>,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let box = Box { value: 5 };
+        \\        box.value;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "comptime refinement violation"));
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "expected MinValue value >= 10"));
+}
+
+test "compiler const eval rejects invalid refinement ADT payload construction" {
+    const source_text =
+        \\enum MaybeAmount {
+        \\    None,
+        \\    Value(MinValue<u256, 10>),
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let maybe = MaybeAmount.Value(5);
+        \\        0;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "comptime refinement violation"));
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "expected MinValue value >= 10"));
+}
+
 test "compiler const eval generic calls can return nested generic struct values" {
     const source_text =
         \\struct Pair(comptime T: type) {
