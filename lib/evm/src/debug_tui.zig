@@ -502,7 +502,12 @@ const Ui = struct {
                 const executed = try self.allocator.dupe(u8, self.command_buffer.items);
                 defer self.command_buffer.clearRetainingCapacity();
                 const should_quit = try self.executeCommand();
-                self.appendCommandLog(executed, self.command_status) catch {};
+                self.appendCommandLog(executed, self.command_status) catch {
+                    // Couldn't record the command in the rolling log; the
+                    // command itself ran fine. Surface so the user knows
+                    // history is incomplete.
+                    self.command_status = "warning: command log truncated (OOM)";
+                };
                 self.allocator.free(executed);
                 return should_quit;
             }
@@ -1453,10 +1458,22 @@ const Ui = struct {
     }
 
     fn applyBreakpoints(self: *Ui) !void {
+        // Continue past per-line failures so a single stale breakpoint
+        // (e.g. after a session reload onto recompiled bytecode) doesn't
+        // disable the rest. Surface the count via the status line.
+        var failed: usize = 0;
+        var first_failed_line: u32 = 0;
         for (self.breakpoints.items) |line| {
             if (!self.session.debugger.setBreakpoint(self.seed.source_path, line)) {
-                return error.InvalidArguments;
+                if (failed == 0) first_failed_line = line;
+                failed += 1;
             }
+        }
+        if (failed != 0) {
+            try self.setCommandStatusFmt(
+                "{d} breakpoint(s) skipped (e.g. line {d} has no statement entry)",
+                .{ failed, first_failed_line },
+            );
         }
     }
 
@@ -1492,7 +1509,11 @@ const Ui = struct {
             };
             return;
         };
-        if (record_history) self.step_history.append(self.allocator, mode) catch {};
+        if (record_history) self.step_history.append(self.allocator, mode) catch {
+            // Out of memory recording history. Step result is still valid;
+            // step-back / replay will be incomplete past this point.
+            self.command_status = "warning: step history truncated (OOM)";
+        };
         self.status = @tagName(self.session.debugger.stop_reason);
         if (!self.shouldPreserveFocusOnTerminalStop()) self.syncFocusFromDebugger();
         self.centerOnCurrentLine();
