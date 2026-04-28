@@ -955,6 +955,58 @@ test "verification reports invalid InRange ADT payload construction without degr
     try testing.expect(!result.degraded);
 }
 
+test "verification reports invalid NonZeroAddress struct field construction without degradation" {
+    const source_text =
+        \\struct Holder {
+        \\    owner: NonZeroAddress,
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn build(raw: address) -> address {
+        \\        let holder = Holder { owner: raw };
+        \\        return holder.owner;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "build");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification reports invalid NonZeroAddress ADT payload construction without degradation" {
+    const source_text =
+        \\enum MaybeOwner {
+        \\    None,
+        \\    Value(NonZeroAddress),
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn build(raw: address) -> address {
+        \\        let maybe = MaybeOwner.Value(raw);
+        \\        return switch (maybe) {
+        \\            MaybeOwner.Value(owner) => owner,
+        \\            MaybeOwner.None => raw,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "build");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports multi-error Result match without degradation" {
     const path = "ora-example/corpus/control-flow/match/result_multi_error_match.ora";
     const function_name = "project";
