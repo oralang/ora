@@ -17,6 +17,7 @@ const Frame = @import("frame.zig").Frame(.{});
 const Debugger = @import("debugger.zig").Debugger(.{});
 const SourceMap = @import("source_map.zig").SourceMap;
 const DebugInfo = @import("debug_info.zig").DebugInfo;
+const debug_session = @import("debug_session.zig");
 
 // =============================================================================
 // EVM/Frame/Debugger fixture builders
@@ -42,18 +43,10 @@ const Fixture = struct {
 fn buildEvm(allocator: std.mem.Allocator) !*Evm {
     const evm = try allocator.create(Evm);
     errdefer allocator.destroy(evm);
-    const block_context = evm_mod.BlockContext{
-        .chain_id = 1,
-        .block_number = 1,
-        .block_timestamp = 1000,
-        .block_difficulty = 0,
-        .block_prevrandao = 0,
-        .block_coinbase = try Address.fromHex("0x0000000000000000000000000000000000000000"),
-        .block_gas_limit = 10_000_000,
-        .block_base_fee = 1,
-        .blob_base_fee = 1,
-    };
-    try evm.init(allocator, null, .CANCUN, block_context, primitives.ZERO_ADDRESS, 0, null);
+    // Use the same pinned block context the production debug-session
+    // helpers use, so the unit-test determinism story matches the runtime
+    // determinism story.
+    try evm.init(allocator, null, .CANCUN, debug_session.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
     errdefer evm.deinit();
     try evm.initTransactionState(null);
     return evm;
@@ -330,10 +323,10 @@ test "Debugger: getSourceLineText returns the right line" {
 }
 
 test "Debugger: stepOver replay produces an identical trace" {
-    // Within the unit-test scope (no block-context reads), running the same
-    // bytecode twice must produce identical PC/opcode-name observations at
-    // each statement boundary. This is the weaker, in-process determinism
-    // signal; the cross-process replay-determinism test arrives with A4.
+    // Running the same bytecode twice must produce identical PC/opcode-name
+    // observations. Pinning a deterministic BlockContext (A4) means
+    // replay-determinism holds even when the contract reads block-context
+    // opcodes — see the dedicated test below.
     const allocator = testing.allocator;
 
     const Trace = struct {
@@ -373,6 +366,52 @@ test "Debugger: stepOver replay produces an identical trace" {
         try testing.expectEqual(a.line, b.line);
         try testing.expectEqualStrings(a.op, b.op);
     }
+}
+
+test "Debugger: replay determinism across block-context opcodes" {
+    // Stress the determinism contract: the contract pushes the values of
+    // every block-context opcode (TIMESTAMP, NUMBER, CHAINID, COINBASE,
+    // BASEFEE, PREVRANDAO, DIFFICULTY, GASLIMIT) onto the stack. With
+    // ora_evm.deterministicBlockContext() pinned, two runs must produce
+    // identical stacks at the STOP boundary.
+    const allocator = testing.allocator;
+
+    // Bytecode: TIMESTAMP, NUMBER, CHAINID, COINBASE, BASEFEE, PREVRANDAO,
+    // GASLIMIT, then STOP. We omit DIFFICULTY because in CANCUN it aliases
+    // PREVRANDAO and the EVM may reject the redundant op; the seven we keep
+    // are independent and exercise the rest of the surface.
+    const bytecode = &[_]u8{
+        0x42, // TIMESTAMP
+        0x43, // NUMBER
+        0x46, // CHAINID
+        0x41, // COINBASE
+        0x48, // BASEFEE
+        0x44, // PREVRANDAO
+        0x45, // GASLIMIT
+        0x00, // STOP
+    };
+
+    const entries = &[_]SourceMap.Entry{
+        .{ .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+        .{ .pc = 7, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = false },
+    };
+
+    var first_stack: std.ArrayList(u256) = .{};
+    defer first_stack.deinit(allocator);
+    var second_stack: std.ArrayList(u256) = .{};
+    defer second_stack.deinit(allocator);
+
+    inline for (.{ &first_stack, &second_stack }) |out| {
+        var fx = try buildFixture(allocator, bytecode, "block ctx\n", entries, null);
+        defer fx.deinit();
+
+        try fx.debugger.continue_();
+        // Snapshot the final stack contents.
+        for (fx.debugger.getStack()) |word| try out.append(allocator, word);
+    }
+
+    try testing.expectEqual(first_stack.items.len, second_stack.items.len);
+    for (first_stack.items, second_stack.items) |a, b| try testing.expectEqual(a, b);
 }
 
 // =============================================================================

@@ -59,7 +59,7 @@ pub fn main() !void {
     defer if (debug_info) |*info| info.deinit();
 
     var evm: Evm = undefined;
-    try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+    try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
     defer evm.deinit();
 
     const caller = primitives.Address.fromU256(0x100);

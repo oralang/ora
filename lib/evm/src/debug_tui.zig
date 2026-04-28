@@ -237,7 +237,7 @@ const Session = struct {
     debugger: Debugger,
 
     fn init(self: *Session, allocator: std.mem.Allocator, seed: *const SessionSeed) !void {
-        try self.evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+        try self.evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
         errdefer self.evm.deinit();
         try self.evm.initTransactionState(null);
         try self.evm.preWarmTransaction(seed.contract);
@@ -4198,7 +4198,7 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
     const contract = primitives.Address.fromU256(0x200);
 
     var evm: Evm = undefined;
-    try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+    try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
     defer evm.deinit();
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(contract);
@@ -4214,7 +4214,7 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
             return err;
         }
         evm.deinit();
-        try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+        try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
         try evm.initTransactionState(null);
         try evm.preWarmTransaction(contract);
         break :blk try SessionHelpers.deployRuntimeBytecode(allocator, &evm, .{

@@ -69,6 +69,7 @@ pub const loadDebuggerArtifact = debug_session.loadArtifact;
 pub const kArtifactMaxBytes = debug_session.kArtifactMaxBytes;
 pub const kDefaultGasLimit = debug_session.kDefaultGasLimit;
 pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
+pub const deterministicBlockContext = debug_session.deterministicBlockContext;
 
 test {
     std.testing.refAllDecls(@This());

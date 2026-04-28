@@ -24,6 +24,32 @@ pub const kDefaultGasLimit: i64 = 5_000_000;
 /// bug rather than something to grind through.
 pub const kDeploymentStepCap: usize = 200_000;
 
+/// Deterministic block context used by every debugger session.
+///
+/// Smart-contract debugging needs byte-identical replay across invocations
+/// (so a bug repro shipped as a session file rebuilds the same trace
+/// elsewhere). The EVM's BlockContext fields feed the TIMESTAMP / NUMBER /
+/// CHAINID / COINBASE / BASEFEE / PREVRANDAO / DIFFICULTY / GASLIMIT
+/// opcodes; if any of those are sampled at runtime, two runs would diverge.
+/// Pinning the context to fixed constants keeps replay byte-identical.
+///
+/// These values are the same as `evm.init`'s null-context fallback today —
+/// promoted to a named constant so the determinism contract is explicit at
+/// every call site, not implicit in the default branch.
+pub fn deterministicBlockContext() evm_mod.BlockContext {
+    return .{
+        .chain_id = 1,
+        .block_number = 0,
+        .block_timestamp = 0,
+        .block_difficulty = 0,
+        .block_prevrandao = 0,
+        .block_coinbase = primitives.ZERO_ADDRESS,
+        .block_gas_limit = 30_000_000,
+        .block_base_fee = 0,
+        .blob_base_fee = 0,
+    };
+}
+
 /// Read a debugger artifact from disk, capped at `kArtifactMaxBytes`.
 pub fn loadArtifact(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, kArtifactMaxBytes);
