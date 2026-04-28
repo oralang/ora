@@ -186,15 +186,17 @@ const Checkpoint = struct {
 /// Source-gutter overlay mode. Controls what extra information the
 /// gutter reveals about the current line. `none` is the default
 /// (provenance / folded / breakpoint marks only). `coverage` adds a
-/// per-line hit-count column.
+/// per-line hit-count column; `gas` adds cumulative gas spent.
 const OverlayMode = enum {
     none,
     coverage,
+    gas,
 
     fn next(self: OverlayMode) OverlayMode {
         return switch (self) {
             .none => .coverage,
-            .coverage => .none,
+            .coverage => .gas,
+            .gas => .none,
         };
     }
 
@@ -202,12 +204,14 @@ const OverlayMode = enum {
         return switch (self) {
             .none => "none",
             .coverage => "coverage",
+            .gas => "gas",
         };
     }
 
     fn parse(text: []const u8) ?OverlayMode {
         if (std.mem.eql(u8, text, "none")) return .none;
         if (std.mem.eql(u8, text, "coverage") or std.mem.eql(u8, text, "cov")) return .coverage;
+        if (std.mem.eql(u8, text, "gas")) return .gas;
         return null;
     }
 };
@@ -740,6 +744,33 @@ const Ui = struct {
         self.command_status = self.command_status_storage.items;
         return .ok;
     }
+    fn cmdGasCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const total = self.session.debugger.lineGasCount();
+        if (total == 0) {
+            self.command_status = "no gas attributed yet";
+            return .ok;
+        }
+        var n: usize = 10;
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (trimmed.len > 0) {
+            n = std.fmt.parseUnsigned(usize, trimmed, 10) catch {
+                self.command_status = "usage: :gascov [N]";
+                return .ok;
+            };
+            if (n == 0) n = 10;
+        }
+        const top = try self.session.debugger.getLineGasTopN(self.allocator, n);
+        defer self.allocator.free(top);
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("gas: {d} lines with gas; top {d}:", .{ total, top.len });
+        for (top) |entry| {
+            try writer.print(" L{d}={d}", .{ entry.line, entry.gas });
+        }
+        self.command_status = self.command_status_storage.items;
+        return .ok;
+    }
     fn cmdEval(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         if (arg.len == 0) {
             self.command_status = "missing expression";
@@ -890,6 +921,8 @@ const Ui = struct {
         .{ .name = "eval ", .match = .prefix, .handler = cmdEval, .help = "evaluate side-effect-free expression (numbers, bindings, +-*/%, == != < > <= >=, && ||, !)" },
         .{ .name = "cov", .match = .exact, .handler = cmdCoverage, .help = "report top-10 hottest source lines (statement-boundary hits)" },
         .{ .name = "cov ", .match = .prefix, .handler = cmdCoverage, .help = "report top-N hottest source lines (`:cov 20`)" },
+        .{ .name = "gascov", .match = .exact, .handler = cmdGasCoverage, .help = "report top-10 source lines by cumulative gas spent" },
+        .{ .name = "gascov ", .match = .prefix, .handler = cmdGasCoverage, .help = "report top-N source lines by cumulative gas spent" },
         .{ .name = "overlay", .match = .exact, .handler = cmdOverlay, .help = "show current overlay mode" },
         .{ .name = "overlay ", .match = .prefix, .handler = cmdOverlay, .help = "switch overlay mode (none, coverage)" },
         .{ .name = "trace ", .match = .prefix, .handler = cmdTraceExport, .help = "export EIP-3155 trace (`:trace export <path>`)" },
@@ -4369,6 +4402,13 @@ const Ui = struct {
                         break :blk self.scratchFmt("{s}{d:>6} {d:>4}|", .{ marker, line, h }) catch marker;
                     }
                     break :blk self.scratchFmt("{s}{d:>6}    .|", .{ marker, line }) catch marker;
+                },
+                .gas => blk: {
+                    const gas = self.session.debugger.getLineGas(line);
+                    if (gas) |g| {
+                        break :blk self.scratchFmt("{s}{d:>6} {d:>7}|", .{ marker, line, g }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}       .|", .{ marker, line }) catch marker;
                 },
             };
             drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});

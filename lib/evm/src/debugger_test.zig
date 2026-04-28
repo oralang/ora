@@ -718,6 +718,36 @@ test "Debugger: line_hits counter increments on every distinct statement-line tr
     try testing.expectEqual(@as(u32, 2), top[1].line);
 }
 
+test "Debugger: line_gas tracks cumulative cost per source line" {
+    const allocator = testing.allocator;
+    var fx = try buildFixture(
+        allocator,
+        TWO_STATEMENT_BYTECODE,
+        TWO_STATEMENT_SOURCE,
+        twoStatementEntries(),
+        null,
+    );
+    defer fx.deinit();
+
+    // Pre-step: nothing attributed yet beyond what primeInitialStop did.
+    const initial_l1 = fx.debugger.getLineGas(1) orelse 0;
+
+    // Step through both statements; each step advances at least one
+    // gas-spending opcode, so both lines should accumulate.
+    try fx.debugger.stepIn();
+    try fx.debugger.stepIn();
+    try fx.debugger.continue_();
+
+    const l1 = fx.debugger.getLineGas(1).?;
+    try testing.expect(l1 >= initial_l1);
+
+    const top = try fx.debugger.getLineGasTopN(allocator, 10);
+    defer allocator.free(top);
+    try testing.expect(top.len >= 1);
+    // Top entry should have gas > 0.
+    try testing.expect(top[0].gas > 0);
+}
+
 test "Debugger: getVisibleScopes returns the active scope" {
     const allocator = testing.allocator;
     const entries = &[_]SourceMap.Entry{

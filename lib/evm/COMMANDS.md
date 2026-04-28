@@ -110,10 +110,12 @@ o) or the `:overlay` command.
 | `overlay`         | Show the current overlay mode                            |
 | `overlay none`    | Reset to plain provenance gutter                         |
 | `overlay coverage` (or `cov`) | Add a hit-count column next to the line number |
+| `overlay gas`     | Add a cumulative-gas-spent column next to the line number |
 
 When `coverage` is on, the gutter renders `<mark><line> <hit>|` for
 every line that has had at least one statement-boundary hit, and
-`<mark><line>    .|` for unvisited statement lines.
+`<mark><line>    .|` for unvisited statement lines. `gas` is the same
+shape but renders cumulative gas instead.
 
 ## Coverage
 
@@ -127,8 +129,19 @@ non-executable spec lines) never appear.
 |-------------------|----------------------------------------------------------|
 | `cov`             | Report the top-10 hottest source lines                   |
 | `cov <n>`         | Report the top-`<n>` hottest source lines                |
+| `gascov`          | Report the top-10 source lines by cumulative gas spent   |
+| `gascov <n>`      | Report the top-`<n>` source lines by cumulative gas spent |
 
-Output format: `cov: <total> lines hit; top <k>: L<line>=<count> ...`.
+Coverage output format:
+`cov: <total> lines hit; top <k>: L<line>=<count> ...`.
+
+Gas-coverage output format:
+`gas: <total> lines with gas; top <k>: L<line>=<gas> ...`.
+
+Gas attribution: each opcode's gas cost is added to the source line
+of the most recent statement boundary. Gas spent inside CALL frames
+is left to the callee — the snapshot/post-step frame mismatch is
+detected and skipped to avoid mis-attributing it to the caller.
 
 ## Expression evaluation
 

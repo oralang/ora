@@ -43,6 +43,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// `:cov` command. Lines that don't host any statement boundary
         /// (whitespace, comments) never appear here.
         line_hits: std.AutoHashMap(u32, u32),
+        /// Per-source-line cumulative gas spent. Each opcode's gas cost
+        /// is attributed to the source line of the most recent statement
+        /// boundary (`last_statement_line`). Surfaces via `getLineGas`
+        /// and the `:gascov` command. Negative deltas (refunds) are
+        /// clamped to 0 to avoid wraparound.
+        line_gas: std.AutoHashMap(u32, u64),
         state: State,
         stop_reason: StopReason,
         allocator: std.mem.Allocator,
@@ -118,6 +124,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .last_watchpoint_id = null,
                 .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
                 .line_hits = std.AutoHashMap(u32, u32).init(allocator),
+                .line_gas = std.AutoHashMap(u32, u64).init(allocator),
                 .state = .paused,
                 .stop_reason = .not_started,
                 .allocator = allocator,
@@ -136,6 +143,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             self.breakpoints.deinit();
             self.ignored_invalid_idx.deinit();
             self.line_hits.deinit();
+            self.line_gas.deinit();
             for (self.watchpoints.items) |wp| self.allocator.free(wp.name);
             self.watchpoints.deinit(self.allocator);
             if (self.debug_info) |*debug_info| debug_info.deinit();
@@ -357,6 +365,47 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Total distinct lines that have been hit at least once.
         pub fn lineHitsCount(self: *const Self) usize {
             return self.line_hits.count();
+        }
+
+        /// Cumulative gas spent on a single source line; `null` if no
+        /// gas-spending opcode has been attributed to this line yet.
+        pub fn getLineGas(self: *const Self, line: u32) ?u64 {
+            return self.line_gas.get(line);
+        }
+
+        pub const LineGas = struct {
+            line: u32,
+            gas: u64,
+        };
+
+        /// Returns the `n` lines with the most cumulative gas spent,
+        /// sorted descending. Caller owns the returned slice.
+        pub fn getLineGasTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineGas {
+            var entries: std.ArrayList(LineGas) = .{};
+            errdefer entries.deinit(allocator);
+            try entries.ensureTotalCapacity(allocator, self.line_gas.count());
+            var it = self.line_gas.iterator();
+            while (it.next()) |kv| {
+                try entries.append(allocator, .{ .line = kv.key_ptr.*, .gas = kv.value_ptr.* });
+            }
+            const items = entries.items;
+            std.sort.heap(LineGas, items, {}, struct {
+                fn lessThan(_: void, a: LineGas, b: LineGas) bool {
+                    if (a.gas != b.gas) return a.gas > b.gas;
+                    return a.line < b.line;
+                }
+            }.lessThan);
+            if (items.len > n) {
+                const trimmed = try allocator.dupe(LineGas, items[0..n]);
+                entries.deinit(allocator);
+                return trimmed;
+            }
+            return entries.toOwnedSlice(allocator);
+        }
+
+        /// Total distinct lines that have been attributed any gas cost.
+        pub fn lineGasCount(self: *const Self) usize {
+            return self.line_gas.count();
         }
 
         /// True iff the last executeOneOpcode pausing was a watchpoint
@@ -804,12 +853,39 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 return;
             }
 
+            // Snapshot the gas pre-step so we can attribute the cost to
+            // whichever source line is currently active. Use the line we
+            // most recently transitioned to (`last_statement_line`) so
+            // multi-opcode statements accumulate their full cost.
+            const gas_before = frame.gas_remaining;
+            const attributed_line = self.last_statement_line;
+
             self.evm.step() catch |err| {
                 self.state = .halted;
                 self.stop_reason = .execution_error;
                 self.last_error_name = @errorName(err);
                 return err;
             };
+
+            // Best-effort gas accounting. The post-step frame may differ
+            // from the pre-step frame (CALL pushed a new one); in that
+            // case the parent's snapshotted gas is no longer comparable,
+            // so we skip the accounting for that step rather than
+            // mis-attribute it.
+            if (self.evm.getCurrentFrame()) |post_frame| {
+                if (post_frame == frame) {
+                    if (gas_before > post_frame.gas_remaining) {
+                        const delta: u64 = @intCast(gas_before - post_frame.gas_remaining);
+                        if (attributed_line) |line| {
+                            const gop = self.line_gas.getOrPut(line) catch null;
+                            if (gop) |entry| {
+                                if (!entry.found_existing) entry.value_ptr.* = 0;
+                                entry.value_ptr.* +%= delta;
+                            }
+                        }
+                    }
+                }
+            }
 
             self.steps_executed += 1;
             self.updateLastStatementLine();

@@ -58,7 +58,7 @@ calldata views.
 
 | Key   | Action                                                          |
 |-------|-----------------------------------------------------------------|
-| `O`   | Cycle source-gutter overlay mode (`none` → `coverage` → ...)    |
+| `O`   | Cycle source-gutter overlay mode (`none` → `coverage` → `gas` → `none`) |
 
 See [COMMANDS.md](COMMANDS.md) for the full `:overlay` command surface.
 
