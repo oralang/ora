@@ -1716,6 +1716,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        pub fn convertValueForSemaFlow(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerSemaType(target_sema_type, range);
+            const value_type = mlir.oraValueGetType(value);
+            const converted = try @This().convertValueForFlow(self, value, target_type, range);
+            if (target_sema_type.kind() == .refinement and !mlir.oraTypeEqual(value_type, target_type)) {
+                try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate");
+            }
+            return converted;
+        }
+
         fn convertTupleToAnonymousStruct(
             self: *FunctionLowerer,
             value: mlir.MlirValue,

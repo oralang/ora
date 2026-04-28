@@ -1133,6 +1133,7 @@ const FunctionLowerer = struct {
     pub const bindPatternValue = FunctionCore.bindPatternValue;
     pub const storePattern = FunctionCore.storePattern;
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
+    pub const convertValueForSemaFlow = FunctionCore.convertValueForSemaFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
     pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;

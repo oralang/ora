@@ -5,6 +5,7 @@ const sema = @import("../sema/mod.zig");
 const abi_support = @import("abi.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
 
@@ -1205,9 +1206,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!mlir.oraTypeIsAAdt(result_type)) return null;
 
             const payload_type = @This().adtVariantPayloadType(result_type, field.name) orelse return null;
+            const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), field.name);
             var payload_values: std.ArrayList(mlir.MlirValue) = .{};
             if (!mlir.oraTypeIsANone(payload_type)) {
-                try payload_values.append(self.parent.allocator, try @This().lowerAdtPayloadValue(self, call, payload_type, locals));
+                try payload_values.append(self.parent.allocator, try @This().lowerAdtPayloadValue(self, call, payload_type, payload_sema_type, locals));
             }
 
             const op = mlir.oraAdtConstructOpCreate(
@@ -1226,6 +1228,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             call: ast.CallExpr,
             payload_type: mlir.MlirType,
+            payload_sema_type: ?sema.Type,
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
             const tuple_count = mlir.oraTupleTypeGetNumElements(payload_type);
@@ -1234,7 +1237,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 for (call.args, 0..) |arg, index| {
                     const element_type = mlir.oraTupleTypeGetElementType(payload_type, index);
                     const raw = try self.lowerExpr(arg, locals);
-                    try elements.append(self.parent.allocator, try self.convertValueForFlow(raw, element_type, exprRange(self.parent.file, arg)));
+                    const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .tuple and index < payload_sema_type.?.tuple.len)
+                        try self.convertValueForSemaFlow(raw, payload_sema_type.?.tuple[index], exprRange(self.parent.file, arg))
+                    else
+                        try self.convertValueForFlow(raw, element_type, exprRange(self.parent.file, arg));
+                    try elements.append(self.parent.allocator, value);
                 }
                 const op = mlir.oraTupleCreateOpCreate(
                     self.parent.context,
@@ -1253,7 +1260,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 for (call.args, 0..) |arg, index| {
                     const field_type = mlir.oraAnonymousStructTypeGetFieldType(payload_type, index);
                     const raw = try self.lowerExpr(arg, locals);
-                    try fields.append(self.parent.allocator, try self.convertValueForFlow(raw, field_type, exprRange(self.parent.file, arg)));
+                    const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .anonymous_struct and index < payload_sema_type.?.anonymous_struct.fields.len)
+                        try self.convertValueForSemaFlow(raw, payload_sema_type.?.anonymous_struct.fields[index].ty, exprRange(self.parent.file, arg))
+                    else
+                        try self.convertValueForFlow(raw, field_type, exprRange(self.parent.file, arg));
+                    try fields.append(self.parent.allocator, value);
                 }
                 const op = mlir.oraStructInitOpCreate(
                     self.parent.context,
@@ -1267,7 +1278,67 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const raw = try self.lowerExpr(call.args[0], locals);
+            if (payload_sema_type) |target| {
+                return self.convertValueForSemaFlow(raw, target, exprRange(self.parent.file, call.args[0]));
+            }
             return self.convertValueForFlow(raw, payload_type, exprRange(self.parent.file, call.args[0]));
+        }
+
+        fn adtVariantPayloadSemaType(
+            self: *FunctionLowerer,
+            adt_sema_type: sema.Type,
+            variant_name: []const u8,
+        ) anyerror!?sema.Type {
+            if (adt_sema_type.kind() != .enum_) return null;
+            const enum_name = adt_sema_type.enum_.name;
+            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                for (instantiated.variants) |variant| {
+                    if (std.mem.eql(u8, variant.name, variant_name)) return variant.payload_type;
+                }
+                return null;
+            }
+            const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
+            const enum_item = switch (self.parent.file.item(item_id).*) {
+                .Enum => |enum_item| enum_item,
+                else => return null,
+            };
+            for (enum_item.variants) |variant| {
+                if (std.mem.eql(u8, variant.name, variant_name)) {
+                    return try @This().enumVariantPayloadSemaType(self, variant.payload);
+                }
+            }
+            return null;
+        }
+
+        fn enumVariantPayloadSemaType(
+            self: *FunctionLowerer,
+            payload: ast.EnumVariantPayload,
+        ) anyerror!?sema.Type {
+            return switch (payload) {
+                .none => null,
+                .positional => |types| blk: {
+                    if (types.len == 0) break :blk null;
+                    if (types.len == 1) {
+                        break :blk try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, types[0]);
+                    }
+                    const elements = try self.parent.allocator.alloc(sema.Type, types.len);
+                    for (types, 0..) |type_expr, index| {
+                        elements[index] = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, type_expr);
+                    }
+                    break :blk .{ .tuple = elements };
+                },
+                .named => |fields| blk: {
+                    if (fields.len == 0) break :blk null;
+                    const sema_fields = try self.parent.allocator.alloc(sema.AnonymousStructField, fields.len);
+                    for (fields, 0..) |field, index| {
+                        sema_fields[index] = .{
+                            .name = field.name,
+                            .ty = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, field.type_expr),
+                        };
+                    }
+                    break :blk .{ .anonymous_struct = .{ .fields = sema_fields } };
+                },
+            };
         }
 
         fn adtVariantPayloadType(adt_type: mlir.MlirType, variant_name: []const u8) ?mlir.MlirType {
@@ -2814,9 +2885,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const field_type = self.parent.lowerTypeExpr(decl_field.type_expr);
+                const field_sema_type = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, decl_field.type_expr);
                 const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                const value = try self.convertValueForSemaFlow(raw_value, field_sema_type, init.range);
                 try operands.append(self.parent.allocator, value);
             }
 
@@ -2846,9 +2917,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
                 const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInstantiateOpCreate(
@@ -2876,9 +2946,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const field_type = self.parent.lowerSemaType(decl_field.ty, init.range);
                 const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForFlow(raw_value, field_type, init.range);
+                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInitOpCreate(
