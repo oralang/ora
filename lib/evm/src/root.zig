@@ -73,11 +73,13 @@ pub const kDefaultGasLimit = debug_session.kDefaultGasLimit;
 pub const kDefaultMaxSteps = debug_session.kDefaultMaxSteps;
 pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
 pub const deterministicBlockContext = debug_session.deterministicBlockContext;
+pub const debug_eval = @import("debug_eval.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("evm_test.zig");
     _ = @import("debugger_test.zig");
+    _ = @import("debug_eval.zig");
     _ = @import("instructions/handlers_stack_test.zig");
     _ = @import("instructions/handlers_arithmetic_test.zig");
     _ = @import("instructions/handlers_comparison_test.zig");

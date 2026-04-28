@@ -50,8 +50,11 @@ are rejected with status `unknown command`.
 | Command            | Action                                                                   |
 |--------------------|--------------------------------------------------------------------------|
 | `break <line>`     | Set a breakpoint on the first statement PC of `<line>`                   |
+| `break <line> when <expr>` | Conditional: only halt when `<expr>` (a `:eval`-grammar predicate) is true |
+| `break <line> hit <n>`     | Hit-count: only halt on the `<n>`-th hit of this breakpoint                 |
+| `break <line> when <expr> hit <n>` | Both gates apply (predicate AND hit count)                          |
 | `delete <line>`    | Remove the breakpoint on `<line>` (no-op if not set)                     |
-| `info break`       | List all currently set breakpoints                                       |
+| `info break`       | List all currently set breakpoints with their conditions and hit counts  |
 
 ## Watchpoints
 
@@ -93,7 +96,56 @@ source-level binding name — bindings resolve to their declared
 | `print mem <off> <words>` | Words of frame memory starting at `<off>`                    |
 | `print stack[i]`        | Stack item at index `i` (0 = top)                            |
 | `print slot <hex>`      | Storage slot `<hex>` for the selected frame's address        |
+| `print logs`            | Decoded log lane: every emitted `LOG*` rendered as `EventName(arg=value, ...)` via the loaded ABI; falls back to topic/data sizes for unknown selectors |
 | `print <binding>`       | Source-level binding by name (resolves to storage / memory / tstore / folded value / "optimized away" / etc.) |
+
+## Expression evaluation
+
+Side-effect-free evaluator over visible bindings + numeric literals.
+Used by `:eval` and (later) by conditional-breakpoint predicates.
+
+| Command            | Action                                                                    |
+|--------------------|---------------------------------------------------------------------------|
+| `eval <expr>`      | Evaluate `<expr>` and print the result. Returns numbers as decimal, booleans as `true` / `false`. |
+
+Supported syntax:
+
+- Numeric literals: decimal (`42`) or hex (`0xff`).
+- Boolean literals: `true`, `false`.
+- Identifiers — resolved through the same binding lookup as `:print
+  <name>`. An unknown name reports `unknown identifier`; a name that
+  resolves to a non-numeric ABI value reports `binding unavailable`.
+- Arithmetic: `+`, `-`, `*`, `/`, `%` — all operate on `u256` with
+  wrapping `+%`/`-%`/`*%` semantics; `/` and `%` halt with `division
+  by zero` on a zero divisor.
+- Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+- Logical: `&&`, `||`, `!`.
+- Parentheses for grouping.
+
+Examples:
+
+```
+:eval n + 1
+:eval n == 0
+:eval (caller != attacker_addr) && (amount > 100)
+```
+
+## ABI-decoded reverts
+
+When execution stops with `execution_reverted` and the contract emitted a
+revert payload, the status line decodes it against the loaded
+`abi.json`:
+
+- Custom errors (4-byte selector + ABI-encoded args) render as
+  `ErrorName(field=value, ...)`.
+- Solidity-style `Error(string)` reverts (selector `0x08c379a0`) render
+  as `Error("...")`.
+- Empty / unrecognised payloads fall back to
+  `reverted (no decoded payload)`.
+
+Decoding requires the debugger to have been launched with an
+`--abi <path>` (the default `ora debug` flow auto-discovers
+`artifacts/<stem>/abi/<stem>.abi.json`).
 
 ## Writing state
 

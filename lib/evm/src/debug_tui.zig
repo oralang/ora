@@ -99,8 +99,14 @@ const SavedSession = struct {
     focus_line: ?u32 = null,
     active_evm_tab: []const u8 = "stack",
     step_history: []const []const u8 = &.{},
-    breakpoints: []const u32 = &.{},
+    breakpoints: []const SavedBreakpoint = &.{},
     checkpoints: []const SavedCheckpoint = &.{},
+
+    pub const SavedBreakpoint = struct {
+        line: u32,
+        condition: ?[]const u8 = null,
+        hit_target: ?u32 = null,
+    };
 };
 
 const AbiDoc = struct {
@@ -209,6 +215,66 @@ const AbiDoc = struct {
 
         return null;
     }
+
+    fn findErrorBySelector(self: *const AbiDoc, selector: [4]u8) ?std.json.Value {
+        const callables = self.parsed.value.object.get("callables") orelse return null;
+        if (callables != .array) return null;
+
+        const selector_int = std.mem.readInt(u32, &selector, .big);
+        var selector_buf: [10]u8 = undefined;
+        const selector_text = std.fmt.bufPrint(&selector_buf, "0x{x:0>8}", .{selector_int}) catch return null;
+
+        for (callables.array.items) |callable| {
+            if (callable != .object) continue;
+            const kind = callable.object.get("kind") orelse continue;
+            if (kind != .string or !std.mem.eql(u8, kind.string, "error")) continue;
+
+            const wire = callable.object.get("wire") orelse continue;
+            if (wire != .object) continue;
+            const evm_default = wire.object.get("evm-default") orelse continue;
+            if (evm_default != .object) continue;
+            const sel = evm_default.object.get("selector") orelse continue;
+            if (sel != .string) continue;
+            if (std.mem.eql(u8, sel.string, selector_text)) return callable;
+        }
+
+        return null;
+    }
+
+    fn findEventByTopic0(self: *const AbiDoc, topic0: u256) ?std.json.Value {
+        const callables = self.parsed.value.object.get("callables") orelse return null;
+        if (callables != .array) return null;
+
+        for (callables.array.items) |callable| {
+            if (callable != .object) continue;
+            const kind = callable.object.get("kind") orelse continue;
+            if (kind != .string or !std.mem.eql(u8, kind.string, "event")) continue;
+
+            const sig = callable.object.get("signature") orelse continue;
+            if (sig != .string) continue;
+
+            var hash: [32]u8 = undefined;
+            std.crypto.hash.sha3.Keccak256.hash(sig.string, &hash, .{});
+            var event_topic0: u256 = 0;
+            for (hash) |byte| event_topic0 = (event_topic0 << 8) | byte;
+            if (event_topic0 == topic0) return callable;
+        }
+
+        return null;
+    }
+
+    fn formatInputType(self: *const AbiDoc, input: std.json.Value) ?[]const u8 {
+        if (input != .object) return null;
+        const type_id = input.object.get("typeId") orelse return null;
+        if (type_id != .string) return null;
+        return self.wireTypeForTypeId(type_id.string);
+    }
+
+    fn isInputIndexed(input: std.json.Value) bool {
+        if (input != .object) return false;
+        const indexed = input.object.get("indexed") orelse return false;
+        return indexed == .bool and indexed.bool;
+    }
 };
 
 const SessionSeed = struct {
@@ -281,6 +347,21 @@ const Checkpoint = struct {
     active_evm_tab: EvmTabKind = .stack,
 };
 
+/// A user-set breakpoint. The debugger core only knows about lines (it
+/// halts on every hit); the TUI layers a side-effect-free predicate
+/// (`condition`) and an optional N-th-hit target on top, transparently
+/// resuming when neither gate is satisfied.
+const Breakpoint = struct {
+    line: u32,
+    condition: ?[]u8 = null,
+    hit_target: ?u32 = null,
+    hit_count: u32 = 0,
+
+    fn deinit(self: *Breakpoint, allocator: std.mem.Allocator) void {
+        if (self.condition) |c| allocator.free(c);
+    }
+};
+
 const MappingWindow = struct {
     statement_id: ?u32 = null,
     execution_region_id: ?u32 = null,
@@ -329,7 +410,7 @@ const Ui = struct {
     render_scratch: std.ArrayList(u8) = .{},
     step_history: std.ArrayList(StepMode) = .{},
     previous_bindings: std.ArrayList(BindingSnapshotEntry) = .{},
-    breakpoints: std.ArrayList(u32) = .{},
+    breakpoints: std.ArrayList(Breakpoint) = .{},
     checkpoints: std.ArrayList(Checkpoint) = .{},
     next_checkpoint_id: u32 = 1,
     selected_frame_index: usize = 0,
@@ -387,6 +468,7 @@ const Ui = struct {
         self.step_history.deinit(self.allocator);
         self.clearPreviousBindingsSnapshot();
         self.previous_bindings.deinit(self.allocator);
+        for (self.breakpoints.items) |*bp| bp.deinit(self.allocator);
         self.breakpoints.deinit(self.allocator);
         self.checkpoints.deinit(self.allocator);
     }
@@ -722,6 +804,28 @@ const Ui = struct {
         try self.handlePrintCommand(arg);
         return .ok;
     }
+    fn cmdEval(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing expression";
+            return .ok;
+        }
+        const value = self.evaluateExpr(arg) catch |err| {
+            switch (err) {
+                error.ParseError => self.command_status = "parse error",
+                error.UnknownIdentifier => self.command_status = "unknown identifier",
+                error.BindingUnavailable => self.command_status = "binding unavailable",
+                error.DivisionByZero => self.command_status = "division by zero",
+                error.Overflow => self.command_status = "literal overflow",
+                error.OutOfMemory => self.command_status = "out of memory",
+            }
+            return .ok;
+        };
+        switch (value) {
+            .num => |n| try self.setCommandStatusFmt("=> {d}", .{n}),
+            .bool_ => |b| try self.setCommandStatusFmt("=> {s}", .{if (b) "true" else "false"}),
+        }
+        return .ok;
+    }
     fn cmdSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         try self.handleSetCommand(arg);
         return .ok;
@@ -847,6 +951,7 @@ const Ui = struct {
         .{ .name = "unwatch ", .match = .prefix, .handler = cmdUnwatch, .help = "remove watchpoint by id" },
         .{ .name = "gas ", .match = .prefix, .handler = cmdGasSet, .help = "override frame gas_remaining" },
         .{ .name = "print ", .match = .prefix, .handler = cmdPrint, .help = "print binding/state target" },
+        .{ .name = "eval ", .match = .prefix, .handler = cmdEval, .help = "evaluate side-effect-free expression (numbers, bindings, +-*/%, == != < > <= >=, && ||, !)" },
         .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
         .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
         .{ .name = "load-session ", .aliases = &.{"ls "}, .match = .prefix, .handler = cmdLoadSession, .help = "load session from path" },
@@ -925,6 +1030,10 @@ const Ui = struct {
         }
         if (std.mem.eql(u8, target, "tstore")) {
             try self.handlePrintStorageCommand(true);
+            return;
+        }
+        if (std.mem.eql(u8, target, "logs")) {
+            try self.handlePrintLogsCommand();
             return;
         }
         if (std.mem.startsWith(u8, target, "mem ")) {
@@ -1017,6 +1126,29 @@ const Ui = struct {
             }
             try writer.print(" 0x{X:0>4}={s}", .{ word_offset, self.scratchShortU256(value) });
             if (word_index + 1 < words) try writer.writeAll(" |");
+        }
+        self.command_status = self.command_status_storage.items;
+    }
+
+    fn handlePrintLogsCommand(self: *Ui) !void {
+        const logs = self.session.evm.logs.items;
+        if (logs.len == 0) {
+            self.command_status = "no logs emitted";
+            return;
+        }
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("logs ({d}):", .{logs.len});
+        for (logs, 0..) |log_entry, i| {
+            self.render_scratch.clearRetainingCapacity();
+            if (self.formatDecodedLog(log_entry)) |decoded| {
+                try writer.print(" #{d}={s}", .{ i, decoded });
+            } else {
+                try writer.print(" #{d}=<{d} topics, {d} data bytes>", .{
+                    i, log_entry.topics.len, log_entry.data.len,
+                });
+            }
         }
         self.command_status = self.command_status_storage.items;
     }
@@ -1217,9 +1349,13 @@ const Ui = struct {
     }
 
     fn handleBreakpointSet(self: *Ui, rest: []const u8) !void {
-        const line = try self.parseBreakpointLine(rest);
+        const parsed = self.parseBreakpointArgs(rest) catch {
+            self.command_status = "usage: :break <line> [when <expr>] [hit <n>]";
+            return;
+        };
+        const line = parsed.line;
         for (self.breakpoints.items) |existing| {
-            if (existing == line) {
+            if (existing.line == line) {
                 self.command_status = "breakpoint already set";
                 return;
             }
@@ -1228,8 +1364,41 @@ const Ui = struct {
             self.command_status = self.breakpointFailureMessage(line);
             return;
         }
-        try self.breakpoints.append(self.allocator, line);
-        if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line)) |prov| {
+        const condition_dup: ?[]u8 = if (parsed.condition) |c| try self.allocator.dupe(u8, c) else null;
+        errdefer if (condition_dup) |c| self.allocator.free(c);
+        try self.breakpoints.append(self.allocator, .{
+            .line = line,
+            .condition = condition_dup,
+            .hit_target = parsed.hit_target,
+        });
+        const prov_label_opt = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
+        const prov_str = if (prov_label_opt) |p| p.label() else "";
+        if (parsed.condition != null and parsed.hit_target != null) {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} when '{s}' hit {d}", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                parsed.condition.?,
+                parsed.hit_target.?,
+            });
+        } else if (parsed.condition) |cond| {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} when '{s}'", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                cond,
+            });
+        } else if (parsed.hit_target) |target| {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} hit {d}", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                target,
+            });
+        } else if (prov_label_opt) |prov| {
             try self.setCommandStatusFmt("breakpoint set on line {d} [{s}]", .{ line, prov.label() });
         } else {
             try self.setCommandStatusFmt("breakpoint set on line {d}", .{line});
@@ -1241,7 +1410,8 @@ const Ui = struct {
         var found = false;
         var i: usize = 0;
         while (i < self.breakpoints.items.len) : (i += 1) {
-            if (self.breakpoints.items[i] == line) {
+            if (self.breakpoints.items[i].line == line) {
+                self.breakpoints.items[i].deinit(self.allocator);
                 _ = self.breakpoints.swapRemove(i);
                 found = true;
                 break;
@@ -1263,6 +1433,56 @@ const Ui = struct {
             return std.fmt.parseUnsigned(u32, std.mem.trim(u8, trimmed[colon + 1 ..], " \t"), 10);
         }
         return std.fmt.parseUnsigned(u32, trimmed, 10);
+    }
+
+    const ParsedBreakpoint = struct {
+        line: u32,
+        condition: ?[]const u8 = null,
+        hit_target: ?u32 = null,
+    };
+
+    /// Parse `<line> [when <expr>] [hit <n>]`. Either order of suffixes is
+    /// accepted. The returned slices are borrowed from `rest` and must be
+    /// duped by the caller if they need to outlive it.
+    fn parseBreakpointArgs(self: *Ui, rest: []const u8) !ParsedBreakpoint {
+        _ = self;
+        const trimmed = std.mem.trim(u8, rest, " \t");
+        if (trimmed.len == 0) return error.InvalidArguments;
+
+        var head_end: usize = 0;
+        while (head_end < trimmed.len and trimmed[head_end] != ' ' and trimmed[head_end] != '\t') head_end += 1;
+        const line_text = trimmed[0..head_end];
+        const line_value: u32 = if (std.mem.indexOfScalar(u8, line_text, ':')) |colon|
+            try std.fmt.parseUnsigned(u32, std.mem.trim(u8, line_text[colon + 1 ..], " \t"), 10)
+        else
+            try std.fmt.parseUnsigned(u32, line_text, 10);
+
+        var result = ParsedBreakpoint{ .line = line_value };
+        var cursor = std.mem.trim(u8, trimmed[head_end..], " \t");
+        while (cursor.len > 0) {
+            if (std.mem.startsWith(u8, cursor, "when ") or std.mem.startsWith(u8, cursor, "when\t")) {
+                const after = std.mem.trim(u8, cursor[5..], " \t");
+                if (std.mem.indexOf(u8, after, " hit ")) |split_at| {
+                    result.condition = std.mem.trim(u8, after[0..split_at], " \t");
+                    cursor = std.mem.trim(u8, after[split_at + 1 ..], " \t");
+                } else {
+                    result.condition = after;
+                    cursor = "";
+                }
+            } else if (std.mem.startsWith(u8, cursor, "hit ") or std.mem.startsWith(u8, cursor, "hit\t")) {
+                const after = std.mem.trim(u8, cursor[4..], " \t");
+                if (std.mem.indexOf(u8, after, " when ")) |split_at| {
+                    result.hit_target = try std.fmt.parseUnsigned(u32, std.mem.trim(u8, after[0..split_at], " \t"), 10);
+                    cursor = std.mem.trim(u8, after[split_at + 1 ..], " \t");
+                } else {
+                    result.hit_target = try std.fmt.parseUnsigned(u32, after, 10);
+                    cursor = "";
+                }
+            } else {
+                return error.InvalidArguments;
+            }
+        }
+        return result;
     }
 
     fn breakpointFailureMessage(self: *Ui, line: u32) []const u8 {
@@ -1407,19 +1627,15 @@ const Ui = struct {
         self.command_status_storage.clearRetainingCapacity();
         var writer = self.command_status_storage.writer(self.allocator);
         try writer.writeAll("breakpoints:");
-        for (self.breakpoints.items, 0..) |line, i| {
-            const prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
-            if (i == 0) {
-                if (prov) |p|
-                    try writer.print(" {d}[{s}]", .{ line, p.label() })
-                else
-                    try writer.print(" {d}", .{line});
-            } else {
-                if (prov) |p|
-                    try writer.print(", {d}[{s}]", .{ line, p.label() })
-                else
-                    try writer.print(", {d}", .{line});
-            }
+        for (self.breakpoints.items, 0..) |bp, i| {
+            const prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, bp.line);
+            const sep: []const u8 = if (i == 0) " " else ", ";
+            if (prov) |p|
+                try writer.print("{s}{d}[{s}]", .{ sep, bp.line, p.label() })
+            else
+                try writer.print("{s}{d}", .{ sep, bp.line });
+            if (bp.condition) |cond| try writer.print(" when '{s}'", .{cond});
+            if (bp.hit_target) |target| try writer.print(" hit {d}/{d}", .{ bp.hit_count, target });
         }
         self.command_status = self.command_status_storage.items;
     }
@@ -1527,9 +1743,9 @@ const Ui = struct {
         // disable the rest. Surface the count via the status line.
         var failed: usize = 0;
         var first_failed_line: u32 = 0;
-        for (self.breakpoints.items) |line| {
-            if (!self.session.debugger.setBreakpoint(self.seed.source_path, line)) {
-                if (failed == 0) first_failed_line = line;
+        for (self.breakpoints.items) |bp| {
+            if (!self.session.debugger.setBreakpoint(self.seed.source_path, bp.line)) {
+                if (failed == 0) first_failed_line = bp.line;
                 failed += 1;
             }
         }
@@ -1573,6 +1789,22 @@ const Ui = struct {
             };
             return;
         };
+        // Apply conditional / hit-count gating: if the breakpoint we
+        // halted at has predicates that aren't satisfied, transparently
+        // resume. Capped to avoid spinning on a malformed predicate that
+        // always falses out — caller can disable the breakpoint manually.
+        var gating_iters: u32 = 0;
+        while (self.shouldSkipCurrentBreakpoint()) : (gating_iters += 1) {
+            if (gating_iters >= 1_000_000) break;
+            self.runDebuggerCommand(.continue_) catch {
+                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
+                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                    self.command_status = self.status;
+                };
+                return;
+            };
+            if (self.session.debugger.isHalted()) break;
+        }
         if (record_history) self.step_history.append(self.allocator, mode) catch {
             // Out of memory recording history. Step result is still valid;
             // step-back / replay will be incomplete past this point.
@@ -1582,6 +1814,41 @@ const Ui = struct {
         if (!self.shouldPreserveFocusOnTerminalStop()) self.syncFocusFromDebugger();
         self.centerOnCurrentLine();
         self.updateCommandStatusForCurrentStop(stepModeName(mode)) catch {};
+    }
+
+    /// Check whether the current breakpoint hit should be skipped because
+    /// its `when <expr>` predicate evaluated to false or its `hit <n>`
+    /// target hasn't been reached yet. Bumps the matching `Breakpoint`'s
+    /// `hit_count` as a side effect when we hit one.
+    fn shouldSkipCurrentBreakpoint(self: *Ui) bool {
+        if (self.session.debugger.stop_reason != .breakpoint_hit) return false;
+        const current_line = self.session.debugger.currentSourceLine() orelse return false;
+        var bp_ptr: ?*Breakpoint = null;
+        for (self.breakpoints.items) |*bp| {
+            if (bp.line == current_line) {
+                bp_ptr = bp;
+                break;
+            }
+        }
+        const bp = bp_ptr orelse return false;
+        bp.hit_count +%= 1;
+
+        var skip = false;
+        if (bp.hit_target) |target| {
+            if (bp.hit_count != target) skip = true;
+        }
+        if (!skip) {
+            if (bp.condition) |cond| {
+                const value = self.evaluateExpr(cond) catch {
+                    // Predicate failed to evaluate — fail open (halt) so
+                    // the user can fix the predicate; don't silently
+                    // skip.
+                    return false;
+                };
+                if (!value.asBool()) skip = true;
+            }
+        }
+        return skip;
     }
 
     fn stepBack(self: *Ui) void {
@@ -2904,6 +3171,20 @@ const Ui = struct {
                 return;
             }
         }
+        if (self.session.debugger.stop_reason == .execution_reverted) {
+            const frames = self.session.evm.frames.items;
+            if (frames.len > 0) {
+                const top = &frames[frames.len - 1];
+                if (top.output.len > 0) {
+                    if (self.formatDecodedRevert(top.output)) |decoded| {
+                        try self.setCommandStatusFmt("{s} => reverted: {s}", .{ action, decoded });
+                        return;
+                    }
+                }
+            }
+            try self.setCommandStatusFmt("{s} => reverted (no decoded payload)", .{action});
+            return;
+        }
 
         if (entry) |e| {
             const stmt_id = e.statement_id;
@@ -3710,6 +3991,44 @@ const Ui = struct {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
 
+    fn evalResolveBinding(ctx: *anyopaque, name: []const u8) ora_evm.debug_eval.EvalError!?ora_evm.debug_eval.Value {
+        const self: *Ui = @alignCast(@ptrCast(ctx));
+        const binding_opt = self.session.debugger.findVisibleBindingByName(self.allocator, name) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const binding = binding_opt orelse return null;
+
+        if (binding.folded_value) |folded_text| {
+            const parsed = std.fmt.parseUnsigned(u256, folded_text, 0) catch return error.BindingUnavailable;
+            return ora_evm.debug_eval.Value{ .num = parsed };
+        }
+
+        if (self.numericBindingValue(&binding) catch null) |value| {
+            return ora_evm.debug_eval.Value{ .num = value };
+        }
+        if (self.resolveAbiParamValue(&binding)) |resolved| {
+            return switch (resolved) {
+                .numeric => |n| ora_evm.debug_eval.Value{ .num = n },
+                .text => error.BindingUnavailable,
+            };
+        }
+        if (self.resolveIntrinsicLocalValue(&binding)) |resolved| {
+            return switch (resolved) {
+                .numeric => |n| ora_evm.debug_eval.Value{ .num = n },
+                .text => error.BindingUnavailable,
+            };
+        }
+        return error.BindingUnavailable;
+    }
+
+    fn evaluateExpr(self: *Ui, expr: []const u8) ora_evm.debug_eval.EvalError!ora_evm.debug_eval.Value {
+        const resolver = ora_evm.debug_eval.Resolver{
+            .ctx = @ptrCast(self),
+            .resolveFn = evalResolveBinding,
+        };
+        return ora_evm.debug_eval.evaluate(expr, resolver);
+    }
+
     fn resolvedBindingValue(self: *Ui, binding: *const DebugInfo.VisibleBinding) !?ResolvedBindingValue {
         if (try self.numericBindingValue(binding)) |value| {
             return .{ .numeric = value };
@@ -3829,6 +4148,149 @@ const Ui = struct {
         return .{ .numeric = value };
     }
 
+
+    /// Try to decode a revert payload (as left in `frame.output` after a
+    /// REVERT) against the loaded ABI. Returns `null` when the payload
+    /// doesn't match a known custom error or string-revert; the caller
+    /// should fall back to plain "execution_reverted" status. The returned
+    /// slice is valid until `render_scratch` is reset.
+    fn formatDecodedRevert(self: *Ui, payload: []const u8) ?[]const u8 {
+        if (payload.len == 0) return null;
+        const start = self.render_scratch.items.len;
+        var writer = self.render_scratch.writer(self.allocator);
+
+        if (payload.len >= 4 + 32 and std.mem.eql(u8, payload[0..4], &.{ 0x08, 0xc3, 0x79, 0xa0 })) {
+            // Solidity-style Error(string) revert.
+            const args = payload[4..];
+            const offset = readU256BE(args[0..32]);
+            if (offset == 32 and args.len >= 64) {
+                const length: usize = @intCast(readU256BE(args[32..64]) & std.math.maxInt(u32));
+                const bytes_start: usize = 64;
+                const end = bytes_start + length;
+                if (end <= args.len) {
+                    writer.print("Error(\"{s}\")", .{args[bytes_start..end]}) catch return null;
+                    return self.render_scratch.items[start..];
+                }
+            }
+        }
+
+        if (payload.len < 4) return null;
+        const abi_doc = self.abi_doc orelse return null;
+        var selector_buf: [4]u8 = undefined;
+        @memcpy(&selector_buf, payload[0..4]);
+        const error_callable = abi_doc.findErrorBySelector(selector_buf) orelse return null;
+
+        const name = blk: {
+            const n = error_callable.object.get("name") orelse break :blk @as([]const u8, "<error>");
+            if (n != .string) break :blk @as([]const u8, "<error>");
+            break :blk n.string;
+        };
+        writer.print("{s}(", .{name}) catch return null;
+
+        const args = payload[4..];
+        const inputs_value = error_callable.object.get("inputs");
+        const inputs_array: []const std.json.Value = blk: {
+            if (inputs_value) |iv| {
+                if (iv == .array) break :blk iv.array.items;
+            }
+            break :blk &.{};
+        };
+
+        var i: usize = 0;
+        while (i < inputs_array.len) : (i += 1) {
+            if (i > 0) writer.writeAll(", ") catch return null;
+            const input = inputs_array[i];
+            const arg_name: []const u8 = blk: {
+                if (input == .object) {
+                    if (input.object.get("name")) |n| {
+                        if (n == .string) break :blk n.string;
+                    }
+                }
+                break :blk "_";
+            };
+            writer.print("{s}=", .{arg_name}) catch return null;
+            const word_start = i * 32;
+            const word_end = word_start + 32;
+            if (word_end > args.len) {
+                writer.writeAll("?") catch return null;
+                continue;
+            }
+            const wire_type = abi_doc.formatInputType(input) orelse "uint256";
+            writeAbiWord(writer, wire_type, args[word_start..word_end]) catch return null;
+        }
+
+        writer.writeAll(")") catch return null;
+        return self.render_scratch.items[start..];
+    }
+
+    /// Decode a single emitted log against the loaded ABI. Returns a
+    /// short human-readable string like `Transfer(from=0x..., to=0x...,
+    /// amount=42)`. Returns `null` when no event in the ABI matches
+    /// `topic[0]`. The returned slice is valid until `render_scratch`
+    /// is reset.
+    fn formatDecodedLog(self: *Ui, log_entry: ora_evm.Log) ?[]const u8 {
+        if (log_entry.topics.len == 0) return null;
+        const abi_doc = self.abi_doc orelse return null;
+        const event = abi_doc.findEventByTopic0(log_entry.topics[0]) orelse return null;
+
+        const name = blk: {
+            const n = event.object.get("name") orelse break :blk @as([]const u8, "<event>");
+            if (n != .string) break :blk @as([]const u8, "<event>");
+            break :blk n.string;
+        };
+
+        const start = self.render_scratch.items.len;
+        var writer = self.render_scratch.writer(self.allocator);
+        writer.print("{s}(", .{name}) catch return null;
+
+        const inputs_value = event.object.get("inputs");
+        const inputs_array: []const std.json.Value = blk: {
+            if (inputs_value) |iv| {
+                if (iv == .array) break :blk iv.array.items;
+            }
+            break :blk &.{};
+        };
+
+        var topic_idx: usize = 1; // topic[0] is the selector
+        var data_idx: usize = 0;
+        var first = true;
+        for (inputs_array) |input| {
+            if (!first) writer.writeAll(", ") catch return null;
+            first = false;
+
+            const arg_name: []const u8 = blk: {
+                if (input == .object) {
+                    if (input.object.get("name")) |n| {
+                        if (n == .string) break :blk n.string;
+                    }
+                }
+                break :blk "_";
+            };
+            writer.print("{s}=", .{arg_name}) catch return null;
+            const wire_type = abi_doc.formatInputType(input) orelse "uint256";
+
+            if (AbiDoc.isInputIndexed(input)) {
+                if (topic_idx >= log_entry.topics.len) {
+                    writer.writeAll("?") catch return null;
+                    continue;
+                }
+                var word: [32]u8 = undefined;
+                writeU256BE(&word, log_entry.topics[topic_idx]);
+                topic_idx += 1;
+                writeAbiWord(writer, wire_type, &word) catch return null;
+            } else {
+                if (data_idx + 32 > log_entry.data.len) {
+                    writer.writeAll("?") catch return null;
+                    continue;
+                }
+                writeAbiWord(writer, wire_type, log_entry.data[data_idx .. data_idx + 32]) catch return null;
+                data_idx += 32;
+            }
+        }
+        writer.writeAll(")") catch return null;
+        return self.render_scratch.items[start..];
+    }
+
     fn selectedFrame(self: *Ui) ?*Frame {
         const frames = self.session.evm.frames.items;
         if (frames.len == 0) return null;
@@ -3881,10 +4343,13 @@ const Ui = struct {
         const tail = @min(self.breakpoints.items.len, 4);
         var i = self.breakpoints.items.len - tail;
         while (i < self.breakpoints.items.len) : (i += 1) {
-            if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, self.breakpoints.items[i])) |prov|
-                try self.render_scratch.writer(self.allocator).print("  L{d}[{s}]", .{ self.breakpoints.items[i], prov.label() })
+            const bp = self.breakpoints.items[i];
+            if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, bp.line)) |prov|
+                try self.render_scratch.writer(self.allocator).print("  L{d}[{s}]", .{ bp.line, prov.label() })
             else
-                try self.render_scratch.writer(self.allocator).print("  L{d}", .{self.breakpoints.items[i]});
+                try self.render_scratch.writer(self.allocator).print("  L{d}", .{bp.line});
+            if (bp.condition != null) try self.render_scratch.writer(self.allocator).writeAll("?");
+            if (bp.hit_target != null) try self.render_scratch.writer(self.allocator).print("@{d}/{d}", .{ bp.hit_count, bp.hit_target.? });
         }
         return self.render_scratch.items[start..];
     }
@@ -3974,7 +4439,7 @@ const Ui = struct {
 
     fn hasBreakpointLine(self: *Ui, line: u32) bool {
         for (self.breakpoints.items) |bp| {
-            if (bp == line) return true;
+            if (bp.line == line) return true;
         }
         return false;
     }
@@ -3997,8 +4462,15 @@ const Ui = struct {
         for (self.step_history.items, 0..) |mode, i| {
             step_names[i] = stepModeName(mode);
         }
-        const breakpoints = try self.allocator.dupe(u32, self.breakpoints.items);
+        const breakpoints = try self.allocator.alloc(SavedSession.SavedBreakpoint, self.breakpoints.items.len);
         defer self.allocator.free(breakpoints);
+        for (self.breakpoints.items, 0..) |bp, i| {
+            breakpoints[i] = .{
+                .line = bp.line,
+                .condition = bp.condition,
+                .hit_target = bp.hit_target,
+            };
+        }
         var saved_checkpoints = try self.allocator.alloc(SavedSession.SavedCheckpoint, self.checkpoints.items.len);
         defer self.allocator.free(saved_checkpoints);
         for (self.checkpoints.items, 0..) |cp, i| {
@@ -4084,9 +4556,16 @@ const Ui = struct {
         self.command_mode = false;
         self.command_buffer.clearRetainingCapacity();
         self.active_evm_tab = parseTabName(parsed.value.active_evm_tab) orelse .stack;
+        for (self.breakpoints.items) |*bp| bp.deinit(self.allocator);
         self.breakpoints.clearRetainingCapacity();
-        for (parsed.value.breakpoints) |line| {
-            try self.breakpoints.append(self.allocator, line);
+        for (parsed.value.breakpoints) |saved| {
+            const condition_dup: ?[]u8 = if (saved.condition) |c| try self.allocator.dupe(u8, c) else null;
+            errdefer if (condition_dup) |c| self.allocator.free(c);
+            try self.breakpoints.append(self.allocator, .{
+                .line = saved.line,
+                .condition = condition_dup,
+                .hit_target = saved.hit_target,
+            });
         }
         self.checkpoints.clearRetainingCapacity();
         self.next_checkpoint_id = 1;
@@ -4121,6 +4600,46 @@ const Ui = struct {
         if (self.focus_line == null) self.syncFocusFromDebugger();
     }
 };
+
+fn writeAbiWord(writer: anytype, wire_type: []const u8, word: []const u8) !void {
+    if (word.len != 32) {
+        try writer.writeAll("0x");
+        for (word) |b| try writer.print("{x:0>2}", .{b});
+        return;
+    }
+    if (std.mem.eql(u8, wire_type, "address")) {
+        try writer.print("0x{x}", .{word[12..32]});
+        return;
+    }
+    if (std.mem.eql(u8, wire_type, "bool")) {
+        try writer.writeAll(if (word[31] == 0) "false" else "true");
+        return;
+    }
+    if (std.mem.startsWith(u8, wire_type, "bytes")) {
+        try writer.writeAll("0x");
+        for (word) |b| try writer.print("{x:0>2}", .{b});
+        return;
+    }
+    var value: u256 = 0;
+    for (word) |b| value = (value << 8) | b;
+    try writer.print("{d}", .{value});
+}
+
+fn readU256BE(word: *const [32]u8) u256 {
+    var value: u256 = 0;
+    for (word) |b| value = (value << 8) | b;
+    return value;
+}
+
+fn writeU256BE(out: *[32]u8, value: u256) void {
+    var v = value;
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        out[i] = @intCast(v & 0xff);
+        v >>= 8;
+    }
+}
 
 fn seg(text: []const u8, style: Style) Segment {
     return .{ .text = text, .style = style };
