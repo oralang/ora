@@ -185,53 +185,7 @@ const Checkpoint = struct {
     active_evm_tab: EvmTabKind = .stack,
 };
 
-/// Source-gutter overlay mode. Controls what extra information the
-/// gutter reveals about the current line.
-///
-/// - `none`: provenance / folded / breakpoint marks only (default).
-/// - `coverage`: per-line statement-boundary hit count.
-/// - `gas`: cumulative gas attributed to each line.
-/// - `folded`: show the folded literal value next to folded source
-///   declarations (compile-time constants only).
-/// - `hoist`: show the origin_statement_id for hoisted lines, so the
-///   reader can trace lowered-region statements back to their source
-///   site.
-const OverlayMode = enum {
-    none,
-    coverage,
-    gas,
-    folded,
-    hoist,
-
-    fn next(self: OverlayMode) OverlayMode {
-        return switch (self) {
-            .none => .coverage,
-            .coverage => .gas,
-            .gas => .folded,
-            .folded => .hoist,
-            .hoist => .none,
-        };
-    }
-
-    fn name(self: OverlayMode) []const u8 {
-        return switch (self) {
-            .none => "none",
-            .coverage => "coverage",
-            .gas => "gas",
-            .folded => "folded",
-            .hoist => "hoist",
-        };
-    }
-
-    fn parse(text: []const u8) ?OverlayMode {
-        if (std.mem.eql(u8, text, "none")) return .none;
-        if (std.mem.eql(u8, text, "coverage") or std.mem.eql(u8, text, "cov")) return .coverage;
-        if (std.mem.eql(u8, text, "gas")) return .gas;
-        if (std.mem.eql(u8, text, "folded") or std.mem.eql(u8, text, "fold")) return .folded;
-        if (std.mem.eql(u8, text, "hoist") or std.mem.eql(u8, text, "hoisted")) return .hoist;
-        return null;
-    }
-};
+const OverlayMode = ora_evm.debug_overlay.OverlayMode;
 
 /// A user-set breakpoint. The debugger core only knows about lines (it
 /// halts on every hit); the TUI layers a side-effect-free predicate
