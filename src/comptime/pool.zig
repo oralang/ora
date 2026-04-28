@@ -79,7 +79,7 @@ pub const ConstPool = struct {
     }
 
     /// Error set for intern operations
-    pub const InternError = error{OutOfMemory};
+    pub const InternError = error{ OutOfMemory, UnsupportedComptimeValue };
 
     /// Intern a CtValue from a CtEnv (deep-copy heap data into pool)
     pub fn intern(self: *ConstPool, env: anytype, v: CtValue) InternError!ConstId {
@@ -138,6 +138,7 @@ pub const ConstPool = struct {
                     .payload = payload_id,
                 } });
             },
+            .error_union_val => error.UnsupportedComptimeValue,
         };
     }
 

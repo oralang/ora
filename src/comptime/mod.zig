@@ -44,6 +44,7 @@
 // Re-export value types
 pub const CtValue = @import("value.zig").CtValue;
 pub const CtEnum = @import("value.zig").CtEnum;
+pub const CtErrorUnion = @import("value.zig").CtErrorUnion;
 pub const ConstValue = @import("value.zig").ConstValue;
 pub const ConstStruct = @import("value.zig").ConstStruct;
 pub const ConstField = @import("value.zig").ConstField;

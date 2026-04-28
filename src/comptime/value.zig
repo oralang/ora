@@ -51,6 +51,7 @@ pub const CtValue = union(enum) {
 
     // Enum (payload may reference heap)
     enum_val: CtEnum,
+    error_union_val: CtErrorUnion,
 
     // Type-level (stable handle)
     type_val: TypeId,
@@ -62,6 +63,7 @@ pub const CtValue = union(enum) {
         return switch (self) {
             .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => true,
             .enum_val => |e| e.payload != null,
+            .error_union_val => true,
             else => false,
         };
     }
@@ -70,6 +72,7 @@ pub const CtValue = union(enum) {
     pub fn getHeapId(self: CtValue) ?HeapId {
         return switch (self) {
             .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => |id| id,
+            .error_union_val => |value| value.payload,
             else => null,
         };
     }
@@ -80,6 +83,13 @@ pub const CtEnum = struct {
     type_id: TypeId,
     variant_id: VariantId,
     payload: ?HeapId,
+};
+
+/// Result/error-union value. Payload is a one-element tuple containing either
+/// the success value or the error value.
+pub const CtErrorUnion = struct {
+    is_error: bool,
+    payload: HeapId,
 };
 
 // ============================================================================
