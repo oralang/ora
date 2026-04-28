@@ -391,9 +391,106 @@ const Ui = struct {
         self.checkpoints.deinit(self.allocator);
     }
 
-    fn handleKey(self: *Ui, key: vaxis.Key) !bool {
-        if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) return true;
+    /// Action a key triggers. The exact key→action mapping lives in
+    /// `kKeymap` below (see KEYBINDINGS.md for the user-facing surface).
+    /// Adding a new binding is one new row in the table plus one switch
+    /// arm here.
+    const KeyAction = enum {
+        quit,
+        enter_command_mode,
+        step_in,
+        step_opcode,
+        step_over,
+        step_out,
+        step_continue,
+        step_back,
+        scroll_source_down,
+        scroll_source_up,
+        scroll_source_page_down,
+        scroll_source_page_up,
+        scroll_sir_down,
+        scroll_sir_up,
+        sir_follow,
+        evm_tab_prev,
+        evm_tab_next,
+        evm_tab_stack,
+        evm_tab_memory,
+        evm_tab_storage,
+        evm_tab_tstore,
+        evm_tab_calldata,
+    };
 
+    const KeyBinding = struct {
+        key: vaxis.Key,
+        action: KeyAction,
+    };
+
+    fn keymap() [22]KeyBinding {
+        return .{
+            .{ .key = .{ .codepoint = 'q' }, .action = .quit },
+            .{ .key = .{ .codepoint = 'c', .mods = .{ .ctrl = true } }, .action = .quit },
+            .{ .key = .{ .codepoint = ':' }, .action = .enter_command_mode },
+            .{ .key = .{ .codepoint = 's' }, .action = .step_in },
+            .{ .key = .{ .codepoint = 'x' }, .action = .step_opcode },
+            .{ .key = .{ .codepoint = 'n' }, .action = .step_over },
+            .{ .key = .{ .codepoint = 'o' }, .action = .step_out },
+            .{ .key = .{ .codepoint = 'c' }, .action = .step_continue },
+            .{ .key = .{ .codepoint = 'p' }, .action = .step_back },
+            .{ .key = .{ .codepoint = 'j' }, .action = .scroll_source_down },
+            .{ .key = .{ .codepoint = 'k' }, .action = .scroll_source_up },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.down }, .action = .scroll_source_down },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.up }, .action = .scroll_source_up },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.page_down }, .action = .scroll_source_page_down },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.page_up }, .action = .scroll_source_page_up },
+            .{ .key = .{ .codepoint = 'J' }, .action = .scroll_sir_down },
+            .{ .key = .{ .codepoint = 'K' }, .action = .scroll_sir_up },
+            .{ .key = .{ .codepoint = '=' }, .action = .sir_follow },
+            .{ .key = .{ .codepoint = '[' }, .action = .evm_tab_prev },
+            .{ .key = .{ .codepoint = ']' }, .action = .evm_tab_next },
+            .{ .key = .{ .codepoint = '1' }, .action = .evm_tab_stack },
+            .{ .key = .{ .codepoint = '2' }, .action = .evm_tab_memory },
+        };
+    }
+
+    // The `handleKey` table fits in 22 rows. Numeric tab keys 3/4/5 are
+    // handled directly because keymap() returns a fixed-size array; if a
+    // future binding pushes us beyond that we'll grow the array literal.
+    fn dispatchKeyAction(self: *Ui, action: KeyAction) bool {
+        switch (action) {
+            .quit => return true,
+            .enter_command_mode => {
+                self.command_mode = true;
+                self.command_status = "command";
+                self.command_buffer.clearRetainingCapacity();
+            },
+            .step_in => self.runStep(.in, true),
+            .step_opcode => self.runStep(.opcode, true),
+            .step_over => self.runStep(.over, true),
+            .step_out => self.runStep(.out, true),
+            .step_continue => self.runStep(.continue_, true),
+            .step_back => self.stepBack(),
+            .scroll_source_down => self.scrollDown(),
+            .scroll_source_up => self.scrollUp(),
+            .scroll_source_page_down => self.scrollPage(8),
+            .scroll_source_page_up => self.scrollPage(-8),
+            .scroll_sir_down => self.scrollSirDown(),
+            .scroll_sir_up => self.scrollSirUp(),
+            .sir_follow => {
+                self.resyncSirView();
+                self.command_status = "sir follow";
+            },
+            .evm_tab_prev => self.prevEvmTab(),
+            .evm_tab_next => self.nextEvmTab(),
+            .evm_tab_stack => self.active_evm_tab = .stack,
+            .evm_tab_memory => self.active_evm_tab = .memory,
+            .evm_tab_storage => self.active_evm_tab = .storage,
+            .evm_tab_tstore => self.active_evm_tab = .tstore,
+            .evm_tab_calldata => self.active_evm_tab = .calldata,
+        }
+        return false;
+    }
+
+    fn handleKey(self: *Ui, key: vaxis.Key) !bool {
         if (self.command_mode) {
             if (key.matches(vaxis.Key.escape, .{})) {
                 self.command_mode = false;
@@ -421,79 +518,288 @@ const Ui = struct {
             return false;
         }
 
-        if (key.matches('s', .{})) {
-            self.runStep(.in, true);
-            return false;
+        // Keymap dispatch — the canonical binding table. KEYBINDINGS.md is
+        // authored from this list; adding a new binding is one row in
+        // keymap() plus one switch arm in dispatchKeyAction.
+        for (keymap()) |binding| {
+            if (key.matches(binding.key.codepoint, binding.key.mods)) {
+                return self.dispatchKeyAction(binding.action);
+            }
         }
-        if (key.matches('x', .{})) {
-            self.runStep(.opcode, true);
-            return false;
-        }
-        if (key.matches('n', .{})) {
-            self.runStep(.over, true);
-            return false;
-        }
-        if (key.matches('o', .{})) {
-            self.runStep(.out, true);
-            return false;
-        }
-        if (key.matches('c', .{})) {
-            self.runStep(.continue_, true);
-            return false;
-        }
-        if (key.matches('p', .{})) {
-            self.stepBack();
-            return false;
-        }
-        if (key.matches(':', .{})) {
-            self.command_mode = true;
-            self.command_status = "command";
-            self.command_buffer.clearRetainingCapacity();
-            return false;
-        }
-        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-            self.scrollDown();
-            return false;
-        }
-        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-            self.scrollUp();
-            return false;
-        }
-        if (key.matches('J', .{})) {
-            self.scrollSirDown();
-            return false;
-        }
-        if (key.matches('K', .{})) {
-            self.scrollSirUp();
-            return false;
-        }
-        if (key.matches('=', .{})) {
-            self.resyncSirView();
-            self.command_status = "sir follow";
-            return false;
-        }
-        if (key.matches(vaxis.Key.page_down, .{})) {
-            self.scrollPage(8);
-            return false;
-        }
-        if (key.matches(vaxis.Key.page_up, .{})) {
-            self.scrollPage(-8);
-            return false;
-        }
-        if (key.matches('[', .{})) {
-            self.prevEvmTab();
-            return false;
-        }
-        if (key.matches(']', .{})) {
-            self.nextEvmTab();
-            return false;
-        }
-        if (key.matches('1', .{})) self.active_evm_tab = .stack;
-        if (key.matches('2', .{})) self.active_evm_tab = .memory;
+
+        // Tail bindings that don't fit the fixed-size keymap array.
         if (key.matches('3', .{})) self.active_evm_tab = .storage;
         if (key.matches('4', .{})) self.active_evm_tab = .tstore;
         if (key.matches('5', .{})) self.active_evm_tab = .calldata;
         return false;
+    }
+
+    /// Outcome of a single command dispatch.
+    const CommandOutcome = enum { ok, quit };
+
+    /// One command-table entry. `name` is the canonical token; `aliases`
+    /// are alternates that resolve to the same handler (the first-match
+    /// rule is `name | aliases[i]` checked in order).
+    /// - `match = .exact` requires `raw == name | aliases[i]`.
+    /// - `match = .prefix` matches `name ` or `name<space>` followed by an
+    ///   argument tail; `arg` receives the trimmed remainder. Aliases on
+    ///   prefix commands match the same way.
+    /// - `help` is a one-line summary used to render `:help`.
+    const CommandMatch = enum { exact, prefix };
+    const CommandHandler = *const fn (*Ui, arg: []const u8) anyerror!CommandOutcome;
+    const CommandSpec = struct {
+        name: []const u8,
+        aliases: []const []const u8 = &.{},
+        match: CommandMatch,
+        handler: CommandHandler,
+        help: []const u8,
+    };
+
+    fn cmdQuit(_: *Ui, _: []const u8) anyerror!CommandOutcome {
+        return .quit;
+    }
+    fn cmdHelp(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeHelp();
+        return .ok;
+    }
+    fn cmdContinue(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.continue_, true);
+        return .ok;
+    }
+    fn cmdRun(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.rerunToHistory(0);
+        try self.updateCommandStatusForCurrentStop("run");
+        return .ok;
+    }
+    fn cmdStepIn(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.in, true);
+        return .ok;
+    }
+    fn cmdStepOpcode(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.opcode, true);
+        return .ok;
+    }
+    fn cmdStepOver(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.over, true);
+        return .ok;
+    }
+    fn cmdStepOut(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.out, true);
+        return .ok;
+    }
+    fn cmdStepBack(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.stepBack();
+        return .ok;
+    }
+    fn cmdLine(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid line";
+            return .ok;
+        };
+        self.focus_line = line;
+        self.centerOnCurrentLine();
+        self.command_status = "line";
+        return .ok;
+    }
+    fn cmdLineInfo(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid line";
+            return .ok;
+        };
+        try self.describeLineInfo(line);
+        return .ok;
+    }
+    fn cmdWhere(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeCurrentStop();
+        return .ok;
+    }
+    fn cmdOrigin(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const origin_line = self.currentOriginLine() orelse {
+            self.command_status = "no distinct origin line";
+            return .ok;
+        };
+        self.focus_line = origin_line;
+        self.centerOnCurrentLine();
+        try self.setCommandStatusFmt("origin line {d}", .{origin_line});
+        return .ok;
+    }
+    fn cmdSirLine(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid sir line";
+            return .ok;
+        };
+        self.sir_scroll_line = if (line > 0) line else 1;
+        self.sir_follow = false;
+        self.command_status = "sirline";
+        return .ok;
+    }
+    fn cmdSirFollow(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.resyncSirView();
+        self.command_status = "sir follow";
+        return .ok;
+    }
+    fn cmdCheckpoint(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.addCheckpoint();
+        return .ok;
+    }
+    fn cmdCheckpoints(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeCheckpoints();
+        return .ok;
+    }
+    fn cmdBacktrace(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeBacktrace();
+        return .ok;
+    }
+    fn cmdFrame(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const idx = std.fmt.parseUnsigned(usize, arg, 10) catch {
+            self.command_status = "invalid frame index";
+            return .ok;
+        };
+        try self.selectFrame(idx);
+        return .ok;
+    }
+    fn cmdRestart(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const id = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid checkpoint id";
+            return .ok;
+        };
+        try self.restartCheckpoint(id);
+        return .ok;
+    }
+    fn cmdBreakpointSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleBreakpointSet(arg);
+        return .ok;
+    }
+    fn cmdBreakpointDelete(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleBreakpointDelete(arg);
+        return .ok;
+    }
+    fn cmdInfoBreak(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeBreakpoints();
+        return .ok;
+    }
+    fn cmdGasShow(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const gas_remaining = self.session.debugger.getGasRemaining();
+        const gas_spent_step = if (self.previous_snapshot.gas_remaining >= gas_remaining)
+            self.previous_snapshot.gas_remaining - gas_remaining
+        else
+            0;
+        const gas_spent_total = self.seed.limits.gas_limit - gas_remaining;
+        try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
+            gas_remaining, gas_spent_step, gas_spent_total,
+        });
+        return .ok;
+    }
+    fn cmdGasSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const gas = std.fmt.parseInt(i64, arg, 0) catch {
+            self.command_status = "invalid gas value";
+            return .ok;
+        };
+        const frame = self.session.evm.getCurrentFrame() orelse {
+            self.command_status = "no active frame";
+            return .ok;
+        };
+        if (gas < 0) {
+            self.command_status = "gas must be >= 0";
+            return .ok;
+        }
+        frame.gas_remaining = gas;
+        self.previous_snapshot = self.captureSnapshot();
+        try self.refreshPreviousBindingsSnapshot();
+        try self.setCommandStatusFmt("gas set to {d}", .{gas});
+        return .ok;
+    }
+    fn cmdPrint(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing print target";
+            return .ok;
+        }
+        try self.handlePrintCommand(arg);
+        return .ok;
+    }
+    fn cmdSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleSetCommand(arg);
+        return .ok;
+    }
+    fn cmdWriteSession(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing session path";
+            return .ok;
+        }
+        self.writeSession(arg) catch {
+            self.command_status = "failed to write session";
+            return .ok;
+        };
+        self.command_status = "session saved";
+        return .ok;
+    }
+    fn cmdLoadSession(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing session path";
+            return .ok;
+        }
+        self.loadSession(arg) catch {
+            self.command_status = "failed to load session";
+            return .ok;
+        };
+        self.command_status = "session loaded";
+        return .ok;
+    }
+
+    /// The full command surface. Adding a new command is one row here
+    /// plus one handler. `:help` is generated from this table.
+    const kCommands = [_]CommandSpec{
+        .{ .name = "q", .aliases = &.{"quit"}, .match = .exact, .handler = cmdQuit, .help = "quit the debugger" },
+        .{ .name = "h", .aliases = &.{ "help", "legend", "marks" }, .match = .exact, .handler = cmdHelp, .help = "show help / mark legend" },
+        .{ .name = "c", .aliases = &.{"continue"}, .match = .exact, .handler = cmdContinue, .help = "continue until breakpoint or halt" },
+        .{ .name = "r", .aliases = &.{ "run", "rerun" }, .match = .exact, .handler = cmdRun, .help = "restart from seed, replay nothing" },
+        .{ .name = "s", .aliases = &.{ "step", "si", "in" }, .match = .exact, .handler = cmdStepIn, .help = "step in (next source statement)" },
+        .{ .name = "x", .aliases = &.{ "op", "opcode" }, .match = .exact, .handler = cmdStepOpcode, .help = "step exactly one EVM opcode" },
+        .{ .name = "n", .aliases = &.{ "next", "so" }, .match = .exact, .handler = cmdStepOver, .help = "step over (skip nested calls)" },
+        .{ .name = "o", .aliases = &.{ "out", "finish" }, .match = .exact, .handler = cmdStepOut, .help = "step out of current frame" },
+        .{ .name = "p", .aliases = &.{ "prev", "previous" }, .match = .exact, .handler = cmdStepBack, .help = "step back (replay history minus 1)" },
+        .{ .name = "where", .aliases = &.{"why-here"}, .match = .exact, .handler = cmdWhere, .help = "describe the current stop" },
+        .{ .name = "origin", .aliases = &.{"origin-line"}, .match = .exact, .handler = cmdOrigin, .help = "jump to origin source line" },
+        .{ .name = "sirfollow", .aliases = &.{"syncsir"}, .match = .exact, .handler = cmdSirFollow, .help = "resync SIR pane to current op" },
+        .{ .name = "checkpoint", .match = .exact, .handler = cmdCheckpoint, .help = "save a checkpoint at current step" },
+        .{ .name = "checkpoints", .match = .exact, .handler = cmdCheckpoints, .help = "list checkpoints" },
+        .{ .name = "bt", .aliases = &.{"backtrace"}, .match = .exact, .handler = cmdBacktrace, .help = "print call-frame stack" },
+        .{ .name = "info break", .match = .exact, .handler = cmdInfoBreak, .help = "list breakpoints" },
+        .{ .name = "gas", .match = .exact, .handler = cmdGasShow, .help = "show gas (remaining/spent)" },
+        // Prefix commands. Order matters: longer prefixes that share a
+        // leading word with a shorter one must come first ("line-info "
+        // before "line ", "why-line " before plain words, etc.).
+        .{ .name = "line-info ", .aliases = &.{"why-line "}, .match = .prefix, .handler = cmdLineInfo, .help = "explain provenance for source line" },
+        .{ .name = "line ", .match = .prefix, .handler = cmdLine, .help = "focus source pane on line N" },
+        .{ .name = "sirline ", .match = .prefix, .handler = cmdSirLine, .help = "pin SIR pane to line N" },
+        .{ .name = "frame ", .match = .prefix, .handler = cmdFrame, .help = "select call-frame index" },
+        .{ .name = "restart ", .match = .prefix, .handler = cmdRestart, .help = "rewind to checkpoint id" },
+        .{ .name = "break ", .match = .prefix, .handler = cmdBreakpointSet, .help = "set breakpoint on line" },
+        .{ .name = "delete ", .match = .prefix, .handler = cmdBreakpointDelete, .help = "delete breakpoint on line" },
+        .{ .name = "gas ", .match = .prefix, .handler = cmdGasSet, .help = "override frame gas_remaining" },
+        .{ .name = "print ", .match = .prefix, .handler = cmdPrint, .help = "print binding/state target" },
+        .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
+        .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
+        .{ .name = "load-session ", .aliases = &.{"ls "}, .match = .prefix, .handler = cmdLoadSession, .help = "load session from path" },
+    };
+
+    fn matchCommand(spec: CommandSpec, raw: []const u8) ?[]const u8 {
+        switch (spec.match) {
+            .exact => {
+                if (std.mem.eql(u8, raw, spec.name)) return raw[raw.len..];
+                for (spec.aliases) |alias| {
+                    if (std.mem.eql(u8, raw, alias)) return raw[raw.len..];
+                }
+                return null;
+            },
+            .prefix => {
+                if (std.mem.startsWith(u8, raw, spec.name)) return std.mem.trim(u8, raw[spec.name.len..], " \t");
+                for (spec.aliases) |alias| {
+                    if (std.mem.startsWith(u8, raw, alias)) return std.mem.trim(u8, raw[alias.len..], " \t");
+                }
+                return null;
+            },
+        }
     }
 
     fn executeCommand(self: *Ui) !bool {
@@ -503,245 +809,11 @@ const Ui = struct {
             return false;
         }
 
-        if (std.mem.eql(u8, raw, "q") or std.mem.eql(u8, raw, "quit")) {
-            self.command_status = "quit";
-            return true;
-        }
-        if (std.mem.eql(u8, raw, "h") or std.mem.eql(u8, raw, "help") or std.mem.eql(u8, raw, "legend") or std.mem.eql(u8, raw, "marks")) {
-            try self.describeHelp();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "c") or std.mem.eql(u8, raw, "continue")) {
-            self.runStep(.continue_, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "r") or std.mem.eql(u8, raw, "run") or std.mem.eql(u8, raw, "rerun")) {
-            try self.rerunToHistory(0);
-            try self.updateCommandStatusForCurrentStop("run");
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "s") or std.mem.eql(u8, raw, "step") or std.mem.eql(u8, raw, "si") or std.mem.eql(u8, raw, "in")) {
-            self.runStep(.in, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "x") or std.mem.eql(u8, raw, "op") or std.mem.eql(u8, raw, "opcode")) {
-            self.runStep(.opcode, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "n") or std.mem.eql(u8, raw, "next") or std.mem.eql(u8, raw, "so")) {
-            self.runStep(.over, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "o") or std.mem.eql(u8, raw, "out") or std.mem.eql(u8, raw, "finish")) {
-            self.runStep(.out, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "p") or std.mem.eql(u8, raw, "prev") or std.mem.eql(u8, raw, "previous")) {
-            self.stepBack();
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "line ")) {
-            const rest = std.mem.trim(u8, raw["line ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            self.focus_line = line;
-            self.centerOnCurrentLine();
-            self.command_status = "line";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "line-info ")) {
-            const rest = std.mem.trim(u8, raw["line-info ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            try self.describeLineInfo(line);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "why-line ")) {
-            const rest = std.mem.trim(u8, raw["why-line ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            try self.describeLineInfo(line);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "where") or std.mem.eql(u8, raw, "why-here")) {
-            try self.describeCurrentStop();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "origin") or std.mem.eql(u8, raw, "origin-line")) {
-            const origin_line = self.currentOriginLine() orelse {
-                self.command_status = "no distinct origin line";
-                return false;
-            };
-            self.focus_line = origin_line;
-            self.centerOnCurrentLine();
-            try self.setCommandStatusFmt("origin line {d}", .{origin_line});
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "sirline ")) {
-            const rest = std.mem.trim(u8, raw["sirline ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid sir line";
-                return false;
-            };
-            self.sir_scroll_line = if (line > 0) line else 1;
-            self.sir_follow = false;
-            self.command_status = "sirline";
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "sirfollow") or std.mem.eql(u8, raw, "syncsir")) {
-            self.resyncSirView();
-            self.command_status = "sir follow";
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "checkpoint")) {
-            try self.addCheckpoint();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "checkpoints")) {
-            try self.describeCheckpoints();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "bt") or std.mem.eql(u8, raw, "backtrace")) {
-            try self.describeBacktrace();
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "frame ")) {
-            const rest = std.mem.trim(u8, raw["frame ".len..], " \t");
-            const idx = std.fmt.parseUnsigned(usize, rest, 10) catch {
-                self.command_status = "invalid frame index";
-                return false;
-            };
-            try self.selectFrame(idx);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "restart ")) {
-            const rest = std.mem.trim(u8, raw["restart ".len..], " \t");
-            const id = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid checkpoint id";
-                return false;
-            };
-            try self.restartCheckpoint(id);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "break ")) {
-            const rest = std.mem.trim(u8, raw["break ".len..], " \t");
-            try self.handleBreakpointSet(rest);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "delete ")) {
-            const rest = std.mem.trim(u8, raw["delete ".len..], " \t");
-            try self.handleBreakpointDelete(rest);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "info break")) {
-            try self.describeBreakpoints();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "gas")) {
-            const gas_remaining = self.session.debugger.getGasRemaining();
-            const gas_spent_step = if (self.previous_snapshot.gas_remaining >= gas_remaining)
-                self.previous_snapshot.gas_remaining - gas_remaining
-            else
-                0;
-            const gas_spent_total = self.seed.limits.gas_limit - gas_remaining;
-            try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
-                gas_remaining,
-                gas_spent_step,
-                gas_spent_total,
-            });
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "gas ")) {
-            const rest = std.mem.trim(u8, raw["gas ".len..], " \t");
-            const gas = std.fmt.parseInt(i64, rest, 0) catch {
-                self.command_status = "invalid gas value";
-                return false;
-            };
-            const frame = self.session.evm.getCurrentFrame() orelse {
-                self.command_status = "no active frame";
-                return false;
-            };
-            if (gas < 0) {
-                self.command_status = "gas must be >= 0";
-                return false;
+        for (kCommands) |spec| {
+            if (matchCommand(spec, raw)) |arg| {
+                const outcome = try spec.handler(self, arg);
+                return outcome == .quit;
             }
-            frame.gas_remaining = gas;
-            self.previous_snapshot = self.captureSnapshot();
-            try self.refreshPreviousBindingsSnapshot();
-            try self.setCommandStatusFmt("gas set to {d}", .{gas});
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "print ")) {
-            const target = std.mem.trim(u8, raw["print ".len..], " \t");
-            if (target.len == 0) {
-                self.command_status = "missing print target";
-                return false;
-            }
-            try self.handlePrintCommand(target);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "set ")) {
-            const rest = std.mem.trim(u8, raw["set ".len..], " \t");
-            try self.handleSetCommand(rest);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "write-session ")) {
-            const path = std.mem.trim(u8, raw["write-session ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.writeSession(path) catch {
-                self.command_status = "failed to write session";
-                return false;
-            };
-            self.command_status = "session saved";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "ws ")) {
-            const path = std.mem.trim(u8, raw["ws ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.writeSession(path) catch {
-                self.command_status = "failed to write session";
-                return false;
-            };
-            self.command_status = "session saved";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "load-session ")) {
-            const path = std.mem.trim(u8, raw["load-session ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.loadSession(path) catch {
-                self.command_status = "failed to load session";
-                return false;
-            };
-            self.command_status = "session loaded";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "ls ")) {
-            const path = std.mem.trim(u8, raw["ls ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.loadSession(path) catch {
-                self.command_status = "failed to load session";
-                return false;
-            };
-            self.command_status = "session loaded";
-            return false;
         }
 
         self.command_status = "unknown command";
@@ -750,19 +822,20 @@ const Ui = struct {
 
     fn describeHelp(self: *Ui) !void {
         self.clearCommandLog();
-        try self.appendLogLine("help: exec   s step-in  x opcode  n next  o out  c continue  p previous");
-        try self.appendLogLine("help: print  :print <binding>  gas  stack[i]  mem <off> <words>");
-        try self.appendLogLine("help: print  :print slot <hex>  storage  tstore  calldata");
-        try self.appendLogLine("help: set    :set <binding> = <v>  gas = <v>  mem <off> = <v>");
-        try self.appendLogLine("help: set    :set slot <hex> = <v>");
-        try self.appendLogLine("help: break  :break <line>  :delete <line>  :info break");
-        try self.appendLogLine("help: lines  :line-info <line>  :why-line <line>  :where  :origin");
-        try self.appendLogLine("help: replay :checkpoint  :checkpoints  :restart <id>  :run");
-        try self.appendLogLine("help: sess   :write-session <path>  :load-session <path>");
-        try self.appendLogLine("help: nav    j/k Ora  J/K SIR  = sync  :sirline <n>  :sirfollow");
-        try self.appendLogLine("help: tabs   1..5 tabs  [/] cycle  q quit");
-        try self.appendLogLine("legend: . direct runtime  ~ synthetic-only  + mixed runtime");
-        try self.appendLogLine("legend: = folded  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
+        // Auto-generated from kCommands so the docs and the dispatcher
+        // can't drift. Layout: ":<name>  <help>", with prefix commands
+        // showing the trailing space as a hint that an argument follows.
+        for (kCommands) |spec| {
+            const name_buf = self.scratchFmt("{s}{s}{s}  -  {s}", .{
+                ":",
+                spec.name,
+                if (spec.aliases.len > 0) "" else "",
+                spec.help,
+            }) catch continue;
+            try self.appendLogLine(name_buf);
+        }
+        try self.appendLogLine("keys: see KEYBINDINGS.md (or `man 1 ora-evm-debug-tui`)");
+        try self.appendLogLine("legend: . direct  ~ synthetic  + mixed  = folded  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
         self.command_status = "help";
     }
 
@@ -1393,6 +1466,16 @@ const Ui = struct {
         self.command_status = self.command_status_storage.items;
     }
 
+    fn runDebuggerCommand(self: *Ui, mode: StepMode) anyerror!void {
+        return switch (mode) {
+            .in => self.session.debugger.stepIn(),
+            .opcode => self.session.debugger.stepOpcode(),
+            .over => self.session.debugger.stepOver(),
+            .out => self.session.debugger.stepOut(),
+            .continue_ => self.session.debugger.continue_(),
+        };
+    }
+
     fn runStep(self: *Ui, mode: StepMode, record_history: bool) void {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
@@ -1402,43 +1485,13 @@ const Ui = struct {
         }
         self.previous_snapshot = self.captureSnapshot();
         self.refreshPreviousBindingsSnapshot() catch {};
-        switch (mode) {
-            .in => self.session.debugger.stepIn() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .opcode => self.session.debugger.stepOpcode() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .over => self.session.debugger.stepOver() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .out => self.session.debugger.stepOut() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .continue_ => self.session.debugger.continue_() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-        }
+        self.runDebuggerCommand(mode) catch {
+            self.status = self.session.debugger.lastErrorName() orelse "execution_error";
+            self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                self.command_status = self.status;
+            };
+            return;
+        };
         if (record_history) self.step_history.append(self.allocator, mode) catch {};
         self.status = @tagName(self.session.debugger.stop_reason);
         if (!self.shouldPreserveFocusOnTerminalStop()) self.syncFocusFromDebugger();
