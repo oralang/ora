@@ -804,6 +804,33 @@ const Ui = struct {
         try self.handlePrintCommand(arg);
         return .ok;
     }
+    fn cmdCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const total = self.session.debugger.lineHitsCount();
+        if (total == 0) {
+            self.command_status = "no lines hit yet";
+            return .ok;
+        }
+        var n: usize = 10;
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (trimmed.len > 0) {
+            n = std.fmt.parseUnsigned(usize, trimmed, 10) catch {
+                self.command_status = "usage: :cov [N]";
+                return .ok;
+            };
+            if (n == 0) n = 10;
+        }
+        const top = try self.session.debugger.getLineHitsTopN(self.allocator, n);
+        defer self.allocator.free(top);
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("cov: {d} lines hit; top {d}:", .{ total, top.len });
+        for (top) |hit| {
+            try writer.print(" L{d}={d}", .{ hit.line, hit.count });
+        }
+        self.command_status = self.command_status_storage.items;
+        return .ok;
+    }
     fn cmdEval(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         if (arg.len == 0) {
             self.command_status = "missing expression";
@@ -952,6 +979,8 @@ const Ui = struct {
         .{ .name = "gas ", .match = .prefix, .handler = cmdGasSet, .help = "override frame gas_remaining" },
         .{ .name = "print ", .match = .prefix, .handler = cmdPrint, .help = "print binding/state target" },
         .{ .name = "eval ", .match = .prefix, .handler = cmdEval, .help = "evaluate side-effect-free expression (numbers, bindings, +-*/%, == != < > <= >=, && ||, !)" },
+        .{ .name = "cov", .match = .exact, .handler = cmdCoverage, .help = "report top-10 hottest source lines (statement-boundary hits)" },
+        .{ .name = "cov ", .match = .prefix, .handler = cmdCoverage, .help = "report top-N hottest source lines (`:cov 20`)" },
         .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
         .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
         .{ .name = "load-session ", .aliases = &.{"ls "}, .match = .prefix, .handler = cmdLoadSession, .help = "load session from path" },

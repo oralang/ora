@@ -99,6 +99,21 @@ source-level binding name — bindings resolve to their declared
 | `print logs`            | Decoded log lane: every emitted `LOG*` rendered as `EventName(arg=value, ...)` via the loaded ABI; falls back to topic/data sizes for unknown selectors |
 | `print <binding>`       | Source-level binding by name (resolves to storage / memory / tstore / folded value / "optimized away" / etc.) |
 
+## Coverage
+
+The debugger maintains a per-source-line hit counter — incremented
+every time a statement boundary on that line is entered. Re-entering
+the same statement (loop iteration, recursion) counts as a fresh hit.
+Lines without any statement boundary (whitespace, comments,
+non-executable spec lines) never appear.
+
+| Command           | Action                                                   |
+|-------------------|----------------------------------------------------------|
+| `cov`             | Report the top-10 hottest source lines                   |
+| `cov <n>`         | Report the top-`<n>` hottest source lines                |
+
+Output format: `cov: <total> lines hit; top <k>: L<line>=<count> ...`.
+
 ## Expression evaluation
 
 Side-effect-free evaluator over visible bindings + numeric literals.

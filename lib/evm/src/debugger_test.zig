@@ -689,6 +689,35 @@ test "Debugger: tstore_field binding round-trip" {
     try testing.expectEqual(@as(?u256, 7), fx.debugger.getVisibleTStoreRootValue(ttl));
 }
 
+test "Debugger: line_hits counter increments on every distinct statement-line transition" {
+    const allocator = testing.allocator;
+    var fx = try buildFixture(
+        allocator,
+        TWO_STATEMENT_BYTECODE,
+        TWO_STATEMENT_SOURCE,
+        twoStatementEntries(),
+        null,
+    );
+    defer fx.deinit();
+
+    // Initial stop is on line 1; the counter for line 1 should already be 1.
+    try testing.expectEqual(@as(?u32, 1), fx.debugger.getLineHits(1));
+    try testing.expectEqual(@as(?u32, null), fx.debugger.getLineHits(2));
+
+    // Step into line 2.
+    try fx.debugger.stepIn();
+    try testing.expectEqual(@as(?u32, 1), fx.debugger.getLineHits(1));
+    try testing.expectEqual(@as(?u32, 1), fx.debugger.getLineHits(2));
+
+    // Top-N getter sorts descending by count, then ascending by line.
+    const top = try fx.debugger.getLineHitsTopN(allocator, 10);
+    defer allocator.free(top);
+    try testing.expectEqual(@as(usize, 2), top.len);
+    try testing.expectEqual(@as(u32, 1), top[0].line);
+    try testing.expectEqual(@as(u32, 1), top[0].count);
+    try testing.expectEqual(@as(u32, 2), top[1].line);
+}
+
 test "Debugger: getVisibleScopes returns the active scope" {
     const allocator = testing.allocator;
     const entries = &[_]SourceMap.Entry{

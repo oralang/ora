@@ -37,6 +37,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Built once at the time debug_info is bound; queried in O(1) on
         /// every step. Empty when debug_info isn't set.
         ignored_invalid_idx: std.AutoHashMap(u32, void),
+        /// Per-source-line statement-boundary hit counts. Bumped on every
+        /// distinct statement-line transition; never reset across the
+        /// session. Exposed via `getLineHits` / `getLineHitsTopN` for the
+        /// `:cov` command. Lines that don't host any statement boundary
+        /// (whitespace, comments) never appear here.
+        line_hits: std.AutoHashMap(u32, u32),
         state: State,
         stop_reason: StopReason,
         allocator: std.mem.Allocator,
@@ -111,6 +117,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .next_watchpoint_id = 1,
                 .last_watchpoint_id = null,
                 .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
+                .line_hits = std.AutoHashMap(u32, u32).init(allocator),
                 .state = .paused,
                 .stop_reason = .not_started,
                 .allocator = allocator,
@@ -128,6 +135,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         pub fn deinit(self: *Self) void {
             self.breakpoints.deinit();
             self.ignored_invalid_idx.deinit();
+            self.line_hits.deinit();
             for (self.watchpoints.items) |wp| self.allocator.free(wp.name);
             self.watchpoints.deinit(self.allocator);
             if (self.debug_info) |*debug_info| debug_info.deinit();
@@ -308,6 +316,47 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
         pub fn lastWatchpointId(self: *const Self) ?u32 {
             return self.last_watchpoint_id;
+        }
+
+        /// Hit count for a single source line; `null` if the line never
+        /// had a statement boundary visited at runtime.
+        pub fn getLineHits(self: *const Self, line: u32) ?u32 {
+            return self.line_hits.get(line);
+        }
+
+        pub const LineHit = struct {
+            line: u32,
+            count: u32,
+        };
+
+        /// Returns the `n` hottest lines by hit count, sorted descending.
+        /// Caller owns the returned slice.
+        pub fn getLineHitsTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineHit {
+            var entries: std.ArrayList(LineHit) = .{};
+            errdefer entries.deinit(allocator);
+            try entries.ensureTotalCapacity(allocator, self.line_hits.count());
+            var it = self.line_hits.iterator();
+            while (it.next()) |kv| {
+                try entries.append(allocator, .{ .line = kv.key_ptr.*, .count = kv.value_ptr.* });
+            }
+            const items = entries.items;
+            std.sort.heap(LineHit, items, {}, struct {
+                fn lessThan(_: void, a: LineHit, b: LineHit) bool {
+                    if (a.count != b.count) return a.count > b.count;
+                    return a.line < b.line;
+                }
+            }.lessThan);
+            if (items.len > n) {
+                const trimmed = try allocator.dupe(LineHit, items[0..n]);
+                entries.deinit(allocator);
+                return trimmed;
+            }
+            return entries.toOwnedSlice(allocator);
+        }
+
+        /// Total distinct lines that have been hit at least once.
+        pub fn lineHitsCount(self: *const Self) usize {
+            return self.line_hits.count();
         }
 
         /// True iff the last executeOneOpcode pausing was a watchpoint
@@ -806,6 +855,16 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         fn updateLastStatementLine(self: *Self) void {
             const entry = self.currentEntry() orelse return;
             if (!entry.is_statement) return;
+            // Bump the coverage counter on every distinct statement-line
+            // transition. Re-entering the same statement (loop iteration,
+            // recursion) counts as a fresh hit. OOM is non-fatal — the
+            // counter just stops updating.
+            const prev_line = self.last_statement_line;
+            if (prev_line == null or prev_line.? != entry.line or self.last_statement_id != entry.statement_id) {
+                const gop = self.line_hits.getOrPut(entry.line) catch return;
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* +%= 1;
+            }
             self.last_statement_id = entry.statement_id;
             self.last_statement_line = entry.line;
             self.last_statement_sir_line = entry.sir_line;
