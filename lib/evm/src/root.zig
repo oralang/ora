@@ -63,6 +63,12 @@ pub const debug_info = @import("debug_info.zig");
 pub const DebugInfo = debug_info.DebugInfo;
 pub const debugger = @import("debugger.zig");
 pub const Debugger = debugger.Debugger;
+pub const debug_session = @import("debug_session.zig");
+pub const DebugSession = debug_session.DebugSession;
+pub const loadDebuggerArtifact = debug_session.loadArtifact;
+pub const kArtifactMaxBytes = debug_session.kArtifactMaxBytes;
+pub const kDefaultGasLimit = debug_session.kDefaultGasLimit;
+pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
 
 test {
     std.testing.refAllDecls(@This());

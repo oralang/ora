@@ -9,6 +9,7 @@ const Frame = ora_evm.Frame(.{});
 const Debugger = ora_evm.Debugger(.{});
 const SourceMap = ora_evm.SourceMap;
 const DebugInfo = ora_evm.DebugInfo;
+const SessionHelpers = ora_evm.DebugSession(.{});
 
 const Style = vaxis.Style;
 const Color = vaxis.Color;
@@ -107,7 +108,7 @@ const AbiDoc = struct {
     parsed: std.json.Parsed(std.json.Value),
 
     fn loadFromPath(allocator: std.mem.Allocator, path: []const u8) !AbiDoc {
-        const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+        const json_bytes = try ora_evm.loadDebuggerArtifact(allocator, path);
         errdefer allocator.free(json_bytes);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
@@ -244,7 +245,7 @@ const Session = struct {
         try self.evm.frames.append(self.evm.arena.allocator(), try Frame.init(
             self.evm.arena.allocator(),
             seed.runtime_bytecode,
-            5_000_000,
+            ora_evm.kDefaultGasLimit,
             seed.caller,
             seed.contract,
             0,
@@ -645,7 +646,7 @@ const Ui = struct {
                 self.previous_snapshot.gas_remaining - gas_remaining
             else
                 0;
-            const gas_spent_total = 5_000_000 - gas_remaining;
+            const gas_spent_total = ora_evm.kDefaultGasLimit - gas_remaining;
             try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
                 gas_remaining,
                 gas_spent_step,
@@ -1989,9 +1990,9 @@ const Ui = struct {
         else
             0;
         const gas_spent_total: i64 = if (frame != null)
-            5_000_000 - gas_remaining
+            ora_evm.kDefaultGasLimit - gas_remaining
         else if (self.session.debugger.isSuccess())
-            5_000_000
+            ora_evm.kDefaultGasLimit
         else
             0;
 
@@ -2710,7 +2711,7 @@ const Ui = struct {
     }
 
     fn currentSyntheticPath(self: *Ui) ?[]const u8 {
-        if (self.currentOpMeta()) |meta| {
+        if (self.session.debugger.currentOpMeta()) |meta| {
             if (meta.synthetic_path) |path| return path;
         }
         if (self.session.debugger.currentEntry()) |entry| {
@@ -3899,7 +3900,7 @@ const Ui = struct {
     }
 
     fn loadSession(self: *Ui, path: []const u8) !void {
-        const json_bytes = try std.fs.cwd().readFileAlloc(self.allocator, path, 16 * 1024 * 1024);
+        const json_bytes = try ora_evm.loadDebuggerArtifact(self.allocator, path);
         defer self.allocator.free(json_bytes);
 
         const parsed = try std.json.parseFromSlice(SavedSession, self.allocator, json_bytes, .{
@@ -4168,29 +4169,29 @@ fn runMain() !void {
 }
 
 fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
-    const bytecode_hex = try std.fs.cwd().readFileAlloc(allocator, config.bytecode_path, 16 * 1024 * 1024);
+    const bytecode_hex = try ora_evm.loadDebuggerArtifact(allocator, config.bytecode_path);
     defer allocator.free(bytecode_hex);
     const bytecode = try decodeHexAlloc(allocator, bytecode_hex);
     defer allocator.free(bytecode);
 
-    const source_map_json = try std.fs.cwd().readFileAlloc(allocator, config.source_map_path, 16 * 1024 * 1024);
+    const source_map_json = try ora_evm.loadDebuggerArtifact(allocator, config.source_map_path);
     defer allocator.free(source_map_json);
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
     errdefer source_map.deinit();
 
-    const source_text = try std.fs.cwd().readFileAlloc(allocator, config.source_path, 16 * 1024 * 1024);
+    const source_text = try ora_evm.loadDebuggerArtifact(allocator, config.source_path);
     errdefer allocator.free(source_text);
 
     var debug_info_json: ?[]u8 = null;
     errdefer if (debug_info_json) |bytes| allocator.free(bytes);
     if (config.debug_info_path) |path| {
-        debug_info_json = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+        debug_info_json = try ora_evm.loadDebuggerArtifact(allocator, path);
     }
 
     var sir_text: ?[]u8 = null;
     errdefer if (sir_text) |bytes| allocator.free(bytes);
     if (config.sir_path) |path| {
-        sir_text = std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024) catch null;
+        sir_text = ora_evm.loadDebuggerArtifact(allocator, path) catch null;
     }
 
     const caller = primitives.Address.fromU256(0x100);
@@ -4202,7 +4203,13 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(contract);
 
-    const runtime_bytecode = deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode, config.init_calldata) catch |err| blk: {
+    const runtime_bytecode = SessionHelpers.deployRuntimeBytecode(allocator, &evm, .{
+        .caller = caller,
+        .contract = contract,
+        .deployment_bytecode = bytecode,
+        .init_calldata = config.init_calldata,
+        .strict = true,
+    }) catch |err| blk: {
         if (err != error.DeploymentRevertedWithNoRuntime or config.init_calldata_fallback.len == 0) {
             return err;
         }
@@ -4210,12 +4217,18 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
         try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
         try evm.initTransactionState(null);
         try evm.preWarmTransaction(contract);
-        break :blk try deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode, config.init_calldata_fallback);
+        break :blk try SessionHelpers.deployRuntimeBytecode(allocator, &evm, .{
+            .caller = caller,
+            .contract = contract,
+            .deployment_bytecode = bytecode,
+            .init_calldata = config.init_calldata_fallback,
+            .strict = true,
+        });
     };
     errdefer allocator.free(runtime_bytecode);
 
     if (source_map.runtime_start_pc) |_| {
-        const runtime_source_map = try rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
+        const runtime_source_map = try SessionHelpers.rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
         source_map.deinit();
         source_map = runtime_source_map;
     }
@@ -4231,116 +4244,6 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
         .caller = caller,
         .contract = contract,
     };
-}
-
-fn deployRuntimeBytecode(
-    allocator: std.mem.Allocator,
-    evm: *Evm,
-    caller: primitives.Address,
-    contract: primitives.Address,
-    deployment_bytecode: []const u8,
-    init_calldata: []const u8,
-) ![]u8 {
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
-    try evm.frames.append(evm.arena.allocator(), try Frame.init(
-        evm.arena.allocator(),
-        deployment_bytecode,
-        5_000_000,
-        caller,
-        contract,
-        0,
-        init_calldata,
-        @as(*anyopaque, @ptrCast(evm)),
-        evm.hardfork,
-        false,
-    ));
-
-    var steps: usize = 0;
-    while (evm.getCurrentFrame()) |frame| {
-        if (frame.stopped or frame.reverted) break;
-        if (steps >= 200_000) {
-            try stderr.print("debug-tui: deployment did not halt after {d} steps (pc={d})\n", .{
-                steps,
-                frame.pc,
-            });
-            try stderr.flush();
-            return error.DeploymentDidNotHalt;
-        }
-        try evm.step();
-        steps += 1;
-    }
-
-    const frame = evm.getCurrentFrame() orelse return try allocator.dupe(u8, deployment_bytecode);
-    defer {
-        for (evm.frames.items) |*live_frame| {
-            live_frame.deinit();
-        }
-        evm.frames.clearRetainingCapacity();
-    }
-
-    if (frame.reverted or frame.output.len == 0) {
-        try stderr.print("debug-tui: deployment completed without runtime output (reverted={any}, output_len={d}, steps={d})\n", .{
-            frame.reverted,
-            frame.output.len,
-            steps,
-        });
-        try stderr.flush();
-        return error.DeploymentRevertedWithNoRuntime;
-    }
-    try stderr.print("debug-tui: deployment completed in {d} steps, runtime_len={d}\n", .{ steps, frame.output.len });
-    try stderr.flush();
-    return try allocator.dupe(u8, frame.output);
-}
-
-fn rebaseSourceMapForRuntime(
-    allocator: std.mem.Allocator,
-    creation_source_map: *const SourceMap,
-    runtime_bytecode: []const u8,
-) !SourceMap {
-    const runtime_start_pc = creation_source_map.runtime_start_pc orelse {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    };
-    if (runtime_bytecode.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-
-    var rebased: std.ArrayList(SourceMap.Entry) = .{};
-    defer rebased.deinit(allocator);
-
-    for (creation_source_map.entries) |entry| {
-        if (entry.pc < runtime_start_pc) continue;
-        const rebased_pc = entry.pc - runtime_start_pc;
-        if (rebased_pc >= runtime_bytecode.len) continue;
-        try rebased.append(allocator, .{
-            .idx = entry.idx,
-            .pc = @intCast(rebased_pc),
-            .file = entry.file,
-            .line = entry.line,
-            .col = entry.col,
-            .statement_id = entry.statement_id,
-            .origin_statement_id = entry.origin_statement_id,
-            .execution_region_id = entry.execution_region_id,
-            .statement_run_index = entry.statement_run_index,
-            .sir_line = entry.sir_line,
-            .is_synthetic = entry.is_synthetic,
-            .synthetic_index = entry.synthetic_index,
-            .synthetic_count = entry.synthetic_count,
-            .synthetic_path = entry.synthetic_path,
-            .is_hoisted = entry.is_hoisted,
-            .is_duplicated = entry.is_duplicated,
-            .is_statement = entry.is_statement,
-            .kind = entry.kind,
-        });
-    }
-
-    if (rebased.items.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-    var runtime_map = try SourceMap.fromEntries(allocator, rebased.items);
-    runtime_map.runtime_start_pc = 0;
-    return runtime_map;
 }
 
 fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
@@ -4428,7 +4331,7 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
         allocator.free(config.init_calldata);
         allocator.free(config.init_calldata_fallback);
         if (config.abi_path) |abi_path| {
-            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            const abi_bytes = try ora_evm.loadDebuggerArtifact(allocator, abi_path);
             defer allocator.free(abi_bytes);
             config.init_calldata = try encodeConstructorArgsAlloc(allocator, abi_bytes, sig, init_raw_args.items);
         } else {
@@ -4440,7 +4343,7 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
     if (signature) |sig| {
         allocator.free(config.calldata);
         if (config.abi_path) |abi_path| {
-            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            const abi_bytes = try ora_evm.loadDebuggerArtifact(allocator, abi_path);
             defer allocator.free(abi_bytes);
             config.calldata = try encodeAbiCallDataAlloc(allocator, abi_bytes, sig, raw_args.items);
         } else {
