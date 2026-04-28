@@ -1892,6 +1892,7 @@ const TypeChecker = struct {
                 }
                 if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
                 try self.requireExhaustiveSumMatch(condition_type, switch_stmt.arms, switch_stmt.else_body != null, switch_stmt.range);
+                try self.warnWildcardCoversNamedSumVariants(condition_type, switch_stmt.arms, switch_stmt.else_body != null, switch_stmt.range);
             },
             .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
             .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
@@ -2076,6 +2077,7 @@ const TypeChecker = struct {
                 if (saw_mismatch) result_type = .{ .unknown = {} };
                 self.expr_types[expr_id.index()] = result_type;
                 try self.requireExhaustiveSumMatch(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
+                try self.warnWildcardCoversNamedSumVariants(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
             },
             .Comptime => |comptime_expr| {
                 try self.visitBody(comptime_expr.body);
@@ -6463,13 +6465,41 @@ const TypeChecker = struct {
         }
     }
 
+    fn warnWildcardCoversNamedSumVariants(
+        self: *TypeChecker,
+        condition_type: Type,
+        arms: anytype,
+        has_else: bool,
+        range: source.TextRange,
+    ) !void {
+        if (!has_else) return;
+
+        const wildcard_covers_named_variant = switch (condition_type.kind()) {
+            .error_union => !self.errorUnionNamedErrorsAreExhaustive(condition_type, arms),
+            .enum_ => !self.enumPatternsAreExhaustive(condition_type, arms),
+            else => false,
+        };
+        if (!wildcard_covers_named_variant) return;
+
+        try self.emitRangeWarning(range, "wildcard match arm covers named variants; list variants explicitly to preserve exhaustiveness diagnostics", .{});
+    }
+
     fn errorUnionPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
         var seen_ok = false;
         var seen_err = false;
-        var all_named_errors_covered = true;
+        const all_named_errors_covered = self.errorUnionNamedErrorsAreExhaustive(condition_type, arms);
         for (arms) |arm| switch (arm.pattern) {
             .Ok => seen_ok = true,
             .Err => seen_err = true,
+            else => {},
+        };
+
+        return seen_ok and (seen_err or all_named_errors_covered);
+    }
+
+    fn errorUnionNamedErrorsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
+        var all_named_errors_covered = true;
+        for (arms) |arm| switch (arm.pattern) {
             .Expr => if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
                 if (named_error.has_payload) {
                     all_named_errors_covered = false;
@@ -6479,30 +6509,37 @@ const TypeChecker = struct {
             else => {},
         };
 
-        if (!seen_err) {
-            for (condition_type.errorTypes()) |error_type| {
-                const error_name = error_type.name() orelse {
-                    all_named_errors_covered = false;
-                    continue;
-                };
-                var found = false;
-                for (arms) |arm| {
-                    const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern) orelse continue;
-                    if (named_error.has_payload and arm.pattern != .NamedError) continue;
-                    const item = self.file.item(named_error.item_id).*;
-                    if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    all_named_errors_covered = false;
+        for (condition_type.errorTypes()) |error_type| {
+            const error_name = error_type.name() orelse {
+                all_named_errors_covered = false;
+                continue;
+            };
+            var found = false;
+            for (arms) |arm| {
+                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern) orelse continue;
+                if (named_error.has_payload and arm.pattern != .NamedError) continue;
+                const item = self.file.item(named_error.item_id).*;
+                if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
+                    found = true;
                     break;
                 }
             }
+            if (!found) {
+                all_named_errors_covered = false;
+                break;
+            }
         }
 
-        return seen_ok and (seen_err or all_named_errors_covered);
+        return all_named_errors_covered;
+    }
+
+    fn emitRangeWarning(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, fmt, args);
+        try self.diagnostics.append(.Warning, message, .{
+            .file_id = self.file_id,
+            .range = range,
+        });
     }
 
     fn enumPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {

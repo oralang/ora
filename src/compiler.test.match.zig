@@ -31,6 +31,28 @@ const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
 
+fn diagnosticContains(
+    diags: *const compiler.diagnostics.DiagnosticList,
+    severity: compiler.diagnostics.Severity,
+    needle: []const u8,
+) bool {
+    for (diags.items.items) |diag| {
+        if (diag.severity == severity and std.mem.indexOf(u8, diag.message, needle) != null) return true;
+    }
+    return false;
+}
+
+fn diagnosticSeverityCount(
+    diags: *const compiler.diagnostics.DiagnosticList,
+    severity: compiler.diagnostics.Severity,
+) usize {
+    var count: usize = 0;
+    for (diags.items.items) |diag| {
+        if (diag.severity == severity) count += 1;
+    }
+    return count;
+}
+
 test "compiler syntax parses match statements as match syntax nodes" {
     const source_text =
         \\pub fn run(value: u256) -> u256 {
@@ -245,6 +267,72 @@ test "compiler rejects non-exhaustive payload enum match expressions without els
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match on enum must cover all variants or provide else"));
+}
+
+test "compiler warns when enum wildcard covers named variants" {
+    const source_text =
+        \\enum State {
+        \\    Open,
+        \\    Closed,
+        \\}
+        \\
+        \\pub fn run(state: State) -> u256 {
+        \\    return match (state) {
+        \\        State.Open => 1,
+        \\        else => 2,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), diagnosticSeverityCount(&typecheck.diagnostics, .Error));
+    try testing.expect(diagnosticContains(&typecheck.diagnostics, .Warning, "wildcard match arm covers named variants"));
+}
+
+test "compiler does not warn when enum variants are explicit before else" {
+    const source_text =
+        \\enum State {
+        \\    Open,
+        \\    Closed,
+        \\}
+        \\
+        \\pub fn run(state: State) -> u256 {
+        \\    return match (state) {
+        \\        State.Open => 1,
+        \\        State.Closed => 2,
+        \\        else => 3,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), diagnosticSeverityCount(&typecheck.diagnostics, .Error));
+    try testing.expect(!diagnosticContains(&typecheck.diagnostics, .Warning, "wildcard match arm covers named variants"));
+}
+
+test "compiler warns when Result wildcard covers named error variants" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        else => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), diagnosticSeverityCount(&typecheck.diagnostics, .Error));
+    try testing.expect(diagnosticContains(&typecheck.diagnostics, .Warning, "wildcard match arm covers named variants"));
 }
 
 test "compiler rejects mixed Result match patterns and ordinary value patterns" {
