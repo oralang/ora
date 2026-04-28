@@ -718,6 +718,49 @@ test "Debugger: line_hits counter increments on every distinct statement-line tr
     try testing.expectEqual(@as(u32, 2), top[1].line);
 }
 
+test "Debugger: line_gas skips PCs without source-map entries" {
+    // Regression: on multi-contract calls the debugger holds the
+    // primary contract's source map, but executes opcodes from
+    // callees too. Those callee opcodes have no entry in src_map
+    // and previously would have been mis-attributed to the
+    // caller's last_statement_line. This test exercises the
+    // simpler form of the same skip: a bytecode whose tail opcodes
+    // have no source-map entry at all.
+
+    const allocator = testing.allocator;
+    // Two statements then a tail PUSH/STOP sequence that has no
+    // source-map entry. Gas spent on the tail opcodes must not be
+    // attributed to either source line.
+    const bytecode = &[_]u8{
+        0x60, 0x01, // PC 0: PUSH1 1   (statement 1)
+        0x60, 0x02, // PC 2: PUSH1 2   (statement 1)
+        0x01, // PC 4: ADD       (statement 1)
+        0x60, 0x00, // PC 5: PUSH1 0  (no source-map entry)
+        0x52, // PC 7: MSTORE    (no source-map entry)
+        0x00, // PC 8: STOP      (no source-map entry)
+    };
+    // Only statement 1 (line 1) is mapped; PCs 5..8 have no entries.
+    const entries = &[_]SourceMap.Entry{
+        .{ .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+        .{ .pc = 2, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = false },
+        .{ .pc = 4, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = false },
+    };
+
+    var fx = try buildFixture(allocator, bytecode, "stmt 1\n", entries, null);
+    defer fx.deinit();
+
+    try fx.debugger.continue_();
+    try testing.expect(fx.debugger.isHalted());
+
+    // Line 1 should have accumulated gas; the unmapped tail opcodes
+    // shouldn't have been attributed anywhere.
+    const l1 = fx.debugger.getLineGas(1);
+    try testing.expect(l1 != null);
+    try testing.expect(l1.? > 0);
+    try testing.expectEqual(@as(?u64, null), fx.debugger.getLineGas(0));
+    try testing.expectEqual(@as(?u64, null), fx.debugger.getLineGas(99));
+}
+
 test "Debugger: line_gas tracks cumulative cost per source line" {
     const allocator = testing.allocator;
     var fx = try buildFixture(

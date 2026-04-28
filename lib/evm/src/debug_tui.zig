@@ -225,6 +225,13 @@ const WriteEffectKind = enum {
 
 const lock_prefix: u256 = (@as(u256, 1) << 255);
 
+/// Safety cap on the number of transparent resumes runStep will issue
+/// when a conditional / hit-count breakpoint keeps short-circuiting.
+/// This is only a guard against malformed user predicates (e.g.
+/// `when false`); under normal use the loop terminates within a
+/// handful of iterations.
+const kMaxConditionalBreakpointGatingIters: u32 = 1_000_000;
+
 const Ui = struct {
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -1642,6 +1649,10 @@ const Ui = struct {
         self.command_buffer.clearRetainingCapacity();
         self.selected_frame_index = 0;
         self.step_history.clearRetainingCapacity();
+        // Reset hit counters before replay — the replay re-traverses the
+        // same opcodes so re-counting from zero keeps the count
+        // consistent with what the user just saw.
+        self.resetBreakpointHitCounts();
         try self.primeInitialStop();
         try self.applyBreakpoints();
         for (replay_items) |mode| {
@@ -1650,6 +1661,13 @@ const Ui = struct {
         }
         self.previous_snapshot = self.captureSnapshot();
         try self.refreshPreviousBindingsSnapshot();
+    }
+
+    /// Clear every breakpoint's hit_count back to 0. Called before any
+    /// session rebuild that will replay history, so a `:break <line>
+    /// hit <n>` predicate doesn't get "stuck" past N.
+    fn resetBreakpointHitCounts(self: *Ui) void {
+        for (self.breakpoints.items) |*bp| bp.hit_count = 0;
     }
 
     fn applyBreakpoints(self: *Ui) !void {
@@ -1710,7 +1728,7 @@ const Ui = struct {
         // always falses out — caller can disable the breakpoint manually.
         var gating_iters: u32 = 0;
         while (self.shouldSkipCurrentBreakpoint()) : (gating_iters += 1) {
-            if (gating_iters >= 1_000_000) break;
+            if (gating_iters >= kMaxConditionalBreakpointGatingIters) break;
             self.runDebuggerCommand(.continue_) catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
                 self.updateExecutionErrorStatus(stepModeName(mode)) catch {
@@ -1778,6 +1796,10 @@ const Ui = struct {
             self.command_status = "failed to rebuild session";
             return;
         };
+        // Same reasoning as in rerunToHistory: replay re-traverses the
+        // same opcodes, so re-counting hit_count from zero keeps the
+        // breakpoint state consistent with the user's view.
+        self.resetBreakpointHitCounts();
         self.primeInitialStop() catch {
             self.status = "execution_error";
             self.command_status = "failed to prime session";
@@ -2911,10 +2933,17 @@ const Ui = struct {
         return null;
     }
 
-    /// Return the origin_statement_id of the first source-map entry on
-    /// `line` that's marked hoisted (either at the source-map entry
+    /// Return the origin_statement_id of the first source-map entry
+    /// on `line` that's marked hoisted (either at the source-map entry
     /// level or via its op_meta). null when nothing on the line is
     /// hoisted.
+    ///
+    /// Limitation: only the first statement boundary on the line is
+    /// inspected. If a line carries multiple statements with different
+    /// hoist statuses (rare in practice), the second statement's hoist
+    /// won't surface in the overlay. SourceMap doesn't expose an
+    /// all-entries-for-line iterator, and adding one for an overlay
+    /// hint isn't justified yet.
     fn hoistOriginForLine(self: *Ui, line: u32) ?u32 {
         const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line) orelse return null;
         if (entry.is_hoisted) {
@@ -3945,11 +3974,18 @@ const Ui = struct {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
 
-    /// Return the AbiDoc that applies to a given frame. For now this
-    /// is just "the primary contract's ABI when the frame's address
-    /// matches the seed contract"; the lookup signature is in place
-    /// so cross-frame inspection of external contracts can later
-    /// register more entries (e.g. by code hash).
+    /// Return the AbiDoc that applies to a given frame. Currently
+    /// only the primary contract has an ABI loaded (via `--abi`), so
+    /// this returns it when `frame.address == seed.contract` and null
+    /// otherwise. External callees rendered in `:bt` therefore
+    /// surface as a raw selector hex rather than a decoded function
+    /// name.
+    ///
+    /// Extending this to a code-hash → AbiDoc registry — so external
+    /// callee bytecode can decode against its own ABI — is tracked
+    /// separately (see C4 in the debugger plan); the call site is
+    /// already routed through this helper so adding the map later is
+    /// localized.
     fn abiDocForFrame(self: *Ui, frame: *const Frame) ?*const AbiDoc {
         const abi_doc = if (self.abi_doc) |*doc| doc else return null;
         if (std.mem.eql(u8, &frame.address.bytes, &self.seed.contract.bytes)) return abi_doc;
@@ -3968,7 +4004,11 @@ const Ui = struct {
             return ora_evm.debug_eval.Value{ .num = parsed };
         }
 
-        if (self.numericBindingValue(&binding) catch null) |value| {
+        // numericBindingValue currently only returns OutOfMemory on the
+        // error path; propagate it explicitly so the evaluator
+        // surfaces it instead of mapping it to BindingUnavailable.
+        const numeric_opt = try self.numericBindingValue(&binding);
+        if (numeric_opt) |value| {
             return ora_evm.debug_eval.Value{ .num = value };
         }
         if (self.resolveAbiParamValue(&binding)) |resolved| {
@@ -4463,6 +4503,20 @@ const Ui = struct {
         tracer.enable();
         shadow.evm.setTracer(&tracer);
 
+        // Apply the same breakpoints to the shadow session so a
+        // `:continue_` in the user's history halts at the same place
+        // it did live. Without this, replay diverges and the trace
+        // wouldn't reflect what the user actually saw. Conditional /
+        // hit-count gating is intentionally not replayed: the
+        // debugger core doesn't know about it (it's a TUI-layer
+        // concern), so a `:continue_` that was internally retried
+        // until predicate-true is captured as a single user-step
+        // here. The trace will land at the same final stop because
+        // the EVM advances deterministically.
+        for (self.breakpoints.items) |bp| {
+            _ = shadow.debugger.setBreakpoint(self.seed.source_path, bp.line);
+        }
+
         // Mirror primeInitialStop: advance the shadow session until the
         // first user-facing statement, so the trace's earliest entries
         // line up with what the user sees.
@@ -4617,6 +4671,9 @@ const Ui = struct {
         self.source_buffer = .{};
         try self.source_buffer.update(self.allocator, .{ .bytes = self.seed.source_text });
 
+        // loadSession just rebuilt the session and is about to replay
+        // step_history; mirror rerunToHistory and start hit counts at 0.
+        self.resetBreakpointHitCounts();
         try self.primeInitialStop();
         try self.applyBreakpoints();
         for (parsed.value.step_history) |name| {

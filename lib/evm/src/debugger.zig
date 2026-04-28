@@ -867,14 +867,21 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 return err;
             };
 
-            // Best-effort gas accounting. The post-step frame may differ
-            // from the pre-step frame (CALL pushed a new one); in that
-            // case the parent's snapshotted gas is no longer comparable,
-            // so we skip the accounting for that step rather than
-            // mis-attribute it.
+            // Best-effort gas accounting. Three cases skip attribution:
+            //   1. The post-step frame differs from pre-step (CALL pushed
+            //      a new frame, or RETURN popped — the caller's snapshot
+            //      isn't comparable to whatever the new top is).
+            //   2. The current PC has no source-map entry. This is what
+            //      blocks mis-attribution while executing inside a callee
+            //      contract: the debugger's source map covers the primary
+            //      contract only, so callee opcodes have no entry and
+            //      we'd otherwise pin their gas to the caller's last
+            //      statement line.
+            //   3. We don't have a `last_statement_line` to attribute
+            //      against (early prologue before the first statement).
             if (self.evm.getCurrentFrame()) |post_frame| {
-                if (post_frame == frame) {
-                    if (gas_before > post_frame.gas_remaining) {
+                if (post_frame == frame and gas_before > post_frame.gas_remaining) {
+                    if (self.src_map.getEntry(post_frame.pc) != null) {
                         const delta: u64 = @intCast(gas_before - post_frame.gas_remaining);
                         if (attributed_line) |line| {
                             const gop = self.line_gas.getOrPut(line) catch null;
