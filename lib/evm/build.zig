@@ -116,4 +116,28 @@ pub fn build(b: *std.Build) void {
 
     const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
     debug_tui_step.dependOn(&run_debug_tui.step);
+
+    // Per-step debugger micro-benchmark. Tracks the per-step wall-clock cost
+    // of stepOpcode + statement-boundary check; fails if it exceeds the
+    // budget defined inside the bench (see test/bench/step_bench.zig). Run
+    // with `zig build bench`.
+    const step_bench_exe = b.addExecutable(.{
+        .name = "ora-evm-step-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/bench/step_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "ora_evm", .module = evm_mod },
+                .{ .name = "voltaire", .module = primitives_mod },
+                .{ .name = "crypto", .module = crypto_mod },
+                .{ .name = "precompiles", .module = precompiles_mod },
+            },
+        }),
+    });
+    step_bench_exe.step.dependOn(&bootstrap_crypto.step);
+    const run_step_bench = b.addRunArtifact(step_bench_exe);
+
+    const bench_step = b.step("bench", "Run Ora EVM debugger per-step benchmark");
+    bench_step.dependOn(&run_step_bench.step);
 }

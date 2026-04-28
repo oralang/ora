@@ -2,6 +2,12 @@ const std = @import("std");
 
 pub const DebugInfo = struct {
     parsed: std.json.Parsed(JsonDebugInfo),
+    /// Lookups built once at loadFromJson time. The pointers reference into
+    /// the parsed JSON arena and stay valid for as long as `parsed` does.
+    op_meta_by_idx: std.AutoHashMap(u32, *const OpMeta),
+    op_visibility_by_idx: std.AutoHashMap(u32, *const OpVisibility),
+    scope_by_id: std.AutoHashMap(u32, *const SourceScope),
+    local_by_id: std.AutoHashMap(u32, *const Local),
 
     pub const Position = struct {
         line: u32,
@@ -113,10 +119,42 @@ pub const DebugInfo = struct {
         const parsed = try std.json.parseFromSlice(JsonDebugInfo, allocator, json_bytes, .{
             .ignore_unknown_fields = true,
         });
-        return .{ .parsed = parsed };
+        var info = DebugInfo{
+            .parsed = parsed,
+            .op_meta_by_idx = std.AutoHashMap(u32, *const OpMeta).init(allocator),
+            .op_visibility_by_idx = std.AutoHashMap(u32, *const OpVisibility).init(allocator),
+            .scope_by_id = std.AutoHashMap(u32, *const SourceScope).init(allocator),
+            .local_by_id = std.AutoHashMap(u32, *const Local).init(allocator),
+        };
+        errdefer {
+            info.op_meta_by_idx.deinit();
+            info.op_visibility_by_idx.deinit();
+            info.scope_by_id.deinit();
+            info.local_by_id.deinit();
+            info.parsed.deinit();
+        }
+
+        for (info.parsed.value.ops) |*op| {
+            try info.op_meta_by_idx.put(op.idx, op);
+        }
+        for (info.parsed.value.op_visibility) |*op| {
+            try info.op_visibility_by_idx.put(op.idx, op);
+        }
+        for (info.parsed.value.source_scopes) |*scope| {
+            try info.scope_by_id.put(scope.id, scope);
+            for (scope.locals) |*local| {
+                try info.local_by_id.put(local.id, local);
+            }
+        }
+
+        return info;
     }
 
     pub fn deinit(self: *DebugInfo) void {
+        self.op_meta_by_idx.deinit();
+        self.op_visibility_by_idx.deinit();
+        self.scope_by_id.deinit();
+        self.local_by_id.deinit();
         self.parsed.deinit();
     }
 
@@ -125,33 +163,19 @@ pub const DebugInfo = struct {
     }
 
     pub fn getVisibilityForIdx(self: *const DebugInfo, idx: u32) ?*const OpVisibility {
-        for (self.parsed.value.op_visibility) |*op| {
-            if (op.idx == idx) return op;
-        }
-        return null;
+        return self.op_visibility_by_idx.get(idx);
     }
 
     pub fn getOpMetaForIdx(self: *const DebugInfo, idx: u32) ?*const OpMeta {
-        for (self.parsed.value.ops) |*op| {
-            if (op.idx == idx) return op;
-        }
-        return null;
+        return self.op_meta_by_idx.get(idx);
     }
 
     pub fn getScopeById(self: *const DebugInfo, id: u32) ?*const SourceScope {
-        for (self.parsed.value.source_scopes) |*scope| {
-            if (scope.id == id) return scope;
-        }
-        return null;
+        return self.scope_by_id.get(id);
     }
 
     pub fn getLocalById(self: *const DebugInfo, id: u32) ?*const Local {
-        for (self.parsed.value.source_scopes) |*scope| {
-            for (scope.locals) |*local| {
-                if (local.id == id) return local;
-            }
-        }
-        return null;
+        return self.local_by_id.get(id);
     }
 
     pub fn collectVisibleLocals(self: *const DebugInfo, allocator: std.mem.Allocator, idx: u32) ![]VisibleLocal {

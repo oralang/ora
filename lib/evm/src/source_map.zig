@@ -38,6 +38,31 @@ pub const SourceMap = struct {
     runtime_start_pc: ?u32 = null,
     entries: []Entry,
     allocator: std.mem.Allocator,
+    /// Per-file index built once at construction time. Lookups by
+    /// (file, line) and (file, statement_id) become O(1) instead of
+    /// O(N) over the full entry array.
+    index: std.StringHashMap(FileIndex),
+
+    /// Aggregated per-line view used by all the line-keyed lookups.
+    pub const LineRecord = struct {
+        first_statement_entry: ?*const Entry = null,
+        first_statement_kind: ?StatementKind = null,
+        saw_direct: bool = false,
+        saw_synthetic: bool = false,
+        has_any: bool = false,
+    };
+
+    pub const FileIndex = struct {
+        line_records: std.AutoHashMap(u32, LineRecord),
+        first_line_by_statement_id: std.AutoHashMap(u32, u32),
+        first_line_by_origin_statement_id: std.AutoHashMap(u32, u32),
+
+        fn deinit(self: *FileIndex) void {
+            self.line_records.deinit();
+            self.first_line_by_statement_id.deinit();
+            self.first_line_by_origin_statement_id.deinit();
+        }
+    };
 
     pub const Entry = struct {
         /// Serialized SIR op index backing this PC mapping, if available.
@@ -101,26 +126,23 @@ pub const SourceMap = struct {
         return &self.entries[lo - 1];
     }
 
+    fn lineRecord(self: *const SourceMap, file: []const u8, line: u32) ?LineRecord {
+        const file_index = self.index.getPtr(file) orelse return null;
+        return file_index.line_records.get(line);
+    }
+
     /// Get the first statement-boundary entry for a given source line.
-    ///
-    /// Entries are sorted by PC, not by source location, so matches for a single
-    /// source line may not be contiguous. This helper therefore returns only the
-    /// first statement entry for the line.
     pub fn getFirstStatementEntryForLine(self: *const SourceMap, file: []const u8, line: u32) ?*const Entry {
-        for (self.entries) |*entry| {
-            if (entry.line == line and entry.is_statement and std.mem.eql(u8, entry.file, file)) {
-                return entry;
-            }
-        }
-        return null;
+        const rec = self.lineRecord(file, line) orelse return null;
+        return rec.first_statement_entry;
     }
 
     /// Compatibility wrapper for older callers.
     /// Returns a single-element slice containing the first statement entry.
     pub fn getPcsForLine(self: *const SourceMap, file: []const u8, line: u32) []const Entry {
         if (self.getFirstStatementEntryForLine(file, line)) |entry| {
-            const idx = @intFromPtr(entry) - @intFromPtr(self.entries.ptr);
-            const entry_index = @divExact(idx, @sizeOf(Entry));
+            const offset = @intFromPtr(entry) - @intFromPtr(self.entries.ptr);
+            const entry_index = @divExact(offset, @sizeOf(Entry));
             return self.entries[entry_index .. entry_index + 1];
         }
         return &[_]Entry{};
@@ -132,56 +154,76 @@ pub const SourceMap = struct {
     }
 
     pub fn getStatementKindForLine(self: *const SourceMap, file: []const u8, line: u32) ?StatementKind {
-        for (self.entries) |*entry| {
-            if (entry.line != line) continue;
-            if (!std.mem.eql(u8, entry.file, file)) continue;
-            if (!entry.is_statement) continue;
-            return entry.kind;
-        }
-        return null;
+        const rec = self.lineRecord(file, line) orelse return null;
+        return rec.first_statement_kind;
     }
 
     pub fn getLineProvenance(self: *const SourceMap, file: []const u8, line: u32) ?LineProvenance {
-        var saw_direct = false;
-        var saw_synthetic = false;
-        for (self.entries) |*entry| {
-            if (entry.line != line) continue;
-            if (!std.mem.eql(u8, entry.file, file)) continue;
-            if (!entry.is_statement) continue;
-            if (entry.is_synthetic)
-                saw_synthetic = true
-            else
-                saw_direct = true;
-        }
-        if (saw_direct and saw_synthetic) return .mixed;
-        if (saw_direct) return .direct;
-        if (saw_synthetic) return .synthetic;
+        const rec = self.lineRecord(file, line) orelse return null;
+        if (rec.saw_direct and rec.saw_synthetic) return .mixed;
+        if (rec.saw_direct) return .direct;
+        if (rec.saw_synthetic) return .synthetic;
         return null;
     }
 
     pub fn getFirstLineForStatementId(self: *const SourceMap, file: []const u8, statement_id: u32) ?u32 {
-        for (self.entries) |*entry| {
-            if (!std.mem.eql(u8, entry.file, file)) continue;
-            if (entry.statement_id != statement_id) continue;
-            return entry.line;
-        }
-        return null;
+        const file_index = self.index.getPtr(file) orelse return null;
+        return file_index.first_line_by_statement_id.get(statement_id);
     }
 
     pub fn getFirstLineForOriginStatementId(self: *const SourceMap, file: []const u8, origin_statement_id: u32) ?u32 {
-        for (self.entries) |*entry| {
-            if (!std.mem.eql(u8, entry.file, file)) continue;
-            if (entry.origin_statement_id != origin_statement_id) continue;
-            return entry.line;
-        }
-        return null;
+        const file_index = self.index.getPtr(file) orelse return null;
+        return file_index.first_line_by_origin_statement_id.get(origin_statement_id);
     }
 
     pub fn hasAnyEntryForLine(self: *const SourceMap, file: []const u8, line: u32) bool {
-        for (self.entries) |*entry| {
-            if (entry.line == line and std.mem.eql(u8, entry.file, file)) return true;
+        const rec = self.lineRecord(file, line) orelse return false;
+        return rec.has_any;
+    }
+
+    /// Build the per-file index over `entries` (which must already be in their
+    /// final, allocator-owned home so the pointers are stable for the
+    /// SourceMap's lifetime).
+    fn buildIndex(allocator: std.mem.Allocator, entries: []Entry) !std.StringHashMap(FileIndex) {
+        var index = std.StringHashMap(FileIndex).init(allocator);
+        errdefer {
+            var it = index.valueIterator();
+            while (it.next()) |fi| fi.deinit();
+            index.deinit();
         }
-        return false;
+
+        for (entries) |*entry| {
+            const gop = try index.getOrPut(entry.file);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{
+                    .line_records = std.AutoHashMap(u32, LineRecord).init(allocator),
+                    .first_line_by_statement_id = std.AutoHashMap(u32, u32).init(allocator),
+                    .first_line_by_origin_statement_id = std.AutoHashMap(u32, u32).init(allocator),
+                };
+            }
+            const fi = gop.value_ptr;
+
+            const rec_gop = try fi.line_records.getOrPut(entry.line);
+            if (!rec_gop.found_existing) rec_gop.value_ptr.* = .{};
+            const rec = rec_gop.value_ptr;
+            rec.has_any = true;
+            if (entry.is_statement) {
+                if (rec.first_statement_entry == null) {
+                    rec.first_statement_entry = entry;
+                    rec.first_statement_kind = entry.kind;
+                }
+                if (entry.is_synthetic) rec.saw_synthetic = true else rec.saw_direct = true;
+            }
+
+            if (entry.statement_id) |sid| {
+                _ = try fi.first_line_by_statement_id.getOrPutValue(sid, entry.line);
+            }
+            if (entry.origin_statement_id) |osid| {
+                _ = try fi.first_line_by_origin_statement_id.getOrPutValue(osid, entry.line);
+            }
+        }
+
+        return index;
     }
 
     /// Load a source map from JSON.
@@ -233,10 +275,13 @@ pub const SourceMap = struct {
             };
         }
 
+        const index = try buildIndex(allocator, entries);
+
         return .{
             .runtime_start_pc = parsed.value.runtime_start_pc,
             .entries = entries,
             .allocator = allocator,
+            .index = index,
         };
     }
 
@@ -266,14 +311,20 @@ pub const SourceMap = struct {
                 .kind = e.kind,
             };
         }
+        const index = try buildIndex(allocator, owned);
+
         return .{
             .runtime_start_pc = null,
             .entries = owned,
             .allocator = allocator,
+            .index = index,
         };
     }
 
     pub fn deinit(self: *SourceMap) void {
+        var it = self.index.valueIterator();
+        while (it.next()) |fi| fi.deinit();
+        self.index.deinit();
         for (self.entries) |entry| {
             self.allocator.free(entry.file);
             if (entry.function) |function_name| self.allocator.free(function_name);

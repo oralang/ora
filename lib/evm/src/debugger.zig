@@ -22,6 +22,12 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         source_text: []const u8,
         source_lines: []const LineSlice,
         breakpoints: std.AutoHashMap(u32, void),
+        /// Set of source-map entry idx values whose statement boundary the
+        /// debugger should ignore: their op_meta is "invalid" / "sir.invalid"
+        /// but another entry in the same statement_id surfaces a real op.
+        /// Built once at the time debug_info is bound; queried in O(1) on
+        /// every step. Empty when debug_info isn't set.
+        ignored_invalid_idx: std.AutoHashMap(u32, void),
         state: State,
         stop_reason: StopReason,
         allocator: std.mem.Allocator,
@@ -77,6 +83,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .source_text = source_text,
                 .source_lines = lines,
                 .breakpoints = std.AutoHashMap(u32, void).init(allocator),
+                .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
                 .state = .paused,
                 .stop_reason = .not_started,
                 .allocator = allocator,
@@ -93,6 +100,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
         pub fn deinit(self: *Self) void {
             self.breakpoints.deinit();
+            self.ignored_invalid_idx.deinit();
             if (self.debug_info) |*debug_info| debug_info.deinit();
             self.src_map.deinit();
             self.allocator.free(self.source_lines);
@@ -107,7 +115,55 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         ) !Self {
             var self = try Self.init(allocator, evm, src_map, source_text);
             self.debug_info = debug_info;
+            try self.buildIgnoredInvalidIdxSet();
             return self;
+        }
+
+        /// Walks the source map once and records every entry whose op_meta
+        /// is "invalid" / "sir.invalid" *and* shares its statement_id with
+        /// at least one entry whose op is a real opcode. Step-time we then
+        /// just check `ignored_invalid_idx.contains(idx)` — O(1) per step
+        /// instead of the previous O(N) scan whose inner getOpMetaForIdx
+        /// itself was O(N) (so O(N²) overall).
+        fn buildIgnoredInvalidIdxSet(self: *Self) !void {
+            const debug_info = self.debug_info orelse return;
+            // Bucket entries by statement_id, splitting into invalid-op idx
+            // and "has at least one real op" flag.
+            const ScratchEntry = struct {
+                invalid_idxs: std.ArrayList(u32) = .{},
+                has_real_op: bool = false,
+            };
+            var by_stmt = std.AutoHashMap(u32, ScratchEntry).init(self.allocator);
+            defer {
+                var it = by_stmt.valueIterator();
+                while (it.next()) |bucket| bucket.invalid_idxs.deinit(self.allocator);
+                by_stmt.deinit();
+            }
+
+            for (self.src_map.entries) |entry| {
+                const stmt_id = entry.statement_id orelse continue;
+                const idx = entry.idx orelse continue;
+                const op_meta = debug_info.getOpMetaForIdx(idx) orelse continue;
+                const is_invalid = std.mem.eql(u8, op_meta.op, "invalid") or
+                    std.mem.eql(u8, op_meta.op, "sir.invalid");
+
+                const gop = try by_stmt.getOrPut(stmt_id);
+                if (!gop.found_existing) gop.value_ptr.* = .{};
+                const bucket = gop.value_ptr;
+                if (is_invalid) {
+                    try bucket.invalid_idxs.append(self.allocator, idx);
+                } else {
+                    bucket.has_real_op = true;
+                }
+            }
+
+            var it = by_stmt.valueIterator();
+            while (it.next()) |bucket| {
+                if (!bucket.has_real_op) continue;
+                for (bucket.invalid_idxs.items) |idx| {
+                    try self.ignored_invalid_idx.put(idx, {});
+                }
+            }
         }
 
         // ====================================================================
@@ -639,24 +695,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         fn shouldIgnoreStatementBoundary(self: *const Self, entry: *const SourceMap.Entry) bool {
-            const stmt_id = entry.statement_id orelse return false;
+            // Population is gated on having debug_info; without it the set is
+            // empty and we fall through immediately.
             const idx = entry.idx orelse return false;
-            const debug_info = self.debug_info orelse return false;
-            const op_meta = debug_info.getOpMetaForIdx(idx) orelse return false;
-            if (!(std.mem.eql(u8, op_meta.op, "invalid") or std.mem.eql(u8, op_meta.op, "sir.invalid"))) {
-                return false;
-            }
-
-            for (self.src_map.entries) |candidate| {
-                if (candidate.statement_id != stmt_id) continue;
-                if (candidate.idx == null or candidate.idx == idx) continue;
-                const candidate_meta = debug_info.getOpMetaForIdx(candidate.idx.?) orelse continue;
-                if (std.mem.eql(u8, candidate_meta.op, "invalid") or std.mem.eql(u8, candidate_meta.op, "sir.invalid")) {
-                    continue;
-                }
-                return true;
-            }
-            return false;
+            return self.ignored_invalid_idx.contains(idx);
         }
 
         fn bindingHasWritableRuntimeHome(self: *const Self, binding: DebugInfo.VisibleBinding) bool {
