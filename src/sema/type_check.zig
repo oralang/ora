@@ -2405,8 +2405,9 @@ const TypeChecker = struct {
                     return true;
                 }
                 for (elements, call.args) |expected, arg| {
+                    try self.contextualizeLiteral(arg, expected);
                     const actual = self.expr_types[arg.index()];
-                    if (!typesAssignable(expected, actual) and actual.kind() != .unknown) {
+                    if (!typesFlowCompatible(expected, actual) and actual.kind() != .unknown) {
                         try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
                             diagnosticTypeDisplayName(self, expected),
                             diagnosticTypeDisplayName(self, actual),
@@ -2420,8 +2421,9 @@ const TypeChecker = struct {
                     return true;
                 }
                 for (struct_type.fields, call.args) |field, arg| {
+                    try self.contextualizeLiteral(arg, field.ty);
                     const actual = self.expr_types[arg.index()];
-                    if (!typesAssignable(field.ty, actual) and actual.kind() != .unknown) {
+                    if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
                         try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
                             diagnosticTypeDisplayName(self, field.ty),
                             diagnosticTypeDisplayName(self, actual),
@@ -2434,8 +2436,9 @@ const TypeChecker = struct {
                     try self.emitExprError(expr_id, "expected 1 arguments, found {d}", .{call.args.len});
                     return true;
                 }
+                try self.contextualizeLiteral(call.args[0], payload_type);
                 const actual = self.expr_types[call.args[0].index()];
-                if (!typesAssignable(payload_type, actual) and actual.kind() != .unknown) {
+                if (!typesFlowCompatible(payload_type, actual) and actual.kind() != .unknown) {
                     try self.emitExprError(call.args[0], "expected type '{s}', found '{s}'", .{
                         diagnosticTypeDisplayName(self, payload_type),
                         diagnosticTypeDisplayName(self, actual),

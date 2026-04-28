@@ -302,6 +302,57 @@ test "compiler inserts refinement call conversions in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
 }
 
+test "compiler inserts refinement conversions for struct field construction" {
+    const source_text =
+        \\struct Box {
+        \\    value: MinValue<u256, 10>;
+        \\}
+        \\
+        \\pub fn read(raw: u256) -> u256 {
+        \\    let box = Box { value: raw };
+        \\    return box.value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_instantiate"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
+}
+
+test "compiler accepts guardable refinement flows into ADT variant payloads" {
+    const source_text =
+        \\enum MaybeAmount {
+        \\    None,
+        \\    Value(MinValue<u256, 10>),
+        \\}
+        \\
+        \\pub fn read(raw: u256) -> u256 {
+        \\    let maybe = MaybeAmount.Value(raw);
+        \\    return match (maybe) {
+        \\        MaybeAmount.Value(value) => value,
+        \\        MaybeAmount.None => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.base_to_refinement"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.construct"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
+}
+
 test "compiler cleans refinement guards to cf.assert" {
     const source_text =
         \\pub fn guarded(
@@ -593,4 +644,3 @@ test "compiler accepts valid refinement in functions example package" {
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
-

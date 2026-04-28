@@ -1454,7 +1454,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 case_lowerer.block = case_block;
                 var case_locals = try self.cloneLocals(locals);
                 try @This().bindAdtMatchPatternValue(&case_lowerer, raw_condition, arm.pattern, arm.range, &case_locals);
-                const value = try case_lowerer.lowerExpr(arm.value, &case_locals);
+                const raw_value = try case_lowerer.lowerExpr(arm.value, &case_locals);
+                const value = try case_lowerer.convertValueForFlow(raw_value, result_type, arm.range);
                 try appendOraYieldValues(self.parent.context, case_block, self.parent.location(arm.range), &[_]mlir.MlirValue{value});
             }
 
@@ -1464,7 +1465,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                 var else_lowerer = self.*;
                 else_lowerer.block = else_block;
-                const value = try else_lowerer.lowerExpr(else_expr, locals);
+                const raw_value = try else_lowerer.lowerExpr(else_expr, locals);
+                const value = try else_lowerer.convertValueForFlow(raw_value, result_type, switch_expr.range);
                 try appendOraYieldValues(self.parent.context, else_block, self.parent.location(switch_expr.range), &[_]mlir.MlirValue{value});
             }
 
@@ -1501,7 +1503,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
             if (arm_index >= switch_expr.arms.len) {
-                if (switch_expr.else_expr) |else_expr| return self.lowerExpr(else_expr, locals);
+                if (switch_expr.else_expr) |else_expr| {
+                    const result_type = self.parent.lowerExprType(expr_id);
+                    const raw_value = try self.lowerExpr(else_expr, locals);
+                    return self.convertValueForFlow(raw_value, result_type, switch_expr.range);
+                }
                 if (@This().switchPatternsAreExhaustive(
                     self,
                     switch_expr.condition,
@@ -1532,13 +1538,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             then_lowerer.block = then_block;
             var then_locals = try self.cloneLocals(locals);
             try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, arm.range, &then_locals);
-            const then_value = try then_lowerer.lowerExpr(arm.value, &then_locals);
+            const raw_then_value = try then_lowerer.lowerExpr(arm.value, &then_locals);
+            const then_value = try then_lowerer.convertValueForFlow(raw_then_value, result_type, arm.range);
             try appendScfYieldValues(self.parent.context, then_block, self.parent.location(arm.range), &[_]mlir.MlirValue{then_value});
 
             var else_lowerer = self.*;
             else_lowerer.block = else_block;
             var else_locals = try self.cloneLocals(locals);
-            const else_value = try @This().lowerErrorUnionMatchExprChain(&else_lowerer, expr_id, switch_expr, arm_index + 1, condition, &else_locals);
+            const raw_else_value = try @This().lowerErrorUnionMatchExprChain(&else_lowerer, expr_id, switch_expr, arm_index + 1, condition, &else_locals);
+            const else_value = try else_lowerer.convertValueForFlow(raw_else_value, result_type, arm.range);
             try appendScfYieldValues(self.parent.context, else_block, self.parent.location(arm.range), &[_]mlir.MlirValue{else_value});
 
             return mlir.oraOperationGetResult(op, 0);
