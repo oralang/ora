@@ -115,6 +115,7 @@ pub const ConstValue = union(enum) {
 
     // Enum (payload by ConstId)
     enum_val: ConstEnum,
+    error_union_val: ConstErrorUnion,
 
     // Type-level constant (stable handle)
     type_val: TypeId,
@@ -147,6 +148,13 @@ pub const ConstEnum = struct {
     type_id: TypeId,
     variant_id: VariantId,
     payload: ?ConstId,
+};
+
+/// Persistent Result/error-union constant. Payload is a ConstId for the
+/// one-element tuple containing either the success value or the error value.
+pub const ConstErrorUnion = struct {
+    is_error: bool,
+    payload: ConstId,
 };
 
 // ============================================================================

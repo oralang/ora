@@ -49,6 +49,7 @@ pub const ConstValue = @import("value.zig").ConstValue;
 pub const ConstStruct = @import("value.zig").ConstStruct;
 pub const ConstField = @import("value.zig").ConstField;
 pub const ConstEnum = @import("value.zig").ConstEnum;
+pub const ConstErrorUnion = @import("value.zig").ConstErrorUnion;
 pub const ConstId = @import("value.zig").ConstId;
 pub const SlotId = @import("value.zig").SlotId;
 pub const HeapId = @import("value.zig").HeapId;
