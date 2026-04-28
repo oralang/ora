@@ -54,6 +54,14 @@ calldata views.
 | `4`   | Tstore (transient storage) tab                  |
 | `5`   | Calldata tab                                    |
 
+## Overlays
+
+| Key   | Action                                                          |
+|-------|-----------------------------------------------------------------|
+| `O`   | Cycle source-gutter overlay mode (`none` → `coverage` → ...)    |
+
+See [COMMANDS.md](COMMANDS.md) for the full `:overlay` command surface.
+
 ## Command mode
 
 `:` enters command mode. While in command mode the printable keys append

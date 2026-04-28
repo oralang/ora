@@ -347,6 +347,35 @@ const Checkpoint = struct {
     active_evm_tab: EvmTabKind = .stack,
 };
 
+/// Source-gutter overlay mode. Controls what extra information the
+/// gutter reveals about the current line. `none` is the default
+/// (provenance / folded / breakpoint marks only). `coverage` adds a
+/// per-line hit-count column.
+const OverlayMode = enum {
+    none,
+    coverage,
+
+    fn next(self: OverlayMode) OverlayMode {
+        return switch (self) {
+            .none => .coverage,
+            .coverage => .none,
+        };
+    }
+
+    fn name(self: OverlayMode) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .coverage => "coverage",
+        };
+    }
+
+    fn parse(text: []const u8) ?OverlayMode {
+        if (std.mem.eql(u8, text, "none")) return .none;
+        if (std.mem.eql(u8, text, "coverage") or std.mem.eql(u8, text, "cov")) return .coverage;
+        return null;
+    }
+};
+
 /// A user-set breakpoint. The debugger core only knows about lines (it
 /// halts on every hit); the TUI layers a side-effect-free predicate
 /// (`condition`) and an optional N-th-hit target on top, transparently
@@ -414,6 +443,7 @@ const Ui = struct {
     checkpoints: std.ArrayList(Checkpoint) = .{},
     next_checkpoint_id: u32 = 1,
     selected_frame_index: usize = 0,
+    overlay_mode: OverlayMode = .none,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -500,6 +530,7 @@ const Ui = struct {
         evm_tab_storage,
         evm_tab_tstore,
         evm_tab_calldata,
+        cycle_overlay,
     };
 
     const KeyBinding = struct {
@@ -507,7 +538,7 @@ const Ui = struct {
         action: KeyAction,
     };
 
-    fn keymap() [22]KeyBinding {
+    fn keymap() [23]KeyBinding {
         return .{
             .{ .key = .{ .codepoint = 'q' }, .action = .quit },
             .{ .key = .{ .codepoint = 'c', .mods = .{ .ctrl = true } }, .action = .quit },
@@ -531,6 +562,7 @@ const Ui = struct {
             .{ .key = .{ .codepoint = ']' }, .action = .evm_tab_next },
             .{ .key = .{ .codepoint = '1' }, .action = .evm_tab_stack },
             .{ .key = .{ .codepoint = '2' }, .action = .evm_tab_memory },
+            .{ .key = .{ .codepoint = 'O' }, .action = .cycle_overlay },
         };
     }
 
@@ -568,6 +600,12 @@ const Ui = struct {
             .evm_tab_storage => self.active_evm_tab = .storage,
             .evm_tab_tstore => self.active_evm_tab = .tstore,
             .evm_tab_calldata => self.active_evm_tab = .calldata,
+            .cycle_overlay => {
+                self.overlay_mode = self.overlay_mode.next();
+                self.setCommandStatusFmt("overlay = {s}", .{self.overlay_mode.name()}) catch {
+                    self.command_status = "overlay";
+                };
+            },
         }
         return false;
     }
@@ -804,6 +842,41 @@ const Ui = struct {
         try self.handlePrintCommand(arg);
         return .ok;
     }
+    fn cmdTraceExport(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (!std.mem.startsWith(u8, trimmed, "export ") and !std.mem.startsWith(u8, trimmed, "export\t")) {
+            self.command_status = "usage: :trace export <path>";
+            return .ok;
+        }
+        const path = std.mem.trim(u8, trimmed[7..], " \t");
+        if (path.len == 0) {
+            self.command_status = "missing trace path";
+            return .ok;
+        }
+        const wrote = self.exportTrace(path) catch |err| {
+            switch (err) {
+                error.OutOfMemory => self.command_status = "out of memory",
+                else => self.command_status = "failed to export trace",
+            }
+            return .ok;
+        };
+        try self.setCommandStatusFmt("trace exported: {d} steps -> {s}", .{ wrote, path });
+        return .ok;
+    }
+    fn cmdOverlay(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (trimmed.len == 0) {
+            try self.setCommandStatusFmt("overlay = {s} (modes: none, coverage)", .{self.overlay_mode.name()});
+            return .ok;
+        }
+        const mode = OverlayMode.parse(trimmed) orelse {
+            self.command_status = "unknown overlay (modes: none, coverage)";
+            return .ok;
+        };
+        self.overlay_mode = mode;
+        try self.setCommandStatusFmt("overlay = {s}", .{mode.name()});
+        return .ok;
+    }
     fn cmdCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         const total = self.session.debugger.lineHitsCount();
         if (total == 0) {
@@ -981,6 +1054,9 @@ const Ui = struct {
         .{ .name = "eval ", .match = .prefix, .handler = cmdEval, .help = "evaluate side-effect-free expression (numbers, bindings, +-*/%, == != < > <= >=, && ||, !)" },
         .{ .name = "cov", .match = .exact, .handler = cmdCoverage, .help = "report top-10 hottest source lines (statement-boundary hits)" },
         .{ .name = "cov ", .match = .prefix, .handler = cmdCoverage, .help = "report top-N hottest source lines (`:cov 20`)" },
+        .{ .name = "overlay", .match = .exact, .handler = cmdOverlay, .help = "show current overlay mode" },
+        .{ .name = "overlay ", .match = .prefix, .handler = cmdOverlay, .help = "switch overlay mode (none, coverage)" },
+        .{ .name = "trace ", .match = .prefix, .handler = cmdTraceExport, .help = "export EIP-3155 trace (`:trace export <path>`)" },
         .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
         .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
         .{ .name = "load-session ", .aliases = &.{"ls "}, .match = .prefix, .handler = cmdLoadSession, .help = "load session from path" },
@@ -1714,10 +1790,25 @@ const Ui = struct {
         while (i > 0) {
             i -= 1;
             const frame = frames[i];
-            if (logical == 0) {
-                try writer.print(" #{d} pc={d} gas={d}", .{ logical, frame.pc, frame.gas_remaining });
-            } else {
-                try writer.print(", #{d} pc={d} gas={d}", .{ logical, frame.pc, frame.gas_remaining });
+            const sep: []const u8 = if (logical == 0) " " else ", ";
+            try writer.print("{s}#{d} {x} pc={d} gas={d}", .{ sep, logical, frame.address, frame.pc, frame.gas_remaining });
+            if (frame.is_static) try writer.writeAll(" static");
+            if (frame.calldata.len >= 4) {
+                var selector_buf: [4]u8 = undefined;
+                @memcpy(&selector_buf, frame.calldata[0..4]);
+                if (self.abi_doc) |abi_doc| {
+                    if (abi_doc.findCallableBySelector(selector_buf)) |callable| {
+                        if (callable.object.get("name")) |n| {
+                            if (n == .string) {
+                                try writer.print(" -> {s}", .{n.string});
+                                logical += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                const sel_int = std.mem.readInt(u32, &selector_buf, .big);
+                try writer.print(" sel=0x{x:0>8}", .{sel_int});
             }
             logical += 1;
         }
@@ -4434,7 +4525,16 @@ const Ui = struct {
                 style_muted()
             else
                 style_muted();
-            const line_cell = self.scratchFmt("{s}{d:>6} |", .{ marker, line }) catch marker;
+            const line_cell = switch (self.overlay_mode) {
+                .none => self.scratchFmt("{s}{d:>6} |", .{ marker, line }) catch marker,
+                .coverage => blk: {
+                    const hit = self.session.debugger.getLineHits(line);
+                    if (hit) |h| {
+                        break :blk self.scratchFmt("{s}{d:>6} {d:>4}|", .{ marker, line, h }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}    .|", .{ marker, line }) catch marker;
+                },
+            };
             drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});
         }
     }
@@ -4483,6 +4583,46 @@ const Ui = struct {
         const next = pc + step;
         if (next >= bytecode.len()) return null;
         return next;
+    }
+
+    /// Export an EIP-3155 trace of the entire run by replaying
+    /// `step_history` against a shadow session with a `Tracer`
+    /// attached. Doesn't disturb the live session. Returns the number
+    /// of trace entries written.
+    fn exportTrace(self: *Ui, path: []const u8) !usize {
+        var shadow: Session = undefined;
+        try Session.init(&shadow, self.allocator, &self.seed);
+        defer shadow.deinit();
+
+        var tracer = ora_evm.trace.Tracer.init(self.allocator);
+        defer tracer.deinit();
+        tracer.enable();
+        shadow.evm.setTracer(&tracer);
+
+        // Mirror primeInitialStop: advance the shadow session until the
+        // first user-facing statement, so the trace's earliest entries
+        // line up with what the user sees.
+        var prime_attempts: usize = 0;
+        while (!shadow.debugger.isHalted() and prime_attempts < 256) : (prime_attempts += 1) {
+            shadow.debugger.stepIn() catch break;
+            const entry = shadow.debugger.currentEntry() orelse continue;
+            if (entry.is_statement) break;
+        }
+
+        for (self.step_history.items) |mode| {
+            const result = switch (mode) {
+                .in => shadow.debugger.stepIn(),
+                .opcode => shadow.debugger.stepOpcode(),
+                .over => shadow.debugger.stepOver(),
+                .out => shadow.debugger.stepOut(),
+                .continue_ => shadow.debugger.continue_(),
+            };
+            result catch break;
+            if (shadow.debugger.isHalted()) break;
+        }
+
+        try tracer.writeToFile(path);
+        return tracer.entries.items.len;
     }
 
     fn writeSession(self: *Ui, path: []const u8) !void {

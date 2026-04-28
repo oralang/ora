@@ -73,7 +73,7 @@ source-level binding name — bindings resolve to their declared
 
 | Command           | Aliases       | Action                                            |
 |-------------------|---------------|---------------------------------------------------|
-| `bt`              | `backtrace`   | Print the call-frame stack                        |
+| `bt`              | `backtrace`   | Print the call-frame stack with per-frame address, pc, gas, static flag, and decoded function name (when the calldata selector matches an ABI callable) |
 | `frame <idx>`     |               | Select frame `<idx>` for binding / state queries  |
 
 ## Time travel & checkpoints
@@ -98,6 +98,22 @@ source-level binding name — bindings resolve to their declared
 | `print slot <hex>`      | Storage slot `<hex>` for the selected frame's address        |
 | `print logs`            | Decoded log lane: every emitted `LOG*` rendered as `EventName(arg=value, ...)` via the loaded ABI; falls back to topic/data sizes for unknown selectors |
 | `print <binding>`       | Source-level binding by name (resolves to storage / memory / tstore / folded value / "optimized away" / etc.) |
+
+## Overlays
+
+The source-pane gutter cycles through optional overlays that surface
+extra information about each line. Toggle with the `O` key (capital
+o) or the `:overlay` command.
+
+| Command           | Action                                                   |
+|-------------------|----------------------------------------------------------|
+| `overlay`         | Show the current overlay mode                            |
+| `overlay none`    | Reset to plain provenance gutter                         |
+| `overlay coverage` (or `cov`) | Add a hit-count column next to the line number |
+
+When `coverage` is on, the gutter renders `<mark><line> <hit>|` for
+every line that has had at least one statement-boundary hit, and
+`<mark><line>    .|` for unvisited statement lines.
 
 ## Coverage
 
@@ -174,6 +190,21 @@ values. Use `:checkpoint` first if you want to roll back later.
 | `set slot <hex> = <value>`    | Write to persistent storage slot `<hex>` for the selected frame's address |
 | `set mem <offset> = <value>`  | Write a u256 word at memory offset `<offset>`                |
 | `gas <value>`                 | Equivalent to `set gas = <value>`                            |
+
+## Trace export
+
+Dump an EIP-3155 JSON trace of the entire run. The debugger replays
+`step_history` against a shadow session with a `Tracer` attached, so
+the live session is undisturbed. The output file is one
+EIP-3155-shaped step-trace entry per opcode that executed.
+
+| Command                    | Action                                                       |
+|----------------------------|--------------------------------------------------------------|
+| `trace export <path>`      | Write the EIP-3155 JSON trace of the current run to `<path>` |
+
+Combine with `:write-session` to ship a complete repro: the `.session`
+file is the seed + step history, and the `.trace.json` is the
+opcode-level execution.
 
 ## Sessions
 
