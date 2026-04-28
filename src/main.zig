@@ -104,6 +104,10 @@ const DebugCliOptions = struct {
     arg_values: std.ArrayList([]const u8),
     calldata_hex: ?[]const u8 = null,
     verify_requested: bool = false,
+    /// Headless mode: emit debug artifacts but skip launching the TUI.
+    /// Used by debug-artifact regression tests and for offline artifact
+    /// generation that ships traces to another engineer.
+    no_tui: bool = false,
 
     fn init() DebugCliOptions {
         return .{
@@ -220,6 +224,12 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
 
         if (std.mem.eql(u8, arg, "--verify") or std.mem.startsWith(u8, arg, "--verify=")) {
             opts.verify_requested = true;
+        }
+
+        if (std.mem.eql(u8, arg, "--no-tui")) {
+            opts.no_tui = true;
+            i += 1;
+            continue;
         }
 
         try opts.filtered_args.append(allocator, arg);
@@ -532,6 +542,8 @@ pub fn main() !void {
             resolver.options,
         );
         defer allocator.free(artifact_root);
+
+        if (debug_options.no_tui) return;
 
         try launchDebuggerTui(
             allocator,

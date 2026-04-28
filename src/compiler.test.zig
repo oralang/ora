@@ -4,6 +4,7 @@
 comptime {
     _ = @import("compiler.test.abi.zig");
     _ = @import("compiler.test.comptime.zig");
+    _ = @import("compiler.test.debug_artifacts.zig");
     _ = @import("compiler.test.diagnostics.zig");
     _ = @import("compiler.test.hir.zig");
     _ = @import("compiler.test.match.zig");
