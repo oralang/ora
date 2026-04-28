@@ -2,6 +2,7 @@
 /// Wraps the EVM with breakpoints, statement-level stepping, and state inspection.
 /// Does NOT modify evm.zig or frame.zig — it drives them externally via step().
 const std = @import("std");
+const primitives = @import("voltaire");
 const source_map = @import("source_map.zig");
 const SourceMap = source_map.SourceMap;
 const debug_info_mod = @import("debug_info.zig");
@@ -23,6 +24,13 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         source_text: []const u8,
         source_lines: []const LineSlice,
         breakpoints: std.AutoHashMap(u32, void),
+        /// Active storage watchpoints. Checked after every opcode; if any
+        /// slot has changed since the last check, execution pauses with
+        /// stop_reason == .watchpoint_hit and `last_watchpoint_id` is
+        /// set to the triggering id.
+        watchpoints: std.ArrayList(Watchpoint),
+        next_watchpoint_id: u32,
+        last_watchpoint_id: ?u32,
         /// Set of source-map entry idx values whose statement boundary the
         /// debugger should ignore: their op_meta is "invalid" / "sir.invalid"
         /// but another entry in the same statement_id surfaces a real op.
@@ -50,11 +58,26 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         pub const StopReason = enum {
             not_started,
             breakpoint_hit,
+            watchpoint_hit,
             step_complete,
             execution_finished,
             execution_reverted,
             execution_error,
             step_limit_reached,
+        };
+
+        /// A storage watchpoint pauses execution when the value at
+        /// `(address, slot)` changes since the watchpoint was last
+        /// observed. `last_seen` is the value at the moment the
+        /// watchpoint was added (or last serviced); `name` is the
+        /// human-readable label rendered in `:info watch` and the
+        /// watchpoint-hit status line.
+        pub const Watchpoint = struct {
+            id: u32,
+            slot: u256,
+            address: primitives.Address,
+            last_seen: u256,
+            name: []const u8,
         };
 
         pub const LineSlice = struct {
@@ -84,6 +107,9 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .source_text = source_text,
                 .source_lines = lines,
                 .breakpoints = std.AutoHashMap(u32, void).init(allocator),
+                .watchpoints = .{},
+                .next_watchpoint_id = 1,
+                .last_watchpoint_id = null,
                 .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
                 .state = .paused,
                 .stop_reason = .not_started,
@@ -102,6 +128,8 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         pub fn deinit(self: *Self) void {
             self.breakpoints.deinit();
             self.ignored_invalid_idx.deinit();
+            for (self.watchpoints.items) |wp| self.allocator.free(wp.name);
+            self.watchpoints.deinit(self.allocator);
             if (self.debug_info) |*debug_info| debug_info.deinit();
             self.src_map.deinit();
             self.allocator.free(self.source_lines);
@@ -210,6 +238,102 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         // ====================================================================
+        // Watchpoints
+        // ====================================================================
+
+        /// Watch a raw storage slot at the current frame's address.
+        /// Returns the watchpoint id so callers can remove it later.
+        pub fn addWatchpointBySlot(self: *Self, slot: u256) !u32 {
+            const frame = self.evm.getCurrentFrame() orelse return error.NoActiveFrame;
+            const current_value = try self.evm.storage.get(frame.address, slot);
+            const id = self.next_watchpoint_id;
+            self.next_watchpoint_id += 1;
+
+            const buf = try std.fmt.allocPrint(self.allocator, "slot 0x{x}", .{slot});
+            errdefer self.allocator.free(buf);
+            try self.watchpoints.append(self.allocator, .{
+                .id = id,
+                .slot = slot,
+                .address = frame.address,
+                .last_seen = current_value,
+                .name = buf,
+            });
+            return id;
+        }
+
+        /// Watch a source-level binding by name. Resolves to its
+        /// runtime storage slot via the active scope's debug info.
+        /// Returns null if the binding isn't visible at the current op
+        /// or isn't backed by a writable storage slot.
+        pub fn addWatchpointByBindingName(self: *Self, name: []const u8) !?u32 {
+            const binding = try self.findVisibleBindingByName(self.allocator, name) orelse return null;
+            if (!std.mem.eql(u8, binding.runtime_kind, "storage_field")) return null;
+            const location_kind = binding.runtime_location_kind orelse return null;
+            if (!std.mem.eql(u8, location_kind, "storage_root")) return null;
+            const slot64 = binding.runtime_location_slot orelse return null;
+            const slot: u256 = slot64;
+
+            const frame = self.evm.getCurrentFrame() orelse return error.NoActiveFrame;
+            const current_value = try self.evm.storage.get(frame.address, slot);
+            const id = self.next_watchpoint_id;
+            self.next_watchpoint_id += 1;
+
+            const buf = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(buf);
+            try self.watchpoints.append(self.allocator, .{
+                .id = id,
+                .slot = slot,
+                .address = frame.address,
+                .last_seen = current_value,
+                .name = buf,
+            });
+            return id;
+        }
+
+        /// Remove a watchpoint by id. Returns true if a watchpoint with
+        /// that id existed.
+        pub fn removeWatchpoint(self: *Self, id: u32) bool {
+            for (self.watchpoints.items, 0..) |wp, i| {
+                if (wp.id != id) continue;
+                self.allocator.free(wp.name);
+                _ = self.watchpoints.orderedRemove(i);
+                return true;
+            }
+            return false;
+        }
+
+        pub fn getWatchpoints(self: *const Self) []const Watchpoint {
+            return self.watchpoints.items;
+        }
+
+        pub fn lastWatchpointId(self: *const Self) ?u32 {
+            return self.last_watchpoint_id;
+        }
+
+        /// True iff the last executeOneOpcode pausing was a watchpoint
+        /// trigger. The stepping loops use this to short-circuit out of
+        /// their drive loop and surface the pause to the caller.
+        fn pausedOnWatchpoint(self: *const Self) bool {
+            return self.state == .paused and self.stop_reason == .watchpoint_hit;
+        }
+
+        /// Sample every watchpoint and return the id of the first one
+        /// whose value has changed since the last sample. Updates
+        /// `last_seen` on every watchpoint regardless. Cost is one
+        /// `storage.get` per watchpoint per call.
+        fn pollWatchpoints(self: *Self) !?u32 {
+            var triggered: ?u32 = null;
+            for (self.watchpoints.items) |*wp| {
+                const current_value = try self.evm.storage.get(wp.address, wp.slot);
+                if (current_value != wp.last_seen) {
+                    if (triggered == null) triggered = wp.id;
+                    wp.last_seen = current_value;
+                }
+            }
+            return triggered;
+        }
+
+        // ====================================================================
         // Stepping commands
         // ====================================================================
 
@@ -217,13 +341,17 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Enters function calls.
         pub fn stepIn(self: *Self) !void {
             if (self.isHalted()) return;
+            // Resume from any prior pause (e.g. a watchpoint hit). The
+            // post-step pausedOnWatchpoint() check catches NEW watchpoint
+            // triggers during this step.
+            self.state = .running;
 
             const start_statement = self.currentStatementKey();
             self.steps_executed = 0;
 
             while (true) {
                 try self.executeOneOpcode();
-                if (self.isHalted()) return;
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
                 if (self.steps_executed >= self.max_steps) {
                     self.stop_reason = .step_limit_reached;
                     self.state = .paused;
@@ -243,10 +371,11 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// source-level statement boundaries.
         pub fn stepOpcode(self: *Self) !void {
             if (self.isHalted()) return;
+            self.state = .running;
 
             self.steps_executed = 0;
             try self.executeOneOpcode();
-            if (self.isHalted()) return;
+            if (self.isHalted() or self.pausedOnWatchpoint()) return;
             self.stop_reason = .step_complete;
             self.state = .paused;
         }
@@ -255,6 +384,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Skips over function calls.
         pub fn stepOver(self: *Self) !void {
             if (self.isHalted()) return;
+            self.state = .running;
 
             const start_statement = self.currentStatementKey();
             const start_depth = self.getCallDepth();
@@ -262,7 +392,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
             while (true) {
                 try self.executeOneOpcode();
-                if (self.isHalted()) return;
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
                 if (self.steps_executed >= self.max_steps) {
                     self.stop_reason = .step_limit_reached;
                     self.state = .paused;
@@ -285,6 +415,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Returns from the current function.
         pub fn stepOut(self: *Self) !void {
             if (self.isHalted()) return;
+            self.state = .running;
 
             const start_depth = self.getCallDepth();
             if (start_depth == 0) {
@@ -296,7 +427,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
             while (true) {
                 try self.executeOneOpcode();
-                if (self.isHalted()) return;
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
                 if (self.steps_executed >= self.max_steps) {
                     self.stop_reason = .step_limit_reached;
                     self.state = .paused;
@@ -323,7 +454,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
             // Step past current PC first (so we don't immediately re-hit the same breakpoint)
             try self.executeOneOpcode();
-            if (self.isHalted()) return;
+            if (self.isHalted() or self.pausedOnWatchpoint()) return;
 
             while (true) {
                 if (self.steps_executed >= self.max_steps) {
@@ -341,7 +472,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 }
 
                 try self.executeOneOpcode();
-                if (self.isHalted()) return;
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
             }
         }
 
@@ -633,6 +764,20 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
             self.steps_executed += 1;
             self.updateLastStatementLine();
+
+            // Watchpoints fire on the first step after any of their
+            // slots changes. Sampling on every step (rather than only
+            // on SSTORE) keeps the check uniform with cross-frame
+            // calls — a callee's SSTORE on a delegate-shared address
+            // surfaces here too.
+            if (self.watchpoints.items.len != 0) {
+                if (self.pollWatchpoints() catch null) |wp_id| {
+                    self.last_watchpoint_id = wp_id;
+                    self.state = .paused;
+                    self.stop_reason = .watchpoint_hit;
+                    return;
+                }
+            }
 
             // Check if frame finished after step
             if (self.evm.getCurrentFrame()) |f| {

@@ -475,6 +475,92 @@ test "Debugger: shouldIgnoreStatementBoundary skips lone invalid sites" {
 }
 
 // =============================================================================
+// Watchpoints
+// =============================================================================
+
+test "Debugger: watchpoint on storage slot fires when slot is written" {
+    // SSTORE 42 to slot 0, then STOP.
+    //   PUSH1 0x2a   ; value
+    //   PUSH1 0x00   ; slot
+    //   SSTORE
+    //   STOP
+    const allocator = testing.allocator;
+    const bytecode = &[_]u8{
+        0x60, 0x2a, // PUSH1 42
+        0x60, 0x00, // PUSH1 0
+        0x55, // SSTORE
+        0x00, // STOP
+    };
+    const entries = &[_]SourceMap.Entry{
+        .{ .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+        .{ .pc = 5, .file = "fx.ora", .line = 2, .col = 1, .statement_id = 2, .is_statement = true },
+    };
+
+    var fx = try buildFixture(allocator, bytecode, "store\nstop\n", entries, null);
+    defer fx.deinit();
+
+    const wp_id = try fx.debugger.addWatchpointBySlot(0);
+    try testing.expectEqual(@as(usize, 1), fx.debugger.getWatchpoints().len);
+
+    try fx.debugger.continue_();
+    try testing.expectEqual(Debugger.StopReason.watchpoint_hit, fx.debugger.stop_reason);
+    try testing.expectEqual(Debugger.State.paused, fx.debugger.state);
+    try testing.expectEqual(@as(?u32, wp_id), fx.debugger.lastWatchpointId());
+
+    // Resuming continues to halt; the slot is no longer changing so the
+    // watchpoint doesn't re-fire.
+    try fx.debugger.continue_();
+    try testing.expect(fx.debugger.isHalted());
+    try testing.expectEqual(Debugger.StopReason.execution_finished, fx.debugger.stop_reason);
+}
+
+test "Debugger: watchpoint can be removed by id" {
+    const allocator = testing.allocator;
+    // Same fixture as above.
+    const bytecode = &[_]u8{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x00 };
+    const entries = &[_]SourceMap.Entry{
+        .{ .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+    };
+
+    var fx = try buildFixture(allocator, bytecode, "x\n", entries, null);
+    defer fx.deinit();
+
+    const wp_id = try fx.debugger.addWatchpointBySlot(0);
+    try testing.expectEqual(@as(usize, 1), fx.debugger.getWatchpoints().len);
+    try testing.expect(fx.debugger.removeWatchpoint(wp_id));
+    try testing.expectEqual(@as(usize, 0), fx.debugger.getWatchpoints().len);
+    try testing.expect(!fx.debugger.removeWatchpoint(wp_id));
+
+    // With no watchpoints, continue_ runs straight to halt.
+    try fx.debugger.continue_();
+    try testing.expect(fx.debugger.isHalted());
+    try testing.expectEqual(Debugger.StopReason.execution_finished, fx.debugger.stop_reason);
+}
+
+test "Debugger: watchpoint by binding name resolves storage slot" {
+    const allocator = testing.allocator;
+    const bytecode = &[_]u8{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x00 };
+    const entries = &[_]SourceMap.Entry{
+        .{ .idx = 0, .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+    };
+    var fx = try buildFixture(
+        allocator,
+        bytecode,
+        "x\n",
+        entries,
+        STORAGE_BINDING_DEBUG_INFO,
+    );
+    defer fx.deinit();
+
+    const wp_id = try fx.debugger.addWatchpointByBindingName("counter");
+    try testing.expect(wp_id != null);
+
+    try fx.debugger.continue_();
+    try testing.expectEqual(Debugger.StopReason.watchpoint_hit, fx.debugger.stop_reason);
+    try testing.expectEqual(@as(?u32, wp_id.?), fx.debugger.lastWatchpointId());
+}
+
+// =============================================================================
 // Visible bindings: storage/memory/tstore round-trip
 // =============================================================================
 

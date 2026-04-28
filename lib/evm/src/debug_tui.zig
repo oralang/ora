@@ -751,6 +751,67 @@ const Ui = struct {
         return .ok;
     }
 
+    fn cmdWatch(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "usage: :watch <binding-name | slot-hex>";
+            return .ok;
+        }
+        // Try slot first (decimal or hex), then fall back to binding name.
+        if (std.fmt.parseUnsigned(u256, arg, 0)) |slot| {
+            const id = self.session.debugger.addWatchpointBySlot(slot) catch {
+                self.command_status = "failed to add watchpoint";
+                return .ok;
+            };
+            try self.setCommandStatusFmt("watchpoint #{d} on slot {d}", .{ id, slot });
+            return .ok;
+        } else |_| {}
+        const id_opt = self.session.debugger.addWatchpointByBindingName(arg) catch {
+            self.command_status = "failed to add watchpoint";
+            return .ok;
+        };
+        if (id_opt) |id| {
+            try self.setCommandStatusFmt("watchpoint #{d} on {s}", .{ id, arg });
+        } else {
+            self.command_status = "binding not visible or not backed by a writable storage slot";
+        }
+        return .ok;
+    }
+
+    fn cmdUnwatch(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "usage: :unwatch <id>";
+            return .ok;
+        }
+        const id = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid watchpoint id";
+            return .ok;
+        };
+        if (self.session.debugger.removeWatchpoint(id)) {
+            try self.setCommandStatusFmt("watchpoint #{d} removed", .{id});
+        } else {
+            self.command_status = "no watchpoint with that id";
+        }
+        return .ok;
+    }
+
+    fn cmdInfoWatch(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const wps = self.session.debugger.getWatchpoints();
+        if (wps.len == 0) {
+            self.command_status = "no watchpoints";
+            return .ok;
+        }
+        self.clearCommandLog();
+        for (wps) |wp| {
+            const line = self.scratchFmt(
+                "wp #{d}  slot={d}  last={d}  ({s})",
+                .{ wp.id, wp.slot, wp.last_seen, wp.name },
+            ) catch continue;
+            try self.appendLogLine(line);
+        }
+        self.command_status = "watchpoints listed";
+        return .ok;
+    }
+
     /// The full command surface. Adding a new command is one row here
     /// plus one handler. `:help` is generated from this table.
     const kCommands = [_]CommandSpec{
@@ -770,6 +831,7 @@ const Ui = struct {
         .{ .name = "checkpoints", .match = .exact, .handler = cmdCheckpoints, .help = "list checkpoints" },
         .{ .name = "bt", .aliases = &.{"backtrace"}, .match = .exact, .handler = cmdBacktrace, .help = "print call-frame stack" },
         .{ .name = "info break", .match = .exact, .handler = cmdInfoBreak, .help = "list breakpoints" },
+        .{ .name = "info watch", .match = .exact, .handler = cmdInfoWatch, .help = "list watchpoints" },
         .{ .name = "gas", .match = .exact, .handler = cmdGasShow, .help = "show gas (remaining/spent)" },
         // Prefix commands. Order matters: longer prefixes that share a
         // leading word with a shorter one must come first ("line-info "
@@ -781,6 +843,8 @@ const Ui = struct {
         .{ .name = "restart ", .match = .prefix, .handler = cmdRestart, .help = "rewind to checkpoint id" },
         .{ .name = "break ", .match = .prefix, .handler = cmdBreakpointSet, .help = "set breakpoint on line" },
         .{ .name = "delete ", .match = .prefix, .handler = cmdBreakpointDelete, .help = "delete breakpoint on line" },
+        .{ .name = "watch ", .match = .prefix, .handler = cmdWatch, .help = "watch storage slot or binding (halt on change)" },
+        .{ .name = "unwatch ", .match = .prefix, .handler = cmdUnwatch, .help = "remove watchpoint by id" },
         .{ .name = "gas ", .match = .prefix, .handler = cmdGasSet, .help = "override frame gas_remaining" },
         .{ .name = "print ", .match = .prefix, .handler = cmdPrint, .help = "print binding/state target" },
         .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
@@ -2833,6 +2897,12 @@ const Ui = struct {
         if (self.session.debugger.lastErrorName()) |err_name| {
             try self.setCommandStatusFmt("{s} => error {s}", .{ action, err_name });
             return;
+        }
+        if (self.session.debugger.stop_reason == .watchpoint_hit) {
+            if (self.session.debugger.lastWatchpointId()) |wp_id| {
+                try self.setCommandStatusFmt("{s} => watchpoint #{d} hit at line {d}", .{ action, wp_id, current_line });
+                return;
+            }
         }
 
         if (entry) |e| {

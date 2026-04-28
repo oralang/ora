@@ -53,6 +53,19 @@ are rejected with status `unknown command`.
 | `delete <line>`    | Remove the breakpoint on `<line>` (no-op if not set)                     |
 | `info break`       | List all currently set breakpoints                                       |
 
+## Watchpoints
+
+A watchpoint pauses execution when a storage slot's value changes. The
+target is either a raw slot (decimal or `0x`-prefixed hex) or a
+source-level binding name — bindings resolve to their declared
+`storage_field` slot via the active scope's debug info.
+
+| Command                       | Action                                                                   |
+|-------------------------------|--------------------------------------------------------------------------|
+| `watch <slot|binding-name>`   | Add a watchpoint; halt with `watchpoint_hit` when the slot's value changes |
+| `unwatch <id>`                | Remove the watchpoint with id `<id>`                                     |
+| `info watch`                  | List active watchpoints with their last-seen values                      |
+
 ## Backtrace / call frames
 
 | Command           | Aliases       | Action                                            |
