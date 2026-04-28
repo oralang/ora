@@ -108,6 +108,13 @@ const DebugCliOptions = struct {
     /// Used by debug-artifact regression tests and for offline artifact
     /// generation that ships traces to another engineer.
     no_tui: bool = false,
+    /// Limit overrides forwarded verbatim to ora-evm-debug-tui. Stored as
+    /// the raw text so we can re-emit them onto the spawned argv without
+    /// any (re)formatting drift.
+    gas_limit: ?[]const u8 = null,
+    max_steps: ?[]const u8 = null,
+    deploy_step_cap: ?[]const u8 = null,
+    artifact_max_bytes: ?[]const u8 = null,
 
     fn init() DebugCliOptions {
         return .{
@@ -229,6 +236,30 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
         if (std.mem.eql(u8, arg, "--no-tui")) {
             opts.no_tui = true;
             i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--gas-limit")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.gas_limit = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--max-steps")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.max_steps = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.deploy_step_cap = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.artifact_max_bytes = args[i + 1];
+            i += 2;
             continue;
         }
 
@@ -555,6 +586,10 @@ pub fn main() !void {
             debug_options.signature,
             debug_options.arg_values.items,
             debug_options.calldata_hex,
+            debug_options.gas_limit,
+            debug_options.max_steps,
+            debug_options.deploy_step_cap,
+            debug_options.artifact_max_bytes,
         );
         return;
     }
@@ -969,6 +1004,10 @@ fn launchDebuggerTui(
     signature: ?[]const u8,
     arg_values: []const []const u8,
     calldata_hex: ?[]const u8,
+    gas_limit: ?[]const u8,
+    max_steps: ?[]const u8,
+    deploy_step_cap: ?[]const u8,
+    artifact_max_bytes: ?[]const u8,
 ) !void {
     const repo_root = try findOraRepoRoot(allocator);
     defer allocator.free(repo_root);
@@ -1041,6 +1080,11 @@ fn launchDebuggerTui(
     } else if (calldata_hex) |hex| {
         try argv.appendSlice(allocator, &.{ "--calldata-hex", hex });
     }
+
+    if (gas_limit) |v| try argv.appendSlice(allocator, &.{ "--gas-limit", v });
+    if (max_steps) |v| try argv.appendSlice(allocator, &.{ "--max-steps", v });
+    if (deploy_step_cap) |v| try argv.appendSlice(allocator, &.{ "--deploy-step-cap", v });
+    if (artifact_max_bytes) |v| try argv.appendSlice(allocator, &.{ "--artifact-max-bytes", v });
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdin_behavior = .Inherit;
@@ -1619,6 +1663,11 @@ fn printUsage() !void {
     try stdout.print("  --init-signature <sig> - Constructor/init signature, e.g. 'init(u256)'\n", .{});
     try stdout.print("  --init-arg <value>     - Repeated constructor/init arguments\n", .{});
     try stdout.print("  --init-calldata-hex <hex> - Raw constructor/init calldata\n", .{});
+    try stdout.print("  --no-tui               - Emit debug artifacts and exit (no TUI launch)\n", .{});
+    try stdout.print("  --gas-limit <i64>      - Frame gas budget (default 5000000)\n", .{});
+    try stdout.print("  --max-steps <u64>      - Per-command opcode safety cap (default 10000000)\n", .{});
+    try stdout.print("  --deploy-step-cap <usize> - Deployment opcode cap (default 200000)\n", .{});
+    try stdout.print("  --artifact-max-bytes <usize> - Per-file artifact load cap (default 16777216)\n", .{});
     try stdout.flush();
 }
 

@@ -13,7 +13,7 @@ const source_map = @import("source_map.zig");
 const SourceMap = source_map.SourceMap;
 
 /// Maximum bytes any debugger artifact (.hex, .sourcemap.json, .debug.json,
-/// .abi.json, .sir) is permitted to load. 16 MiB.
+/// .abi.json, .sir) is permitted to load by default. 16 MiB.
 pub const kArtifactMaxBytes: usize = 16 * 1024 * 1024;
 
 /// Default gas budget for both deployment and runtime frames in the debugger.
@@ -23,6 +23,21 @@ pub const kDefaultGasLimit: i64 = 5_000_000;
 /// runtime body well under this; a contract that doesn't halt is treated as a
 /// bug rather than something to grind through.
 pub const kDeploymentStepCap: usize = 200_000;
+
+/// Default safety cap on a single user step command (stepIn / continue / etc.)
+/// so a runaway loop doesn't hang the debugger.
+pub const kDefaultMaxSteps: u64 = 10_000_000;
+
+/// Aggregated runtime limits, configurable via CLI flags on both
+/// ora-evm-debug-probe and ora-evm-debug-tui. A single DebugLimits is
+/// constructed once during arg parsing and threaded through everywhere
+/// limits matter (artifact loads, deployment, runtime gas, step cap).
+pub const DebugLimits = struct {
+    gas_limit: i64 = kDefaultGasLimit,
+    max_steps: u64 = kDefaultMaxSteps,
+    deploy_step_cap: usize = kDeploymentStepCap,
+    artifact_max_bytes: usize = kArtifactMaxBytes,
+};
 
 /// Deterministic block context used by every debugger session.
 ///
@@ -51,8 +66,14 @@ pub fn deterministicBlockContext() evm_mod.BlockContext {
 }
 
 /// Read a debugger artifact from disk, capped at `kArtifactMaxBytes`.
+/// Use `loadArtifactWithCap` to override the cap at runtime (e.g. via CLI).
 pub fn loadArtifact(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, kArtifactMaxBytes);
+    return loadArtifactWithCap(allocator, path, kArtifactMaxBytes);
+}
+
+/// Read a debugger artifact from disk, capped at `max_bytes`.
+pub fn loadArtifactWithCap(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
 }
 
 /// Per-EVM-config helpers. The two binaries do `DebugSession(.{})` once at

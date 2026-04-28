@@ -35,6 +35,7 @@ const AppConfig = struct {
     init_calldata: []u8 = &.{},
     init_calldata_fallback: []u8 = &.{},
     calldata: []u8 = &.{},
+    limits: ora_evm.DebugLimits = .{},
 
     fn deinit(self: *AppConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode_path);
@@ -220,6 +221,7 @@ const SessionSeed = struct {
     calldata: []u8,
     caller: primitives.Address,
     contract: primitives.Address,
+    limits: ora_evm.DebugLimits = .{},
 
     fn deinit(self: *SessionSeed, allocator: std.mem.Allocator) void {
         allocator.free(self.runtime_bytecode);
@@ -245,7 +247,7 @@ const Session = struct {
         try self.evm.frames.append(self.evm.arena.allocator(), try Frame.init(
             self.evm.arena.allocator(),
             seed.runtime_bytecode,
-            ora_evm.kDefaultGasLimit,
+            seed.limits.gas_limit,
             seed.caller,
             seed.contract,
             0,
@@ -262,6 +264,7 @@ const Session = struct {
             try Debugger.initWithDebugInfo(allocator, &self.evm, source_map, try DebugInfo.loadFromJson(allocator, json), seed.source_text)
         else
             try Debugger.init(allocator, &self.evm, source_map, seed.source_text);
+        self.debugger.max_steps = seed.limits.max_steps;
     }
 
     fn deinit(self: *Session) void {
@@ -646,7 +649,7 @@ const Ui = struct {
                 self.previous_snapshot.gas_remaining - gas_remaining
             else
                 0;
-            const gas_spent_total = ora_evm.kDefaultGasLimit - gas_remaining;
+            const gas_spent_total = self.seed.limits.gas_limit - gas_remaining;
             try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
                 gas_remaining,
                 gas_spent_step,
@@ -1990,9 +1993,9 @@ const Ui = struct {
         else
             0;
         const gas_spent_total: i64 = if (frame != null)
-            ora_evm.kDefaultGasLimit - gas_remaining
+            self.seed.limits.gas_limit - gas_remaining
         else if (self.session.debugger.isSuccess())
-            ora_evm.kDefaultGasLimit
+            self.seed.limits.gas_limit
         else
             0;
 
@@ -4169,29 +4172,31 @@ fn runMain() !void {
 }
 
 fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
-    const bytecode_hex = try ora_evm.loadDebuggerArtifact(allocator, config.bytecode_path);
+    const limits = config.limits;
+
+    const bytecode_hex = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.bytecode_path, limits.artifact_max_bytes);
     defer allocator.free(bytecode_hex);
     const bytecode = try decodeHexAlloc(allocator, bytecode_hex);
     defer allocator.free(bytecode);
 
-    const source_map_json = try ora_evm.loadDebuggerArtifact(allocator, config.source_map_path);
+    const source_map_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_map_path, limits.artifact_max_bytes);
     defer allocator.free(source_map_json);
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
     errdefer source_map.deinit();
 
-    const source_text = try ora_evm.loadDebuggerArtifact(allocator, config.source_path);
+    const source_text = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_path, limits.artifact_max_bytes);
     errdefer allocator.free(source_text);
 
     var debug_info_json: ?[]u8 = null;
     errdefer if (debug_info_json) |bytes| allocator.free(bytes);
     if (config.debug_info_path) |path| {
-        debug_info_json = try ora_evm.loadDebuggerArtifact(allocator, path);
+        debug_info_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, path, limits.artifact_max_bytes);
     }
 
     var sir_text: ?[]u8 = null;
     errdefer if (sir_text) |bytes| allocator.free(bytes);
     if (config.sir_path) |path| {
-        sir_text = ora_evm.loadDebuggerArtifact(allocator, path) catch null;
+        sir_text = ora_evm.loadDebuggerArtifactWithCap(allocator, path, limits.artifact_max_bytes) catch null;
     }
 
     const caller = primitives.Address.fromU256(0x100);
@@ -4208,6 +4213,8 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
         .contract = contract,
         .deployment_bytecode = bytecode,
         .init_calldata = config.init_calldata,
+        .gas_limit = limits.gas_limit,
+        .step_cap = limits.deploy_step_cap,
         .strict = true,
     }) catch |err| blk: {
         if (err != error.DeploymentRevertedWithNoRuntime or config.init_calldata_fallback.len == 0) {
@@ -4222,6 +4229,8 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
             .contract = contract,
             .deployment_bytecode = bytecode,
             .init_calldata = config.init_calldata_fallback,
+            .gas_limit = limits.gas_limit,
+            .step_cap = limits.deploy_step_cap,
             .strict = true,
         });
     };
@@ -4243,6 +4252,7 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
         .calldata = try allocator.dupe(u8, config.calldata),
         .caller = caller,
         .contract = contract,
+        .limits = limits,
     };
 }
 
@@ -4321,6 +4331,22 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
             if (i >= args.len) return error.InvalidArguments;
             allocator.free(config.calldata);
             config.calldata = try decodeHexAlloc(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--gas-limit")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.gas_limit = try std.fmt.parseInt(i64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--max-steps")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.max_steps = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.deploy_step_cap = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.artifact_max_bytes = try std.fmt.parseInt(usize, args[i], 10);
         } else {
             try printUsage();
             return error.InvalidArguments;
@@ -4370,7 +4396,21 @@ fn printUsage() !void {
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:
-        \\  ora-evm-debug-tui <bytecode.hex> <source-map.json> <source.ora> [--debug-info <debug.json>] [--abi <abi.json>] [--init-signature <sig> [--init-arg <value>]...] [--init-calldata-hex <hex>] [--signature <sig> [--arg <value>]...] [--calldata-hex <hex>]
+        \\  ora-evm-debug-tui <bytecode.hex> <source-map.json> <source.ora> [options]
+        \\
+        \\options:
+        \\  --debug-info <debug.json>    Load source-scope debug info
+        \\  --abi <abi.json>             Load ABI for signature-driven calldata
+        \\  --init-signature <sig>       Constructor signature, e.g. init(u256)
+        \\  --init-arg <value>           Constructor argument (repeatable, in order)
+        \\  --init-calldata-hex <hex>    Raw constructor calldata as hex
+        \\  --signature <sig>            Function signature, e.g. add(u256,u256)
+        \\  --arg <value>                Function argument (repeatable, in order)
+        \\  --calldata-hex <hex>         Raw runtime calldata as hex
+        \\  --gas-limit <i64>            Frame gas budget (default 5000000)
+        \\  --max-steps <u64>            Per-command opcode safety cap (default 10000000)
+        \\  --deploy-step-cap <usize>    Deployment opcode cap (default 200000)
+        \\  --artifact-max-bytes <usize> Per-file artifact load cap (default 16777216)
         \\
         \\example:
         \\  zig build install

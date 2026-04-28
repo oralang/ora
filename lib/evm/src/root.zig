@@ -65,9 +65,12 @@ pub const debugger = @import("debugger.zig");
 pub const Debugger = debugger.Debugger;
 pub const debug_session = @import("debug_session.zig");
 pub const DebugSession = debug_session.DebugSession;
+pub const DebugLimits = debug_session.DebugLimits;
 pub const loadDebuggerArtifact = debug_session.loadArtifact;
+pub const loadDebuggerArtifactWithCap = debug_session.loadArtifactWithCap;
 pub const kArtifactMaxBytes = debug_session.kArtifactMaxBytes;
 pub const kDefaultGasLimit = debug_session.kDefaultGasLimit;
+pub const kDefaultMaxSteps = debug_session.kDefaultMaxSteps;
 pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
 pub const deterministicBlockContext = debug_session.deterministicBlockContext;
 

@@ -9,6 +9,7 @@ const DebugInfo = debug_info_mod.DebugInfo;
 const opcode_utils = @import("opcode.zig");
 const evm_mod = @import("evm.zig");
 const evm_config = @import("evm_config.zig");
+const debug_session = @import("debug_session.zig");
 
 pub fn Debugger(comptime config: evm_config.EvmConfig) type {
     const EvmType = evm_mod.Evm(config);
@@ -88,7 +89,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .stop_reason = .not_started,
                 .allocator = allocator,
                 .steps_executed = 0,
-                .max_steps = 10_000_000,
+                .max_steps = debug_session.kDefaultMaxSteps,
                 .last_statement_id = null,
                 .last_statement_line = null,
                 .last_statement_sir_line = null,
