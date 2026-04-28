@@ -75,6 +75,7 @@ pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
 pub const deterministicBlockContext = debug_session.deterministicBlockContext;
 pub const debug_eval = @import("debug_eval.zig");
 pub const debug_abi = @import("debug_abi.zig");
+pub const debug_breakpoint = @import("debug_breakpoint.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -82,6 +83,7 @@ test {
     _ = @import("debugger_test.zig");
     _ = @import("debug_eval.zig");
     _ = @import("debug_abi.zig");
+    _ = @import("debug_breakpoint.zig");
     _ = @import("instructions/handlers_stack_test.zig");
     _ = @import("instructions/handlers_arithmetic_test.zig");
     _ = @import("instructions/handlers_comparison_test.zig");
