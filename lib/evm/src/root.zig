@@ -73,6 +73,7 @@ pub const kDeploymentStepCap = debug_session.kDeploymentStepCap;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("evm_test.zig");
+    _ = @import("debugger_test.zig");
     _ = @import("instructions/handlers_stack_test.zig");
     _ = @import("instructions/handlers_arithmetic_test.zig");
     _ = @import("instructions/handlers_comparison_test.zig");
