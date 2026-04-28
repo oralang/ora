@@ -903,6 +903,58 @@ test "verification reports invalid refined ADT payload construction without degr
     try testing.expect(!result.degraded);
 }
 
+test "verification reports invalid MaxValue struct field construction without degradation" {
+    const source_text =
+        \\struct Box {
+        \\    value: MaxValue<u256, 10>,
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn build(raw: u256) -> u256 {
+        \\        let box = Box { value: raw };
+        \\        return box.value;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "build");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification reports invalid InRange ADT payload construction without degradation" {
+    const source_text =
+        \\enum MaybeRate {
+        \\    None,
+        \\    Value(InRange<u256, 10, 20>),
+        \\}
+        \\
+        \\contract Sample {
+        \\    pub fn build(raw: u256) -> u256 {
+        \\        let maybe = MaybeRate.Value(raw);
+        \\        return switch (maybe) {
+        \\            MaybeRate.Value(value) => value,
+        \\            MaybeRate.None => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "build");
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports multi-error Result match without degradation" {
     const path = "ora-example/corpus/control-flow/match/result_multi_error_match.ora";
     const function_name = "project";
