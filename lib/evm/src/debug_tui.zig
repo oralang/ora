@@ -186,19 +186,30 @@ const Checkpoint = struct {
 };
 
 /// Source-gutter overlay mode. Controls what extra information the
-/// gutter reveals about the current line. `none` is the default
-/// (provenance / folded / breakpoint marks only). `coverage` adds a
-/// per-line hit-count column; `gas` adds cumulative gas spent.
+/// gutter reveals about the current line.
+///
+/// - `none`: provenance / folded / breakpoint marks only (default).
+/// - `coverage`: per-line statement-boundary hit count.
+/// - `gas`: cumulative gas attributed to each line.
+/// - `folded`: show the folded literal value next to folded source
+///   declarations (compile-time constants only).
+/// - `hoist`: show the origin_statement_id for hoisted lines, so the
+///   reader can trace lowered-region statements back to their source
+///   site.
 const OverlayMode = enum {
     none,
     coverage,
     gas,
+    folded,
+    hoist,
 
     fn next(self: OverlayMode) OverlayMode {
         return switch (self) {
             .none => .coverage,
             .coverage => .gas,
-            .gas => .none,
+            .gas => .folded,
+            .folded => .hoist,
+            .hoist => .none,
         };
     }
 
@@ -207,6 +218,8 @@ const OverlayMode = enum {
             .none => "none",
             .coverage => "coverage",
             .gas => "gas",
+            .folded => "folded",
+            .hoist => "hoist",
         };
     }
 
@@ -214,6 +227,8 @@ const OverlayMode = enum {
         if (std.mem.eql(u8, text, "none")) return .none;
         if (std.mem.eql(u8, text, "coverage") or std.mem.eql(u8, text, "cov")) return .coverage;
         if (std.mem.eql(u8, text, "gas")) return .gas;
+        if (std.mem.eql(u8, text, "folded") or std.mem.eql(u8, text, "fold")) return .folded;
+        if (std.mem.eql(u8, text, "hoist") or std.mem.eql(u8, text, "hoisted")) return .hoist;
         return null;
     }
 };
@@ -708,11 +723,11 @@ const Ui = struct {
     fn cmdOverlay(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         const trimmed = std.mem.trim(u8, arg, " \t");
         if (trimmed.len == 0) {
-            try self.setCommandStatusFmt("overlay = {s} (modes: none, coverage)", .{self.overlay_mode.name()});
+            try self.setCommandStatusFmt("overlay = {s} (modes: none, coverage, gas, folded, hoist)", .{self.overlay_mode.name()});
             return .ok;
         }
         const mode = OverlayMode.parse(trimmed) orelse {
-            self.command_status = "unknown overlay (modes: none, coverage)";
+            self.command_status = "unknown overlay (modes: none, coverage, gas, folded, hoist)";
             return .ok;
         };
         self.overlay_mode = mode;
@@ -926,7 +941,7 @@ const Ui = struct {
         .{ .name = "gascov", .match = .exact, .handler = cmdGasCoverage, .help = "report top-10 source lines by cumulative gas spent" },
         .{ .name = "gascov ", .match = .prefix, .handler = cmdGasCoverage, .help = "report top-N source lines by cumulative gas spent" },
         .{ .name = "overlay", .match = .exact, .handler = cmdOverlay, .help = "show current overlay mode" },
-        .{ .name = "overlay ", .match = .prefix, .handler = cmdOverlay, .help = "switch overlay mode (none, coverage)" },
+        .{ .name = "overlay ", .match = .prefix, .handler = cmdOverlay, .help = "switch overlay mode (none, coverage, gas, folded, hoist)" },
         .{ .name = "trace ", .match = .prefix, .handler = cmdTraceExport, .help = "export EIP-3155 trace (`:trace export <path>`)" },
         .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
         .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
@@ -1622,7 +1637,7 @@ const Ui = struct {
             if (frame.calldata.len >= 4) {
                 var selector_buf: [4]u8 = undefined;
                 @memcpy(&selector_buf, frame.calldata[0..4]);
-                if (self.abi_doc) |abi_doc| {
+                if (self.abiDocForFrame(&frame)) |abi_doc| {
                     if (abi_doc.findCallableBySelector(selector_buf)) |callable| {
                         if (callable.object.get("name")) |n| {
                             if (n == .string) {
@@ -2923,6 +2938,45 @@ const Ui = struct {
         return false;
     }
 
+    /// Return the folded value text for a folded source line, or null
+    /// if the line isn't folded or the local doesn't carry a literal
+    /// folded_value (e.g. only `is_folded` was set).
+    fn foldedValueForLine(self: *Ui, line: u32) ?[]const u8 {
+        const info = self.session.debugger.debug_info orelse return null;
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line < range.start.line or line > range.end.line) continue;
+            for (scope.locals) |local| {
+                const decl = local.decl orelse continue;
+                if (decl.start.line != line) continue;
+                if (!local.is_folded) continue;
+                if (local.folded_value) |fv| return fv;
+            }
+        }
+        return null;
+    }
+
+    /// Return the origin_statement_id of the first source-map entry on
+    /// `line` that's marked hoisted (either at the source-map entry
+    /// level or via its op_meta). null when nothing on the line is
+    /// hoisted.
+    fn hoistOriginForLine(self: *Ui, line: u32) ?u32 {
+        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line) orelse return null;
+        if (entry.is_hoisted) {
+            if (entry.origin_statement_id) |o| return o;
+        }
+        const info = self.session.debugger.debug_info orelse return null;
+        const idx = entry.idx orelse return null;
+        if (info.getOpMetaForIdx(idx)) |meta| {
+            if (meta.is_hoisted) {
+                if (entry.origin_statement_id) |o| return o;
+                if (meta.origin_statement_id) |o| return o;
+            }
+        }
+        return null;
+    }
+
     fn isRemovedSourceLine(self: *Ui, line: u32) bool {
         if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
         const info = self.session.debugger.debug_info orelse return false;
@@ -3937,6 +3991,17 @@ const Ui = struct {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
 
+    /// Return the AbiDoc that applies to a given frame. For now this
+    /// is just "the primary contract's ABI when the frame's address
+    /// matches the seed contract"; the lookup signature is in place
+    /// so cross-frame inspection of external contracts can later
+    /// register more entries (e.g. by code hash).
+    fn abiDocForFrame(self: *Ui, frame: *const Frame) ?*const AbiDoc {
+        const abi_doc = if (self.abi_doc) |*doc| doc else return null;
+        if (std.mem.eql(u8, &frame.address.bytes, &self.seed.contract.bytes)) return abi_doc;
+        return null;
+    }
+
     fn evalResolveBinding(ctx: *anyopaque, name: []const u8) ora_evm.debug_eval.EvalError!?ora_evm.debug_eval.Value {
         const self: *Ui = @alignCast(@ptrCast(ctx));
         const binding_opt = self.session.debugger.findVisibleBindingByName(self.allocator, name) catch |err| switch (err) {
@@ -4366,6 +4431,18 @@ const Ui = struct {
                         break :blk self.scratchFmt("{s}{d:>6} {d:>7}|", .{ marker, line, g }) catch marker;
                     }
                     break :blk self.scratchFmt("{s}{d:>6}       .|", .{ marker, line }) catch marker;
+                },
+                .folded => blk: {
+                    if (self.foldedValueForLine(line)) |fv| {
+                        break :blk self.scratchFmt("{s}{d:>6} ={s}|", .{ marker, line, fv }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}  |", .{ marker, line }) catch marker;
+                },
+                .hoist => blk: {
+                    if (self.hoistOriginForLine(line)) |origin| {
+                        break :blk self.scratchFmt("{s}{d:>6} <-{d}|", .{ marker, line, origin }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}    |", .{ marker, line }) catch marker;
                 },
             };
             drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});

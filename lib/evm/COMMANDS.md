@@ -111,11 +111,13 @@ o) or the `:overlay` command.
 | `overlay none`    | Reset to plain provenance gutter                         |
 | `overlay coverage` (or `cov`) | Add a hit-count column next to the line number |
 | `overlay gas`     | Add a cumulative-gas-spent column next to the line number |
+| `overlay folded` (or `fold`) | Show the folded literal value next to compile-time-folded source declarations |
+| `overlay hoist`   | Show `<-N` next to hoisted lines, where `N` is the origin_statement_id (the source statement the hoisted region was lowered from) |
 
-When `coverage` is on, the gutter renders `<mark><line> <hit>|` for
-every line that has had at least one statement-boundary hit, and
-`<mark><line>    .|` for unvisited statement lines. `gas` is the same
-shape but renders cumulative gas instead.
+`coverage` renders `<mark><line> <hit>|`; `gas` is the same shape with
+cumulative gas; `folded` renders `<mark><line> =<value>|` for folded
+declarations; `hoist` renders `<mark><line> <-<origin>|` for hoisted
+entries.
 
 ## Coverage
 
