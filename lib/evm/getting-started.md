@@ -122,6 +122,24 @@ artifacts/counter/abi/counter.abi.json
 Anyone with the same Ora version can replay your session against the
 same trace.
 
+## 9. Decoding cross-contract calls
+
+If your contract calls into another deployed contract, `:bt` will
+show the callee frame as a raw selector hex by default — the
+debugger doesn't know that contract's ABI yet. Pass it with
+`--abi <addr>=<path>`:
+
+```sh
+ora debug router.ora \
+  --abi artifacts/router/abi/router.abi.json \
+  --abi 0x1234...abcd=artifacts/vault/abi/vault.abi.json
+```
+
+The `--abi <addr>=<path>` flag is repeatable; each call binds an
+ABI to one external 20-byte address. Now `:bt` decodes the callee
+function name on the matching frame instead of showing
+`sel=0x...`.
+
 ## What to read next
 
 - [KEYBINDINGS.md](KEYBINDINGS.md) — all keys

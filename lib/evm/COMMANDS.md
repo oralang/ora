@@ -76,6 +76,27 @@ source-level binding name — bindings resolve to their declared
 | `bt`              | `backtrace`   | Print the call-frame stack with per-frame address, pc, gas, static flag, and decoded function name (when the calldata selector matches an ABI callable) |
 | `frame <idx>`     |               | Select frame `<idx>` for binding / state queries  |
 
+### Decoded function names across frames
+
+`:bt` decodes the callee selector against an ABI registry resolved
+per frame:
+
+1. **Primary contract** — the ABI loaded via `--abi <path>`. Matches
+   when the frame's address is the seed contract.
+2. **External callees** — every `--abi <0x...>=<path>` argument
+   binds an ABI to a 20-byte address; matched in step 2.
+3. **Otherwise** — the row falls back to a raw `sel=0x...` hex.
+
+Example launch with two ABIs:
+
+```
+ora debug counter.ora --abi artifacts/counter/abi/counter.abi.json \
+                      --abi 0x1234...abcd=artifacts/registry/abi/registry.abi.json
+```
+
+The secondary form is repeatable — pass `--abi <addr>=<path>` once
+per external contract whose ABI you have.
+
 ## Time travel & checkpoints
 
 | Command            | Action                                                                   |

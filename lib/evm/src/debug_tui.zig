@@ -31,6 +31,19 @@ const AppEvent = union(enum) {
     paste: []const u8,
 };
 
+/// Pairs an external contract address with the path to its
+/// `.abi.json`. Multiple `--abi <addr>=<path>` invocations on the
+/// command line each produce one of these. The TUI loads them into
+/// a hashmap so per-frame ABI lookup can decode external callees.
+const SecondaryAbiSpec = struct {
+    address: [20]u8,
+    path: []u8,
+
+    fn deinit(self: *SecondaryAbiSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
 const AppConfig = struct {
     bytecode_path: []u8,
     source_map_path: []u8,
@@ -38,6 +51,7 @@ const AppConfig = struct {
     sir_path: ?[]u8 = null,
     debug_info_path: ?[]u8 = null,
     abi_path: ?[]u8 = null,
+    secondary_abi_specs: std.ArrayList(SecondaryAbiSpec) = .{},
     init_calldata: []u8 = &.{},
     init_calldata_fallback: []u8 = &.{},
     calldata: []u8 = &.{},
@@ -50,6 +64,8 @@ const AppConfig = struct {
         if (self.sir_path) |path| allocator.free(path);
         if (self.debug_info_path) |path| allocator.free(path);
         if (self.abi_path) |path| allocator.free(path);
+        for (self.secondary_abi_specs.items) |*spec| spec.deinit(allocator);
+        self.secondary_abi_specs.deinit(allocator);
         allocator.free(self.init_calldata);
         allocator.free(self.init_calldata_fallback);
         allocator.free(self.calldata);
@@ -262,6 +278,11 @@ const Ui = struct {
     next_checkpoint_id: u32 = 1,
     selected_frame_index: usize = 0,
     overlay_mode: OverlayMode = .none,
+    /// External-contract ABIs keyed by 20-byte address. Populated
+    /// from `--abi <hex-address>=<path>` CLI args; consulted by
+    /// `abiDocForFrame` after the primary check fails. Empty when no
+    /// secondary ABIs were provided.
+    secondary_abi: std.AutoHashMap([20]u8, AbiDoc),
 
     fn init(
         allocator: std.mem.Allocator,
@@ -274,7 +295,28 @@ const Ui = struct {
             .abi_doc = if (config.abi_path) |path| try AbiDoc.loadFromPath(allocator, path) else null,
             .seed = seed,
             .session = undefined,
+            .secondary_abi = std.AutoHashMap([20]u8, AbiDoc).init(allocator),
         };
+        errdefer self.secondary_abi.deinit();
+        errdefer if (self.abi_doc) |*doc| doc.deinit();
+
+        // Load secondary ABIs. A failure mid-loop frees what was
+        // already loaded so we don't leak.
+        for (config.secondary_abi_specs.items) |spec| {
+            const doc = AbiDoc.loadFromPath(allocator, spec.path) catch |err| {
+                var it = self.secondary_abi.valueIterator();
+                while (it.next()) |loaded| loaded.deinit();
+                return err;
+            };
+            // Last spec wins on duplicate addresses; free the prior
+            // one before overwriting.
+            if (self.secondary_abi.fetchRemove(spec.address)) |kv| {
+                var prev = kv.value;
+                prev.deinit();
+            }
+            try self.secondary_abi.put(spec.address, doc);
+        }
+
         try Session.init(&self.session, allocator, &self.seed);
         try self.source_buffer.update(allocator, .{ .bytes = self.seed.source_text });
         self.source_view.highlighted_style = .{
@@ -304,6 +346,9 @@ const Ui = struct {
     fn deinit(self: *Ui) void {
         self.config.deinit(self.allocator);
         if (self.abi_doc) |*abi_doc| abi_doc.deinit();
+        var sec_it = self.secondary_abi.valueIterator();
+        while (sec_it.next()) |doc| doc.deinit();
+        self.secondary_abi.deinit();
         self.session.deinit();
         self.seed.deinit(self.allocator);
         self.source_buffer.deinit(self.allocator);
@@ -3974,21 +4019,20 @@ const Ui = struct {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
 
-    /// Return the AbiDoc that applies to a given frame. Currently
-    /// only the primary contract has an ABI loaded (via `--abi`), so
-    /// this returns it when `frame.address == seed.contract` and null
-    /// otherwise. External callees rendered in `:bt` therefore
-    /// surface as a raw selector hex rather than a decoded function
-    /// name.
+    /// Return the AbiDoc that applies to a given frame.
     ///
-    /// Extending this to a code-hash → AbiDoc registry — so external
-    /// callee bytecode can decode against its own ABI — is tracked
-    /// separately (see C4 in the debugger plan); the call site is
-    /// already routed through this helper so adding the map later is
-    /// localized.
+    /// Resolution order:
+    ///   1. Primary contract — when `frame.address == seed.contract`,
+    ///      return the ABI loaded via `--abi <path>`.
+    ///   2. Secondary registry — `--abi <hex-address>=<path>` entries
+    ///      keyed by 20-byte address. Useful when the user is
+    ///      stepping into an external callee whose ABI is known.
+    ///   3. Otherwise null — `:bt` falls back to a raw selector hex.
     fn abiDocForFrame(self: *Ui, frame: *const Frame) ?*const AbiDoc {
-        const abi_doc = if (self.abi_doc) |*doc| doc else return null;
-        if (std.mem.eql(u8, &frame.address.bytes, &self.seed.contract.bytes)) return abi_doc;
+        if (std.mem.eql(u8, &frame.address.bytes, &self.seed.contract.bytes)) {
+            if (self.abi_doc) |*doc| return doc;
+        }
+        if (self.secondary_abi.getPtr(frame.address.bytes)) |doc| return doc;
         return null;
     }
 
@@ -5028,8 +5072,17 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
         } else if (std.mem.eql(u8, arg, "--abi")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
-            if (config.abi_path) |path| allocator.free(path);
-            config.abi_path = try allocator.dupe(u8, args[i]);
+            // Two forms accepted:
+            //   --abi <abi.json>                     → primary contract
+            //   --abi <hex-address>=<abi.json>       → external callee
+            if (parseSecondaryAbiSpec(allocator, args[i])) |spec_opt| {
+                if (spec_opt) |spec| {
+                    try config.secondary_abi_specs.append(allocator, spec);
+                } else {
+                    if (config.abi_path) |path| allocator.free(path);
+                    config.abi_path = try allocator.dupe(u8, args[i]);
+                }
+            } else |err| return err;
         } else if (std.mem.eql(u8, arg, "--signature")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
@@ -5113,7 +5166,8 @@ fn printUsage() !void {
         \\
         \\options:
         \\  --debug-info <debug.json>    Load source-scope debug info
-        \\  --abi <abi.json>             Load ABI for signature-driven calldata
+        \\  --abi <abi.json>             Load primary contract's ABI (signature-driven calldata + decoded reverts/events)
+        \\  --abi <0x..>=<abi.json>      Bind another ABI to an external callee address (repeatable; used by `:bt` decoded names)
         \\  --init-signature <sig>       Constructor signature, e.g. init(u256)
         \\  --init-arg <value>           Constructor argument (repeatable, in order)
         \\  --init-calldata-hex <hex>    Raw constructor calldata as hex
@@ -5136,6 +5190,27 @@ fn printUsage() !void {
 fn pathExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+/// Try to parse an `--abi` argument as a secondary spec
+/// (`<hex-address>=<path>`). Returns:
+///   - `null` if `arg` has no `=`, meaning the caller should treat it
+///     as the primary `--abi <path>`.
+///   - A `SecondaryAbiSpec` when a `=` is present and the LHS parses
+///     as a 20-byte hex address; the returned `path` is owned by
+///     `allocator` and must be freed by the caller.
+fn parseSecondaryAbiSpec(allocator: std.mem.Allocator, arg: []const u8) !?SecondaryAbiSpec {
+    const eq_idx = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
+    const addr_text = arg[0..eq_idx];
+    const path_text = arg[eq_idx + 1 ..];
+    if (path_text.len == 0) return error.InvalidArguments;
+    const address_full = try primitives.Address.fromHex(addr_text);
+    const path_dup = try allocator.dupe(u8, path_text);
+    errdefer allocator.free(path_dup);
+    return SecondaryAbiSpec{
+        .address = address_full.bytes,
+        .path = path_dup,
+    };
 }
 
 fn inferSirPath(allocator: std.mem.Allocator, source_map_path: []const u8) ![]u8 {
