@@ -19,16 +19,39 @@
 
 const std = @import("std");
 
+/// One breakpoint requested by the client before a session exists.
+/// Owned strings: `path` is duped from the parsed JSON so it
+/// outlives the request frame.
+const PendingBreakpoint = struct {
+    path: []u8,
+    line: u32,
+
+    fn deinit(self: *PendingBreakpoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
 pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
+    // Pending breakpoints stash. The client (e.g. VS Code) sends
+    // setBreakpoints during initialization, before launch. We store
+    // them keyed by source path so the future launch handler can
+    // replay them once a Session exists. Wiped + replaced on every
+    // setBreakpoints request for a given path.
+    var pending_breakpoints: std.ArrayList(PendingBreakpoint) = .{};
+    defer {
+        for (pending_breakpoints.items) |*bp| bp.deinit(allocator);
+        pending_breakpoints.deinit(allocator);
+    }
+
     const stdin_file = std.fs.File.stdin();
     const stdout_file = std.fs.File.stdout();
     const stderr_file = std.fs.File.stderr();
 
-    try writeAll(stderr_file, "ora-evm-debug-dap: ready (skeleton only — initialize handshake replied, all other requests ignored)\n");
+    try writeAll(stderr_file, "ora-evm-debug-dap: ready (initialize + setBreakpoints stash + disconnect; launch/threads/stackTrace/etc. still not_implemented)\n");
 
     var seq: i64 = 0;
     while (true) {
@@ -66,6 +89,8 @@ pub fn main() !void {
         seq += 1;
         if (std.mem.eql(u8, command.string, "initialize")) {
             try writeInitializeResponse(allocator, stdout_file, seq, request_seq);
+        } else if (std.mem.eql(u8, command.string, "setBreakpoints")) {
+            try handleSetBreakpoints(allocator, stdout_file, stderr_file, seq, request_seq, root, &pending_breakpoints);
         } else if (std.mem.eql(u8, command.string, "disconnect")) {
             try writeAck(allocator, stdout_file, seq, request_seq, command.string);
             return;
@@ -76,6 +101,111 @@ pub fn main() !void {
             try writeNotImplemented(allocator, stdout_file, seq, request_seq, command.string);
         }
     }
+}
+
+/// DAP `setBreakpoints` handler. The request shape is:
+///
+///   { "command": "setBreakpoints",
+///     "arguments": {
+///       "source": { "path": "/path/to/file.ora" },
+///       "breakpoints": [ { "line": 12 }, { "line": 17 } ] } }
+///
+/// We replace any prior breakpoints for `source.path` with the new
+/// list and reply with one entry per breakpoint, all `verified:
+/// false` since no Session exists to actually arm them yet. The
+/// future launch handler will drain `pending_breakpoints` into the
+/// debugger core.
+fn handleSetBreakpoints(
+    allocator: std.mem.Allocator,
+    stdout_file: std.fs.File,
+    stderr_file: std.fs.File,
+    seq: i64,
+    request_seq: i64,
+    root: std.json.Value,
+    pending_breakpoints: *std.ArrayList(PendingBreakpoint),
+) !void {
+    const arguments = root.object.get("arguments") orelse {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    };
+    if (arguments != .object) {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    }
+    const source = arguments.object.get("source") orelse {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    };
+    if (source != .object) {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    }
+    const path_val = source.object.get("path") orelse {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    };
+    if (path_val != .string) {
+        try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
+        return;
+    }
+    const path = path_val.string;
+
+    // Drop any prior breakpoints for this source path before
+    // installing the new set. DAP semantics: the client always
+    // sends the *full* breakpoint list per source, so we replace.
+    var i: usize = 0;
+    while (i < pending_breakpoints.items.len) {
+        if (std.mem.eql(u8, pending_breakpoints.items[i].path, path)) {
+            var removed = pending_breakpoints.swapRemove(i);
+            removed.deinit(allocator);
+        } else {
+            i += 1;
+        }
+    }
+
+    // Parse the new breakpoints and append. Build the response in
+    // parallel — one body entry per request entry, in order.
+    var response_body: std.ArrayList(u8) = .{};
+    defer response_body.deinit(allocator);
+    var w = response_body.writer(allocator);
+    try w.writeAll("[");
+    var first = true;
+
+    if (arguments.object.get("breakpoints")) |bps| {
+        if (bps == .array) {
+            for (bps.array.items) |bp| {
+                if (bp != .object) continue;
+                const line_val = bp.object.get("line") orelse continue;
+                const line: u32 = switch (line_val) {
+                    .integer => |n| if (n < 0) continue else @intCast(n),
+                    else => continue,
+                };
+                const path_dup = try allocator.dupe(u8, path);
+                errdefer allocator.free(path_dup);
+                try pending_breakpoints.append(allocator, .{
+                    .path = path_dup,
+                    .line = line,
+                });
+                if (!first) try w.writeAll(",");
+                first = false;
+                try w.print(
+                    \\{{"verified":false,"line":{d},"message":"no_session_yet"}}
+                , .{line});
+            }
+        }
+    }
+    try w.writeAll("]");
+
+    // Diagnostic: show pending count after this update.
+    var dbg: [128]u8 = undefined;
+    const dbg_msg = std.fmt.bufPrint(&dbg, "ora-evm-debug-dap: pending breakpoints now {d}\n", .{pending_breakpoints.items.len}) catch "";
+    try writeAll(stderr_file, dbg_msg);
+
+    const out = try std.fmt.allocPrint(allocator,
+        \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":"setBreakpoints","body":{{"breakpoints":{s}}}}}
+    , .{ seq, request_seq, response_body.items });
+    defer allocator.free(out);
+    try writeFramed(allocator, stdout_file, out);
 }
 
 fn writeAll(file: std.fs.File, bytes: []const u8) !void {
