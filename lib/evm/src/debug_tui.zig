@@ -21,7 +21,7 @@ const Style = vaxis.Style;
 const Color = vaxis.Color;
 const Segment = vaxis.Segment;
 const Window = vaxis.Window;
-const ascii_border_glyphs: [6][]const u8 = .{ "+", "-", "+", "|", "+", "+" };
+const ascii_border_glyphs = @import("debug_tui_draw.zig").ascii_border_glyphs;
 
 const AppEvent = union(enum) {
     key_press: vaxis.Key,
@@ -4518,81 +4518,29 @@ pub const Ui = struct {
     }
 };
 
-fn seg(text: []const u8, style: Style) Segment {
-    return .{ .text = text, .style = style };
-}
-
-fn drawSegments(win: Window, col: u16, row: u16, segments: []const Segment) void {
-    _ = win.print(segments, .{ .col_offset = col, .row_offset = row, .wrap = .none });
-}
-
-fn style_header_title() Style {
-    return .{ .fg = Color.rgbFromUint(0x191F24), .bg = Color.rgbFromUint(0xE8EFF6), .bold = true };
-}
-
-fn style_header_meta() Style {
-    return .{ .fg = Color.rgbFromUint(0xD3DBE3), .bg = Color.rgbFromUint(0x1A1D21) };
-}
-
-fn style_footer_note() Style {
-    return .{ .fg = Color.rgbFromUint(0xA8B0B8), .bg = Color.rgbFromUint(0x1A1D21) };
-}
-
-fn style_border() Style {
-    return .{ .fg = Color.rgbFromUint(0x78838E) };
-}
-
-fn style_title() Style {
-    return .{ .fg = Color.rgbFromUint(0xDEE4EB), .bold = true };
-}
-
-fn style_text() Style {
-    return .{ .fg = Color.rgbFromUint(0xD6DCE2) };
-}
-
-fn style_emphasis() Style {
-    return .{ .fg = Color.rgbFromUint(0xF5F7FA), .bold = true };
-}
-
-fn style_changed() Style {
-    return .{ .fg = Color.rgbFromUint(0xFFD666), .bold = true };
-}
-
-fn style_guard() Style {
-    return .{ .fg = Color.rgbFromUint(0xFFAD66), .bold = true };
-}
-
-fn style_hint() Style {
-    return .{ .fg = Color.rgbFromUint(0x969EA6), .italic = true };
-}
-
-fn style_muted() Style {
-    return .{ .fg = Color.rgbFromUint(0xC0C7CF), .dim = true };
-}
-
-fn style_dead() Style {
-    return .{ .fg = Color.rgbFromUint(0x8B929A), .dim = true, .italic = true };
-}
-
-fn style_tab_active() Style {
-    return .{ .fg = Color.rgbFromUint(0xEEF2F8), .bold = true, .ul_style = .single };
-}
-
-fn style_tab_inactive() Style {
-    return .{ .fg = Color.rgbFromUint(0xA0AAB4) };
-}
-
-fn style_error() Style {
-    return .{ .fg = Color.rgbFromUint(0xFF6B6B), .bold = true };
-}
-
-fn style_command_bg() Style {
-    return .{ .fg = Color.rgbFromUint(0xDDE5ED), .bg = Color.rgbFromUint(0x111417) };
-}
-
-fn style_command() Style {
-    return .{ .fg = Color.rgbFromUint(0xE7EDF4), .bg = Color.rgbFromUint(0x111417), .bold = true };
-}
+// seg, drawSegments, style_*, ascii_border_glyphs live in
+// debug_tui_draw.zig; bring them back into the file's namespace
+// via simple aliases so existing call sites read unchanged.
+const draw = @import("debug_tui_draw.zig");
+const seg = draw.seg;
+const drawSegments = draw.drawSegments;
+const style_header_title = draw.style_header_title;
+const style_header_meta = draw.style_header_meta;
+const style_footer_note = draw.style_footer_note;
+const style_border = draw.style_border;
+const style_title = draw.style_title;
+const style_text = draw.style_text;
+const style_emphasis = draw.style_emphasis;
+const style_changed = draw.style_changed;
+const style_guard = draw.style_guard;
+const style_hint = draw.style_hint;
+const style_muted = draw.style_muted;
+const style_dead = draw.style_dead;
+const style_tab_active = draw.style_tab_active;
+const style_tab_inactive = draw.style_tab_inactive;
+const style_error = draw.style_error;
+const style_command_bg = draw.style_command_bg;
+const style_command = draw.style_command;
 
 fn tabLabel(tab: EvmTabKind) []const u8 {
     return switch (tab) {
