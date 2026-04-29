@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
@@ -1541,6 +1542,23 @@ pub const Ui = struct {
                 try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line })
         else
             try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line });
+
+        // Append the inlined-from chain when present. Today this is
+        // always empty (no MLIR-level inliner yet); the render path
+        // is here so future compiler-side work that populates the
+        // chain immediately surfaces in the TUI without further
+        // plumbing.
+        //
+        // `setCommandStatusFmt` left `command_status` pointing into
+        // `command_status_storage.items`, so we just extend the
+        // buffer in place and re-slice — no clear, no copy.
+        if (self.currentInlinedFromChain()) |chain| {
+            if (chain.len > 0) {
+                const writer = self.command_status_storage.writer(self.allocator);
+                try appendInlinedChain(writer, chain);
+                self.command_status = self.command_status_storage.items;
+            }
+        }
     }
 
     fn describeBreakpoints(self: *Ui) !void {
@@ -1955,6 +1973,54 @@ pub const Ui = struct {
             return range.start.line;
         }
         return null;
+    }
+
+    /// Look up the innermost visible function-scope's
+    /// `inlined_from` chain, if any. The chain is empty for scopes
+    /// that the compiler lowered from their lexical site (the common
+    /// case today). Once the MLIR-level inliner lands and populates
+    /// the chain, this becomes the source of "you're inside an
+    /// inlined callee" hints surfaced by `describeCurrentStop` and
+    /// related status renders.
+    ///
+    /// Returns `null` when no debug info is loaded or no function
+    /// scope is visible at the current PC.
+    fn currentInlinedFromChain(self: *Ui) ?[]const DebugInfo.InlinedFrame {
+        const entry = self.session.debugger.currentEntry() orelse return null;
+        const function_name = entry.function orelse return null;
+        const scopes = self.session.debugger.getVisibleScopes(self.allocator) catch return null;
+        defer if (scopes.len > 0) self.allocator.free(scopes);
+
+        for (scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            if (!std.mem.eql(u8, scope.function, function_name)) continue;
+            return scope.inlined_from;
+        }
+        return null;
+    }
+
+    /// Append the inlined-from chain to `writer` as a human-readable
+    /// suffix, e.g. ` (inlined from bar() at app.ora:42 <- baz() at
+    /// app.ora:99)`. No-op when the chain is empty. Outermost entry
+    /// renders first (matches `InlinedFrame` doc on outermost-first
+    /// ordering).
+    fn appendInlinedChain(writer: anytype, chain: []const DebugInfo.InlinedFrame) !void {
+        if (chain.len == 0) return;
+        try writer.writeAll(" (inlined from ");
+        for (chain, 0..) |frame, i| {
+            if (i != 0) try writer.writeAll(" <- ");
+            try writer.print("{s}()", .{frame.function});
+            if (frame.call_site) |range| {
+                // Render the file basename, not the full path, to keep
+                // the status line readable.
+                const file = std.fs.path.basename(frame.file);
+                try writer.print(" at {s}:{d}", .{ file, range.start.line });
+            } else {
+                const file = std.fs.path.basename(frame.file);
+                try writer.print(" at {s}", .{file});
+            }
+        }
+        try writer.writeAll(")");
     }
 
     fn currentSirLine(self: *const Ui) ?u32 {
@@ -4622,6 +4688,7 @@ fn runMain() !void {
 
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(&tty_buf);
+    try configureTtyReadTimeout(&tty);
     defer tty.deinit();
 
     var vx = try vaxis.init(allocator, .{});
@@ -4649,7 +4716,11 @@ fn runMain() !void {
                 try vx.render(tty.writer());
             },
             .key_press => |key| {
-                running = !(try ui.handleKey(key));
+                const should_quit = try ui.handleKey(key);
+                if (should_quit) {
+                    running = false;
+                    break;
+                }
                 ui.render(&vx);
                 try vx.render(tty.writer());
             },
@@ -4657,6 +4728,19 @@ fn runMain() !void {
             else => {},
         }
     }
+}
+
+fn configureTtyReadTimeout(tty: *vaxis.Tty) !void {
+    if (builtin.os.tag == .windows) return;
+
+    var termios = try std.posix.tcgetattr(tty.fd);
+    // Vaxis stops its input thread by setting a flag and waking the read with
+    // a terminal status query. Some terminals/PTYs do not answer that query;
+    // a short read timeout lets the thread observe the flag without relying on
+    // terminal-specific DSR behavior.
+    termios.cc[@intFromEnum(std.posix.V.MIN)] = 0;
+    termios.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+    try std.posix.tcsetattr(tty.fd, .NOW, termios);
 }
 
 pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
@@ -5176,4 +5260,3 @@ pub fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     _ = try std.fmt.hexToBytes(out, hex);
     return out;
 }
-
