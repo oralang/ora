@@ -4988,6 +4988,13 @@ fn writeDebugInfoSidecar(
             }
             try writer.writeAll(",\"range\":");
             try writeDebugRangeJson(writer, sources, scope.file_id, scope.range);
+            // Reserved schema slot for the future inliner — see
+            // `lib/evm/src/debug_info.zig:InlinedFrame`. The compiler
+            // doesn't perform MLIR-level function inlining yet so
+            // this is always empty; emit it explicitly so artifacts
+            // written today round-trip cleanly through the
+            // schema-aware loader.
+            try writer.writeAll(",\"inlined_from\":[]");
             try writer.writeAll(",\"locals\":[");
             var first_local = true;
             for (scope_info.locals[scope.local_start .. scope.local_start + scope.local_count]) |local| {

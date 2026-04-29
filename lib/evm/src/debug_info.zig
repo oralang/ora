@@ -46,6 +46,22 @@ pub const DebugInfo = struct {
         live: ?Range = null,
     };
 
+    /// One link in a scope's inlined-from chain. When the compiler
+    /// inlines a callee, this records the call site that brought the
+    /// scope here — so the TUI can show "inlined from `bar()` at
+    /// `app.ora:42`" instead of dropping the user inside a function
+    /// they didn't write.
+    ///
+    /// The chain on `SourceScope.inlined_from` is outermost-first:
+    /// the lexically outermost caller is index 0, the immediate
+    /// caller is the last entry. Empty slice means "not inlined".
+    pub const InlinedFrame = struct {
+        function: []const u8,
+        file: []const u8,
+        contract: ?[]const u8 = null,
+        call_site: ?Range = null,
+    };
+
     pub const SourceScope = struct {
         id: u32,
         parent: ?u32 = null,
@@ -56,6 +72,14 @@ pub const DebugInfo = struct {
         label: ?[]const u8 = null,
         range: ?Range = null,
         locals: []const Local = &.{},
+        /// Outermost-first chain of call sites that produced this
+        /// scope via compiler inlining. Empty = scope was lowered
+        /// from its lexical site (the common case today). Reserved
+        /// for the inliner work tracked in `compiler-status.md` /
+        /// the debugger plan's B2 item; the TUI doesn't render this
+        /// yet but the schema slot exists so artifacts written
+        /// after the inliner lands are forward-compatible.
+        inlined_from: []const InlinedFrame = &.{},
     };
 
     pub const OpVisibility = struct {
