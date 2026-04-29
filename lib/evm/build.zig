@@ -78,6 +78,28 @@ pub fn build(b: *std.Build) void {
     const run_debug_tui = b.addRunArtifact(debug_tui_exe);
     if (b.args) |args| run_debug_tui.addArgs(args);
 
+    // DAP server (skeleton — see src/debug_dap.zig). Speaks
+    // Content-Length-framed JSON-RPC over stdio. Future increments
+    // wire it into the actual debugger core.
+    const debug_dap_exe = b.addExecutable(.{
+        .name = "ora-evm-debug-dap",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/debug_dap.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ora_evm", .module = evm_mod },
+                .{ .name = "voltaire", .module = primitives_mod },
+                .{ .name = "crypto", .module = crypto_mod },
+                .{ .name = "precompiles", .module = precompiles_mod },
+            },
+        }),
+    });
+    debug_dap_exe.step.dependOn(&bootstrap_crypto.step);
+    b.installArtifact(debug_dap_exe);
+    const run_debug_dap = b.addRunArtifact(debug_dap_exe);
+    if (b.args) |args| run_debug_dap.addArgs(args);
+
     const unit_tests = b.addTest(.{
         .name = "ora-evm-unit-tests",
         .root_module = evm_mod,
@@ -116,6 +138,9 @@ pub fn build(b: *std.Build) void {
 
     const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
     debug_tui_step.dependOn(&run_debug_tui.step);
+
+    const debug_dap_step = b.step("debug-dap", "Run the Ora EVM DAP server (Content-Length-framed JSON-RPC over stdio)");
+    debug_dap_step.dependOn(&run_debug_dap.step);
 
     // Per-step debugger micro-benchmark. Tracks the per-step wall-clock cost
     // of stepOpcode + statement-boundary check; fails if it exceeds the
