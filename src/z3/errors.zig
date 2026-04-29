@@ -102,6 +102,25 @@ pub const Diagnostic = struct {
     }
 };
 
+/// Source position of a guard the verifier classified. Owned
+/// strings (`file`) are duplicated by the writer so the caller
+/// can dispose its query data independently. The `status` field
+/// matches `OpMeta.proof_status` in `lib/evm/src/debug_info.zig`:
+/// `"proved_safe"` (UNSAT — guard's failure condition can't
+/// hold), `"proved_unsafe"` (SAT — counterexample exists), or
+/// `"dynamic"` (UNDEF — solver gave up).
+pub const ProvenGuardPosition = struct {
+    file: []const u8,
+    line: u32,
+    column: u32,
+    status: []const u8,
+
+    pub fn deinit(self: *ProvenGuardPosition, allocator: std.mem.Allocator) void {
+        allocator.free(self.file);
+        allocator.free(self.status);
+    }
+};
+
 /// Result of verification pass
 pub const VerificationResult = struct {
     success: bool,
@@ -109,6 +128,7 @@ pub const VerificationResult = struct {
     diagnostics: ManagedArrayList(Diagnostic),
     seen_keys: std.StringHashMap(void),
     proven_guard_ids: std.StringHashMap(void),
+    proven_guard_positions: std.ArrayList(ProvenGuardPosition),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VerificationResult {
@@ -118,6 +138,7 @@ pub const VerificationResult = struct {
             .diagnostics = ManagedArrayList(Diagnostic).init(allocator),
             .seen_keys = std.StringHashMap(void).init(allocator),
             .proven_guard_ids = std.StringHashMap(void).init(allocator),
+            .proven_guard_positions = .{},
             .allocator = allocator,
         };
     }
@@ -141,6 +162,8 @@ pub const VerificationResult = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.proven_guard_ids.deinit();
+        for (self.proven_guard_positions.items) |*pos| pos.deinit(self.allocator);
+        self.proven_guard_positions.deinit(self.allocator);
     }
 
     pub fn addError(self: *VerificationResult, err: VerificationError) !void {

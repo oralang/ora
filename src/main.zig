@@ -3705,6 +3705,23 @@ fn runMlirEmitAdvanced(
         m.end();
     }
 
+    // Write the FV proof sidecar before the canonicalize / cleanup
+    // passes scrub proven guards from the MLIR module. The TUI's
+    // `fv` overlay reads `<stem>.proof.json` to mark proved-safe
+    // source lines (lib/evm/src/debug_info.zig:OpMeta.proof_status
+    // documents the schema; the sidecar uses the same string
+    // values).
+    if (verification_result_opt) |*vr| {
+        if (vr.proven_guard_positions.items.len > 0) {
+            if (mlir_options.output_dir) |out_dir| {
+                const stem = std.fs.path.stem(file_path);
+                writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items) catch |err| {
+                    try stdout.print("Warning: could not write proof sidecar: {s}\n", .{@errorName(err)});
+                };
+            }
+        }
+    }
+
     if (verification_failed) {
         return error.VerificationFailed;
     }
@@ -4969,6 +4986,42 @@ fn mergeSourceMaps(
     try srcmap_file.writeAll(out.items);
 
     try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
+}
+
+/// Write the FV proof sidecar `<output_dir>/<stem>.proof.json`.
+///
+/// Format: a flat JSON array of objects, one per proved guard:
+///   [{"file":"...", "line":N, "column":N, "status":"proved_safe"}, ...]
+///
+/// Today only `proved_safe` is emitted (UNSAT guards). The schema
+/// is open to `proved_unsafe` and `dynamic` once the verifier
+/// records those positions too. The TUI's `fv` overlay (lib/evm)
+/// reads this file alongside `<stem>.debug.json`.
+fn writeProofSidecar(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    stem: []const u8,
+    positions: []const @import("z3/errors.zig").ProvenGuardPosition,
+) !void {
+    const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
+    defer allocator.free(filename);
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    var w = out.writer(allocator);
+
+    try w.writeAll("[");
+    for (positions, 0..) |pos, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"file\":");
+        try writeJsonString(w, pos.file);
+        try w.print(",\"line\":{d},\"column\":{d},\"status\":", .{ pos.line, pos.column });
+        try writeJsonString(w, pos.status);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+
+    try std.fs.cwd().writeFile(.{ .sub_path = filename, .data = out.items });
 }
 
 fn writeDebugInfoSidecar(

@@ -256,6 +256,12 @@ pub const Ui = struct {
     /// `abiDocForFrame` after the primary check fails. Empty when no
     /// secondary ABIs were provided.
     secondary_abi: std.AutoHashMap([20]u8, AbiDoc),
+    /// Map source_line → proof_status_string from the FV
+    /// sidecar (`<stem>.proof.json`). Populated during init when
+    /// the sidecar is found next to the debug-info path. The `fv`
+    /// gutter overlay consults this map first; OpMeta.proof_status
+    /// is checked as a fallback for future MLIR-side population.
+    proof_lines: std.AutoHashMap(u32, []u8),
 
     fn init(
         allocator: std.mem.Allocator,
@@ -269,9 +275,33 @@ pub const Ui = struct {
             .seed = seed,
             .session = undefined,
             .secondary_abi = std.AutoHashMap([20]u8, AbiDoc).init(allocator),
+            .proof_lines = std.AutoHashMap(u32, []u8).init(allocator),
         };
         errdefer self.secondary_abi.deinit();
         errdefer if (self.abi_doc) |*doc| doc.deinit();
+        errdefer {
+            var it = self.proof_lines.valueIterator();
+            while (it.next()) |v| allocator.free(v.*);
+            self.proof_lines.deinit();
+        }
+
+        // Load FV proof sidecar (`<stem>.proof.json`) if present.
+        // The sidecar lives next to debug.json, with `.debug.json`
+        // replaced by `.proof.json`. Missing or unparseable files
+        // are non-fatal — the overlay just stays empty.
+        if (config.debug_info_path) |di_path| {
+            const proof_path = computeProofSidecarPath(allocator, di_path) catch null;
+            if (proof_path) |path| {
+                defer allocator.free(path);
+                self.loadProofSidecar(path) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => {
+                        // Non-fatal — log to stderr-equivalent via
+                        // command_status if/when status init runs.
+                    },
+                };
+            }
+        }
 
         // Load secondary ABIs. A failure mid-loop frees what was
         // already loaded so we don't leak.
@@ -322,6 +352,9 @@ pub const Ui = struct {
         var sec_it = self.secondary_abi.valueIterator();
         while (sec_it.next()) |doc| doc.deinit();
         self.secondary_abi.deinit();
+        var proof_it = self.proof_lines.valueIterator();
+        while (proof_it.next()) |v| self.allocator.free(v.*);
+        self.proof_lines.deinit();
         self.session.deinit();
         self.seed.deinit(self.allocator);
         self.source_buffer.deinit(self.allocator);
@@ -3018,35 +3051,84 @@ pub const Ui = struct {
 
     const ProofStatusSummary = enum { none, proved_safe, proved_unsafe, dynamic };
 
-    /// Aggregate the FV proof_status across every op on a source
-    /// line. Priority: any unsafe → unsafe; any dynamic → dynamic;
-    /// any safe → safe; else none. Reads `OpMeta.proof_status`
-    /// strings via the debugger's debug_info.
+    /// Aggregate the FV proof_status for a source line.
+    ///
+    /// Two information sources are consulted, in this order:
+    ///   1. The `<stem>.proof.json` sidecar (`proof_lines` map) —
+    ///      written by the verifier with positions of guards it
+    ///      proved. This catches guards that the MLIR-level
+    ///      `cleanupRefinementGuards` pass scrubs out before SIR
+    ///      emission, which is most of them.
+    ///   2. `OpMeta.proof_status` for ops still present in the
+    ///      debug.json — picks up any future verifier pass that
+    ///      attaches per-op attributes instead of pruning.
+    ///
+    /// Aggregation priority: any unsafe → unsafe; any dynamic →
+    /// dynamic; any safe → safe; else none.
     fn lineProofStatusSummary(self: *Ui, line: u32) ProofStatusSummary {
-        const info = self.session.debugger.debug_info orelse return .none;
-        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line) orelse return .none;
-        // Walk all source-map entries with the same statement_id
-        // since multi-op lines map to the same statement. We only
-        // have a getFirstStatementEntry — so check that one entry's
-        // op_meta plus any entries at the same line via a scan over
-        // op_meta for matching statement_id.
-        if (entry.statement_id) |sid| {
-            var saw_unsafe = false;
-            var saw_dynamic = false;
-            var saw_safe = false;
-            for (info.parsed.value.ops) |meta| {
-                if (meta.statement_id != sid) continue;
-                if (meta.proof_status) |status| {
-                    if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
-                    else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
-                    else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+        var saw_unsafe = false;
+        var saw_dynamic = false;
+        var saw_safe = false;
+
+        if (self.proof_lines.get(line)) |status| {
+            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
+            else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
+            else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+        }
+
+        if (self.session.debugger.debug_info) |info| {
+            if (self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line)) |entry| {
+                if (entry.statement_id) |sid| {
+                    for (info.parsed.value.ops) |meta| {
+                        if (meta.statement_id != sid) continue;
+                        if (meta.proof_status) |status| {
+                            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
+                            else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
+                            else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+                        }
+                    }
                 }
             }
-            if (saw_unsafe) return .proved_unsafe;
-            if (saw_dynamic) return .dynamic;
-            if (saw_safe) return .proved_safe;
         }
+
+        if (saw_unsafe) return .proved_unsafe;
+        if (saw_dynamic) return .dynamic;
+        if (saw_safe) return .proved_safe;
         return .none;
+    }
+
+    /// Parse `<stem>.proof.json` and populate `proof_lines`. The
+    /// file is a flat array of objects with `file`, `line`,
+    /// `column`, `status`. Entries whose `file` doesn't match the
+    /// session's source path are ignored.
+    fn loadProofSidecar(self: *Ui, path: []const u8) !void {
+        const bytes = try ora_evm.loadDebuggerArtifact(self.allocator, path);
+        defer self.allocator.free(bytes);
+
+        const ProofEntry = struct {
+            file: []const u8,
+            line: u32,
+            column: ?u32 = null,
+            status: []const u8,
+        };
+        const parsed = try std.json.parseFromSlice([]const ProofEntry, self.allocator, bytes, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        for (parsed.value) |entry| {
+            // Compare against seed.source_path so the overlay
+            // doesn't pick up entries for imported files we
+            // aren't rendering.
+            if (!std.mem.eql(u8, entry.file, self.seed.source_path)) continue;
+            // Last entry wins on duplicate lines (rare).
+            if (self.proof_lines.fetchRemove(entry.line)) |kv| {
+                self.allocator.free(kv.value);
+            }
+            const status_dup = try self.allocator.dupe(u8, entry.status);
+            errdefer self.allocator.free(status_dup);
+            try self.proof_lines.put(entry.line, status_dup);
+        }
     }
 
     /// Return the origin_statement_id of the first source-map entry
@@ -5054,6 +5136,17 @@ fn printUsage() !void {
 fn pathExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+/// Derive `<stem>.proof.json` from the path to `<stem>.debug.json`.
+/// Returns an allocator-owned path the caller must free. Errors
+/// when the input doesn't end in `.debug.json` (the canonical
+/// sidecar suffix the compiler emits).
+fn computeProofSidecarPath(allocator: std.mem.Allocator, debug_info_path: []const u8) ![]u8 {
+    const suffix = ".debug.json";
+    if (!std.mem.endsWith(u8, debug_info_path, suffix)) return error.InvalidArguments;
+    const stem = debug_info_path[0 .. debug_info_path.len - suffix.len];
+    return try std.fmt.allocPrint(allocator, "{s}.proof.json", .{stem});
 }
 
 /// Try to parse an `--abi` argument as a secondary spec

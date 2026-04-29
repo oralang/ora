@@ -134,7 +134,7 @@ o) or the `:overlay` command.
 | `overlay gas`     | Add a cumulative-gas-spent column next to the line number |
 | `overlay folded` (or `fold`) | Show the folded literal value next to compile-time-folded source declarations |
 | `overlay hoist`   | Show `<-N` next to hoisted lines, where `N` is the origin_statement_id (the source statement the hoisted region was lowered from) |
-| `overlay fv` (or `proven`)   | FV-dead-branch overlay: show ` S` next to lines whose runtime guards the verifier proved unreachable, ` X` for proved-failing, ` ?` for solver-undecided |
+| `overlay fv` (or `proven`)   | FV-dead-branch overlay: show ` S` next to lines whose runtime guards the verifier proved unreachable, ` X` for proved-failing, ` ?` for solver-undecided. Reads `<stem>.proof.json` (emitted by `ora debug --verify`) for compiler-side classifications and `OpMeta.proof_status` for any future per-op proof attributes. |
 
 `coverage` renders `<mark><line> <hit>|`; `gas` is the same shape with
 cumulative gas; `folded` renders `<mark><line> =<value>|` for folded

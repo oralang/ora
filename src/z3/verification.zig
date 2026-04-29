@@ -3081,12 +3081,26 @@ pub const VerificationPass = struct {
                             query.line,
                             query.column,
                         );
-                    } else if (entry.status == z3.Z3_L_FALSE and query.obligation_kind == .Guard and query.guard_id != null) {
-                        const guard_id = query.guard_id.?;
-                        if (!combined.proven_guard_ids.contains(guard_id)) {
+                    } else if (entry.status == z3.Z3_L_FALSE) {
+                        // Any obligation the verifier proves unsat
+                        // (the bad case is impossible / the property
+                        // holds). Record its position for the
+                        // FV-dead-branch overlay. For Guard-kind
+                        // obligations also dedupe via the guard_id
+                        // set so the same guard isn't recorded
+                        // twice across checked sites.
+                        if (query.obligation_kind == .Guard and query.guard_id != null) {
+                            const guard_id = query.guard_id.?;
+                            if (combined.proven_guard_ids.contains(guard_id)) continue;
                             const key = try self.allocator.dupe(u8, guard_id);
                             try combined.proven_guard_ids.put(key, {});
                         }
+                        try combined.proven_guard_positions.append(combined.allocator, .{
+                            .file = try combined.allocator.dupe(u8, query.file),
+                            .line = query.line,
+                            .column = query.column,
+                            .status = try combined.allocator.dupe(u8, "proved_safe"),
+                        });
                     }
                 },
                 .LoopInvariantStep => {
@@ -3176,6 +3190,14 @@ pub const VerificationPass = struct {
                         if (!combined.proven_guard_ids.contains(guard_id)) {
                             const key = try self.allocator.dupe(u8, guard_id);
                             try combined.proven_guard_ids.put(key, {});
+                            // Same as the obligation site above —
+                            // also record the source position.
+                            try combined.proven_guard_positions.append(combined.allocator, .{
+                                .file = try combined.allocator.dupe(u8, query.file),
+                                .line = query.line,
+                                .column = query.column,
+                                .status = try combined.allocator.dupe(u8, "proved_safe"),
+                            });
                         }
                     } else if (entry.status == z3.Z3_L_TRUE) {
                         if (entry.model_str) |model_str| {
