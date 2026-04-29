@@ -153,6 +153,7 @@ non-executable spec lines) never appear.
 |-------------------|----------------------------------------------------------|
 | `cov`             | Report the top-10 hottest source lines                   |
 | `cov <n>`         | Report the top-`<n>` hottest source lines                |
+| `cov export lcov <path>` | Write per-line hit counts as an LCOV record at `<path>`. Compatible with VS Code's Coverage Gutters and other LCOV viewers — open `<path>` to overlay execution counts on the source file. |
 | `gascov`          | Report the top-10 source lines by cumulative gas spent   |
 | `gascov <n>`      | Report the top-`<n>` source lines by cumulative gas spent |
 

@@ -747,16 +747,47 @@ pub const Ui = struct {
         return .ok;
     }
     fn cmdCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+
+        // `:cov export lcov <path>` — write per-line hit counts as
+        // an LCOV record so coverage extensions (e.g. VS Code's
+        // Coverage Gutters) can render the same data alongside the
+        // source file outside the debugger.
+        if (std.mem.startsWith(u8, trimmed, "export ")) {
+            const rest = std.mem.trim(u8, trimmed["export ".len..], " \t");
+            if (!std.mem.startsWith(u8, rest, "lcov ") and !std.mem.eql(u8, rest, "lcov")) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            if (std.mem.eql(u8, rest, "lcov")) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            const path = std.mem.trim(u8, rest["lcov ".len..], " \t");
+            if (path.len == 0) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            const wrote = self.exportLcov(path) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => self.command_status = "out of memory",
+                    else => self.command_status = "failed to export lcov",
+                }
+                return .ok;
+            };
+            try self.setCommandStatusFmt("lcov exported: {d} lines -> {s}", .{ wrote, path });
+            return .ok;
+        }
+
         const total = self.session.debugger.lineHitsCount();
         if (total == 0) {
             self.command_status = "no lines hit yet";
             return .ok;
         }
         var n: usize = 10;
-        const trimmed = std.mem.trim(u8, arg, " \t");
         if (trimmed.len > 0) {
             n = std.fmt.parseUnsigned(usize, trimmed, 10) catch {
-                self.command_status = "usage: :cov [N]";
+                self.command_status = "usage: :cov [N] | :cov export lcov <path>";
                 return .ok;
             };
             if (n == 0) n = 10;
@@ -772,6 +803,40 @@ pub const Ui = struct {
         }
         self.command_status = self.command_status_storage.items;
         return .ok;
+    }
+
+    /// Write an LCOV record covering the active source file with
+    /// the per-line hit counts the debugger has accumulated.
+    /// Returns the number of `DA:` records written. The LCOV format
+    /// is documented at
+    /// https://github.com/linux-test-project/lcov/blob/master/man/geninfo.1
+    /// — the minimal subset is `SF:<path>` followed by `DA:<line>,<count>`
+    /// rows and an `end_of_record` terminator.
+    fn exportLcov(self: *Ui, path: []const u8) !usize {
+        var entries: std.ArrayList(Debugger.LineHit) = .{};
+        defer entries.deinit(self.allocator);
+
+        // Reuse the existing top-N getter with a large N so we
+        // get every recorded line in one slice. Lines absent from
+        // line_hits aren't covered (count = 0); LCOV viewers
+        // distinguish "0 hits" from "not instrumented" via the
+        // presence of a DA record, so we only emit what we
+        // actually saw.
+        const top = try self.session.debugger.getLineHitsTopN(self.allocator, std.math.maxInt(usize));
+        defer self.allocator.free(top);
+
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(self.allocator);
+        var w = out.writer(self.allocator);
+
+        try w.print("TN:\nSF:{s}\n", .{self.seed.source_path});
+        for (top) |hit| {
+            try w.print("DA:{d},{d}\n", .{ hit.line, hit.count });
+        }
+        try w.print("LH:{d}\nLF:{d}\nend_of_record\n", .{ top.len, top.len });
+
+        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.items });
+        return top.len;
     }
     fn cmdGasCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
         const total = self.session.debugger.lineGasCount();
