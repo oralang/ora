@@ -2390,6 +2390,178 @@ fn appendPatternDebugLocals(
     }
 }
 
+/// Compute the narrowed live-range end for a binding declared at
+/// `decl_idx` within `body.statements`. Returns null when the
+/// binding's range cannot be safely narrowed and the caller should
+/// fall back to `body.range.end` (the conservative coarse end).
+///
+/// Today's narrowing is intentionally conservative: it only fires
+/// when every statement after the decl in the same block is
+/// expression-only (no nested If/While/For/Switch/Try/Block). With
+/// any nested control flow we'd need a stmt walker to verify the
+/// binding isn't used inside, which doesn't exist yet — so we
+/// preserve the old end. This still narrows ~all top-level
+/// `let x = ... ; <flat statements>` patterns, including the
+/// `liveness_dead_after_use` regression fixture's expected case.
+fn computeNarrowedLiveEnd(
+    ast_file: *const compiler.ast.AstFile,
+    body: *const compiler.ast.Body,
+    decl_idx: usize,
+    binding_names: []const []const u8,
+) ?u32 {
+    if (binding_names.len == 0) return null;
+
+    var last_use_idx: ?usize = null;
+    var j: usize = decl_idx + 1;
+    while (j < body.statements.len) : (j += 1) {
+        const stmt = ast_file.statement(body.statements[j]).*;
+        // Statements that bring sub-bodies abort the narrowing.
+        switch (stmt) {
+            .If, .While, .For, .Switch, .Try, .Block, .LabeledBlock => return null,
+            else => {},
+        }
+        if (statementUsesAnyName(ast_file, body.statements[j], binding_names)) {
+            last_use_idx = j;
+        }
+    }
+
+    if (last_use_idx) |idx| {
+        return stmtRange(ast_file.statement(body.statements[idx]).*).end;
+    }
+    // No reference after the decl. Live ends at the decl itself.
+    return stmtRange(ast_file.statement(body.statements[decl_idx]).*).end;
+}
+
+/// Pull the source range out of any Stmt arm. The arms each have
+/// their own `range` field but the union itself doesn't expose
+/// one — this helper does the switch in one place.
+fn stmtRange(stmt: compiler.ast.Stmt) compiler.source.TextRange {
+    return switch (stmt) {
+        .VariableDecl => |s| s.range,
+        .Return => |s| s.range,
+        .If => |s| s.range,
+        .While => |s| s.range,
+        .For => |s| s.range,
+        .Switch => |s| s.range,
+        .Try => |s| s.range,
+        .Log => |s| s.range,
+        .Lock => |s| s.range,
+        .Unlock => |s| s.range,
+        .Assert => |s| s.range,
+        .Assume => |s| s.range,
+        .Havoc => |s| s.range,
+        .Break => |s| s.range,
+        .Continue => |s| s.range,
+        .Assign => |s| s.range,
+        .Expr => |s| s.range,
+        .Block => |s| s.range,
+        .LabeledBlock => |s| s.range,
+        .Error => |s| s.range,
+    };
+}
+
+/// Does any expression in `statement_id` reference any of the
+/// names in `targets`? Conservative — every expression sub-tree is
+/// walked, including LHS of assignments (a naive overcount; treats
+/// `x = foo` as a use of `x`, which is fine for liveness since
+/// over-counting only delays narrowing, never removes a real use).
+fn statementUsesAnyName(
+    ast_file: *const compiler.ast.AstFile,
+    statement_id: compiler.ast.StmtId,
+    targets: []const []const u8,
+) bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var names: std.ArrayList([]const u8) = .{};
+    defer names.deinit(arena_allocator);
+
+    const stmt = ast_file.statement(statement_id).*;
+    switch (stmt) {
+        .VariableDecl => |d| if (d.value) |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e, &names) catch return true,
+        .Return => |r| if (r.value) |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e, &names) catch return true,
+        .Log => |l| {
+            for (l.args) |arg| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, arg, &names) catch return true;
+        },
+        .Lock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .Unlock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .Assert => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
+        .Assume => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
+        .Havoc => {},
+        .Break, .Continue => {},
+        .Assign => |a| {
+            // target is a PatternId — pattern arms can carry an
+            // ExprId (IndexPattern.index). Walk both sides for any
+            // names that might be uses of `targets`.
+            collectNamesInPattern(arena_allocator, ast_file, a.target, &names) catch return true;
+            compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.value, &names) catch return true;
+        },
+        .Expr => |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e.expr, &names) catch return true,
+        // Body-bearing statements never reach here (the caller
+        // bailed out in computeNarrowedLiveEnd).
+        .If, .While, .For, .Switch, .Try, .Block, .LabeledBlock => return true,
+        .Error => {},
+    }
+
+    for (names.items) |name| {
+        for (targets) |target| {
+            if (std.mem.eql(u8, name, target)) return true;
+        }
+    }
+    return false;
+}
+
+/// Collect all `Name` references within a pattern's expression
+/// subtrees (not the pattern's own binding names — those are
+/// definitions, not uses). Today only `IndexPattern.index` is an
+/// ExprId; other arms recurse into sub-patterns. Used by the
+/// liveness pass to count `x[i] = ...` as a use of `i`.
+fn collectNamesInPattern(
+    allocator: std.mem.Allocator,
+    ast_file: *const compiler.ast.AstFile,
+    pattern_id: compiler.ast.PatternId,
+    out: *std.ArrayList([]const u8),
+) !void {
+    switch (ast_file.pattern(pattern_id).*) {
+        .Name => {},
+        .Field => |field| try collectNamesInPattern(allocator, ast_file, field.base, out),
+        .Index => |index| {
+            try collectNamesInPattern(allocator, ast_file, index.base, out);
+            try compiler.ast.collectNamesInExpr(allocator, ast_file, index.index, out);
+        },
+        .StructDestructure => |destructure| {
+            for (destructure.fields) |field| {
+                try collectNamesInPattern(allocator, ast_file, field.binding, out);
+            }
+        },
+        .Error => {},
+    }
+}
+
+/// Extract the leaf binding name(s) from a pattern. Supports
+/// `Name`, `StructDestructure` (recursive), `Field`, and `Index`
+/// — same shapes the local-emitter walks. Returns the list in
+/// declaration order.
+fn collectPatternBindingNames(
+    allocator: std.mem.Allocator,
+    ast_file: *const compiler.ast.AstFile,
+    pattern_id: compiler.ast.PatternId,
+    out: *std.ArrayList([]const u8),
+) !void {
+    switch (ast_file.pattern(pattern_id).*) {
+        .Name => |name| try out.append(allocator, name.name),
+        .StructDestructure => |destructure| {
+            for (destructure.fields) |field| {
+                try collectPatternBindingNames(allocator, ast_file, field.binding, out);
+            }
+        },
+        .Field => |field| try collectPatternBindingNames(allocator, ast_file, field.base, out),
+        .Index => |index| try collectPatternBindingNames(allocator, ast_file, index.base, out),
+        else => {},
+    }
+}
+
 fn collectBodyScopeDebugInfo(
     allocator: std.mem.Allocator,
     db: *compiler.CompilerDb,
@@ -2461,7 +2633,7 @@ fn collectBodyScopeDebugInfo(
         }
     }
 
-    for (body.statements) |statement_id| {
+    for (body.statements, 0..) |statement_id, stmt_idx| {
         switch (ast_file.statement(statement_id).*) {
             .VariableDecl => |decl| {
                 const folded_value = if (decl.value) |expr_id|
@@ -2471,19 +2643,18 @@ fn collectBodyScopeDebugInfo(
                         null
                 else
                     null;
-                // B3 (statement-level liveness): the live range below
-                // is intentionally coarse — every `let` is treated as
-                // live for the rest of its enclosing body, regardless
-                // of where its actual last use is. The TUI's
-                // `bindingPastLiveRange` check therefore only fires
-                // at the body's closing brace. A future pass should
-                // run a backward dataflow walk over `body.statements`
-                // collecting AST name references, then narrow the
-                // end position to `statements[last_use_index].range.end`.
-                // No name-ref walker exists in the AST today; adding
-                // one is the prerequisite work. See
-                // tests/debug_artifacts/liveness_dead_after_use as
-                // the regression target.
+                // B3 (statement-level liveness): try to narrow the
+                // live range to the position after the binding's
+                // last same-block use. Falls back to body.range.end
+                // when any later statement is body-bearing
+                // (If/While/For/Switch/Try/Block/LabeledBlock) —
+                // walking into nested bodies needs a stmt walker
+                // that doesn't exist yet; staying conservative
+                // there avoids false dead-binding signals.
+                var binding_names: std.ArrayList([]const u8) = .{};
+                defer binding_names.deinit(allocator);
+                try collectPatternBindingNames(allocator, ast_file, decl.pattern, &binding_names);
+                const live_end = computeNarrowedLiveEnd(ast_file, &body, stmt_idx, binding_names.items) orelse body.range.end;
                 try appendPatternDebugLocals(
                     allocator,
                     ast_file,
@@ -2494,7 +2665,7 @@ fn collectBodyScopeDebugInfo(
                     decl.binding_kind,
                     decl.storage_class,
                     decl.range,
-                    .{ .start = decl.range.start, .end = body.range.end },
+                    .{ .start = decl.range.start, .end = live_end },
                     debugRuntimeKindForStorageClass(
                         decl.storage_class,
                         switch (ast_file.pattern(decl.pattern).*) {

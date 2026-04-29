@@ -25,6 +25,7 @@ const Fixture = struct {
 
 const FIXTURES = [_]Fixture{
     .{ .name = "simple_counter", .source_relpath = "tests/debug_artifacts/simple_counter/simple_counter.ora" },
+    .{ .name = "liveness_dead_after_use", .source_relpath = "tests/debug_artifacts/liveness_dead_after_use/liveness_dead_after_use.ora" },
 };
 
 fn binaryAvailable() bool {
