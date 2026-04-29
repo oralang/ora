@@ -3,6 +3,8 @@ pub const nodes = @import("nodes.zig");
 pub const file = @import("file.zig");
 pub const builder = @import("builder.zig");
 pub const lower_impl = @import("lower.zig");
+pub const walk = @import("walk.zig");
+pub const collectNamesInExpr = walk.collectNamesInExpr;
 
 pub const AstFileId = ids.AstFileId;
 pub const ItemId = ids.ItemId;
