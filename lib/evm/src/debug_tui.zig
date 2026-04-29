@@ -44,7 +44,7 @@ const SecondaryAbiSpec = struct {
     }
 };
 
-const AppConfig = struct {
+pub const AppConfig = struct {
     bytecode_path: []u8,
     source_map_path: []u8,
     source_path: []u8,
@@ -57,7 +57,7 @@ const AppConfig = struct {
     calldata: []u8 = &.{},
     limits: ora_evm.DebugLimits = .{},
 
-    fn deinit(self: *AppConfig, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *AppConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode_path);
         allocator.free(self.source_map_path);
         allocator.free(self.source_path);
@@ -95,43 +95,15 @@ const BindingSnapshotEntry = struct {
     value: ?u256,
 };
 
-const EvmTabKind = enum { stack, memory, storage, tstore, calldata };
-const StepMode = enum { in, opcode, over, out, continue_ };
+pub const EvmTabKind = enum { stack, memory, storage, tstore, calldata };
+pub const StepMode = enum { in, opcode, over, out, continue_ };
 
-const SavedSession = struct {
-    const SavedCheckpoint = struct {
-        id: u32,
-        step_index: usize,
-        scroll_line: u32,
-        focus_line: ?u32 = null,
-        active_evm_tab: []const u8 = "stack",
-    };
+// SavedSession + writeSession/loadSession/exportTrace live in
+// debug_tui_session.zig; the methods on `Ui` below are 1-line
+// delegators. Keep imports tight: we don't need to surface
+// SavedSession at this scope.
 
-    version: u32 = 1,
-    bytecode_path: []const u8,
-    source_map_path: []const u8,
-    source_path: []const u8,
-    sir_path: ?[]const u8 = null,
-    debug_info_path: ?[]const u8 = null,
-    abi_path: ?[]const u8 = null,
-    calldata_hex: []const u8,
-    scroll_line: u32 = 1,
-    sir_scroll_line: u32 = 1,
-    sir_follow: bool = true,
-    focus_line: ?u32 = null,
-    active_evm_tab: []const u8 = "stack",
-    step_history: []const []const u8 = &.{},
-    breakpoints: []const SavedBreakpoint = &.{},
-    checkpoints: []const SavedCheckpoint = &.{},
-
-    pub const SavedBreakpoint = struct {
-        line: u32,
-        condition: ?[]const u8 = null,
-        hit_target: ?u32 = null,
-    };
-};
-
-const SessionSeed = struct {
+pub const SessionSeed = struct {
     runtime_bytecode: []u8,
     source_map: SourceMap,
     debug_info_json: ?[]u8 = null,
@@ -143,7 +115,7 @@ const SessionSeed = struct {
     contract: primitives.Address,
     limits: ora_evm.DebugLimits = .{},
 
-    fn deinit(self: *SessionSeed, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SessionSeed, allocator: std.mem.Allocator) void {
         allocator.free(self.runtime_bytecode);
         self.source_map.deinit();
         if (self.debug_info_json) |bytes| allocator.free(bytes);
@@ -154,11 +126,11 @@ const SessionSeed = struct {
     }
 };
 
-const Session = struct {
+pub const Session = struct {
     evm: Evm,
     debugger: Debugger,
 
-    fn init(self: *Session, allocator: std.mem.Allocator, seed: *const SessionSeed) !void {
+    pub fn init(self: *Session, allocator: std.mem.Allocator, seed: *const SessionSeed) !void {
         try self.evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
         errdefer self.evm.deinit();
         try self.evm.initTransactionState(null);
@@ -187,7 +159,7 @@ const Session = struct {
         self.debugger.max_steps = seed.limits.max_steps;
     }
 
-    fn deinit(self: *Session) void {
+    pub fn deinit(self: *Session) void {
         self.debugger.deinit();
         self.evm.deinit();
     }
@@ -207,13 +179,13 @@ const OverlayMode = ora_evm.debug_overlay.OverlayMode;
 /// halts on every hit); the TUI layers a side-effect-free predicate
 /// (`condition`) and an optional N-th-hit target on top, transparently
 /// resuming when neither gate is satisfied.
-const Breakpoint = struct {
+pub const Breakpoint = struct {
     line: u32,
     condition: ?[]u8 = null,
     hit_target: ?u32 = null,
     hit_count: u32 = 0,
 
-    fn deinit(self: *Breakpoint, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Breakpoint, allocator: std.mem.Allocator) void {
         if (self.condition) |c| allocator.free(c);
     }
 };
@@ -248,7 +220,7 @@ const lock_prefix: u256 = (@as(u256, 1) << 255);
 /// handful of iterations.
 const kMaxConditionalBreakpointGatingIters: u32 = 1_000_000;
 
-const Ui = struct {
+pub const Ui = struct {
     allocator: std.mem.Allocator,
     config: AppConfig,
     abi_doc: ?AbiDoc = null,
@@ -1711,11 +1683,11 @@ const Ui = struct {
     /// Clear every breakpoint's hit_count back to 0. Called before any
     /// session rebuild that will replay history, so a `:break <line>
     /// hit <n>` predicate doesn't get "stuck" past N.
-    fn resetBreakpointHitCounts(self: *Ui) void {
+    pub fn resetBreakpointHitCounts(self: *Ui) void {
         for (self.breakpoints.items) |*bp| bp.hit_count = 0;
     }
 
-    fn applyBreakpoints(self: *Ui) !void {
+    pub fn applyBreakpoints(self: *Ui) !void {
         // Continue past per-line failures so a single stale breakpoint
         // (e.g. after a session reload onto recompiled bytecode) doesn't
         // disable the rest. Surface the count via the status line.
@@ -1751,7 +1723,7 @@ const Ui = struct {
         };
     }
 
-    fn runStep(self: *Ui, mode: StepMode, record_history: bool) void {
+    pub fn runStep(self: *Ui, mode: StepMode, record_history: bool) void {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
             self.syncFocusFromDebugger();
@@ -1862,7 +1834,7 @@ const Ui = struct {
         self.command_status = "previous stop";
     }
 
-    fn primeInitialStop(self: *Ui) !void {
+    pub fn primeInitialStop(self: *Ui) !void {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
             return;
@@ -1919,7 +1891,7 @@ const Ui = struct {
         return false;
     }
 
-    fn syncFocusFromDebugger(self: *Ui) void {
+    pub fn syncFocusFromDebugger(self: *Ui) void {
         if (self.session.debugger.lastStatementLine()) |line| {
             self.focus_line = line;
             return;
@@ -2134,7 +2106,7 @@ const Ui = struct {
         };
     }
 
-    fn captureSnapshot(self: *Ui) Snapshot {
+    pub fn captureSnapshot(self: *Ui) Snapshot {
         var snapshot = Snapshot{};
         snapshot.gas_remaining = self.session.debugger.getGasRemaining();
         const stack = self.session.debugger.getStack();
@@ -2198,14 +2170,14 @@ const Ui = struct {
         return count;
     }
 
-    fn clearPreviousBindingsSnapshot(self: *Ui) void {
+    pub fn clearPreviousBindingsSnapshot(self: *Ui) void {
         for (self.previous_bindings.items) |entry| {
             self.allocator.free(entry.name);
         }
         self.previous_bindings.clearRetainingCapacity();
     }
 
-    fn refreshPreviousBindingsSnapshot(self: *Ui) !void {
+    pub fn refreshPreviousBindingsSnapshot(self: *Ui) !void {
         self.clearPreviousBindingsSnapshot();
         const bindings = try self.session.debugger.getVisibleBindings(self.allocator);
         defer if (bindings.len > 0) self.allocator.free(bindings);
@@ -4533,205 +4505,16 @@ const Ui = struct {
         return next;
     }
 
-    /// Export an EIP-3155 trace of the entire run by replaying
-    /// `step_history` against a shadow session with a `Tracer`
-    /// attached. Doesn't disturb the live session. Returns the number
-    /// of trace entries written.
     fn exportTrace(self: *Ui, path: []const u8) !usize {
-        var shadow: Session = undefined;
-        try Session.init(&shadow, self.allocator, &self.seed);
-        defer shadow.deinit();
-
-        var tracer = ora_evm.trace.Tracer.init(self.allocator);
-        defer tracer.deinit();
-        tracer.enable();
-        shadow.evm.setTracer(&tracer);
-
-        // Apply the same breakpoints to the shadow session so a
-        // `:continue_` in the user's history halts at the same place
-        // it did live. Without this, replay diverges and the trace
-        // wouldn't reflect what the user actually saw. Conditional /
-        // hit-count gating is intentionally not replayed: the
-        // debugger core doesn't know about it (it's a TUI-layer
-        // concern), so a `:continue_` that was internally retried
-        // until predicate-true is captured as a single user-step
-        // here. The trace will land at the same final stop because
-        // the EVM advances deterministically.
-        for (self.breakpoints.items) |bp| {
-            _ = shadow.debugger.setBreakpoint(self.seed.source_path, bp.line);
-        }
-
-        // Mirror primeInitialStop: advance the shadow session until the
-        // first user-facing statement, so the trace's earliest entries
-        // line up with what the user sees.
-        var prime_attempts: usize = 0;
-        while (!shadow.debugger.isHalted() and prime_attempts < 256) : (prime_attempts += 1) {
-            shadow.debugger.stepIn() catch break;
-            const entry = shadow.debugger.currentEntry() orelse continue;
-            if (entry.is_statement) break;
-        }
-
-        for (self.step_history.items) |mode| {
-            const result = switch (mode) {
-                .in => shadow.debugger.stepIn(),
-                .opcode => shadow.debugger.stepOpcode(),
-                .over => shadow.debugger.stepOver(),
-                .out => shadow.debugger.stepOut(),
-                .continue_ => shadow.debugger.continue_(),
-            };
-            result catch break;
-            if (shadow.debugger.isHalted()) break;
-        }
-
-        try tracer.writeToFile(path);
-        return tracer.entries.items.len;
+        return @import("debug_tui_session.zig").exportTrace(self, path);
     }
 
     fn writeSession(self: *Ui, path: []const u8) !void {
-        var step_names = try self.allocator.alloc([]const u8, self.step_history.items.len);
-        defer self.allocator.free(step_names);
-        for (self.step_history.items, 0..) |mode, i| {
-            step_names[i] = stepModeName(mode);
-        }
-        const breakpoints = try self.allocator.alloc(SavedSession.SavedBreakpoint, self.breakpoints.items.len);
-        defer self.allocator.free(breakpoints);
-        for (self.breakpoints.items, 0..) |bp, i| {
-            breakpoints[i] = .{
-                .line = bp.line,
-                .condition = bp.condition,
-                .hit_target = bp.hit_target,
-            };
-        }
-        var saved_checkpoints = try self.allocator.alloc(SavedSession.SavedCheckpoint, self.checkpoints.items.len);
-        defer self.allocator.free(saved_checkpoints);
-        for (self.checkpoints.items, 0..) |cp, i| {
-            saved_checkpoints[i] = .{
-                .id = cp.id,
-                .step_index = cp.step_index,
-                .scroll_line = cp.scroll_line,
-                .focus_line = cp.focus_line,
-                .active_evm_tab = tabName(cp.active_evm_tab),
-            };
-        }
-
-        const calldata_hex = try std.fmt.allocPrint(self.allocator, "{x}", .{self.seed.calldata});
-        defer self.allocator.free(calldata_hex);
-
-        const session = SavedSession{
-            .bytecode_path = self.config.bytecode_path,
-            .source_map_path = self.config.source_map_path,
-            .source_path = self.config.source_path,
-            .sir_path = self.config.sir_path,
-            .debug_info_path = self.config.debug_info_path,
-            .abi_path = self.config.abi_path,
-            .calldata_hex = calldata_hex,
-            .scroll_line = self.scroll_line,
-            .sir_scroll_line = self.sir_scroll_line,
-            .sir_follow = self.sir_follow,
-            .focus_line = self.focus_line,
-            .active_evm_tab = tabName(self.active_evm_tab),
-            .step_history = step_names,
-            .breakpoints = breakpoints,
-            .checkpoints = saved_checkpoints,
-        };
-
-        var json_buf: std.ArrayList(u8) = .{};
-        defer json_buf.deinit(self.allocator);
-        var writer = json_buf.writer(self.allocator);
-        var adapter_buf: [256]u8 = undefined;
-        var adapter = writer.adaptToNewApi(&adapter_buf);
-        var jw: std.json.Stringify = .{
-            .writer = &adapter.new_interface,
-            .options = .{ .whitespace = .indent_2 },
-        };
-        try jw.write(session);
-        if (adapter.err) |err| return err;
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json_buf.items });
+        return @import("debug_tui_session.zig").writeSession(self, path);
     }
 
     fn loadSession(self: *Ui, path: []const u8) !void {
-        const json_bytes = try ora_evm.loadDebuggerArtifact(self.allocator, path);
-        defer self.allocator.free(json_bytes);
-
-        const parsed = try std.json.parseFromSlice(SavedSession, self.allocator, json_bytes, .{
-            .ignore_unknown_fields = true,
-        });
-        defer parsed.deinit();
-
-        var new_config = AppConfig{
-            .bytecode_path = try self.allocator.dupe(u8, parsed.value.bytecode_path),
-            .source_map_path = try self.allocator.dupe(u8, parsed.value.source_map_path),
-            .source_path = try self.allocator.dupe(u8, parsed.value.source_path),
-            .sir_path = if (parsed.value.sir_path) |p| try self.allocator.dupe(u8, p) else null,
-            .debug_info_path = if (parsed.value.debug_info_path) |p| try self.allocator.dupe(u8, p) else null,
-            .abi_path = if (parsed.value.abi_path) |p| try self.allocator.dupe(u8, p) else null,
-            .init_calldata = try self.allocator.dupe(u8, &.{}),
-            .init_calldata_fallback = try self.allocator.dupe(u8, &.{}),
-            .calldata = try decodeHexAlloc(self.allocator, parsed.value.calldata_hex),
-        };
-        errdefer new_config.deinit(self.allocator);
-
-        var new_seed = try loadSeedFromConfig(self.allocator, &new_config);
-        errdefer new_seed.deinit(self.allocator);
-
-        self.config.deinit(self.allocator);
-        self.session.deinit();
-        self.seed.deinit(self.allocator);
-        self.clearPreviousBindingsSnapshot();
-        self.step_history.clearRetainingCapacity();
-
-        self.config = new_config;
-        self.seed = new_seed;
-        try Session.init(&self.session, self.allocator, &self.seed);
-
-        self.command_mode = false;
-        self.command_buffer.clearRetainingCapacity();
-        self.active_evm_tab = parseTabName(parsed.value.active_evm_tab) orelse .stack;
-        for (self.breakpoints.items) |*bp| bp.deinit(self.allocator);
-        self.breakpoints.clearRetainingCapacity();
-        for (parsed.value.breakpoints) |saved| {
-            const condition_dup: ?[]u8 = if (saved.condition) |c| try self.allocator.dupe(u8, c) else null;
-            errdefer if (condition_dup) |c| self.allocator.free(c);
-            try self.breakpoints.append(self.allocator, .{
-                .line = saved.line,
-                .condition = condition_dup,
-                .hit_target = saved.hit_target,
-            });
-        }
-        self.checkpoints.clearRetainingCapacity();
-        self.next_checkpoint_id = 1;
-        for (parsed.value.checkpoints) |cp| {
-            try self.checkpoints.append(self.allocator, .{
-                .id = cp.id,
-                .step_index = cp.step_index,
-                .scroll_line = cp.scroll_line,
-                .focus_line = cp.focus_line,
-                .active_evm_tab = parseTabName(cp.active_evm_tab) orelse .stack,
-            });
-            if (cp.id >= self.next_checkpoint_id) self.next_checkpoint_id = cp.id + 1;
-        }
-
-        self.source_buffer.deinit(self.allocator);
-        self.source_buffer = .{};
-        try self.source_buffer.update(self.allocator, .{ .bytes = self.seed.source_text });
-
-        // loadSession just rebuilt the session and is about to replay
-        // step_history; mirror rerunToHistory and start hit counts at 0.
-        self.resetBreakpointHitCounts();
-        try self.primeInitialStop();
-        try self.applyBreakpoints();
-        for (parsed.value.step_history) |name| {
-            const mode = parseStepMode(name) orelse continue;
-            self.runStep(mode, true);
-            if (std.mem.eql(u8, self.status, "execution_error")) break;
-        }
-        self.scroll_line = parsed.value.scroll_line;
-        self.sir_scroll_line = parsed.value.sir_scroll_line;
-        self.sir_follow = parsed.value.sir_follow;
-        self.focus_line = parsed.value.focus_line;
-        self.previous_snapshot = self.captureSnapshot();
-        try self.refreshPreviousBindingsSnapshot();
-        if (self.focus_line == null) self.syncFocusFromDebugger();
+        return @import("debug_tui_session.zig").loadSession(self, path);
     }
 };
 
@@ -4821,7 +4604,7 @@ fn tabLabel(tab: EvmTabKind) []const u8 {
     };
 }
 
-fn tabName(tab: EvmTabKind) []const u8 {
+pub fn tabName(tab: EvmTabKind) []const u8 {
     return switch (tab) {
         .stack => "stack",
         .memory => "memory",
@@ -4831,7 +4614,7 @@ fn tabName(tab: EvmTabKind) []const u8 {
     };
 }
 
-fn parseTabName(name: []const u8) ?EvmTabKind {
+pub fn parseTabName(name: []const u8) ?EvmTabKind {
     if (std.mem.eql(u8, name, "stack")) return .stack;
     if (std.mem.eql(u8, name, "memory")) return .memory;
     if (std.mem.eql(u8, name, "storage")) return .storage;
@@ -4840,7 +4623,7 @@ fn parseTabName(name: []const u8) ?EvmTabKind {
     return null;
 }
 
-fn stepModeName(mode: StepMode) []const u8 {
+pub fn stepModeName(mode: StepMode) []const u8 {
     return switch (mode) {
         .in => "in",
         .opcode => "opcode",
@@ -4850,7 +4633,7 @@ fn stepModeName(mode: StepMode) []const u8 {
     };
 }
 
-fn parseStepMode(name: []const u8) ?StepMode {
+pub fn parseStepMode(name: []const u8) ?StepMode {
     if (std.mem.eql(u8, name, "in")) return .in;
     if (std.mem.eql(u8, name, "opcode")) return .opcode;
     if (std.mem.eql(u8, name, "over")) return .over;
@@ -4928,7 +4711,7 @@ fn runMain() !void {
     }
 }
 
-fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
+pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
     const limits = config.limits;
 
     const bytecode_hex = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.bytecode_path, limits.artifact_max_bytes);
@@ -5435,7 +5218,7 @@ fn encodeAbiWord(type_name: []const u8, value_text: []const u8, out_word: []u8) 
     }
 }
 
-fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+pub fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     const hex = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
     if (hex.len % 2 != 0) return error.InvalidHex;
