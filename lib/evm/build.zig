@@ -78,9 +78,12 @@ pub fn build(b: *std.Build) void {
     const run_debug_tui = b.addRunArtifact(debug_tui_exe);
     if (b.args) |args| run_debug_tui.addArgs(args);
 
-    // DAP server (skeleton — see src/debug_dap.zig). Speaks
-    // Content-Length-framed JSON-RPC over stdio. Future increments
-    // wire it into the actual debugger core.
+    // DAP server (see src/debug_dap.zig). Imports debug_tui.zig
+    // directly to reuse Session / SessionSeed / loadSeedFromConfig,
+    // which transitively pulls in vaxis at compile time even though
+    // the DAP binary doesn't render anything — cheaper than carving
+    // a shared loader module while the typed boundary is still
+    // moving.
     const debug_dap_exe = b.addExecutable(.{
         .name = "ora-evm-debug-dap",
         .root_module = b.createModule(.{
@@ -92,6 +95,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "voltaire", .module = primitives_mod },
                 .{ .name = "crypto", .module = crypto_mod },
                 .{ .name = "precompiles", .module = precompiles_mod },
+                .{ .name = "vaxis", .module = vaxis_mod },
             },
         }),
     });
