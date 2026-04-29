@@ -3016,6 +3016,39 @@ pub const Ui = struct {
         return null;
     }
 
+    const ProofStatusSummary = enum { none, proved_safe, proved_unsafe, dynamic };
+
+    /// Aggregate the FV proof_status across every op on a source
+    /// line. Priority: any unsafe → unsafe; any dynamic → dynamic;
+    /// any safe → safe; else none. Reads `OpMeta.proof_status`
+    /// strings via the debugger's debug_info.
+    fn lineProofStatusSummary(self: *Ui, line: u32) ProofStatusSummary {
+        const info = self.session.debugger.debug_info orelse return .none;
+        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line) orelse return .none;
+        // Walk all source-map entries with the same statement_id
+        // since multi-op lines map to the same statement. We only
+        // have a getFirstStatementEntry — so check that one entry's
+        // op_meta plus any entries at the same line via a scan over
+        // op_meta for matching statement_id.
+        if (entry.statement_id) |sid| {
+            var saw_unsafe = false;
+            var saw_dynamic = false;
+            var saw_safe = false;
+            for (info.parsed.value.ops) |meta| {
+                if (meta.statement_id != sid) continue;
+                if (meta.proof_status) |status| {
+                    if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
+                    else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
+                    else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+                }
+            }
+            if (saw_unsafe) return .proved_unsafe;
+            if (saw_dynamic) return .dynamic;
+            if (saw_safe) return .proved_safe;
+        }
+        return .none;
+    }
+
     /// Return the origin_statement_id of the first source-map entry
     /// on `line` that's marked hoisted (either at the source-map entry
     /// level or via its op_meta). null when nothing on the line is
@@ -4519,6 +4552,22 @@ pub const Ui = struct {
                         break :blk self.scratchFmt("{s}{d:>6} <-{d}|", .{ marker, line, origin }) catch marker;
                     }
                     break :blk self.scratchFmt("{s}{d:>6}    |", .{ marker, line }) catch marker;
+                },
+                .fv => blk: {
+                    // FV-dead-branch: render a single-character
+                    // proof status next to each line that has a
+                    // verified guard. Aggregated across all ops on
+                    // the line: if any op is proved-safe AND no op
+                    // is unsafe/dynamic, show `✓`. If any op is
+                    // proved-unsafe show `✗`. Otherwise blank.
+                    const status = self.lineProofStatusSummary(line);
+                    const mark_text: []const u8 = switch (status) {
+                        .proved_safe => " S",
+                        .proved_unsafe => " X",
+                        .dynamic => " ?",
+                        .none => "  ",
+                    };
+                    break :blk self.scratchFmt("{s}{d:>6}{s}|", .{ marker, line, mark_text }) catch marker;
                 },
             };
             drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});

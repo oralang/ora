@@ -5138,6 +5138,11 @@ fn writeDebugInfoSidecar(
         }
         if (op.is_hoisted) try writer.writeAll(",\"is_hoisted\":true");
         if (op.is_duplicated) try writer.writeAll(",\"is_duplicated\":true");
+        // C5 FV-dead-branch: proof_status emission. Today the
+        // verifier doesn't thread per-statement results into this
+        // sidecar yet, so we always emit null. The schema slot is
+        // documented in lib/evm/src/debug_info.zig:OpMeta.
+        try writer.writeAll(",\"proof_status\":null");
         try writer.writeAll("}");
     }
     try writer.writeAll("]");

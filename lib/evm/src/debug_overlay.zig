@@ -13,6 +13,7 @@ pub const OverlayMode = enum {
     gas,
     folded,
     hoist,
+    fv,
 
     pub fn next(self: OverlayMode) OverlayMode {
         return switch (self) {
@@ -20,7 +21,8 @@ pub const OverlayMode = enum {
             .coverage => .gas,
             .gas => .folded,
             .folded => .hoist,
-            .hoist => .none,
+            .hoist => .fv,
+            .fv => .none,
         };
     }
 
@@ -31,6 +33,7 @@ pub const OverlayMode = enum {
             .gas => "gas",
             .folded => "folded",
             .hoist => "hoist",
+            .fv => "fv",
         };
     }
 
@@ -43,6 +46,7 @@ pub const OverlayMode = enum {
         if (std.mem.eql(u8, text, "gas")) return .gas;
         if (std.mem.eql(u8, text, "folded") or std.mem.eql(u8, text, "fold")) return .folded;
         if (std.mem.eql(u8, text, "hoist") or std.mem.eql(u8, text, "hoisted")) return .hoist;
+        if (std.mem.eql(u8, text, "fv") or std.mem.eql(u8, text, "proven")) return .fv;
         return null;
     }
 };
@@ -62,7 +66,7 @@ test "OverlayMode: cycle covers all modes and returns to none" {
 }
 
 test "OverlayMode: parse round-trips canonical names" {
-    inline for (&[_]OverlayMode{ .none, .coverage, .gas, .folded, .hoist }) |m| {
+    inline for (&[_]OverlayMode{ .none, .coverage, .gas, .folded, .hoist, .fv }) |m| {
         try testing.expectEqual(m, OverlayMode.parse(m.name()).?);
     }
 }
@@ -71,6 +75,7 @@ test "OverlayMode: parse accepts aliases" {
     try testing.expectEqual(OverlayMode.coverage, OverlayMode.parse("cov").?);
     try testing.expectEqual(OverlayMode.folded, OverlayMode.parse("fold").?);
     try testing.expectEqual(OverlayMode.hoist, OverlayMode.parse("hoisted").?);
+    try testing.expectEqual(OverlayMode.fv, OverlayMode.parse("proven").?);
 }
 
 test "OverlayMode: parse rejects unknown" {

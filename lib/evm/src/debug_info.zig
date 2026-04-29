@@ -109,6 +109,22 @@ pub const DebugInfo = struct {
         kind: ?[]const u8 = null,
         is_hoisted: bool = false,
         is_duplicated: bool = false,
+        /// Formal-verification proof status for guards / runtime
+        /// safety checks at this op. One of:
+        ///   - "proved_safe"   — verifier proved the guard's
+        ///     failure condition UNSAT, so the runtime check is
+        ///     dead code. The TUI's `fv` overlay dims these lines.
+        ///   - "proved_unsafe" — verifier proved the failure
+        ///     condition SAT (a counterexample exists). Surfaces
+        ///     as a compile error today, but the artifact still
+        ///     records it in case the user is debugging a
+        ///     known-bad fixture.
+        ///   - "dynamic"       — verifier returned UNDEF (solver
+        ///     timeout, undecidable). The check stays in runtime
+        ///     code and the overlay leaves it untouched.
+        ///   - null            — non-guard op, no verification
+        ///     attempted, or proof_status not yet emitted.
+        proof_status: ?[]const u8 = null,
     };
 
     pub const VisibleLocal = struct {
