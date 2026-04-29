@@ -2471,6 +2471,19 @@ fn collectBodyScopeDebugInfo(
                         null
                 else
                     null;
+                // B3 (statement-level liveness): the live range below
+                // is intentionally coarse — every `let` is treated as
+                // live for the rest of its enclosing body, regardless
+                // of where its actual last use is. The TUI's
+                // `bindingPastLiveRange` check therefore only fires
+                // at the body's closing brace. A future pass should
+                // run a backward dataflow walk over `body.statements`
+                // collecting AST name references, then narrow the
+                // end position to `statements[last_use_index].range.end`.
+                // No name-ref walker exists in the AST today; adding
+                // one is the prerequisite work. See
+                // tests/debug_artifacts/liveness_dead_after_use as
+                // the regression target.
                 try appendPatternDebugLocals(
                     allocator,
                     ast_file,
