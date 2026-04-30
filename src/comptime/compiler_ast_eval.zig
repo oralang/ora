@@ -261,16 +261,7 @@ const ConstEvaluator = struct {
                 .Switch => |switch_stmt| {
                     _ = self.evalExpr(switch_stmt.condition) catch null;
                     for (switch_stmt.arms) |arm| {
-                        switch (arm.pattern) {
-                            .Expr => |expr_id| _ = self.evalExpr(expr_id) catch null,
-                            .Range => |range_pattern| {
-                                _ = self.evalExpr(range_pattern.start) catch null;
-                                _ = self.evalExpr(range_pattern.end) catch null;
-                            },
-                            .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
-                            .Ok, .Err => {},
-                            .Else => {},
-                        }
+                        self.visitSwitchPattern(arm.pattern);
                         self.visitBody(arm.body);
                     }
                     if (switch_stmt.else_body) |else_body| self.visitBody(else_body);
@@ -300,6 +291,32 @@ const ConstEvaluator = struct {
 
     fn evalExprUncached(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?ConstValue {
         return self.evalExprImpl(expr_id, false);
+    }
+
+    fn visitSwitchPattern(self: *ConstEvaluator, pattern: ast.SwitchPattern) void {
+        switch (pattern) {
+            .Expr => |expr_id| _ = self.evalExpr(expr_id) catch null,
+            .Range => |range_pattern| {
+                _ = self.evalExpr(range_pattern.start) catch null;
+                _ = self.evalExpr(range_pattern.end) catch null;
+            },
+            .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| self.visitSwitchPattern(alternative),
+            .Ok, .Err, .Else => {},
+        }
+    }
+
+    fn evalSwitchPatternExprs(self: *ConstEvaluator, pattern: ast.SwitchPattern, comptime use_cache: bool) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| _ = try self.evalExprImpl(expr_id, use_cache),
+            .Range => |range_pattern| {
+                _ = try self.evalExprImpl(range_pattern.start, use_cache);
+                _ = try self.evalExprImpl(range_pattern.end, use_cache);
+            },
+            .NamedError => |named_error| _ = try self.evalExprImpl(named_error.callee, use_cache),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.evalSwitchPatternExprs(alternative, use_cache),
+            .Ok, .Err, .Else => {},
+        }
     }
 
     fn evalExprImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?ConstValue {
@@ -361,16 +378,7 @@ const ConstEvaluator = struct {
 
                 const condition = (try self.evalExprImpl(switch_expr.condition, use_cache)) orelse {
                     for (switch_expr.arms) |arm| {
-                        switch (arm.pattern) {
-                            .Expr => |pattern_expr| _ = try self.evalExprImpl(pattern_expr, use_cache),
-                            .Range => |range_pattern| {
-                                _ = try self.evalExprImpl(range_pattern.start, use_cache);
-                                _ = try self.evalExprImpl(range_pattern.end, use_cache);
-                            },
-                            .NamedError => |named_error| _ = try self.evalExprImpl(named_error.callee, use_cache),
-                            .Ok, .Err => {},
-                            .Else => {},
-                        }
+                        try self.evalSwitchPatternExprs(arm.pattern, use_cache);
                         _ = try self.evalExprImpl(arm.value, use_cache);
                     }
                     if (switch_expr.else_expr) |else_expr| _ = try self.evalExprImpl(else_expr, use_cache);
@@ -378,16 +386,7 @@ const ConstEvaluator = struct {
                 };
 
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| _ = try self.evalExprImpl(pattern_expr, use_cache),
-                        .Range => |range_pattern| {
-                            _ = try self.evalExprImpl(range_pattern.start, use_cache);
-                            _ = try self.evalExprImpl(range_pattern.end, use_cache);
-                        },
-                        .NamedError => |named_error| _ = try self.evalExprImpl(named_error.callee, use_cache),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.evalSwitchPatternExprs(arm.pattern, use_cache);
                 }
 
                 for (switch_expr.arms) |arm| {
@@ -1728,6 +1727,12 @@ const ConstEvaluator = struct {
         return switch (pattern) {
             .Expr => |expr_id| if (self.evalExpr(expr_id) catch null) |value| constEquals(condition, value) else false,
             .NamedError => false,
+            .Or => |or_pattern| blk: {
+                for (or_pattern.alternatives) |alternative| {
+                    if (self.patternMatches(condition, alternative)) break :blk true;
+                }
+                break :blk false;
+            },
             .Range => |range_pattern| blk: {
                 const start = (self.evalExpr(range_pattern.start) catch null) orelse break :blk false;
                 const finish = (self.evalExpr(range_pattern.end) catch null) orelse break :blk false;
@@ -1751,6 +1756,12 @@ const ConstEvaluator = struct {
     }
 
     fn patternMatchesCt(self: *ConstEvaluator, condition: CtValue, pattern: ast.SwitchPattern) !bool {
+        if (pattern == .Or) {
+            for (pattern.Or.alternatives) |alternative| {
+                if (try self.patternMatchesCt(condition, alternative)) return true;
+            }
+            return false;
+        }
         switch (condition) {
             .enum_val => |enum_value| {
                 if (self.sumVariantRefFromPattern(pattern)) |variant_ref| {
@@ -1788,6 +1799,15 @@ const ConstEvaluator = struct {
 
     fn bindSwitchPatternCtValue(self: *ConstEvaluator, condition: CtValue, pattern: ast.SwitchPattern) !void {
         switch (pattern) {
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    if (try self.patternMatchesCt(condition, alternative)) {
+                        try self.bindSwitchPatternCtValue(condition, alternative);
+                        return;
+                    }
+                }
+                return;
+            },
             .Ok => |pattern_id| {
                 const result = switch (condition) {
                     .error_union_val => |value| value,
@@ -2289,16 +2309,7 @@ const ConstEvaluator = struct {
             .Switch => |switch_stmt| blk: {
                 if (self.exprStage(switch_stmt.condition) == .runtime_only) break :blk .runtime_only;
                 for (switch_stmt.arms) |arm| {
-                    const pattern_stage = switch (arm.pattern) {
-                        .Expr => |expr_id| self.exprStage(expr_id),
-                        .Range => |range_pattern| self.mergeStages(.{
-                            self.exprStage(range_pattern.start),
-                            self.exprStage(range_pattern.end),
-                        }),
-                        .NamedError => self.namedErrorPatternStage(arm.pattern),
-                        .Ok, .Err => .comptime_ok,
-                        .Else => .comptime_ok,
-                    };
+                    const pattern_stage = self.switchPatternStage(arm.pattern);
                     if (pattern_stage == .runtime_only or self.bodyStage(arm.body) == .runtime_only) break :blk .runtime_only;
                 }
                 if (switch_stmt.else_body) |else_body| {
@@ -2361,16 +2372,7 @@ const ConstEvaluator = struct {
             .Switch => |switch_expr| blk: {
                 if (self.exprStage(switch_expr.condition) == .runtime_only) break :blk .runtime_only;
                 for (switch_expr.arms) |arm| {
-                    const pattern_stage = switch (arm.pattern) {
-                        .Expr => |pattern_expr| self.exprStage(pattern_expr),
-                        .Range => |range_pattern| self.mergeStages(.{
-                            self.exprStage(range_pattern.start),
-                            self.exprStage(range_pattern.end),
-                        }),
-                        .NamedError => self.namedErrorPatternStage(arm.pattern),
-                        .Ok, .Err => .comptime_ok,
-                        .Else => .comptime_ok,
-                    };
+                    const pattern_stage = self.switchPatternStage(arm.pattern);
                     if (pattern_stage == .runtime_only or self.exprStage(arm.value) == .runtime_only) break :blk .runtime_only;
                 }
                 if (switch_expr.else_expr) |else_expr| {
@@ -2386,6 +2388,29 @@ const ConstEvaluator = struct {
 
     fn namedErrorPatternStage(self: *ConstEvaluator, pattern: ast.SwitchPattern) Stage {
         return if (self.sumVariantRefFromPattern(pattern) != null) .comptime_ok else .runtime_only;
+    }
+
+    fn switchPatternStage(self: *ConstEvaluator, pattern: ast.SwitchPattern) Stage {
+        return switch (pattern) {
+            .Expr => |expr_id| self.exprStage(expr_id),
+            .Range => |range_pattern| self.mergeStages(.{
+                self.exprStage(range_pattern.start),
+                self.exprStage(range_pattern.end),
+            }),
+            .NamedError => self.namedErrorPatternStage(pattern),
+            .Or => |or_pattern| blk: {
+                var stage: Stage = .comptime_ok;
+                for (or_pattern.alternatives) |alternative| {
+                    switch (self.switchPatternStage(alternative)) {
+                        .runtime_only => break :blk .runtime_only,
+                        .comptime_only => stage = .comptime_only,
+                        .comptime_ok => {},
+                    }
+                }
+                break :blk stage;
+            },
+            .Ok, .Err, .Else => .comptime_ok,
+        };
     }
 
     fn argsStage(self: *ConstEvaluator, args: []const ast.ExprId) Stage {
@@ -3478,16 +3503,7 @@ const ConstEvaluator = struct {
             .Switch => |switch_stmt| {
                 _ = self.evalExpr(switch_stmt.condition) catch null;
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| _ = self.evalExpr(expr_id) catch null,
-                        .Range => |range_pattern| {
-                            _ = self.evalExpr(range_pattern.start) catch null;
-                            _ = self.evalExpr(range_pattern.end) catch null;
-                        },
-                        .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    self.visitSwitchPattern(arm.pattern);
                     self.visitBody(arm.body);
                 }
                 if (switch_stmt.else_body) |else_body| self.visitBody(else_body);

@@ -1759,7 +1759,20 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.DestructuringPattern, children.items);
         }
 
+        var has_rest = false;
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.DotDot)) {
+                if (has_rest) try self.reportHere("duplicate '..' in destructuring pattern");
+                has_rest = true;
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (!self.at(.Comma) and !self.at(.RightBrace)) {
+                    try self.reportHere("expected ',' or '}' after '..' in destructuring pattern");
+                }
+                if (self.at(.Comma)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                }
+                continue;
+            }
             try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
             if (self.at(.Comma)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
@@ -2561,7 +2574,10 @@ const Parser = struct {
             };
             return self.finishNode(SyntaxKind.ErrorExpr, &children);
         }
-        const start_expr = try self.parseExpressionNode(&.{ .Arrow, .DotDot, .DotDotDot, .RightBrace });
+        const start_expr = try self.parseExpressionNode(&.{ .Arrow, .DotDot, .DotDotDot, .LeftBrace, .RightBrace });
+        if (self.at(.LeftBrace)) {
+            return try self.parseSwitchStructPatternNode(start_expr);
+        }
         if (self.at(.DotDot) or self.at(.DotDotDot)) {
             const children = [_]ChildRef{
                 .{ .node = start_expr },
@@ -2571,6 +2587,37 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.RangeExpr, &children);
         }
         return start_expr;
+    }
+
+    fn parseSwitchStructPatternNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .node = base });
+        try children.append(self.allocator, .{ .token = self.bump() });
+        var has_rest = false;
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            if (self.at(.DotDot)) {
+                if (has_rest) try self.reportHere("duplicate '..' in switch pattern");
+                has_rest = true;
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (!self.at(.Comma) and !self.at(.RightBrace)) {
+                    try self.reportHere("expected ',' or '}' after '..' in switch pattern");
+                }
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
+        }
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated switch pattern", children.items);
+        }
+        return self.finishNode(SyntaxKind.StructLiteral, children.items);
     }
 
     fn parseCallExprNode(self: *Parser, callee: green.GreenNodeId, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
@@ -2914,6 +2961,24 @@ const Parser = struct {
                     }
                 }
                 break :blk false;
+            },
+            .FieldExpr => blk: {
+                const node = self.nodes.items[node_id.index()];
+                var saw_base = false;
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| {
+                            if (!saw_base) {
+                                saw_base = self.nodeCouldStartStructLiteral(child_id);
+                                continue;
+                            }
+                        },
+                    }
+                }
+                break :blk saw_base;
             },
             else => false,
         };

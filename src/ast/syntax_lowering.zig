@@ -886,8 +886,14 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerSwitchPatternNode(self: *Builder, node: SyntaxNode) !SwitchPattern {
+            if (try Lowering.lowerOrSwitchPatternNode(self, node)) |pattern| return pattern;
             if (try Lowering.lowerMatchConstructorPatternNode(self, node)) |pattern| return pattern;
             return switch (node.kind()) {
+                .NameExpr => blk: {
+                    const token = firstDirectTokenOfKind(node, .Identifier) orelse break :blk .{ .Expr = try Lowering.lowerExpressionNode(self, node) };
+                    if (!std.mem.eql(u8, tokenText(token), "_")) break :blk .{ .Expr = try Lowering.lowerExpressionNode(self, node) };
+                    break :blk .{ .Else = token.range() };
+                },
                 .RangeExpr => .{ .Range = try Lowering.lowerRangePatternNode(self, node) },
                 .ErrorExpr => blk: {
                     const token = firstToken(node) orelse break :blk .{ .Expr = try Lowering.malformedExpr(self, node, "missing switch else token") };
@@ -898,7 +904,35 @@ pub fn mixin(Builder: type) type {
             };
         }
 
+        fn lowerOrSwitchPatternNode(self: *Builder, node: SyntaxNode) anyerror!?SwitchPattern {
+            if (node.kind() != .BinaryExpr) return null;
+            const op_token = firstDirectToken(node) orelse return null;
+            if (op_token.kind() != .Pipe) return null;
+            const lhs_node = nthDirectNode(node, 0) orelse return null;
+            const rhs_node = nthDirectNode(node, 1) orelse return null;
+
+            var alternatives: std.ArrayList(SwitchPattern) = .{};
+            defer alternatives.deinit(self.allocator);
+            try Lowering.appendOrSwitchPatternAlternative(self, lhs_node, &alternatives);
+            try Lowering.appendOrSwitchPatternAlternative(self, rhs_node, &alternatives);
+            return .{ .Or = .{
+                .range = node.range(),
+                .alternatives = try alternatives.toOwnedSlice(self.allocator),
+            } };
+        }
+
+        fn appendOrSwitchPatternAlternative(self: *Builder, node: SyntaxNode, alternatives: *std.ArrayList(SwitchPattern)) anyerror!void {
+            if (try Lowering.lowerOrSwitchPatternNode(self, node)) |pattern| {
+                try alternatives.appendSlice(self.allocator, pattern.Or.alternatives);
+                return;
+            }
+            try alternatives.append(self.allocator, try Lowering.lowerSwitchPatternNode(self, node));
+        }
+
         fn lowerMatchConstructorPatternNode(self: *Builder, node: SyntaxNode) !?SwitchPattern {
+            if (node.kind() == .StructLiteral) {
+                return try Lowering.lowerStructMatchConstructorPatternNode(self, node);
+            }
             if (node.kind() != .CallExpr) return null;
 
             const callee_node = nthDirectNode(node, 0) orelse return null;
@@ -935,6 +969,42 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .callee = callee_expr,
                 .bindings = try self.allocator.dupe(PatternId, bindings.items),
+            } };
+        }
+
+        fn lowerStructMatchConstructorPatternNode(self: *Builder, node: SyntaxNode) !?SwitchPattern {
+            const callee_node = nthDirectNode(node, 0) orelse return null;
+            const callee_expr = try Lowering.lowerExpressionNode(self, callee_node);
+            switch (Support.exprRef(self, callee_expr).*) {
+                .Field => {},
+                else => return null,
+            }
+
+            var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            defer fields.deinit(self.allocator);
+            var has_rest = false;
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => |token| {
+                        if (token.kind() == .DotDot) has_rest = true;
+                    },
+                    .node => |field_node| {
+                        if (field_node.kind() != .DestructuringField) continue;
+                        try fields.append(self.allocator, try Lowering.lowerDestructuringFieldNode(self, field_node));
+                    },
+                }
+            }
+            const destructure = try Support.pushPattern(self, .{ .StructDestructure = .{
+                .range = node.range(),
+                .fields = try fields.toOwnedSlice(self.allocator),
+                .has_rest = has_rest,
+            } });
+            return .{ .NamedError = .{
+                .range = node.range(),
+                .callee = callee_expr,
+                .bindings = try self.allocator.dupe(PatternId, &[_]PatternId{destructure}),
             } };
         }
 
@@ -1111,10 +1181,13 @@ pub fn mixin(Builder: type) type {
 
         fn lowerDestructuringPatternNode(self: *Builder, node: SyntaxNode) !PatternId {
             var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            var has_rest = false;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
-                    .token => {},
+                    .token => |token| {
+                        if (token.kind() == .DotDot) has_rest = true;
+                    },
                     .node => |field_node| {
                         if (field_node.kind() != .DestructuringField) continue;
                         try fields.append(self.allocator, try Lowering.lowerDestructuringFieldNode(self, field_node));
@@ -1124,6 +1197,7 @@ pub fn mixin(Builder: type) type {
             return Support.pushPattern(self, .{ .StructDestructure = .{
                 .range = node.range(),
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .has_rest = has_rest,
             } });
         }
 
@@ -1452,6 +1526,10 @@ pub fn mixin(Builder: type) type {
                 .Name => |name| name.name,
                 .TypeValue => |type_value| Lowering.typeValueBaseName(self, type_value.type_expr),
                 .Group => |group| Lowering.structLiteralTypeName(self, group.expr),
+                .Field => |field| blk: {
+                    const base = Lowering.structLiteralTypeName(self, field.base) orelse break :blk null;
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ base, field.name }) catch null;
+                },
                 .Call => |call| blk: {
                     const generic_type = Lowering.callStyleGenericTypeExpr(self, call) catch break :blk null;
                     if (generic_type) |type_expr| break :blk Lowering.typeValueBaseName(self, type_expr);

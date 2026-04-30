@@ -173,6 +173,27 @@ const Resolver = struct {
         }
     }
 
+    fn resolveSwitchPattern(self: *Resolver, pattern: ast.SwitchPattern, env: *const Env, arm_env: *Env) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.resolveExpr(expr_id, env),
+            .Range => |range_pattern| {
+                try self.resolveExpr(range_pattern.start, env);
+                try self.resolveExpr(range_pattern.end, env);
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    try self.resolveSwitchPattern(alternative, env, arm_env);
+                }
+            },
+            .Ok, .Err => |pattern_id| try self.bindPatternIfName(arm_env, pattern_id),
+            .NamedError => |named_error| {
+                try self.resolveExpr(named_error.callee, env);
+                for (named_error.bindings) |pattern_id| try self.bindPatternIfName(arm_env, pattern_id);
+            },
+            .Else => {},
+        }
+    }
+
     fn resolveStmt(self: *Resolver, statement_id: ast.StmtId, env: *Env) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| {
@@ -207,6 +228,11 @@ const Resolver = struct {
                         .Range => |range_pattern| {
                             try self.resolveExpr(range_pattern.start, env);
                             try self.resolveExpr(range_pattern.end, env);
+                        },
+                        .Or => |or_pattern| {
+                            for (or_pattern.alternatives) |alternative| {
+                                try self.resolveSwitchPattern(alternative, env, &arm_env);
+                            }
                         },
                         .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
                         .NamedError => |named_error| {
@@ -299,6 +325,11 @@ const Resolver = struct {
                         .Range => |range_pattern| {
                             try self.resolveExpr(range_pattern.start, env);
                             try self.resolveExpr(range_pattern.end, env);
+                        },
+                        .Or => |or_pattern| {
+                            for (or_pattern.alternatives) |alternative| {
+                                try self.resolveSwitchPattern(alternative, env, &arm_env);
+                            }
                         },
                         .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
                         .NamedError => |named_error| {

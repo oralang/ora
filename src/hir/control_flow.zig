@@ -1023,16 +1023,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 switch_stmt.arms,
                 switch_stmt.else_body != null,
             );
-            for (switch_stmt.arms, 0..) |arm, case_index| {
-                const arm_terminated = try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.pattern, raw_condition, arm.range, locals, carried_locals.items, has_return);
+            var case_index: usize = 0;
+            for (switch_stmt.arms) |arm| {
+                const arm_terminated = try @This().lowerSwitchArmCases(self, op, &case_index, arm.body, arm.pattern, raw_condition, arm.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and arm_terminated;
             }
 
             if (switch_stmt.else_body) |else_body| {
-                const else_terminated = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
+                const else_terminated = try self.lowerSwitchCaseBlock(op, case_index, else_body, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and else_terminated;
             } else if (carried_locals.items.len > 0) {
-                _ = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
+                _ = try self.lowerSwitchCaseBlock(op, case_index, null, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
             }
 
             mlir.oraSwitchOpSetCasePatterns(
@@ -1071,9 +1072,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var seen_true = false;
                 var seen_false = false;
                 for (arms) |arm| {
-                    const value = @This().switchPatternOrdinal(self, arm.pattern) orelse return false;
-                    if (value == 0) seen_false = true;
-                    if (value == 1) seen_true = true;
+                    if (!@This().collectBoolSwitchPatternCoverage(self, arm.pattern, &seen_true, &seen_false)) return false;
                 }
                 return seen_true and seen_false;
             }
@@ -1096,6 +1095,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return @This().enumPatternsAreExhaustive(self, arms, enum_item.variants.len);
         }
 
+        fn collectBoolSwitchPatternCoverage(self: *FunctionLowerer, pattern: ast.SwitchPattern, seen_true: *bool, seen_false: *bool) bool {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        if (!@This().collectBoolSwitchPatternCoverage(self, alternative, seen_true, seen_false)) return false;
+                    }
+                    return true;
+                },
+                else => {
+                    const value = @This().switchPatternOrdinal(self, pattern) orelse return false;
+                    if (value == 0) seen_false.* = true;
+                    if (value == 1) seen_true.* = true;
+                    return true;
+                },
+            }
+        }
+
         fn switchPatternOrdinal(self: *FunctionLowerer, pattern: ast.SwitchPattern) ?i64 {
             return switch (pattern) {
                 .Expr => |pattern_expr| self.switchPatternValue(pattern_expr),
@@ -1109,11 +1125,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             defer seen.deinit();
 
             for (arms) |arm| {
-                const value = @This().switchPatternOrdinal(self, arm.pattern) orelse return false;
-                seen.put(value, {}) catch return false;
+                if (!@This().collectSwitchPatternOrdinals(self, arm.pattern, &seen)) return false;
             }
 
             return seen.count() == variant_count;
+        }
+
+        fn collectSwitchPatternOrdinals(self: *FunctionLowerer, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(i64, void)) bool {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        if (!@This().collectSwitchPatternOrdinals(self, alternative, seen)) return false;
+                    }
+                    return true;
+                },
+                else => {
+                    const value = @This().switchPatternOrdinal(self, pattern) orelse return false;
+                    seen.put(value, {}) catch return false;
+                    return true;
+                },
+            }
         }
 
         fn errorUnionPatternsAreExhaustive(
@@ -1298,7 +1329,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn buildSwitchPatternData(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, synthesize_default_case: bool) anyerror!?SwitchPatternData {
-            const total_cases: usize = switch_stmt.arms.len + (if (switch_stmt.else_body != null or synthesize_default_case) @as(usize, 1) else 0);
+            var total_cases: usize = if (switch_stmt.else_body != null or synthesize_default_case) 1 else 0;
+            for (switch_stmt.arms) |arm| total_cases += @This().switchPatternCaseCount(arm.pattern);
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
@@ -1324,7 +1356,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn buildSwitchExprPatternData(self: *FunctionLowerer, switch_expr: ast.SwitchExpr) anyerror!?SwitchPatternData {
-            const total_cases: usize = switch_expr.arms.len + (if (switch_expr.else_expr != null) @as(usize, 1) else 0);
+            var total_cases: usize = if (switch_expr.else_expr != null) 1 else 0;
+            for (switch_expr.arms) |arm| total_cases += @This().switchPatternCaseCount(arm.pattern);
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
@@ -1376,10 +1409,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try data.range_ends.append(self.parent.allocator, 0);
                     try data.case_kinds.append(self.parent.allocator, 0);
                 },
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        if (!try self.appendSwitchPatternData(alternative, data)) return false;
+                    }
+                },
                 .Ok, .Err => return false,
                 .Else => unreachable,
             }
             return true;
+        }
+
+        fn switchPatternCaseCount(pattern: ast.SwitchPattern) usize {
+            return switch (pattern) {
+                .Or => |or_pattern| blk: {
+                    var count: usize = 0;
+                    for (or_pattern.alternatives) |alternative| count += @This().switchPatternCaseCount(alternative);
+                    break :blk count;
+                },
+                else => 1,
+            };
         }
 
         pub fn lowerSwitchCaseBlock(
@@ -1426,6 +1475,35 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return terminated;
         }
 
+        fn lowerSwitchArmCases(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            case_index: *usize,
+            body: ast.BodyId,
+            pattern: ast.SwitchPattern,
+            raw_condition: mlir.MlirValue,
+            range: source.TextRange,
+            locals: *LocalEnv,
+            carried_locals: []const LocalId,
+            has_return: bool,
+        ) anyerror!bool {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    var all_terminate = true;
+                    for (or_pattern.alternatives) |alternative| {
+                        const terminated = try @This().lowerSwitchArmCases(self, op, case_index, body, alternative, raw_condition, range, locals, carried_locals, has_return);
+                        all_terminate = all_terminate and terminated;
+                    }
+                    return all_terminate;
+                },
+                else => {
+                    const terminated = try self.lowerSwitchCaseBlock(op, case_index.*, body, pattern, raw_condition, range, locals, carried_locals, has_return);
+                    case_index.* += 1;
+                    return terminated;
+                },
+            }
+        }
+
         pub fn lowerSwitchExpr(self: *FunctionLowerer, expr_id: ast.ExprId, switch_expr: ast.SwitchExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
             const raw_condition = try @This().lowerSwitchRawCondition(self, switch_expr.condition, locals);
             const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_expr.range);
@@ -1446,21 +1524,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
-            for (switch_expr.arms, 0..) |arm, case_index| {
-                const case_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index);
-                if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
-
-                var case_lowerer = self.*;
-                case_lowerer.block = case_block;
-                var case_locals = try self.cloneLocals(locals);
-                try @This().bindAdtMatchPatternValue(&case_lowerer, raw_condition, arm.pattern, arm.range, &case_locals);
-                const raw_value = try case_lowerer.lowerExpr(arm.value, &case_locals);
-                const value = try case_lowerer.convertValueForFlow(raw_value, result_type, arm.range);
-                try appendOraYieldValues(self.parent.context, case_block, self.parent.location(arm.range), &[_]mlir.MlirValue{value});
+            var case_index: usize = 0;
+            for (switch_expr.arms) |arm| {
+                try @This().lowerSwitchExprArmCases(self, op, &case_index, arm.value, arm.pattern, raw_condition, arm.range, locals, result_type);
             }
 
             if (switch_expr.else_expr) |else_expr| {
-                const else_block = mlir.oraSwitchExprOpGetCaseBlock(op, switch_expr.arms.len);
+                const else_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index);
                 if (mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
 
                 var else_lowerer = self.*;
@@ -1480,6 +1550,39 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 pattern_data.case_values.items.len,
             );
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerSwitchExprArmCases(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            case_index: *usize,
+            value_expr: ast.ExprId,
+            pattern: ast.SwitchPattern,
+            raw_condition: mlir.MlirValue,
+            range: source.TextRange,
+            locals: *LocalEnv,
+            result_type: mlir.MlirType,
+        ) anyerror!void {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        try @This().lowerSwitchExprArmCases(self, op, case_index, value_expr, alternative, raw_condition, range, locals, result_type);
+                    }
+                },
+                else => {
+                    const case_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index.*);
+                    if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
+
+                    var case_lowerer = self.*;
+                    case_lowerer.block = case_block;
+                    var case_locals = try self.cloneLocals(locals);
+                    try @This().bindAdtMatchPatternValue(&case_lowerer, raw_condition, pattern, range, &case_locals);
+                    const raw_value = try case_lowerer.lowerExpr(value_expr, &case_locals);
+                    const value = try case_lowerer.convertValueForFlow(raw_value, result_type, range);
+                    try appendOraYieldValues(self.parent.context, case_block, self.parent.location(range), &[_]mlir.MlirValue{value});
+                    case_index.* += 1;
+                },
+            }
         }
 
         fn lowerErrorUnionMatchExpr(
@@ -1707,7 +1810,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var any_uses = false;
             for (named.bindings) |pattern_id| {
-                if (@This().patternHasUses(self, pattern_id)) {
+                if (@This().patternNeedsBinding(self, pattern_id)) {
                     any_uses = true;
                     break;
                 }
@@ -1731,7 +1834,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const tuple_count = mlir.oraTupleTypeGetNumElements(payload_type);
             if (tuple_count == named.bindings.len and tuple_count != 0) {
                 for (named.bindings, 0..) |pattern_id, index| {
-                    if (!@This().patternHasUses(self, pattern_id)) continue;
+                    if (!@This().patternNeedsBinding(self, pattern_id)) continue;
                     const element_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const extract = mlir.oraTupleExtractOpCreate(
                         self.parent.context,
@@ -1747,9 +1850,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const field_count = mlir.oraAnonymousStructTypeGetFieldCount(payload_type);
+            if (field_count != 0 and named.bindings.len == 1) {
+                switch (self.parent.file.pattern(named.bindings[0]).*) {
+                    .StructDestructure => |destructure| {
+                        try @This().bindAdtNamedPayloadDestructure(self, aggregate, destructure, range, locals);
+                        return;
+                    },
+                    else => {},
+                }
+            }
             if (field_count == named.bindings.len and field_count != 0) {
                 for (named.bindings, 0..) |pattern_id, index| {
-                    if (!@This().patternHasUses(self, pattern_id)) continue;
+                    if (!@This().patternNeedsBinding(self, pattern_id)) continue;
                     const field_name = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
                     const field_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const extract = mlir.oraStructFieldExtractOpCreate(
@@ -1767,6 +1879,29 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (named.bindings.len == 1) {
                 try self.bindPatternValue(named.bindings[0], aggregate, locals);
+            }
+        }
+
+        fn bindAdtNamedPayloadDestructure(
+            self: *FunctionLowerer,
+            aggregate: mlir.MlirValue,
+            destructure: ast.nodes.StructDestructurePattern,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!void {
+            _ = range;
+            for (destructure.fields) |field| {
+                if (!@This().patternNeedsBinding(self, field.binding)) continue;
+                const field_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()].type, field.range);
+                const extract = mlir.oraStructFieldExtractOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    aggregate,
+                    strRef(field.name),
+                    field_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
+                try self.bindPatternValue(field.binding, appendValueOp(self.block, extract), locals);
             }
         }
 
@@ -1802,7 +1937,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!void {
             switch (pattern) {
                 .Ok => |pattern_id| {
-                    if (!@This().patternHasUses(self, pattern_id)) return;
+                    if (!@This().patternNeedsBinding(self, pattern_id)) return;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
@@ -1810,7 +1945,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try self.bindPatternValue(pattern_id, value, locals);
                 },
                 .Err => |pattern_id| {
-                    if (!@This().patternHasUses(self, pattern_id)) return;
+                    if (!@This().patternNeedsBinding(self, pattern_id)) return;
                     const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
                     if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
@@ -1820,7 +1955,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .NamedError => |named_error| {
                     var any_uses = false;
                     for (named_error.bindings) |pattern_id| {
-                        if (@This().patternHasUses(self, pattern_id)) {
+                        if (@This().patternNeedsBinding(self, pattern_id)) {
                             any_uses = true;
                             break;
                         }
@@ -1860,7 +1995,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const aggregate = appendValueOp(self.block, get_error);
 
                     for (named_error.bindings, 0..) |pattern_id, index| {
-                        if (!@This().patternHasUses(self, pattern_id)) continue;
+                        if (!@This().patternNeedsBinding(self, pattern_id)) continue;
                         const element_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                         const extract = mlir.oraTupleExtractOpCreate(
                             self.parent.context,
@@ -1878,7 +2013,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
+        fn patternNeedsBinding(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            return @This().patternHasUses(self, pattern_id) or @This().patternBindsUsableName(self, pattern_id);
+        }
+
+        fn patternBindsUsableName(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| !std.mem.eql(u8, name.name, "_"),
+                .StructDestructure => |destructure| blk: {
+                    for (destructure.fields) |field| {
+                        if (@This().patternBindsUsableName(self, field.binding)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                else => false,
+            };
+        }
+
         fn patternHasUses(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            switch (self.parent.file.pattern(pattern_id).*) {
+                .StructDestructure => |destructure| {
+                    for (destructure.fields) |field| {
+                        if (@This().patternHasUses(self, field.binding)) return true;
+                    }
+                },
+                else => {},
+            }
             for (self.parent.resolution.expr_bindings) |binding| {
                 if (binding) |resolved| switch (resolved) {
                     .pattern => |bound_pattern_id| if (bound_pattern_id == pattern_id) return true,

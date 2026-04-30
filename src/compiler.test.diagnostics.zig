@@ -682,6 +682,146 @@ test "compiler rejects payload enum match patterns with wrong destructure arity"
     try expectDiagnosticProbeContains(source_text, .typecheck, "ADT tuple payload bindings must match the payload field count");
 }
 
+test "compiler rejects named payload enum field literals with missing unknown duplicate or wrong typed fields" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn missing(code: u256) -> Event {
+        \\    return Event.Named { code: code };
+        \\}
+        \\
+        \\fn unknown(code: u256, amount: u256) -> Event {
+        \\    return Event.Named { code: code, amount: amount, extra: amount };
+        \\}
+        \\
+        \\fn duplicate(code: u256, amount: u256) -> Event {
+        \\    return Event.Named { code: code, amount: amount, code: amount };
+        \\}
+        \\
+        \\fn wrong_type(flag: bool, amount: u256) -> Event {
+        \\    return Event.Named { code: flag, amount: amount };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "missing field 'amount' for ADT variant 'Named'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown field 'extra' for ADT variant 'Named'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "duplicate field 'code' for ADT variant 'Named'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "expected type 'u256', found 'bool'"));
+}
+
+test "compiler rejects named payload enum structural match patterns with missing unknown or duplicate fields" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn missing(value: Event) -> u256 {
+        \\    return switch (value) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { code } => code,
+        \\    };
+        \\}
+        \\
+        \\fn unknown(value: Event) -> u256 {
+        \\    return switch (value) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { code, extra } => code,
+        \\    };
+        \\}
+        \\
+        \\fn duplicate(value: Event) -> u256 {
+        \\    return switch (value) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { code, code: other } => code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "duplicate destructuring field name 'code'"));
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "ADT named payload destructure must bind every payload field"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "missing ADT payload field 'amount'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown ADT payload field 'extra'"));
+}
+
+test "compiler warns when wildcard enum match arm covers named variants" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\fn classify(value: Event) -> u256 {
+        \\    return switch (value) {
+        \\        Event.Value(_) => 1,
+        \\        _ => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "wildcard match arm covers named variants"));
+}
+
+test "compiler rejects enum or-pattern alternatives with mismatched bindings" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Value(x) | Event.Empty => x,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "or-pattern alternatives must bind the same names"));
+}
+
+test "compiler rejects enum or-pattern alternatives with incompatible binding types" {
+    const source_text =
+        \\enum Event {
+        \\    Number(u256),
+        \\    Flag(bool),
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Number(x) | Event.Flag(x) => 1,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "or-pattern binding 'x' has incompatible types"));
+}
+
 test "compiler rejects directly recursive payload-carrying enums" {
     const source_text =
         \\enum Tree {

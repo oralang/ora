@@ -2583,6 +2583,35 @@ test "compiler lowers payload-carrying enum constructors to ADT construct ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_init"));
 }
 
+test "compiler lowers named payload enum field literals to ADT construct ops" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn named(code: u256, amount: u256) -> Event {
+        \\    return Event.Named {
+        \\        amount: amount,
+        \\        code: code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.construct"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_init"));
+}
+
 test "compiler lowers payload-carrying enum variant switch to ADT tag" {
     const source_text =
         \\enum Event {
@@ -2645,4 +2674,149 @@ test "compiler lowers payload-carrying enum match bindings to ADT payload extrac
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.tuple_extract"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}
+
+test "compiler lowers named payload enum structural match patterns by field name" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { amount: value, code } => value + code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.payload"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}
+
+test "compiler lowers named payload enum structural match rest patterns" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { amount: value, .. } => value,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.payload"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.struct_field_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 2, "ora.struct_field_extract"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.switch_expr\""));
+}
+
+test "compiler lowers wildcard enum match arms without binding payload wildcards" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Value(_) => 1,
+        \\        _ => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.payload"));
+}
+
+test "compiler lowers no-bind enum or-pattern arms as separate cases" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Other,
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty | Event.Value(_) => 1,
+        \\        Event.Other => 2,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.tag"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.adt.payload"));
+}
+
+test "compiler lowers shared-binding enum or-pattern arms as separate payload cases" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Other(u256),
+        \\}
+        \\
+        \\fn classify(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Value(x) | Event.Other(x) => x + 1,
+        \\        Event.Empty => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_expr"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.adt.payload"));
 }

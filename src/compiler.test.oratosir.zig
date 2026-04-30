@@ -149,6 +149,42 @@ test "compiler converts aggregate ADT payload matches through compiler-managed p
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts named aggregate ADT payload structural matches through OraToSIR" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\fn make() -> Event {
+        \\    return Event.Named {
+        \\        amount: 20,
+        \\        code: 10,
+        \\    };
+        \\}
+        \\
+        \\fn sum(event: Event) -> u256 {
+        \\    return switch (event) {
+        \\        Event.Empty => 0,
+        \\        Event.Named { amount: value, code } => value + code,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn sum:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload256"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts nested ADT fields through compiler-managed handle storage" {
     const source_text =
         \\struct Holder {

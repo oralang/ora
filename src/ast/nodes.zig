@@ -156,6 +156,7 @@ pub const StructDestructureField = struct {
 pub const StructDestructurePattern = struct {
     range: source.TextRange,
     fields: []StructDestructureField,
+    has_rest: bool = false,
 };
 
 pub const Expr = union(enum) {
@@ -403,10 +404,16 @@ pub const ForStmt = struct {
 pub const SwitchPattern = union(enum) {
     Expr: ExprId,
     Range: RangeSwitchPattern,
+    Or: OrSwitchPattern,
     Ok: PatternId,
     Err: PatternId,
     NamedError: NamedErrorSwitchPattern,
     Else: source.TextRange,
+};
+
+pub const OrSwitchPattern = struct {
+    range: source.TextRange,
+    alternatives: []const SwitchPattern,
 };
 
 pub const NamedErrorSwitchPattern = struct {

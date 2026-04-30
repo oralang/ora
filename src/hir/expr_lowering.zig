@@ -2838,6 +2838,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
             const expr_type = self.parent.typecheck.exprType(expr_id);
+            if (expr_type.kind() == .enum_) {
+                if (@This().adtStructLiteralVariantName(struct_literal.type_name)) |_| {
+                    return try @This().lowerAdtNamedPayloadStructLiteral(self, expr_id, struct_literal, locals);
+                }
+            }
             if (expr_type.kind() == .anonymous_struct) {
                 return try @This().lowerAnonymousStructLiteral(self, expr_id, struct_literal, expr_type.anonymous_struct.fields, locals);
             }
@@ -2901,6 +2906,77 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerAdtNamedPayloadStructLiteral(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            struct_literal: ast.StructLiteralExpr,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const variant_name = @This().adtStructLiteralVariantName(struct_literal.type_name) orelse return error.MlirOperationCreationFailed;
+            const result_type = self.parent.lowerExprType(expr_id);
+            if (!mlir.oraTypeIsAAdt(result_type)) return error.MlirOperationCreationFailed;
+
+            const payload_type = @This().adtVariantPayloadType(result_type, variant_name) orelse return error.MlirOperationCreationFailed;
+            if (mlir.oraTypeIsANone(payload_type)) {
+                const op = mlir.oraAdtConstructOpCreate(
+                    self.parent.context,
+                    self.parent.location(struct_literal.range),
+                    strRef(variant_name),
+                    null,
+                    0,
+                    result_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(payload_type);
+            if (field_count == 0) return error.MlirOperationCreationFailed;
+
+            const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), variant_name);
+            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            defer fields.deinit(self.parent.allocator);
+            for (0..field_count) |index| {
+                const field_name_ref = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
+                const field_name = field_name_ref.data[0..field_name_ref.length];
+                const init = findStructFieldInit(struct_literal.fields, field_name) orelse return error.MlirOperationCreationFailed;
+                const raw = try self.lowerExpr(init.value, locals);
+                const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .anonymous_struct and index < payload_sema_type.?.anonymous_struct.fields.len)
+                    try self.convertValueForSemaFlow(raw, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range)
+                else
+                    try self.convertValueForFlow(raw, mlir.oraAnonymousStructTypeGetFieldType(payload_type, index), init.range);
+                try fields.append(self.parent.allocator, value);
+            }
+
+            const payload_op = mlir.oraStructInitOpCreate(
+                self.parent.context,
+                self.parent.location(struct_literal.range),
+                if (fields.items.len == 0) null else fields.items.ptr,
+                fields.items.len,
+                payload_type,
+            );
+            if (mlir.oraOperationIsNull(payload_op)) return error.MlirOperationCreationFailed;
+            const payload = appendValueOp(self.block, payload_op);
+
+            const operands = [_]mlir.MlirValue{payload};
+            const op = mlir.oraAdtConstructOpCreate(
+                self.parent.context,
+                self.parent.location(struct_literal.range),
+                strRef(variant_name),
+                &operands,
+                operands.len,
+                result_type,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, op);
+        }
+
+        fn adtStructLiteralVariantName(type_name: []const u8) ?[]const u8 {
+            const dot_index = std.mem.lastIndexOfScalar(u8, type_name, '.') orelse return null;
+            if (dot_index + 1 >= type_name.len) return null;
+            return type_name[dot_index + 1 ..];
         }
 
         fn lowerInstantiatedStructLiteral(

@@ -1,0 +1,36 @@
+// ==========================================
+// ADT ENUM OR-PATTERNS
+// ==========================================
+// Covers enum match arms that share a body across multiple variants.
+
+enum Event {
+    Empty,
+    Value(u256),
+    Other(u256),
+    Done,
+}
+
+contract EnumOrPatterns {
+    fn choose(flag: bool, amount: u256) -> Event {
+        if (flag) {
+            return Event.Value(amount);
+        }
+        return Event.Other(amount);
+    }
+
+    pub fn shared_payload_binding(flag: bool, amount: u256) -> u256 {
+        let event = choose(flag, amount);
+        return switch (event) {
+            Event.Value(x) | Event.Other(x) => x,
+            Event.Empty | Event.Done => 0,
+        };
+    }
+
+    pub fn no_bind_or_pattern(flag: bool, amount: u256) -> u256 {
+        let event = choose(flag, amount);
+        return switch (event) {
+            Event.Value(_) | Event.Other(_) => 1,
+            Event.Empty | Event.Done => 0,
+        };
+    }
+}

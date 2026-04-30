@@ -1877,17 +1877,7 @@ const TypeChecker = struct {
                 const condition_type = self.expr_types[switch_stmt.condition.index()];
                 try self.validateMatchPatternFamily(condition_type, switch_stmt.arms, switch_stmt.range);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.visitExpr(expr_id),
-                        .Range => |range_pattern| {
-                            try self.visitExpr(range_pattern.start);
-                            try self.visitExpr(range_pattern.end);
-                        },
-                        .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
-                        .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
-                        .NamedError => |named_error| try self.assignConstructorMatchPatternType(named_error, condition_type, arm.range),
-                        .Else => {},
-                    }
+                    try self.visitSwitchPattern(arm.pattern, condition_type, arm.range);
                     try self.visitBody(arm.body);
                 }
                 if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
@@ -1996,12 +1986,16 @@ const TypeChecker = struct {
             },
             .StructLiteral => |struct_literal| {
                 for (struct_literal.fields) |field| try self.visitExpr(field.value);
-                self.expr_types[expr_id.index()] = if (struct_literal.type_expr) |type_expr|
+                const literal_type = if (struct_literal.type_expr) |type_expr|
                     try self.resolveTypeExprInCurrentContext(type_expr)
                 else if (struct_literal.type_name.len != 0)
                     self.structLiteralType(struct_literal.type_name)
                 else
-                    .{ .unknown = {} };
+                    Type{ .unknown = {} };
+                self.expr_types[expr_id.index()] = literal_type;
+                if (literal_type.kind() == .enum_) {
+                    try self.checkEnumVariantStructLiteral(expr_id, struct_literal);
+                }
             },
             .ExternalProxy => |proxy| {
                 try self.visitExpr(proxy.address_expr);
@@ -2036,17 +2030,7 @@ const TypeChecker = struct {
                 var result_type: Type = .{ .unknown = {} };
                 var saw_mismatch = false;
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.visitExpr(pattern_expr),
-                        .Range => |range_pattern| {
-                            try self.visitExpr(range_pattern.start);
-                            try self.visitExpr(range_pattern.end);
-                        },
-                        .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, arm.range),
-                        .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, arm.range),
-                        .NamedError => |named_error| try self.assignConstructorMatchPatternType(named_error, condition_type, arm.range),
-                        .Else => {},
-                    }
+                    try self.visitSwitchPattern(arm.pattern, condition_type, arm.range);
                     try self.visitExpr(arm.value);
                     const arm_type = self.expr_types[arm.value.index()];
                     if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !typesAssignable(result_type, arm_type) and !typesAssignable(arm_type, result_type)) {
@@ -2614,15 +2598,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.validateGenericExprInstantiation(switch_stmt.condition, bindings);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
-                        .Range => |range_pattern| {
-                            try self.validateGenericExprInstantiation(range_pattern.start, bindings);
-                            try self.validateGenericExprInstantiation(range_pattern.end, bindings);
-                        },
-                        .NamedError => |named_error| try self.validateGenericExprInstantiation(named_error.callee, bindings),
-                        .Ok, .Err, .Else => {},
-                    }
+                    try self.validateGenericSwitchPatternInstantiation(arm.pattern, bindings);
                     try self.validateGenericBodyInstantiation(arm.body, bindings);
                 }
                 if (switch_stmt.else_body) |else_body| try self.validateGenericBodyInstantiation(else_body, bindings);
@@ -2661,6 +2637,19 @@ const TypeChecker = struct {
         }
     }
 
+    fn validateGenericSwitchPatternInstantiation(self: *TypeChecker, pattern: ast.SwitchPattern, bindings: []const GenericTypeBinding) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
+            .Range => |range_pattern| {
+                try self.validateGenericExprInstantiation(range_pattern.start, bindings);
+                try self.validateGenericExprInstantiation(range_pattern.end, bindings);
+            },
+            .NamedError => |named_error| try self.validateGenericExprInstantiation(named_error.callee, bindings),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateGenericSwitchPatternInstantiation(alternative, bindings),
+            .Ok, .Err, .Else => {},
+        }
+    }
+
     fn validateGenericExprInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) anyerror!void {
         switch (self.file.expression(expr_id).*) {
             .TypeValue, .Comptime, .ExternalProxy, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
@@ -2683,15 +2672,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.validateGenericExprInstantiation(switch_expr.condition, bindings);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.validateGenericExprInstantiation(pattern_expr, bindings),
-                        .Range => |range_pattern| {
-                            try self.validateGenericExprInstantiation(range_pattern.start, bindings);
-                            try self.validateGenericExprInstantiation(range_pattern.end, bindings);
-                        },
-                        .NamedError => |named_error| try self.validateGenericExprInstantiation(named_error.callee, bindings),
-                        .Ok, .Err, .Else => {},
-                    }
+                    try self.validateGenericSwitchPatternInstantiation(arm.pattern, bindings);
                     try self.validateGenericExprInstantiation(arm.value, bindings);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.validateGenericExprInstantiation(else_expr, bindings);
@@ -3635,7 +3616,8 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn structLiteralType(self: *const TypeChecker, name: []const u8) Type {
+    fn structLiteralType(self: *TypeChecker, name: []const u8) Type {
+        if (self.enumVariantStructLiteralInfo(name)) |info| return info.enum_type;
         if (self.item_index.lookup(name)) |item_id| {
             return self.item_types[item_id.index()];
         }
@@ -3649,6 +3631,109 @@ const TypeChecker = struct {
             return .{ .bitfield = .{ .name = name } };
         }
         return .{ .named = .{ .name = name } };
+    }
+
+    const EnumVariantStructLiteralInfo = struct {
+        enum_type: Type,
+        variant_name: []const u8,
+        payload_type: ?Type,
+    };
+
+    fn enumVariantStructLiteralInfo(self: *TypeChecker, name: []const u8) ?EnumVariantStructLiteralInfo {
+        const dot_index = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
+        if (dot_index == 0 or dot_index + 1 >= name.len) return null;
+        const enum_name = name[0..dot_index];
+        const variant_name = name[dot_index + 1 ..];
+
+        if (self.instantiatedEnumByName(enum_name)) |instantiated| {
+            for (instantiated.variants) |variant| {
+                if (std.mem.eql(u8, variant.name, variant_name)) {
+                    return .{
+                        .enum_type = .{ .enum_ = .{ .name = enum_name } },
+                        .variant_name = variant_name,
+                        .payload_type = variant.payload_type,
+                    };
+                }
+            }
+            return null;
+        }
+
+        const item_id = self.lookupTypeItemInScope(enum_name) orelse return null;
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return null,
+        };
+        for (enum_item.variants) |variant| {
+            if (std.mem.eql(u8, variant.name, variant_name)) {
+                return .{
+                    .enum_type = .{ .enum_ = .{ .name = enum_item.name } },
+                    .variant_name = variant_name,
+                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn checkEnumVariantStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !void {
+        const info = self.enumVariantStructLiteralInfo(struct_literal.type_name) orelse return;
+        const payload_type = info.payload_type orelse {
+            if (struct_literal.fields.len != 0) {
+                try self.emitExprError(expr_id, "payloadless ADT variant '{s}' cannot be constructed with named fields", .{info.variant_name});
+            }
+            return;
+        };
+        if (payload_type.kind() != .anonymous_struct) {
+            try self.emitExprError(expr_id, "ADT variant '{s}' does not have a named payload", .{info.variant_name});
+            return;
+        }
+
+        var seen_fields = std.StringHashMap(void).init(self.arena);
+        defer seen_fields.deinit();
+        for (struct_literal.fields) |init| {
+            const existing = try seen_fields.fetchPut(init.name, {});
+            if (existing != null) {
+                try self.emitRangeError(init.range, "duplicate field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+            }
+        }
+
+        const payload_fields = payload_type.anonymous_struct.fields;
+        for (payload_fields) |field| {
+            const init = self.findStructLiteralField(struct_literal.fields, field.name) orelse {
+                try self.emitExprError(expr_id, "missing field '{s}' for ADT variant '{s}'", .{ field.name, info.variant_name });
+                continue;
+            };
+            try self.contextualizeLiteral(init.value, field.ty);
+            const actual = self.expr_types[init.value.index()];
+            if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
+                try self.emitExprError(init.value, "expected type '{s}', found '{s}'", .{
+                    diagnosticTypeDisplayName(self, field.ty),
+                    diagnosticTypeDisplayName(self, actual),
+                });
+            }
+        }
+
+        for (struct_literal.fields) |init| {
+            if (self.findAnonymousStructField(payload_fields, init.name) == null) {
+                try self.emitRangeError(init.range, "unknown field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+            }
+        }
+    }
+
+    fn findStructLiteralField(self: *const TypeChecker, fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
+        _ = self;
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field;
+        }
+        return null;
+    }
+
+    fn findAnonymousStructField(self: *const TypeChecker, fields: []const model.AnonymousStructField, name: []const u8) ?model.AnonymousStructField {
+        _ = self;
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field;
+        }
+        return null;
     }
 
     fn contextualizeLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
@@ -4299,16 +4384,7 @@ const TypeChecker = struct {
                 try self.validateExprExternalCalls(switch_stmt.condition, state);
                 var merged_state = try self.cloneExternalCallValidationState(state.*);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.validateExprExternalCalls(expr_id, state),
-                        .Range => |range_pattern| {
-                            try self.validateExprExternalCalls(range_pattern.start, state);
-                            try self.validateExprExternalCalls(range_pattern.end, state);
-                        },
-                        .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.validateSwitchPatternExternalCalls(arm.pattern, state);
                     var case_state = try self.cloneExternalCallValidationState(state.*);
                     defer case_state.deinit(self.arena);
                     try self.validateBodyExternalCalls(arm.body, &case_state);
@@ -4387,16 +4463,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.validateExprExternalCalls(switch_expr.condition, state);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.validateExprExternalCalls(pattern_expr, state),
-                        .Range => |range_pattern| {
-                            try self.validateExprExternalCalls(range_pattern.start, state);
-                            try self.validateExprExternalCalls(range_pattern.end, state);
-                        },
-                        .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.validateSwitchPatternExternalCalls(arm.pattern, state);
                     try self.validateExprExternalCalls(arm.value, state);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.validateExprExternalCalls(else_expr, state);
@@ -4409,6 +4476,19 @@ const TypeChecker = struct {
             },
             .Group => |group| try self.validateExprExternalCalls(group.expr, state),
             .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+        }
+    }
+
+    fn validateSwitchPatternExternalCalls(self: *TypeChecker, pattern: ast.SwitchPattern, state: *ExternalCallValidationState) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.validateExprExternalCalls(expr_id, state),
+            .Range => |range_pattern| {
+                try self.validateExprExternalCalls(range_pattern.start, state);
+                try self.validateExprExternalCalls(range_pattern.end, state);
+            },
+            .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternExternalCalls(alternative, state),
+            .Ok, .Err, .Else => {},
         }
     }
 
@@ -4448,16 +4528,7 @@ const TypeChecker = struct {
                 try self.validateExprLocks(switch_stmt.condition, locked_slots);
                 var merged_locked = try self.cloneEffectSlots(locked_slots.items);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.validateExprLocks(expr_id, locked_slots),
-                        .Range => |range_pattern| {
-                            try self.validateExprLocks(range_pattern.start, locked_slots);
-                            try self.validateExprLocks(range_pattern.end, locked_slots);
-                        },
-                        .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.validateSwitchPatternLocks(arm.pattern, locked_slots);
                     var case_locked = try self.cloneEffectSlots(locked_slots.items);
                     defer case_locked.deinit(self.arena);
                     try self.validateBodyLocks(arm.body, &case_locked);
@@ -4546,16 +4617,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.validateExprLocks(switch_expr.condition, locked_slots);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.validateExprLocks(pattern_expr, locked_slots),
-                        .Range => |range_pattern| {
-                            try self.validateExprLocks(range_pattern.start, locked_slots);
-                            try self.validateExprLocks(range_pattern.end, locked_slots);
-                        },
-                        .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.validateSwitchPatternLocks(arm.pattern, locked_slots);
                     try self.validateExprLocks(arm.value, locked_slots);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.validateExprLocks(else_expr, locked_slots);
@@ -4568,6 +4630,19 @@ const TypeChecker = struct {
             },
             .Group => |group| try self.validateExprLocks(group.expr, locked_slots),
             .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
+        }
+    }
+
+    fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.validateExprLocks(expr_id, locked_slots),
+            .Range => |range_pattern| {
+                try self.validateExprLocks(range_pattern.start, locked_slots);
+                try self.validateExprLocks(range_pattern.end, locked_slots);
+            },
+            .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternLocks(alternative, locked_slots),
+            .Ok, .Err, .Else => {},
         }
     }
 
@@ -4843,16 +4918,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.collectExprEffects(switch_stmt.condition, state);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.collectExprEffects(expr_id, state),
-                        .Range => |range_pattern| {
-                            try self.collectExprEffects(range_pattern.start, state);
-                            try self.collectExprEffects(range_pattern.end, state);
-                        },
-                        .NamedError => |named_error| try self.collectExprEffects(named_error.callee, state),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternEffects(arm.pattern, state);
                     try self.collectBodyEffects(arm.body, state);
                 }
                 if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, state);
@@ -4893,16 +4959,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.collectExprEffects(switch_expr.condition, &expr_state);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.collectExprEffects(pattern_expr, &expr_state),
-                        .Range => |range_pattern| {
-                            try self.collectExprEffects(range_pattern.start, &expr_state);
-                            try self.collectExprEffects(range_pattern.end, &expr_state);
-                        },
-                        .NamedError => |named_error| try self.collectExprEffects(named_error.callee, &expr_state),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternEffects(arm.pattern, &expr_state);
                     try self.collectExprEffects(arm.value, &expr_state);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, &expr_state);
@@ -4949,6 +5006,19 @@ const TypeChecker = struct {
         }
         self.expr_effects[expr_id.index()] = self.effectFromState(expr_state);
         try self.mergeEffect(state, self.expr_effects[expr_id.index()]);
+    }
+
+    fn collectSwitchPatternEffects(self: *TypeChecker, pattern: ast.SwitchPattern, state: *EffectCollectorState) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.collectExprEffects(expr_id, state),
+            .Range => |range_pattern| {
+                try self.collectExprEffects(range_pattern.start, state);
+                try self.collectExprEffects(range_pattern.end, state);
+            },
+            .NamedError => |named_error| try self.collectExprEffects(named_error.callee, state),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternEffects(alternative, state),
+            .Ok, .Err, .Else => {},
+        }
     }
 
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {
@@ -5222,16 +5292,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.collectExprDirectCallees(switch_stmt.condition, callees);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-                        .Range => |range_pattern| {
-                            try self.collectExprDirectCallees(range_pattern.start, callees);
-                            try self.collectExprDirectCallees(range_pattern.end, callees);
-                        },
-                        .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
                     try self.collectBodyDirectCallees(arm.body, callees);
                 }
                 if (switch_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
@@ -5267,16 +5328,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.collectExprDirectCallees(switch_expr.condition, callees);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.collectExprDirectCallees(pattern_expr, callees),
-                        .Range => |range_pattern| {
-                            try self.collectExprDirectCallees(range_pattern.start, callees);
-                            try self.collectExprDirectCallees(range_pattern.end, callees);
-                        },
-                        .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
                     try self.collectExprDirectCallees(arm.value, callees);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.collectExprDirectCallees(else_expr, callees);
@@ -5311,6 +5363,19 @@ const TypeChecker = struct {
                 try self.collectExprDirectCallees(index.index, callees);
             },
             .Name, .StructDestructure, .Error => {},
+        }
+    }
+
+    fn collectSwitchPatternDirectCallees(self: *TypeChecker, pattern: ast.SwitchPattern, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+            .Range => |range_pattern| {
+                try self.collectExprDirectCallees(range_pattern.start, callees);
+                try self.collectExprDirectCallees(range_pattern.end, callees);
+            },
+            .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternDirectCallees(alternative, callees),
+            .Ok, .Err, .Else => {},
         }
     }
 
@@ -6065,16 +6130,7 @@ const TypeChecker = struct {
             .Switch => |switch_stmt| {
                 try self.collectExprErrorTypes(switch_stmt.condition, error_types);
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-                        .Range => |range_pattern| {
-                            try self.collectExprErrorTypes(range_pattern.start, error_types);
-                            try self.collectExprErrorTypes(range_pattern.end, error_types);
-                        },
-                        .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
                     try self.collectBodyErrorTypes(arm.body, error_types);
                 }
                 if (switch_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
@@ -6124,16 +6180,7 @@ const TypeChecker = struct {
             .Switch => |switch_expr| {
                 try self.collectExprErrorTypes(switch_expr.condition, error_types);
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.collectExprErrorTypes(pattern_expr, error_types),
-                        .Range => |range_pattern| {
-                            try self.collectExprErrorTypes(range_pattern.start, error_types);
-                            try self.collectExprErrorTypes(range_pattern.end, error_types);
-                        },
-                        .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
-                        .Ok, .Err => {},
-                        .Else => {},
-                    }
+                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
                     try self.collectExprErrorTypes(arm.value, error_types);
                 }
                 if (switch_expr.else_expr) |else_expr| try self.collectExprErrorTypes(else_expr, error_types);
@@ -6148,6 +6195,19 @@ const TypeChecker = struct {
             },
             .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprErrorTypes(arg, error_types),
             else => {},
+        }
+    }
+
+    fn collectSwitchPatternErrorTypes(self: *TypeChecker, pattern: ast.SwitchPattern, error_types: *std.ArrayList(Type)) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
+            .Range => |range_pattern| {
+                try self.collectExprErrorTypes(range_pattern.start, error_types);
+                try self.collectExprErrorTypes(range_pattern.end, error_types);
+            },
+            .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternErrorTypes(alternative, error_types),
+            .Ok, .Err, .Else => {},
         }
     }
 
@@ -6298,6 +6358,112 @@ const TypeChecker = struct {
         self.opaque_multi_error_patterns[pattern_id.index()] = true;
     }
 
+    fn visitSwitchPattern(self: *TypeChecker, pattern: ast.SwitchPattern, condition_type: Type, range: source.TextRange) !void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.visitExpr(expr_id),
+            .Range => |range_pattern| {
+                try self.visitExpr(range_pattern.start);
+                try self.visitExpr(range_pattern.end);
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    try self.visitSwitchPattern(alternative, condition_type, range);
+                }
+                try self.validateOrSwitchPatternBindings(or_pattern);
+            },
+            .Ok => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, true, range),
+            .Err => |pattern_id| try self.assignMatchPatternType(pattern_id, condition_type, false, range),
+            .NamedError => |named_error| try self.assignConstructorMatchPatternType(named_error, condition_type, range),
+            .Else => {},
+        }
+    }
+
+    const OrPatternBinding = struct {
+        name: []const u8,
+        ty: Type,
+        range: source.TextRange,
+    };
+
+    fn validateOrSwitchPatternBindings(self: *TypeChecker, or_pattern: ast.nodes.OrSwitchPattern) !void {
+        if (or_pattern.alternatives.len == 0) return;
+
+        var expected: std.ArrayList(OrPatternBinding) = .{};
+        try self.collectSwitchPatternBindings(or_pattern.alternatives[0], &expected);
+
+        for (or_pattern.alternatives[1..]) |alternative| {
+            var actual: std.ArrayList(OrPatternBinding) = .{};
+            try self.collectSwitchPatternBindings(alternative, &actual);
+
+            if (expected.items.len != actual.items.len) {
+                try self.emitRangeError(or_pattern.range, "or-pattern alternatives must bind the same names", .{});
+                continue;
+            }
+
+            for (expected.items) |expected_binding| {
+                const actual_binding = self.findOrPatternBinding(actual.items, expected_binding.name) orelse {
+                    try self.emitRangeError(or_pattern.range, "or-pattern alternatives must bind the same names", .{});
+                    continue;
+                };
+                if (!self.orPatternBindingTypesCompatible(expected_binding.ty, actual_binding.ty)) {
+                    try self.emitRangeError(actual_binding.range, "or-pattern binding '{s}' has incompatible types", .{actual_binding.name});
+                }
+            }
+        }
+    }
+
+    fn collectSwitchPatternBindings(self: *TypeChecker, pattern: ast.SwitchPattern, bindings: *std.ArrayList(OrPatternBinding)) !void {
+        return switch (pattern) {
+            .Ok, .Err => |pattern_id| try self.collectPatternBindings(pattern_id, bindings),
+            .NamedError => |named_error| {
+                for (named_error.bindings) |pattern_id| {
+                    try self.collectPatternBindings(pattern_id, bindings);
+                }
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    try self.collectSwitchPatternBindings(alternative, bindings);
+                }
+            },
+            else => {},
+        };
+    }
+
+    fn collectPatternBindings(self: *TypeChecker, pattern_id: ast.PatternId, bindings: *std.ArrayList(OrPatternBinding)) !void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| {
+                if (std.mem.eql(u8, name.name, "_")) return;
+                if (self.findOrPatternBinding(bindings.items, name.name)) |_| {
+                    try self.emitRangeError(name.range, "or-pattern alternative binds '{s}' more than once", .{name.name});
+                    return;
+                }
+                try bindings.append(self.arena, .{
+                    .name = name.name,
+                    .ty = self.pattern_types[pattern_id.index()].type,
+                    .range = name.range,
+                });
+            },
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.collectPatternBindings(field.binding, bindings);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn findOrPatternBinding(self: *const TypeChecker, bindings: []const OrPatternBinding, name: []const u8) ?OrPatternBinding {
+        _ = self;
+        for (bindings) |binding| {
+            if (std.mem.eql(u8, binding.name, name)) return binding;
+        }
+        return null;
+    }
+
+    fn orPatternBindingTypesCompatible(self: *const TypeChecker, lhs: Type, rhs: Type) bool {
+        _ = self;
+        return typesAssignable(lhs, rhs) and typesAssignable(rhs, lhs);
+    }
+
     fn assignNamedErrorMatchPatternType(
         self: *TypeChecker,
         named_error: ast.NamedErrorSwitchPattern,
@@ -6380,6 +6546,10 @@ const TypeChecker = struct {
                     }
                 },
                 .anonymous_struct => |struct_type| {
+                    if (constructor.bindings.len == 1 and self.file.pattern(constructor.bindings[0]).* == .StructDestructure) {
+                        try self.assignNamedAdtPayloadDestructureTypes(constructor.bindings[0], struct_type.fields, range);
+                        return;
+                    }
                     if (struct_type.fields.len != constructor.bindings.len) {
                         for (constructor.bindings) |pattern_id| {
                             self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .unknown = {} });
@@ -6406,6 +6576,47 @@ const TypeChecker = struct {
         }
 
         try self.assignNamedErrorMatchPatternType(constructor, condition_type, range);
+    }
+
+    fn assignNamedAdtPayloadDestructureTypes(
+        self: *TypeChecker,
+        pattern_id: ast.PatternId,
+        fields: []const model.AnonymousStructField,
+        range: source.TextRange,
+    ) !void {
+        const destructure = switch (self.file.pattern(pattern_id).*) {
+            .StructDestructure => |destructure| destructure,
+            else => return,
+        };
+        self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .anonymous_struct = .{ .fields = fields } });
+
+        if (!destructure.has_rest and destructure.fields.len != fields.len) {
+            try self.emitRangeError(range, "ADT named payload destructure must bind every payload field", .{});
+        }
+
+        for (destructure.fields) |binding_field| {
+            const field = self.findAnonymousStructField(fields, binding_field.name) orelse {
+                self.pattern_types[binding_field.binding.index()] = LocatedType.unlocated(.{ .unknown = {} });
+                try self.emitRangeError(binding_field.range, "unknown ADT payload field '{s}'", .{binding_field.name});
+                continue;
+            };
+            self.pattern_types[binding_field.binding.index()] = LocatedType.unlocated(field.ty);
+        }
+
+        if (!destructure.has_rest) {
+            for (fields) |field| {
+                var found = false;
+                for (destructure.fields) |binding_field| {
+                    if (std.mem.eql(u8, binding_field.name, field.name)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try self.emitRangeError(range, "missing ADT payload field '{s}'", .{field.name});
+                }
+            }
+        }
     }
 
     const NamedErrorPatternInfo = struct {
@@ -6491,26 +6702,27 @@ const TypeChecker = struct {
         var seen_ok = false;
         var seen_err = false;
         const all_named_errors_covered = self.errorUnionNamedErrorsAreExhaustive(condition_type, arms);
-        for (arms) |arm| switch (arm.pattern) {
-            .Ok => seen_ok = true,
-            .Err => seen_err = true,
-            else => {},
-        };
+        for (arms) |arm| self.collectErrorUnionOkErrCoverage(arm.pattern, &seen_ok, &seen_err);
 
         return seen_ok and (seen_err or all_named_errors_covered);
     }
 
+    fn collectErrorUnionOkErrCoverage(self: *const TypeChecker, pattern: ast.SwitchPattern, seen_ok: *bool, seen_err: *bool) void {
+        switch (pattern) {
+            .Ok => seen_ok.* = true,
+            .Err => seen_err.* = true,
+            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| self.collectErrorUnionOkErrCoverage(alternative, seen_ok, seen_err),
+            else => {},
+        }
+    }
+
     fn errorUnionNamedErrorsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
         var all_named_errors_covered = true;
-        for (arms) |arm| switch (arm.pattern) {
-            .Expr => if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
-                if (named_error.has_payload) {
-                    all_named_errors_covered = false;
-                }
-            },
-            .NamedError => {},
-            else => {},
-        };
+        for (arms) |arm| {
+            if (self.errorUnionPatternUsesPayloadNamedExpr(condition_type, arm.pattern)) {
+                all_named_errors_covered = false;
+            }
+        }
 
         for (condition_type.errorTypes()) |error_type| {
             const error_name = error_type.name() orelse {
@@ -6519,10 +6731,7 @@ const TypeChecker = struct {
             };
             var found = false;
             for (arms) |arm| {
-                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern) orelse continue;
-                if (named_error.has_payload and arm.pattern != .NamedError) continue;
-                const item = self.file.item(named_error.item_id).*;
-                if (item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name)) {
+                if (self.errorUnionPatternCoversName(condition_type, arm.pattern, error_name)) {
                     found = true;
                     break;
                 }
@@ -6534,6 +6743,39 @@ const TypeChecker = struct {
         }
 
         return all_named_errors_covered;
+    }
+
+    fn errorUnionPatternUsesPayloadNamedExpr(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern) bool {
+        switch (pattern) {
+            .Expr => {
+                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, pattern) orelse return false;
+                return named_error.has_payload;
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    if (self.errorUnionPatternUsesPayloadNamedExpr(condition_type, alternative)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn errorUnionPatternCoversName(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, error_name: []const u8) bool {
+        switch (pattern) {
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    if (self.errorUnionPatternCoversName(condition_type, alternative, error_name)) return true;
+                }
+                return false;
+            },
+            else => {
+                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, pattern) orelse return false;
+                if (named_error.has_payload and pattern != .NamedError) return false;
+                const item = self.file.item(named_error.item_id).*;
+                return item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name);
+            },
+        }
     }
 
     fn emitRangeWarning(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
@@ -6563,11 +6805,26 @@ const TypeChecker = struct {
 
         for (arms) |arm| {
             if (arm.pattern == .Else) return true;
-            const variant_index = self.enumPatternVariantIndex(condition_type, arm.pattern) orelse return false;
-            seen.put(variant_index, {}) catch return false;
+            if (!self.collectEnumPatternVariantIndexes(condition_type, arm.pattern, &seen)) return false;
         }
 
         return seen.count() == variant_count;
+    }
+
+    fn collectEnumPatternVariantIndexes(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(usize, void)) bool {
+        switch (pattern) {
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    if (!self.collectEnumPatternVariantIndexes(condition_type, alternative, seen)) return false;
+                }
+                return true;
+            },
+            else => {
+                const variant_index = self.enumPatternVariantIndex(condition_type, pattern) orelse return false;
+                seen.put(variant_index, {}) catch return false;
+                return true;
+            },
+        }
     }
 
     fn enumPatternVariantIndex(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern) ?usize {
@@ -6616,31 +6873,47 @@ const TypeChecker = struct {
         var saw_error_union_pattern = false;
         var saw_regular_pattern = false;
         for (arms) |arm| {
-            switch (arm.pattern) {
-                .Ok, .Err => saw_error_union_pattern = true,
-                .NamedError => {
-                    if (condition_type.kind() == .enum_) {
-                        saw_regular_pattern = true;
-                    } else {
-                        saw_error_union_pattern = true;
-                    }
-                },
-                .Expr => {
-                    if (self.matchPatternNamedErrorDeclInfo(condition_type, arm.pattern)) |named_error| {
-                        saw_error_union_pattern = true;
-                        if (named_error.has_payload) {
-                            try self.emitRangeError(range, "named error match arms currently require payloadless error declarations; use Err(binding) for payload-carrying errors", .{});
-                        }
-                    } else {
-                        saw_regular_pattern = true;
-                    }
-                },
-                .Range => saw_regular_pattern = true,
-                .Else => {},
-            }
+            try self.classifyMatchPatternFamily(condition_type, arm.pattern, range, &saw_error_union_pattern, &saw_regular_pattern);
         }
         if (saw_error_union_pattern and saw_regular_pattern) {
             try self.emitRangeError(range, "cannot mix Ok(...)/Err(...)/named error match arms with ordinary value/range patterns", .{});
+        }
+    }
+
+    fn classifyMatchPatternFamily(
+        self: *TypeChecker,
+        condition_type: Type,
+        pattern: ast.SwitchPattern,
+        range: source.TextRange,
+        saw_error_union_pattern: *bool,
+        saw_regular_pattern: *bool,
+    ) !void {
+        switch (pattern) {
+            .Ok, .Err => saw_error_union_pattern.* = true,
+            .NamedError => {
+                if (condition_type.kind() == .enum_) {
+                    saw_regular_pattern.* = true;
+                } else {
+                    saw_error_union_pattern.* = true;
+                }
+            },
+            .Expr => {
+                if (self.matchPatternNamedErrorDeclInfo(condition_type, pattern)) |named_error| {
+                    saw_error_union_pattern.* = true;
+                    if (named_error.has_payload) {
+                        try self.emitRangeError(range, "named error match arms currently require payloadless error declarations; use Err(binding) for payload-carrying errors", .{});
+                    }
+                } else {
+                    saw_regular_pattern.* = true;
+                }
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    try self.classifyMatchPatternFamily(condition_type, alternative, range, saw_error_union_pattern, saw_regular_pattern);
+                }
+            },
+            .Range => saw_regular_pattern.* = true,
+            .Else => {},
         }
     }
 
