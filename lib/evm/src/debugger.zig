@@ -60,6 +60,17 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         last_statement_line: ?u32,
         last_statement_sir_line: ?u32,
         last_error_name: ?[]const u8,
+        /// Set when a best-effort instrumentation path (gas
+        /// accounting, watchpoint polling) hit a recoverable error
+        /// the user wouldn't otherwise see. The TUI surfaces this
+        /// as a `[degraded]` suffix on the status line so users
+        /// don't quietly trust stale coverage / gas / watchpoint
+        /// state. Sticky once set; cleared only by session
+        /// rebuild.
+        instrumentation_degraded: bool,
+        /// Last reason the degraded flag was set, for diagnostics.
+        /// Borrowed from a static string; never freed.
+        instrumentation_degraded_reason: ?[]const u8,
 
         pub const State = enum {
             paused,
@@ -134,6 +145,8 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .last_statement_line = null,
                 .last_statement_sir_line = null,
                 .last_error_name = null,
+                .instrumentation_degraded = false,
+                .instrumentation_degraded_reason = null,
             };
             self.updateLastStatementLine();
             return self;
@@ -408,6 +421,27 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             return self.line_gas.count();
         }
 
+        /// True iff a best-effort instrumentation path (gas
+        /// accounting, watchpoint polling) failed at any point in
+        /// this session. Sticky once set; cleared only by session
+        /// rebuild (`Session.init`). Surfaced by the TUI as a
+        /// `[degraded]` suffix on the status line so users don't
+        /// quietly trust stale displayed state.
+        pub fn instrumentationDegraded(self: *const Self) bool {
+            return self.instrumentation_degraded;
+        }
+
+        /// Last reason `instrumentation_degraded` was raised.
+        /// Borrowed from a static string, never freed.
+        pub fn instrumentationDegradedReason(self: *const Self) ?[]const u8 {
+            return self.instrumentation_degraded_reason;
+        }
+
+        fn markInstrumentationDegraded(self: *Self, reason: []const u8) void {
+            self.instrumentation_degraded = true;
+            self.instrumentation_degraded_reason = reason;
+        }
+
         /// True iff the last executeOneOpcode pausing was a watchpoint
         /// trigger. The stepping loops use this to short-circuit out of
         /// their drive loop and surface the pause to the caller.
@@ -435,28 +469,84 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         // Stepping commands
         // ====================================================================
 
-        /// Step In: execute until the source line changes (at any call depth).
-        /// Enters function calls.
-        pub fn stepIn(self: *Self) !void {
-            if (self.isHalted()) return;
-            // Resume from any prior pause (e.g. a watchpoint hit). The
-            // post-step pausedOnWatchpoint() check catches NEW watchpoint
-            // triggers during this step.
-            self.state = .running;
+        /// Stop conditions for the unified `runUntil` engine. Each
+        /// public stepping method is a thin wrapper that picks one
+        /// of these and lets `runUntil` drive the loop.
+        const StopCondition = union(enum) {
+            /// Stop on the next statement-boundary transition,
+            /// regardless of call depth.
+            step_in: ?StatementKey,
+            /// Stop on the next statement-boundary transition at
+            /// the original or shallower call depth.
+            step_over: struct { start_statement: ?StatementKey, start_depth: usize },
+            /// Stop at the first statement boundary after returning
+            /// from the current frame (call_depth < start_depth).
+            step_out: struct { start_depth: usize },
+            /// Run until a breakpoint at a statement boundary or
+            /// halt. Initial opcode runs unguarded so a `:c` from
+            /// an existing breakpoint doesn't immediately re-fire.
+            continue_,
+            /// Execute exactly one opcode then pause.
+            step_opcode,
+        };
 
-            const start_statement = self.currentStatementKey();
+        /// Single drive loop for every stepping mode. Each public
+        /// step method is a 3–5 line wrapper that builds a
+        /// `StopCondition` and delegates here. Shared concerns
+        /// (running flag, step-cap, halt/watchpoint detection,
+        /// step-limit_reached fallback, post-pause stop_reason)
+        /// live in one place so a future "step to next loop
+        /// iteration" / "step to next call site" mode plugs in
+        /// without duplicating the harness.
+        fn runUntil(self: *Self, condition: StopCondition) !void {
+            if (self.isHalted()) return;
+            self.state = .running;
             self.steps_executed = 0;
 
-            while (true) {
+            // continue_ runs the first opcode unguarded — otherwise
+            // a continue from a paused-on-breakpoint state would
+            // re-fire the same breakpoint immediately.
+            const skip_first_breakpoint_check = condition == .continue_;
+            if (skip_first_breakpoint_check) {
                 try self.executeOneOpcode();
                 if (self.isHalted() or self.pausedOnWatchpoint()) return;
+            }
+
+            while (true) {
                 if (self.steps_executed >= self.max_steps) {
                     self.stop_reason = .step_limit_reached;
                     self.state = .paused;
                     return;
                 }
 
-                if (self.currentStatementKeyChanged(start_statement)) {
+                // Pre-step breakpoint check (only for continue_).
+                if (condition == .continue_) {
+                    const pc = self.getPC();
+                    if (self.breakpoints.contains(pc) and self.isAtStatementBoundary()) {
+                        self.stop_reason = .breakpoint_hit;
+                        self.state = .paused;
+                        return;
+                    }
+                }
+
+                try self.executeOneOpcode();
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
+
+                // Per-mode post-step check.
+                const should_stop = switch (condition) {
+                    .step_in => |start_stmt| self.currentStatementKeyChanged(start_stmt),
+                    .step_over => |args| blk: {
+                        if (self.getCallDepth() > args.start_depth) break :blk false;
+                        break :blk self.currentStatementKeyChanged(args.start_statement);
+                    },
+                    .step_out => |args| blk: {
+                        if (self.getCallDepth() >= args.start_depth) break :blk false;
+                        break :blk self.isAtStatementBoundary();
+                    },
+                    .step_opcode => true,
+                    .continue_ => false,
+                };
+                if (should_stop) {
                     self.stop_reason = .step_complete;
                     self.state = .paused;
                     return;
@@ -464,114 +554,39 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             }
         }
 
+        /// Step In: execute until the source line changes (at any call depth).
+        /// Enters function calls.
+        pub fn stepIn(self: *Self) !void {
+            return self.runUntil(.{ .step_in = self.currentStatementKey() });
+        }
+
         /// Step Opcode: execute exactly one opcode and pause immediately.
         /// This is useful for inspecting the transient EVM operand stack between
         /// source-level statement boundaries.
         pub fn stepOpcode(self: *Self) !void {
-            if (self.isHalted()) return;
-            self.state = .running;
-
-            self.steps_executed = 0;
-            try self.executeOneOpcode();
-            if (self.isHalted() or self.pausedOnWatchpoint()) return;
-            self.stop_reason = .step_complete;
-            self.state = .paused;
+            return self.runUntil(.step_opcode);
         }
 
         /// Step Over: execute until the source line changes at the same or lower call depth.
         /// Skips over function calls.
         pub fn stepOver(self: *Self) !void {
-            if (self.isHalted()) return;
-            self.state = .running;
-
-            const start_statement = self.currentStatementKey();
-            const start_depth = self.getCallDepth();
-            self.steps_executed = 0;
-
-            while (true) {
-                try self.executeOneOpcode();
-                if (self.isHalted() or self.pausedOnWatchpoint()) return;
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                const current_depth = self.getCallDepth();
-                // Only consider stopping if we're at same or shallower depth
-                if (current_depth <= start_depth) {
-                    if (self.currentStatementKeyChanged(start_statement)) {
-                        self.stop_reason = .step_complete;
-                        self.state = .paused;
-                        return;
-                    }
-                }
-            }
+            return self.runUntil(.{ .step_over = .{
+                .start_statement = self.currentStatementKey(),
+                .start_depth = self.getCallDepth(),
+            } });
         }
 
         /// Step Out: execute until the call depth is less than current.
         /// Returns from the current function.
         pub fn stepOut(self: *Self) !void {
-            if (self.isHalted()) return;
-            self.state = .running;
-
             const start_depth = self.getCallDepth();
-            if (start_depth == 0) {
-                // Already at top level — run to completion
-                return self.continue_();
-            }
-
-            self.steps_executed = 0;
-
-            while (true) {
-                try self.executeOneOpcode();
-                if (self.isHalted() or self.pausedOnWatchpoint()) return;
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                if (self.getCallDepth() < start_depth) {
-                    // Wait for the next statement boundary after returning
-                    if (self.isAtStatementBoundary()) {
-                        self.stop_reason = .step_complete;
-                        self.state = .paused;
-                        return;
-                    }
-                }
-            }
+            if (start_depth == 0) return self.continue_();
+            return self.runUntil(.{ .step_out = .{ .start_depth = start_depth } });
         }
 
         /// Continue: run until a breakpoint is hit or execution finishes.
         pub fn continue_(self: *Self) !void {
-            if (self.isHalted()) return;
-
-            self.state = .running;
-            self.steps_executed = 0;
-
-            // Step past current PC first (so we don't immediately re-hit the same breakpoint)
-            try self.executeOneOpcode();
-            if (self.isHalted() or self.pausedOnWatchpoint()) return;
-
-            while (true) {
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                // Check breakpoint before executing
-                const pc = self.getPC();
-                if (self.breakpoints.contains(pc) and self.isAtStatementBoundary()) {
-                    self.stop_reason = .breakpoint_hit;
-                    self.state = .paused;
-                    return;
-                }
-
-                try self.executeOneOpcode();
-                if (self.isHalted() or self.pausedOnWatchpoint()) return;
-            }
+            return self.runUntil(.continue_);
         }
 
         // ====================================================================
@@ -884,10 +899,11 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                     if (self.src_map.getEntry(post_frame.pc) != null) {
                         const delta: u64 = @intCast(gas_before - post_frame.gas_remaining);
                         if (attributed_line) |line| {
-                            const gop = self.line_gas.getOrPut(line) catch null;
-                            if (gop) |entry| {
+                            if (self.line_gas.getOrPut(line)) |entry| {
                                 if (!entry.found_existing) entry.value_ptr.* = 0;
                                 entry.value_ptr.* +%= delta;
+                            } else |_| {
+                                self.markInstrumentationDegraded("line_gas allocation failed");
                             }
                         }
                     }
@@ -903,11 +919,20 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             // calls — a callee's SSTORE on a delegate-shared address
             // surfaces here too.
             if (self.watchpoints.items.len != 0) {
-                if (self.pollWatchpoints() catch null) |wp_id| {
-                    self.last_watchpoint_id = wp_id;
-                    self.state = .paused;
-                    self.stop_reason = .watchpoint_hit;
-                    return;
+                if (self.pollWatchpoints()) |maybe_wp| {
+                    if (maybe_wp) |wp_id| {
+                        self.last_watchpoint_id = wp_id;
+                        self.state = .paused;
+                        self.stop_reason = .watchpoint_hit;
+                        return;
+                    }
+                } else |_| {
+                    // Polling failed (storage host error / OOM).
+                    // Mark degraded so the user knows the
+                    // displayed state isn't watchpoint-checked
+                    // beyond this step. Continue execution rather
+                    // than aborting the session.
+                    self.markInstrumentationDegraded("watchpoint poll failed");
                 }
             }
 

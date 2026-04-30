@@ -343,8 +343,11 @@ fn handleStackTrace(
         else
             0;
         try w.print(
-            \\{{"id":{d},"name":"frame#{d}","line":{d},"column":1,"source":{{"path":"{s}"}}}}
-        , .{ logical, logical, line, state.seed.source_path });
+            \\{{"id":{d},"name":"frame#{d}","line":{d},"column":1,"source":{{"path":
+        , .{ logical, logical, line });
+        try w.writeAll("\"");
+        try writeJsonEscaped(w, state.seed.source_path);
+        try w.writeAll("\"}}");
         _ = frame;
         logical += 1;
     }
@@ -438,9 +441,13 @@ fn dupOptionalString(allocator: std.mem.Allocator, args: std.json.Value, key: []
 }
 
 fn writeError(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8, message: []const u8) !void {
+    const cmd_quoted = try allocJsonString(allocator, command);
+    defer allocator.free(cmd_quoted);
+    const msg_quoted = try allocJsonString(allocator, message);
+    defer allocator.free(msg_quoted);
     const body = try std.fmt.allocPrint(allocator,
-        \\{{"seq":{d},"type":"response","request_seq":{d},"success":false,"command":"{s}","message":"{s}"}}
-    , .{ seq, request_seq, command, message });
+        \\{{"seq":{d},"type":"response","request_seq":{d},"success":false,"command":{s},"message":{s}}}
+    , .{ seq, request_seq, cmd_quoted, msg_quoted });
     defer allocator.free(body);
     try writeFramed(allocator, file, body);
 }
@@ -617,6 +624,40 @@ fn writeFramed(allocator: std.mem.Allocator, file: std.fs.File, body: []const u8
     try file.writeAll(body);
 }
 
+/// Escape `s` as a JSON string literal (without the surrounding
+/// quotes) into `writer`. Required wherever user / network /
+/// filesystem-controlled strings (DAP commands, source paths,
+/// error messages) flow into a DAP response body — a stray quote
+/// or backslash from an attacker-controlled path would otherwise
+/// corrupt the framed JSON-RPC stream.
+fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{c}),
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
+/// Allocator-returning convenience: produce a JSON-string-quoted
+/// copy of `s` like `"foo\\nbar"` (with surrounding quotes
+/// included). Caller frees.
+fn allocJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .{};
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '"');
+    try writeJsonEscaped(buf.writer(allocator), s);
+    try buf.append(allocator, '"');
+    return try buf.toOwnedSlice(allocator);
+}
+
 fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64) !void {
     const body = try std.fmt.allocPrint(allocator,
         \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":"initialize","body":{{"supportsConfigurationDoneRequest":false,"supportsSetVariable":false,"supportsRestartRequest":false}}}}
@@ -626,17 +667,21 @@ fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.fs.File, seq:
 }
 
 fn writeAck(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8) !void {
+    const cmd_quoted = try allocJsonString(allocator, command);
+    defer allocator.free(cmd_quoted);
     const body = try std.fmt.allocPrint(allocator,
-        \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":"{s}"}}
-    , .{ seq, request_seq, command });
+        \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":{s}}}
+    , .{ seq, request_seq, cmd_quoted });
     defer allocator.free(body);
     try writeFramed(allocator, file, body);
 }
 
 fn writeNotImplemented(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8) !void {
+    const cmd_quoted = try allocJsonString(allocator, command);
+    defer allocator.free(cmd_quoted);
     const body = try std.fmt.allocPrint(allocator,
-        \\{{"seq":{d},"type":"response","request_seq":{d},"success":false,"command":"{s}","message":"not_implemented"}}
-    , .{ seq, request_seq, command });
+        \\{{"seq":{d},"type":"response","request_seq":{d},"success":false,"command":{s},"message":"not_implemented"}}
+    , .{ seq, request_seq, cmd_quoted });
     defer allocator.free(body);
     try writeFramed(allocator, file, body);
 }

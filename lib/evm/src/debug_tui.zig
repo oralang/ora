@@ -3403,6 +3403,7 @@ pub const Ui = struct {
     }
 
     fn updateCommandStatusForCurrentStop(self: *Ui, action: []const u8) !void {
+        defer self.appendDegradedSuffix();
         const entry = self.session.debugger.currentEntry();
         const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
         const origin_line = self.currentOriginLine();
@@ -3516,6 +3517,20 @@ pub const Ui = struct {
             return;
         }
         try self.setCommandStatusFmt("{s} => line {d}", .{ action, current_line });
+    }
+
+    /// Best-effort: append `[degraded: <reason>]` to the status
+    /// line whenever the debugger flagged an instrumentation
+    /// failure (gas accounting / watchpoint poll). Called as a
+    /// `defer` from status writers — if the append itself fails
+    /// (OOM), we silently skip; the worst case is the user
+    /// doesn't see the warning, not a crashed status line.
+    fn appendDegradedSuffix(self: *Ui) void {
+        if (!self.session.debugger.instrumentationDegraded()) return;
+        const reason = self.session.debugger.instrumentationDegradedReason() orelse "unknown";
+        const writer = self.command_status_storage.writer(self.allocator);
+        writer.print(" [degraded: {s}]", .{reason}) catch return;
+        self.command_status = self.command_status_storage.items;
     }
 
     fn updateExecutionErrorStatus(self: *Ui, action: []const u8) !void {
