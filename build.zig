@@ -230,6 +230,22 @@ pub fn build(b: *std.Build) void {
     const evm_debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI");
     evm_debug_tui_step.dependOn(&evm_debug_tui_cmd.step);
 
+    // DAP server. Same pattern as debug-tui: shell out to the
+    // lib/evm sub-build so the top-level `zig build debug-dap`
+    // works without duplicating the DAP build configuration.
+    const evm_debug_dap_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build",
+        "debug-dap",
+        "--",
+    });
+    evm_debug_dap_cmd.setCwd(b.path("lib/evm"));
+    if (b.args) |args| {
+        evm_debug_dap_cmd.addArgs(args);
+    }
+    const evm_debug_dap_step = b.step("debug-dap", "Run the Ora EVM debugger DAP server (Content-Length-framed JSON-RPC over stdio)");
+    evm_debug_dap_step.dependOn(&evm_debug_dap_cmd.step);
+
     // Sensei SIR CLI integration (vendored Rust tool)
     const sensei_root = "vendor/sensei/senseic";
     const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});

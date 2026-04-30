@@ -183,7 +183,41 @@ commits:
   `updateCommandStatusForCurrentStop`. Users no longer
   silently trust stale gas/watchpoint state.
 
-`<this commit>` — DebugController extraction (#2/#3 partial):
+**Reviewer round 3** — correctness + hardening:
+
+- **High: setBreakpoints replacement** (#1). The DAP layer used
+  to push new breakpoints into the debugger but never lift old
+  ones, so a client unsetting a breakpoint via setBreakpoints
+  still hit it. New `installed_breakpoints` tracking on
+  `ServerState`; `replayPendingBreakpoints` now diffs pending
+  vs installed and emits real `removeBreakpoint` calls for
+  retired entries. Smoke-tested: install bp at line 5, unset
+  via empty list, continue → finishes without hitting 5.
+  Plus a `Debugger`-level regression test for the underlying
+  set/remove primitives.
+- **Medium: step-error responses** (#2). `continue`/`next`/
+  `stepIn`/`stepOut` failures used to ack success and emit a
+  `stopped` event regardless. Now propagate the error name as
+  a failed response so the client doesn't desync UI state.
+- **Medium: top-level wire-up** (#3). `zig build debug-dap`
+  now exposed at the root build, mirroring `debug-tui`. New
+  `ora debug --dap` flag spawns the DAP server with stdio
+  inherited; explicitly skips the artifact pipeline so no
+  unframed text leaks onto stdout (a stray "Bytecode saved"
+  line ahead of a Content-Length header would corrupt the
+  JSON-RPC stream). Workflow: `ora debug --no-tui` to
+  produce artifacts, then DAP client passes those via the
+  `launch` request.
+- **Low: framing hardening** (#4). `kMaxMessageBytes = 16
+  MiB` cap on Content-Length so a malformed announcement
+  can't force unbounded allocation. `readDapMessage` factored
+  through a `Source` abstraction so it's testable against
+  in-memory buffers; 9 new framing tests cover simple body,
+  no-op headers, zero-length body, missing Content-Length,
+  EOF-before-any-byte, oversize Content-Length, header too
+  long, short body, LF-only line endings.
+
+`b35706ee` — DebugController extraction (#2/#3 partial):
 
 - New `lib/evm/src/debug_controller.zig` —
   front-end-agnostic controller with `evaluateExpr` and

@@ -812,3 +812,77 @@ test "Debugger: getVisibleScopes returns the active scope" {
     try testing.expectEqualStrings("function", scopes[0].kind);
     try testing.expectEqualStrings("f", scopes[0].function);
 }
+
+test "Debugger: setBreakpoint + removeBreakpoint round-trip lifts breakpoint" {
+    // Regression coverage for the DAP setBreakpoints replacement
+    // bug: a client unsetting a breakpoint must actually remove
+    // it from the debugger, not just from the pending list.
+    // The DAP layer is the one calling these APIs in a diff
+    // loop; this test confirms the underlying primitives behave
+    // the way the diff loop assumes.
+    const allocator = testing.allocator;
+    var fx = try buildFixture(
+        allocator,
+        TWO_STATEMENT_BYTECODE,
+        TWO_STATEMENT_SOURCE,
+        twoStatementEntries(),
+        null,
+    );
+    defer fx.deinit();
+
+    try testing.expect(fx.debugger.setBreakpoint("fixture.ora", 2));
+    try testing.expect(fx.debugger.hasBreakpoint("fixture.ora", 2));
+
+    fx.debugger.removeBreakpoint("fixture.ora", 2);
+    try testing.expect(!fx.debugger.hasBreakpoint("fixture.ora", 2));
+
+    // Continuing after removal runs to halt — the breakpoint
+    // genuinely no longer fires. Before this regression-target
+    // test the DAP-layer bug let stale breakpoints linger and
+    // continue would have stopped at line 2.
+    try fx.debugger.continue_();
+    try testing.expect(fx.debugger.isHalted());
+    try testing.expectEqual(Debugger.StopReason.execution_finished, fx.debugger.stop_reason);
+}
+
+test "DebugController: evaluateExpr resolves visible storage binding" {
+    const debug_controller = @import("debug_controller.zig");
+    const Controller = debug_controller.DebugController(.{});
+
+    const allocator = testing.allocator;
+    const entries = &[_]SourceMap.Entry{
+        .{ .idx = 0, .pc = 0, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = true },
+    };
+    var fx = try buildFixture(
+        allocator,
+        SINGLE_STATEMENT_BYTECODE,
+        "stmt\n",
+        entries,
+        STORAGE_BINDING_DEBUG_INFO,
+    );
+    defer fx.deinit();
+
+    // Seed the storage slot the binding resolves to so the
+    // controller has something non-zero to read.
+    const counter = (try fx.debugger.findVisibleBindingByName(allocator, "counter")).?;
+    try testing.expect(try fx.debugger.setVisibleStorageRootValue(counter, 17));
+
+    var controller = Controller.init(allocator, &fx.debugger);
+
+    // Resolve a literal — no binding involved.
+    const lit = try controller.evaluateExpr("1 + 2 * 3");
+    try testing.expectEqual(@as(u256, 7), lit.asNum());
+
+    // Resolve a visible storage binding.
+    const bound = try controller.evaluateExpr("counter + 5");
+    try testing.expectEqual(@as(u256, 22), bound.asNum());
+
+    // Comparison.
+    const cmp = try controller.evaluateExpr("counter > 10");
+    try testing.expectEqual(true, cmp.asBool());
+
+    // Unknown identifier should bubble up as the typed error
+    // — DAP / TUI map this to "unknown identifier" in their
+    // own error layers.
+    try testing.expectError(error.UnknownIdentifier, controller.evaluateExpr("nope_not_a_thing"));
+}

@@ -44,6 +44,15 @@ const SessionSeed = tui.SessionSeed;
 const AppConfig = tui.AppConfig;
 const DebugController = ora_evm.DebugController(.{});
 
+// JSON-RPC framing + escaping live in their own module so the
+// helpers are testable from root.zig's test target. This file
+// stays a thin handler dispatcher.
+const jsonrpc = ora_evm.jsonrpc;
+const writeJsonEscaped = jsonrpc.writeJsonEscaped;
+const allocJsonString = jsonrpc.allocJsonString;
+const writeFramed = jsonrpc.writeFramed;
+const readDapMessage = jsonrpc.readDapMessage;
+
 /// One breakpoint requested by the client before a session exists.
 /// Owned strings: `path` is duped from the parsed JSON so it
 /// outlives the request frame.
@@ -52,6 +61,19 @@ const PendingBreakpoint = struct {
     line: u32,
 
     fn deinit(self: *PendingBreakpoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
+/// One breakpoint that's currently installed in the debugger,
+/// tracked so we can diff against `pending_breakpoints` and
+/// remove old entries when a setBreakpoints request implicitly
+/// retires them.
+const InstalledBreakpoint = struct {
+    path: []u8,
+    line: u32,
+
+    fn deinit(self: *InstalledBreakpoint, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
     }
 };
@@ -70,12 +92,25 @@ const ServerState = struct {
     /// `Session.init` succeeds. `evaluate` requests delegate
     /// here instead of importing TUI helpers.
     controller: DebugController = undefined,
+    /// Breakpoints that are *actually installed* in the debugger
+    /// (as opposed to `pending_breakpoints`, which holds the
+    /// client's last-known intent). On every setBreakpoints
+    /// replay we diff `pending_breakpoints` against this set:
+    /// installed-but-not-pending entries get `removeBreakpoint`,
+    /// pending-but-not-installed entries get `setBreakpoint`.
+    /// Without this diff, a client unsetting a breakpoint via
+    /// `setBreakpoints` would still hit it because the prior
+    /// replay had pushed it into the debugger and never lifted
+    /// it back out.
+    installed_breakpoints: std.ArrayList(InstalledBreakpoint) = .{},
     session_active: bool = false,
     seq: i64 = 0,
 
     fn deinit(self: *ServerState) void {
         for (self.pending_breakpoints.items) |*bp| bp.deinit(self.allocator);
         self.pending_breakpoints.deinit(self.allocator);
+        for (self.installed_breakpoints.items) |*bp| bp.deinit(self.allocator);
+        self.installed_breakpoints.deinit(self.allocator);
         if (self.session_active) {
             self.session.deinit();
             self.seed.deinit(self.allocator);
@@ -101,32 +136,54 @@ pub fn main() !void {
     const stdout_file = std.fs.File.stdout();
     const stderr_file = std.fs.File.stderr();
 
-    try writeAll(stderr_file, "ora-evm-debug-dap: ready (initialize+launch+setBreakpoints+threads+stackTrace+continue/next/stepIn/stepOut/pause+evaluate+disconnect)\n");
+    // Inbound message logging is opt-in. By default we don't log
+    // request bodies because they may carry user paths, calldata,
+    // and other things the operator hasn't consented to write to
+    // a log file. Set ORA_DAP_LOG=1 to enable for debugging.
+    const verbose_logging: bool = blk: {
+        const val = std.process.getEnvVarOwned(allocator, "ORA_DAP_LOG") catch break :blk false;
+        defer allocator.free(val);
+        break :blk val.len > 0 and !std.mem.eql(u8, val, "0");
+    };
+
+    try writeAll(stderr_file, "ora-evm-debug-dap: ready (initialize+launch+setBreakpoints+threads+stackTrace+continue/next/stepIn/stepOut/pause+evaluate+disconnect; set ORA_DAP_LOG=1 for inbound trace)\n");
 
     while (true) {
         const message_bytes = readDapMessage(allocator, stdin_file) catch |err| switch (err) {
             error.EndOfStream => return,
             else => {
-                try writeAll(stderr_file, "ora-evm-debug-dap: read error\n");
+                writeAll(stderr_file, "ora-evm-debug-dap: read error\n") catch {};
                 return err;
             },
         };
         defer allocator.free(message_bytes);
 
-        try writeAll(stderr_file, "ora-evm-debug-dap: <- ");
-        try writeAll(stderr_file, message_bytes);
-        try writeAll(stderr_file, "\n");
+        if (verbose_logging) {
+            writeAll(stderr_file, "ora-evm-debug-dap: <- ") catch {};
+            writeAll(stderr_file, message_bytes) catch {};
+            writeAll(stderr_file, "\n") catch {};
+        }
 
+        // Malformed JSON or wrong shape used to silently `continue`,
+        // leaving the client waiting for a response. Now we send a
+        // proper error response so clients can recover, and the
+        // server keeps reading subsequent messages.
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, message_bytes, .{
             .ignore_unknown_fields = true,
-        }) catch continue;
+        }) catch {
+            try writeError(allocator, stdout_file, state.nextSeq(), 0, "unknown", "malformed_json");
+            continue;
+        };
         defer parsed.deinit();
 
         const root = parsed.value;
-        if (root != .object) continue;
+        if (root != .object) {
+            try writeError(allocator, stdout_file, state.nextSeq(), 0, "unknown", "request_not_an_object");
+            continue;
+        }
 
-        const command = root.object.get("command") orelse continue;
-        if (command != .string) continue;
+        // Pull request_seq up-front so error responses below can
+        // reference it even when the command field is unusable.
         const request_seq = blk: {
             const v = root.object.get("seq") orelse break :blk 0;
             break :blk switch (v) {
@@ -134,6 +191,15 @@ pub fn main() !void {
                 else => 0,
             };
         };
+
+        const command = root.object.get("command") orelse {
+            try writeError(allocator, stdout_file, state.nextSeq(), request_seq, "unknown", "missing_command");
+            continue;
+        };
+        if (command != .string) {
+            try writeError(allocator, stdout_file, state.nextSeq(), request_seq, "unknown", "command_not_a_string");
+            continue;
+        }
 
         const cmd = command.string;
         const seq = state.nextSeq();
@@ -292,19 +358,58 @@ fn handleLaunch(
     try writeFramed(allocator, stdout_file, event);
 }
 
-/// Drain `pending_breakpoints` into the now-existing debugger.
-/// Best-effort: a setBreakpoint call that fails (e.g. line has no
-/// statement entry) is logged but doesn't abort the drain.
+/// Sync the debugger's installed breakpoints to match the
+/// client's stated intent in `pending_breakpoints`. Diff against
+/// `installed_breakpoints` so old entries that the client has
+/// implicitly retired (by sending a new full setBreakpoints list
+/// for their source) get a real `removeBreakpoint` call —
+/// otherwise an "unset" action would leave the breakpoint live in
+/// the debugger and the client would hit it on the next continue.
+///
+/// Best-effort on the install side: a `setBreakpoint` that fails
+/// (e.g. line has no statement entry) is silently dropped — same
+/// behavior as the TUI's `applyBreakpoints`. The pending entry
+/// stays in `pending_breakpoints` so a subsequent re-send /
+/// re-launch tries again.
 fn replayPendingBreakpoints(state: *ServerState) !void {
     if (!state.session_active) return;
+
+    // 1. Remove installed entries that aren't in pending.
+    var i: usize = 0;
+    while (i < state.installed_breakpoints.items.len) {
+        const inst = state.installed_breakpoints.items[i];
+        const still_wanted = blk: {
+            for (state.pending_breakpoints.items) |bp| {
+                if (bp.line == inst.line and std.mem.eql(u8, bp.path, inst.path)) break :blk true;
+            }
+            break :blk false;
+        };
+        if (still_wanted) {
+            i += 1;
+        } else {
+            state.session.debugger.removeBreakpoint(inst.path, inst.line);
+            var removed = state.installed_breakpoints.swapRemove(i);
+            removed.deinit(state.allocator);
+        }
+    }
+
+    // 2. Install pending entries that aren't already installed.
     for (state.pending_breakpoints.items) |bp| {
-        // The DAP client paths are usually absolute; the
-        // sourcemap also stores absolute paths, so a direct
-        // setBreakpoint(path, line) typically resolves. If the
-        // path doesn't match what the sourcemap recorded, the
-        // call fails silently — same behavior as the TUI's
-        // applyBreakpoints.
-        _ = state.session.debugger.setBreakpoint(bp.path, bp.line);
+        const already = blk: {
+            for (state.installed_breakpoints.items) |inst| {
+                if (inst.line == bp.line and std.mem.eql(u8, inst.path, bp.path)) break :blk true;
+            }
+            break :blk false;
+        };
+        if (already) continue;
+        if (state.session.debugger.setBreakpoint(bp.path, bp.line)) {
+            const path_dup = try state.allocator.dupe(u8, bp.path);
+            errdefer state.allocator.free(path_dup);
+            try state.installed_breakpoints.append(state.allocator, .{
+                .path = path_dup,
+                .line = bp.line,
+            });
+        }
     }
 }
 
@@ -399,15 +504,26 @@ fn handleStep(
     else
         return error.UnknownStepCommand;
 
+    // If the step itself errored, surface that to the client as a
+    // failed response — previously we acked success and emitted a
+    // `stopped` event regardless, which left the UI thinking
+    // execution had halted cleanly when in fact the EVM blew up.
+    // The client can re-issue or roll back from a failed step
+    // response; it can't recover from a phantom success.
     if (result) {} else |err| {
         var dbg: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&dbg, "ora-evm-debug-dap: {s} error: {s}\n", .{ cmd, @errorName(err) }) catch "";
-        try writeAll(stderr_file, msg);
+        writeAll(stderr_file, msg) catch {};
+        try writeError(allocator, stdout_file, seq, request_seq, cmd, @errorName(err));
+        return;
     }
 
     try writeAck(allocator, stdout_file, seq, request_seq, cmd);
 
     // `stopped` event so the client knows where we landed.
+    // `@tagName` of a Zig enum is a compile-time constant string
+    // with no quotes/backslashes — safe to interpolate without
+    // escaping.
     const reason = @tagName(state.session.debugger.stop_reason);
     const event = try std.fmt.allocPrint(allocator,
         \\{{"seq":{d},"type":"event","event":"stopped","body":{{"reason":"{s}","threadId":1}}}}
@@ -641,103 +757,6 @@ fn handleSetBreakpoints(
 
 fn writeAll(file: std.fs.File, bytes: []const u8) !void {
     try file.writeAll(bytes);
-}
-
-/// Read one Content-Length-framed JSON message from `file`.
-/// Returns the message body bytes (caller frees).
-fn readDapMessage(allocator: std.mem.Allocator, file: std.fs.File) ![]u8 {
-    var content_length: ?usize = null;
-    while (true) {
-        var line_buf: [256]u8 = undefined;
-        // Distinguish "saw any byte this line" (including the CRLF
-        // of an empty separator) from "stream gave us nothing" so
-        // an empty separator line terminates headers cleanly while
-        // an immediate EOF still surfaces as EndOfStream.
-        var saw_any_byte = false;
-        var i: usize = 0;
-        while (true) {
-            var b: [1]u8 = undefined;
-            const n = try file.read(&b);
-            if (n == 0) {
-                if (!saw_any_byte) return error.EndOfStream;
-                break;
-            }
-            saw_any_byte = true;
-            const byte = b[0];
-            if (byte == '\r') {
-                // Expect \n; consume but tolerate.
-                var nl: [1]u8 = undefined;
-                _ = file.read(&nl) catch {};
-                break;
-            }
-            if (byte == '\n') break;
-            if (i >= line_buf.len) return error.HeaderTooLong;
-            line_buf[i] = byte;
-            i += 1;
-        }
-        const line = line_buf[0..i];
-        if (line.len == 0) {
-            if (!saw_any_byte) return error.EndOfStream;
-            break;
-        }
-        const prefix = "Content-Length:";
-        if (std.mem.startsWith(u8, line, prefix)) {
-            const value = std.mem.trim(u8, line[prefix.len..], " \t");
-            content_length = try std.fmt.parseInt(usize, value, 10);
-        }
-        // Other headers (e.g. Content-Type) are ignored.
-    }
-    const len = content_length orelse return error.MissingContentLength;
-    const body = try allocator.alloc(u8, len);
-    errdefer allocator.free(body);
-    var read_total: usize = 0;
-    while (read_total < len) {
-        const n = try file.read(body[read_total..]);
-        if (n == 0) return error.UnexpectedEndOfStream;
-        read_total += n;
-    }
-    return body;
-}
-
-fn writeFramed(allocator: std.mem.Allocator, file: std.fs.File, body: []const u8) !void {
-    const header = try std.fmt.allocPrint(allocator, "Content-Length: {d}\r\n\r\n", .{body.len});
-    defer allocator.free(header);
-    try file.writeAll(header);
-    try file.writeAll(body);
-}
-
-/// Escape `s` as a JSON string literal (without the surrounding
-/// quotes) into `writer`. Required wherever user / network /
-/// filesystem-controlled strings (DAP commands, source paths,
-/// error messages) flow into a DAP response body — a stray quote
-/// or backslash from an attacker-controlled path would otherwise
-/// corrupt the framed JSON-RPC stream.
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x08 => try writer.writeAll("\\b"),
-            0x0c => try writer.writeAll("\\f"),
-            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{c}),
-            else => try writer.writeByte(c),
-        }
-    }
-}
-
-/// Allocator-returning convenience: produce a JSON-string-quoted
-/// copy of `s` like `"foo\\nbar"` (with surrounding quotes
-/// included). Caller frees.
-fn allocJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
-    errdefer buf.deinit(allocator);
-    try buf.append(allocator, '"');
-    try writeJsonEscaped(buf.writer(allocator), s);
-    try buf.append(allocator, '"');
-    return try buf.toOwnedSlice(allocator);
 }
 
 fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64) !void {

@@ -108,6 +108,11 @@ const DebugCliOptions = struct {
     /// Used by debug-artifact regression tests and for offline artifact
     /// generation that ships traces to another engineer.
     no_tui: bool = false,
+    /// Launch the DAP server (`ora-evm-debug-dap`) instead of the
+    /// TUI. The server reads Content-Length-framed JSON-RPC over
+    /// stdio; suitable for piping to a DAP-aware editor (VS Code
+    /// launch.json, etc.). Mutually exclusive with --no-tui.
+    dap: bool = false,
     /// Limit overrides forwarded verbatim to ora-evm-debug-tui. Stored as
     /// the raw text so we can re-emit them onto the spawned argv without
     /// any (re)formatting drift.
@@ -235,6 +240,11 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
 
         if (std.mem.eql(u8, arg, "--no-tui")) {
             opts.no_tui = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dap")) {
+            opts.dap = true;
             i += 1;
             continue;
         }
@@ -565,6 +575,23 @@ pub fn main() !void {
             debug_mlir_options.emit_smt_report = false;
         }
 
+        // --dap skips the artifact pipeline so that nothing
+        // unframed lands on stdout — the DAP server's stdio is
+        // a JSON-RPC channel, and a stray "Bytecode saved to ..."
+        // line ahead of the first Content-Length header would
+        // corrupt the stream. The expected flow:
+        //
+        //     ora debug --no-tui foo.ora -o artifacts/foo
+        //     # then in your DAP client (VS Code launch.json,
+        //     # etc.), spawn `ora-evm-debug-dap` and send a
+        //     # `launch` request with the artifact paths.
+        //
+        // `ora debug --dap` itself just spawns the server.
+        if (debug_options.dap) {
+            try launchDebuggerDap(allocator);
+            return;
+        }
+
         const artifact_root = try runDebugArtifacts(
             allocator,
             file_path,
@@ -576,21 +603,23 @@ pub fn main() !void {
 
         if (debug_options.no_tui) return;
 
-        try launchDebuggerTui(
-            allocator,
-            file_path,
-            artifact_root,
-            debug_options.init_signature,
-            debug_options.init_arg_values.items,
-            debug_options.init_calldata_hex,
-            debug_options.signature,
-            debug_options.arg_values.items,
-            debug_options.calldata_hex,
-            debug_options.gas_limit,
-            debug_options.max_steps,
-            debug_options.deploy_step_cap,
-            debug_options.artifact_max_bytes,
-        );
+        {
+            try launchDebuggerTui(
+                allocator,
+                file_path,
+                artifact_root,
+                debug_options.init_signature,
+                debug_options.init_arg_values.items,
+                debug_options.init_calldata_hex,
+                debug_options.signature,
+                debug_options.arg_values.items,
+                debug_options.calldata_hex,
+                debug_options.gas_limit,
+                debug_options.max_steps,
+                debug_options.deploy_step_cap,
+                debug_options.artifact_max_bytes,
+            );
+        }
         return;
     }
 
@@ -992,6 +1021,50 @@ fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
     if (pathExists(cwd_probe)) return cwd;
 
     return error.OraRepoRootNotFound;
+}
+
+/// Spawn the DAP server with stdio inherited from the parent.
+/// `ora debug --dap` is the supported entry point; editors that
+/// speak DAP pipe through stdin/stdout directly. Artifact paths
+/// are passed via the DAP `launch` request, not as CLI args, so
+/// this function just spawns the binary.
+fn launchDebuggerDap(allocator: std.mem.Allocator) !void {
+    const repo_root = try findOraRepoRoot(allocator);
+    defer allocator.free(repo_root);
+
+    const evm_dir = try std.fs.path.join(allocator, &[_][]const u8{ repo_root, "lib", "evm" });
+    defer allocator.free(evm_dir);
+
+    const dap_bin = try std.fs.path.join(allocator, &[_][]const u8{ evm_dir, "zig-out", "bin", "ora-evm-debug-dap" });
+    defer allocator.free(dap_bin);
+
+    if (!pathExists(dap_bin)) {
+        // Same auto-build pattern launchDebuggerTui uses — keeps
+        // `ora debug --dap` working from a fresh checkout without
+        // requiring a separate `zig build install` step.
+        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
+        build_child.cwd = evm_dir;
+        build_child.stdin_behavior = .Inherit;
+        build_child.stdout_behavior = .Inherit;
+        build_child.stderr_behavior = .Inherit;
+        try build_child.spawn();
+        const term = try build_child.wait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.DapBuildFailed,
+            else => return error.DapBuildFailed,
+        }
+    }
+
+    var child = std.process.Child.init(&.{dap_bin}, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.DapExited,
+        else => return error.DapExited,
+    }
 }
 
 fn launchDebuggerTui(
@@ -1664,6 +1737,7 @@ fn printUsage() !void {
     try stdout.print("  --init-arg <value>     - Repeated constructor/init arguments\n", .{});
     try stdout.print("  --init-calldata-hex <hex> - Raw constructor/init calldata\n", .{});
     try stdout.print("  --no-tui               - Emit debug artifacts and exit (no TUI launch)\n", .{});
+    try stdout.print("  --dap                  - Launch the DAP server (Content-Length-framed JSON-RPC over stdio) instead of the TUI\n", .{});
     try stdout.print("  --gas-limit <i64>      - Frame gas budget (default 5000000)\n", .{});
     try stdout.print("  --max-steps <u64>      - Per-command opcode safety cap (default 10000000)\n", .{});
     try stdout.print("  --deploy-step-cap <usize> - Deployment opcode cap (default 200000)\n", .{});

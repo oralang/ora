@@ -211,6 +211,7 @@ pub fn loadSession(ui: *Ui, path: []const u8) !void {
     ui.config = new_config;
     ui.seed = new_seed;
     try Session.init(&ui.session, ui.allocator, &ui.seed);
+    ui.controller = ora_evm.DebugController(.{}).init(ui.allocator, &ui.session.debugger);
 
     ui.command_mode = false;
     ui.command_buffer.clearRetainingCapacity();

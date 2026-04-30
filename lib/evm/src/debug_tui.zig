@@ -256,6 +256,11 @@ pub const Ui = struct {
     /// `abiDocForFrame` after the primary check fails. Empty when no
     /// secondary ABIs were provided.
     secondary_abi: std.AutoHashMap([20]u8, AbiDoc),
+    /// Front-end-agnostic controller layer. Routes the bulk of
+    /// eval / binding-resolve work through the same code path
+    /// the DAP server uses, so the two front-ends can't drift.
+    /// Initialised in `Ui.init` after `Session.init`.
+    controller: ora_evm.DebugController(.{}) = undefined,
     /// Map source_line → proof_status_string from the FV
     /// sidecar (`<stem>.proof.json`). Populated during init when
     /// the sidecar is found next to the debug-info path. The `fv`
@@ -321,6 +326,7 @@ pub const Ui = struct {
         }
 
         try Session.init(&self.session, allocator, &self.seed);
+        self.controller = ora_evm.DebugController(.{}).init(allocator, &self.session.debugger);
         try self.source_buffer.update(allocator, .{ .bytes = self.seed.source_text });
         self.source_view.highlighted_style = .{
             .bg = Color.rgbFromUint(0x303A45),
@@ -1778,6 +1784,9 @@ pub const Ui = struct {
 
         self.session.deinit();
         try Session.init(&self.session, self.allocator, &self.seed);
+        // Rebind the controller — the new debugger is a different
+        // address from the prior one's.
+        self.controller = ora_evm.DebugController(.{}).init(self.allocator, &self.session.debugger);
         self.command_mode = false;
         self.command_buffer.clearRetainingCapacity();
         self.selected_frame_index = 0;
@@ -1929,6 +1938,9 @@ pub const Ui = struct {
             self.command_status = "failed to rebuild session";
             return;
         };
+        // Rebind the controller against the freshly-initialised
+        // debugger.
+        self.controller = ora_evm.DebugController(.{}).init(self.allocator, &self.session.debugger);
         // Same reasoning as in rerunToHistory: replay re-traverses the
         // same opcodes, so re-counting hit_count from zero keeps the
         // breakpoint state consistent with the user's view.
@@ -4269,25 +4281,40 @@ pub const Ui = struct {
         return null;
     }
 
+    /// Resolver shared by the TUI's `:eval`. Delegates the
+    /// folded-literal + storage/memory/tstore numeric path to the
+    /// front-end-agnostic controller so DAP and TUI agree on
+    /// what's resolvable. Falls back to the TUI-specific
+    /// `resolveAbiParamValue` (SSA function args read from
+    /// calldata via the loaded ABI) and `resolveIntrinsicLocalValue`,
+    /// which currently depend on Ui state and aren't on the
+    /// controller yet.
     fn evalResolveBinding(ctx: *anyopaque, name: []const u8) ora_evm.debug_eval.EvalError!?ora_evm.debug_eval.Value {
         const self: *Ui = @alignCast(@ptrCast(ctx));
+
+        // 1. Controller path — folded value + storage/memory/tstore root.
+        if (self.controller.resolveBindingNumeric(name)) |numeric| {
+            if (numeric) |n| return ora_evm.debug_eval.Value{ .num = n };
+            // Controller saw "no binding by that name" — name truly
+            // isn't visible at this stop.
+            return null;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BindingUnavailable => {
+                // The binding is visible but the controller can't
+                // read it via the basic numeric path. Fall through
+                // to the TUI-specific fallbacks below.
+            },
+            else => return err,
+        }
+
+        // 2. TUI-specific fallbacks. Need the binding handle for
+        //    the ABI-param / intrinsic resolvers.
         const binding_opt = self.session.debugger.findVisibleBindingByName(self.allocator, name) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
         const binding = binding_opt orelse return null;
 
-        if (binding.folded_value) |folded_text| {
-            const parsed = std.fmt.parseUnsigned(u256, folded_text, 0) catch return error.BindingUnavailable;
-            return ora_evm.debug_eval.Value{ .num = parsed };
-        }
-
-        // numericBindingValue currently only returns OutOfMemory on the
-        // error path; propagate it explicitly so the evaluator
-        // surfaces it instead of mapping it to BindingUnavailable.
-        const numeric_opt = try self.numericBindingValue(&binding);
-        if (numeric_opt) |value| {
-            return ora_evm.debug_eval.Value{ .num = value };
-        }
         if (self.resolveAbiParamValue(&binding)) |resolved| {
             return switch (resolved) {
                 .numeric => |n| ora_evm.debug_eval.Value{ .num = n },
