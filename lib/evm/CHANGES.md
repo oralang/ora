@@ -1,14 +1,17 @@
 # Ora EVM debugger — branch summary for review
 
-Branch: `v0.2`. 136 commits ahead of `main`. ~6.6k LOC added under
-`lib/evm/`; 24 files touched. The bulk of this document is the
-debugger work; the branch also carries unrelated compiler-side
-changes (ADT/IR fixes, OraToSIR refactors) that aren't covered
-here.
+Branch: `v0.2`. 138+ commits ahead of `main`. ~7k LOC added
+under `lib/evm/` (25 files touched). The bulk of this document
+is the debugger work; the branch also carries unrelated
+compiler-side changes (ADT/IR fixes, OraToSIR refactors) that
+aren't covered here. `lib/evm/src/debug_tui.zig` sits at ~5485
+LOC after the partial split — see "Stopped early" below for
+why phase 3 wasn't worth the churn, and "Reviewer round" for
+the architectural split that did land.
 
 **Headline metric:** 551/551 lib/evm unit tests pass; top-level
 `zig build` and `zig build test-compiler` both green; bench
-`step_bench` reports ~25 ns/step (budget 100 µs).
+`step_bench` reports ~26 ns/step (budget 100 µs).
 
 ## How the work was organized
 
@@ -153,15 +156,56 @@ at branch start). Six new self-contained modules total:
 `debug_breakpoint.zig`, `debug_overlay.zig`, `debug_tui_draw.zig`,
 `debug_tui_session.zig`.
 
-## Known DAP gaps (excluded from this round per call)
+## Reviewer round
 
-The DAP server handles initialize / launch / setBreakpoints /
-threads / stackTrace / step / continue / pause / disconnect.
-Not implemented:
+After the first review pass, six findings landed in two
+commits:
 
-- `scopes`, `variables`, `evaluate` — surface binding-by-name
-  lookups currently bound to `Ui.render_scratch`. Lifting them
-  onto `Session` is a separate small refactor (~half a session).
+`0acc7c6c` — JSON safety, dedup, surface degraded paths:
+
+- **DAP JSON safety** (#1). All response interpolations of
+  user-controlled strings now go through `writeJsonEscaped` /
+  `allocJsonString`. Verified by sending a request with
+  `command:"weird\"name\\with/quote"` — response is well-formed
+  JSON instead of a corrupt stream.
+- **Stepping dedup** (#4). Four near-duplicate ~30-LOC
+  stepping loops collapsed into a single `runUntil(condition:
+  StopCondition)` engine on `Debugger`. Each public stepping
+  method is now a 3–5 line wrapper. `step_opcode` arm folds
+  in. Adding a new step mode plugs in without copying the
+  harness.
+- **Surface silent best-effort paths** (#5). `Debugger` gains
+  a sticky `instrumentation_degraded` flag set on first
+  `line_gas`/`watchpoint` failure. New pub getters
+  `instrumentationDegraded()` /
+  `instrumentationDegradedReason()`. TUI's status line picks
+  up `[degraded: <reason>]` via a `defer` on
+  `updateCommandStatusForCurrentStop`. Users no longer
+  silently trust stale gas/watchpoint state.
+
+`<this commit>` — DebugController extraction (#2/#3 partial):
+
+- New `lib/evm/src/debug_controller.zig` —
+  front-end-agnostic controller with `evaluateExpr` and
+  `resolveBindingNumeric`. Generic over `EvmConfig` so it
+  binds to the same `Debugger` instantiation the front-end
+  uses.
+- DAP `evaluate` request handler now calls
+  `state.controller.evaluateExpr` directly. **No TUI
+  dependency on the eval path.** End-to-end smoke tested:
+  `evaluate "1 + 2 + 3"` → `"6"`; `evaluate "unknown_var"` →
+  `success:false, message:"unknown identifier"`.
+- DAP binary still imports `debug_tui.zig` for `Session` /
+  `SessionSeed` / `AppConfig` machinery — that's the next
+  lift target. The eval path is the first slice; ABI-param
+  decoding (for SSA function args) and ABI document loading
+  are tracked for the next round.
+
+## Known DAP gaps remaining
+
+- `scopes` / `variables` — would surface visible bindings as
+  structured DAP variables. Needs ABI-param decoding +
+  formatted-text rendering lifted onto `DebugController`.
 - `restart`, `setExceptionBreakpoints`, `configurationDone` —
   capabilities advertise as unsupported.
 - VS Code `package.json` `debuggers` contribution + `launch.json`
@@ -179,8 +223,10 @@ self-contained, and has its own tests where applicable:
 - `lib/evm/src/debug_abi.zig` (258 LOC, 4 tests) — AbiDoc +
   decoders.
 - `lib/evm/src/debug_overlay.zig` (84 LOC, 4 tests) — OverlayMode.
-- `lib/evm/src/debug_dap.zig` (642 LOC) — DAP server skeleton +
-  handlers.
+- `lib/evm/src/debug_dap.zig` (~770 LOC) — DAP server +
+  handlers including `evaluate` via DebugController.
+- `lib/evm/src/debug_controller.zig` (~95 LOC) — front-end
+  agnostic controller layer (eval path lifted out of TUI).
 - `lib/evm/src/debug_tui_session.zig` (263 LOC) — Session JSON
   I/O + EIP-3155 trace export.
 - `lib/evm/src/debug_tui_draw.zig` (94 LOC) — drawing primitives.

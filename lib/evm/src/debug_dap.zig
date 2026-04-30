@@ -10,8 +10,8 @@
 //! - `launch` — takes pre-compiled artifact paths
 //!   (bytecodePath, sourceMapPath, sourcePath, optional
 //!   debugInfoPath, abiPath, sirPath, calldataHex). Builds a
-//!   Session, drains pending breakpoints into it, sends
-//!   `initialized` event.
+//!   Session + DebugController, drains pending breakpoints,
+//!   sends `initialized` event.
 //! - `setBreakpoints` — stash before launch; replays into the
 //!   debugger once a session exists.
 //! - `threads` — single synthetic thread (the debugger has one
@@ -20,12 +20,15 @@
 //! - `continue`, `next`, `stepIn`, `stepOut` — wired to
 //!   `Session.debugger` methods.
 //! - `pause` — sets the debugger state to paused.
+//! - `evaluate` — side-effect-free expression evaluation via
+//!   `DebugController.evaluateExpr`. No TUI dependency on this
+//!   path.
 //! - `disconnect` — ack and exit.
 //!
 //! NOT IMPLEMENTED:
-//! - `scopes`, `variables`, `evaluate` — would surface the
-//!   binding-by-name lookup, but that lives on `Ui` (depends on
-//!   render_scratch); needs a small refactor to lift onto Session.
+//! - `scopes`, `variables` — would surface visible bindings as
+//!   structured DAP variables. Needs ABI-param decoding lifted
+//!   onto DebugController; tracked separately.
 //! - `restart`, `setExceptionBreakpoints`,
 //!   `configurationDone` — capabilities advertise as unsupported.
 //! - Compile-from-source: launch arguments are pre-compiled
@@ -39,6 +42,7 @@ const tui = @import("debug_tui.zig");
 const Session = tui.Session;
 const SessionSeed = tui.SessionSeed;
 const AppConfig = tui.AppConfig;
+const DebugController = ora_evm.DebugController(.{});
 
 /// One breakpoint requested by the client before a session exists.
 /// Owned strings: `path` is duped from the parsed JSON so it
@@ -62,6 +66,10 @@ const ServerState = struct {
     session: Session = undefined,
     seed: SessionSeed = undefined,
     config: AppConfig = undefined,
+    /// Front-end-agnostic controller layer. Built right after
+    /// `Session.init` succeeds. `evaluate` requests delegate
+    /// here instead of importing TUI helpers.
+    controller: DebugController = undefined,
     session_active: bool = false,
     seq: i64 = 0,
 
@@ -93,7 +101,7 @@ pub fn main() !void {
     const stdout_file = std.fs.File.stdout();
     const stderr_file = std.fs.File.stderr();
 
-    try writeAll(stderr_file, "ora-evm-debug-dap: ready (initialize+launch+setBreakpoints+threads+stackTrace+continue/next/stepIn/stepOut/pause+disconnect)\n");
+    try writeAll(stderr_file, "ora-evm-debug-dap: ready (initialize+launch+setBreakpoints+threads+stackTrace+continue/next/stepIn/stepOut/pause+evaluate+disconnect)\n");
 
     while (true) {
         const message_bytes = readDapMessage(allocator, stdin_file) catch |err| switch (err) {
@@ -148,6 +156,8 @@ pub fn main() !void {
             try handleStep(allocator, stdout_file, stderr_file, seq, request_seq, &state, cmd);
         } else if (std.mem.eql(u8, cmd, "pause")) {
             try handlePause(allocator, stdout_file, seq, request_seq, &state);
+        } else if (std.mem.eql(u8, cmd, "evaluate")) {
+            try handleEvaluate(allocator, stdout_file, seq, request_seq, &state, root);
         } else if (std.mem.eql(u8, cmd, "disconnect")) {
             try writeAck(allocator, stdout_file, seq, request_seq, cmd);
             return;
@@ -267,6 +277,7 @@ fn handleLaunch(
         return;
     };
     state.config = config;
+    state.controller = DebugController.init(allocator, &state.session.debugger);
     state.session_active = true;
 
     // Drain pending breakpoints into the now-existing debugger.
@@ -403,6 +414,77 @@ fn handleStep(
     , .{ state.nextSeq(), reason });
     defer allocator.free(event);
     try writeFramed(allocator, stdout_file, event);
+}
+
+/// DAP `evaluate` handler. The request shape is:
+///
+///   { "command": "evaluate",
+///     "arguments": { "expression": "n + 1", "context": "watch" } }
+///
+/// The expression is evaluated against the current stop's
+/// visible bindings via the front-end-agnostic
+/// `DebugController.evaluateExpr`. No TUI dependency on this
+/// path — DAP doesn't import any TUI helpers for evaluate.
+///
+/// Reply body:
+///   { "result": "<decimal>", "variablesReference": 0 }
+fn handleEvaluate(
+    allocator: std.mem.Allocator,
+    stdout_file: std.fs.File,
+    seq: i64,
+    request_seq: i64,
+    state: *ServerState,
+    root: std.json.Value,
+) !void {
+    if (!state.session_active) {
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", "no session");
+        return;
+    }
+    const arguments = root.object.get("arguments") orelse {
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", "missing arguments");
+        return;
+    };
+    if (arguments != .object) {
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", "arguments not an object");
+        return;
+    }
+    const expr_val = arguments.object.get("expression") orelse {
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", "missing expression");
+        return;
+    };
+    if (expr_val != .string) {
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", "expression not a string");
+        return;
+    }
+
+    const value = state.controller.evaluateExpr(expr_val.string) catch |err| {
+        const msg: []const u8 = switch (err) {
+            error.ParseError => "parse error",
+            error.UnknownIdentifier => "unknown identifier",
+            error.BindingUnavailable => "binding unavailable",
+            error.DivisionByZero => "division by zero",
+            error.Overflow => "literal overflow",
+            error.OutOfMemory => "out of memory",
+        };
+        try writeError(allocator, stdout_file, seq, request_seq, "evaluate", msg);
+        return;
+    };
+
+    var result_buf: std.ArrayList(u8) = .{};
+    defer result_buf.deinit(allocator);
+    var w = result_buf.writer(allocator);
+    switch (value) {
+        .num => |n| try w.print("{d}", .{n}),
+        .bool_ => |b| try w.writeAll(if (b) "true" else "false"),
+    }
+    const result_quoted = try allocJsonString(allocator, result_buf.items);
+    defer allocator.free(result_quoted);
+
+    const body = try std.fmt.allocPrint(allocator,
+        \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":"evaluate","body":{{"result":{s},"variablesReference":0}}}}
+    , .{ seq, request_seq, result_quoted });
+    defer allocator.free(body);
+    try writeFramed(allocator, stdout_file, body);
 }
 
 /// `pause` is a no-op on a single-threaded synchronous debugger:
