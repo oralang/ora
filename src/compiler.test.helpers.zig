@@ -361,4 +361,3 @@ pub fn nthDescendantNodeOfKindInner(node: compiler.SyntaxNode, kind: compiler.sy
     }
     return null;
 }
-

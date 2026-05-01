@@ -65,9 +65,9 @@ test "compiler lowers impl self methods and calls end to end" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.bump"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Counter.bump"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.bump"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @CounterLike.Counter.bump"));
 }
 
 test "compiler lowers syntax into immutable AST items" {

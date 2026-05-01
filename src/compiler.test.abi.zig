@@ -376,4 +376,3 @@ test "compiler emits ABI attrs for public contract entries" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"address\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
 }
-

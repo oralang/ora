@@ -782,7 +782,7 @@ test "compiler lowers trait ghost blocks into verification HIR" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @SafeCounter.Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 }
 
@@ -813,7 +813,7 @@ test "compiler verifies impls with trait ghost blocks end to end" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @SafeCounter.Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
@@ -857,7 +857,7 @@ test "compiler verifies trait ghost method calls with self end to end" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Counter.get"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @SafeCounter.Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
@@ -1250,10 +1250,10 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
 
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @run"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
@@ -1287,8 +1287,8 @@ test "compiler lowers generic impl methods for trait-bound calls" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.marked__"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked__"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
 }
 
@@ -1411,6 +1411,34 @@ test "compiler reports ambiguous trait method names across impls" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "method 'mark' is ambiguous for type 'Box' across multiple impls"));
 }
 
+test "compiler lowers same-named impl methods as trait-qualified symbols" {
+    const source_text =
+        \\trait Left {
+        \\    fn mark() -> bool;
+        \\}
+        \\
+        \\trait Right {
+        \\    fn mark() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Left for Box {
+        \\    fn mark() -> bool { return true; }
+        \\}
+        \\
+        \\impl Right for Box {
+        \\    fn mark() -> bool { return false; }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Left.Box.mark"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Right.Box.mark"));
+}
+
 test "compiler lowers associated trait impl calls to concrete symbols" {
     const source_text =
         \\trait Factory {
@@ -1443,9 +1471,9 @@ test "compiler lowers associated trait impl calls to concrete symbols" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Factory.Box.make"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Factory.Box.make"));
 }
 
 test "compiler const eval executes comptime associated trait methods" {
@@ -1553,4 +1581,3 @@ test "dispatcher translates payload-bearing extern trait errors to ABI reverts" 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.error_selectors"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
-

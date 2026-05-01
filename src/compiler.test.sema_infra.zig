@@ -493,4 +493,3 @@ test "compiler lowers native string and bytes index access" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.byte_at"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "arith.trunci"));
 }
-

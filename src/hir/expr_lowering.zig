@@ -1876,6 +1876,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const callee_name = try self.parent.ensureLoweredImplMethod(
                 resolved.method_item_id,
                 resolved.function,
+                resolved.trait_name,
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
@@ -1904,6 +1905,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             impl_item_id: ast.ItemId,
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
+            trait_name: []const u8,
             target_name: []const u8,
             receiver_expr: ast.ExprId,
         };
@@ -1944,6 +1946,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .impl_item_id = impl_item_id,
                     .method_item_id = method_item_id,
                     .function = item.Function,
+                    .trait_name = trait_name,
                     .target_name = target_name,
                     .receiver_expr = field.base,
                 };
@@ -1959,6 +1962,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var matched_impl_item_id: ?ast.ItemId = null;
             var matched_method_item_id: ?ast.ItemId = null;
             var matched_function: ?ast.FunctionItem = null;
+            var matched_trait_name: ?[]const u8 = null;
 
             for (self.parent.file.items, 0..) |item, item_index| {
                 if (item != .Impl) continue;
@@ -1973,6 +1977,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     matched_impl_item_id = ast.ItemId.fromIndex(item_index);
                     matched_method_item_id = method_item_id;
                     matched_function = method_item.Function;
+                    matched_trait_name = impl_item.trait_name;
                 }
             }
 
@@ -1980,6 +1985,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .impl_item_id = matched_impl_item_id orelse return null,
                 .method_item_id = matched_method_item_id orelse return null,
                 .function = matched_function orelse return null,
+                .trait_name = matched_trait_name orelse return null,
                 .target_name = target_name,
                 .receiver_expr = field.base,
             };
@@ -1989,6 +1995,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             impl_item_id: ast.ItemId,
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
+            trait_name: []const u8,
             target_name: []const u8,
         };
 
@@ -2012,6 +2019,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const callee_name = try self.parent.ensureLoweredImplMethod(
                 resolved.method_item_id,
                 resolved.function,
+                resolved.trait_name,
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
@@ -2052,6 +2060,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var matched_impl_item_id: ?ast.ItemId = null;
             var matched_method_item_id: ?ast.ItemId = null;
             var matched_function: ?ast.FunctionItem = null;
+            var matched_trait_name: ?[]const u8 = null;
 
             for (self.parent.typecheck.impl_interfaces) |impl_interface| {
                 if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
@@ -2062,6 +2071,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     matched_impl_item_id = impl_interface.impl_item_id;
                     matched_method_item_id = impl_item.methods[index];
                     matched_function = self.parent.file.item(impl_item.methods[index]).Function;
+                    matched_trait_name = impl_interface.trait_name;
                 }
             }
 
@@ -2069,6 +2079,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .impl_item_id = matched_impl_item_id orelse return null,
                 .method_item_id = matched_method_item_id orelse return null,
                 .function = matched_function orelse return null,
+                .trait_name = matched_trait_name orelse return null,
                 .target_name = target_name,
             };
         }
@@ -2104,6 +2115,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .impl_item_id = impl_item_id,
                     .method_item_id = method_item_id,
                     .function = item.Function,
+                    .trait_name = trait_name,
                     .target_name = target_name,
                 };
             }

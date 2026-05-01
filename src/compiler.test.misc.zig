@@ -2668,4 +2668,3 @@ test "SMT degradation probes fail closed in sequential and parallel verification
         try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
 }
-

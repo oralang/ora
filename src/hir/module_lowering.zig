@@ -111,7 +111,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     else => continue,
                 };
                 if (function.is_generic or function.is_comptime) continue;
-                const symbol_name = try @This().implMethodSymbolName(self, impl_item.target_name, function.name);
+                const symbol_name = try @This().implMethodSymbolName(self, impl_item.trait_name, impl_item.target_name, function.name);
                 if (self.monomorphized_function_names.contains(symbol_name)) continue;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
@@ -261,7 +261,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             caller_contract_id: ?ast.ItemId,
         ) anyerror!?[]const u8 {
             if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
-                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.target_name, call, null);
+                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.trait_name, impl_item.target_name, call, null);
                 return symbol_name;
             }
             const scoped_contract_id = if (function.parent_contract == null) caller_contract_id else null;
@@ -433,11 +433,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             self: *Lowerer,
             method_item_id: ast.ItemId,
             function: ast.FunctionItem,
+            trait_name: []const u8,
             target_name: []const u8,
             call: ?ast.CallExpr,
             parent_block_override: ?mlir.MlirBlock,
         ) anyerror![]const u8 {
-            const base_symbol_name = try @This().implMethodSymbolName(self, target_name, function.name);
+            const base_symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
             const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name);
             if (function.is_generic) {
                 const method_call = call orelse return base_symbol_name;
@@ -469,8 +470,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return self.module_body;
         }
 
-        fn implMethodSymbolName(self: *Lowerer, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
+        fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
             var name = std.ArrayList(u8){};
+            try name.appendSlice(self.allocator, trait_name);
+            try name.appendSlice(self.allocator, ".");
             try name.appendSlice(self.allocator, target_name);
             try name.appendSlice(self.allocator, ".");
             try name.appendSlice(self.allocator, method_name);

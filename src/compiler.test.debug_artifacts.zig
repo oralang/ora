@@ -92,10 +92,10 @@ fn assertEqualOrDescribeDiff(
             "  cp /tmp/dbg/{s}.sourcemap.json tests/debug_artifacts/{s}/sourcemap.golden.json && \\\n" ++
             "  cp /tmp/dbg/{s}.debug.json     tests/debug_artifacts/{s}/debug.golden.json\n",
         .{
-            fixture_name, label, golden_path,
-            actual_path, actual.len,
-            golden_path, golden.len,
-            // regen instructions:
+            fixture_name, label,      golden_path,
+            actual_path,  actual.len, golden_path,
+            golden.len,
+                // regen instructions:
             FIXTURES[0].source_relpath, // simple_counter for now
             fixture_name,
             fixture_name,
