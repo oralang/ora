@@ -3424,6 +3424,31 @@ pub const Encoder = struct {
         return try self.coerceTypedAstToSortOrUndef(current, result_type, result_sort, "tensor_extract_result", @intFromPtr(mlir_op.ptr));
     }
 
+    fn shapedTypeAfterOneIndex(self: *Encoder, shaped_type: mlir.MlirType) EncodeError!mlir.MlirType {
+        if (mlir.oraTypeIsNull(shaped_type) or !mlir.oraTypeIsAShaped(shaped_type)) {
+            return mlir.MlirType{ .ptr = null };
+        }
+
+        const element_type = mlir.oraShapedTypeGetElementType(shaped_type);
+        const rank = mlir.oraShapedTypeGetRank(shaped_type);
+        if (rank <= 1) return element_type;
+
+        const next_rank: usize = @intCast(rank - 1);
+        const shape = try self.allocator.alloc(i64, next_rank);
+        defer self.allocator.free(shape);
+        for (shape, 0..) |*dim, index| {
+            dim.* = mlir.oraShapedTypeGetDimSize(shaped_type, @intCast(index + 1));
+        }
+
+        return mlir.oraRankedTensorTypeCreate(
+            mlir.mlirTypeGetContext(shaped_type),
+            @intCast(next_rank),
+            shape.ptr,
+            element_type,
+            mlir.MlirAttribute{ .ptr = null },
+        );
+    }
+
     fn encodeTensorInsertOp(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
         // tensor.insert %value into %tensor[%i, ...]
         // operands: value, tensor, idx0, idx1, ...
@@ -3435,21 +3460,26 @@ pub const Encoder = struct {
 
         var containers = try self.allocator.alloc(z3.Z3_ast, indices.len);
         defer self.allocator.free(containers);
+        var container_types = try self.allocator.alloc(mlir.MlirType, indices.len);
+        defer self.allocator.free(container_types);
         var cast_indices = try self.allocator.alloc(z3.Z3_ast, indices.len);
         defer self.allocator.free(cast_indices);
 
         var cursor = tensor;
+        var cursor_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
         for (indices, 0..) |raw_index, i| {
             const container_sort = z3.Z3_get_sort(self.context.ctx, cursor);
             if (!self.isArraySort(container_sort)) return error.UnsupportedOperation;
 
             containers[i] = cursor;
+            container_types[i] = cursor_type;
             const index_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
             const index_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, @intCast(i + 2)));
             cast_indices[i] = try self.coerceTypedAstToSortOrUndef(raw_index, index_type, index_sort, "tensor_insert_index", @intFromPtr(mlir_op.ptr));
 
             if (i + 1 < indices.len) {
                 cursor = self.encodeSelect(cursor, cast_indices[i]);
+                cursor_type = try self.shapedTypeAfterOneIndex(cursor_type);
             }
         }
 
@@ -3469,7 +3499,18 @@ pub const Encoder = struct {
             const parent = containers[depth];
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent);
             const parent_range = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
-            updated = self.encodeStore(parent, cast_indices[depth], try self.coerceAstToSortOrUndef(updated, parent_range, "tensor_insert_parent", @intFromPtr(mlir_op.ptr)));
+            const parent_value_type = try self.shapedTypeAfterOneIndex(container_types[depth]);
+            const parent_value = if (mlir.oraTypeIsNull(parent_value_type))
+                try self.degradeToUndef(parent_range, "tensor_insert_parent", @intFromPtr(mlir_op.ptr), "missing tensor parent value type metadata")
+            else
+                try self.coerceTypedAstToSortOrUndef(
+                    updated,
+                    parent_value_type,
+                    parent_range,
+                    "tensor_insert_parent",
+                    @intFromPtr(mlir_op.ptr),
+                );
+            updated = self.encodeStore(parent, cast_indices[depth], parent_value);
         }
 
         return updated;
@@ -4217,31 +4258,7 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
-            const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
-            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
-            const op_id = @intFromPtr(mlir_op.ptr);
-            if (try self.tryStmtAlwaysEntersCatch(mlir_op, mode)) {
-                return (try self.extractRegionYield(mlir_op, 1, result_index, mode)) orelse
-                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
-            }
-            if (!self.tryStmtMayEnterCatch(mlir_op)) {
-                return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
-                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
-            }
-            if (try self.tryExtractTryRegionCatchPredicate(mlir_op, mode)) |catch_pred| {
-                if (try self.extractRegionYieldValue(mlir_op, 0, result_index)) |yield_value| {
-                    if (try self.trySummarizeTryValue(yield_value, mode)) |summary| {
-                        if (try self.extractRegionYield(mlir_op, 1, result_index, mode)) |catch_expr| {
-                            return try self.encodeControlFlow("scf.if", catch_pred, catch_expr, summary.ok_expr);
-                        }
-                    }
-                }
-            }
-            if (try self.tryExtractDirectErrorUnwrapTryStmtResult(mlir_op, result_index, mode)) |encoded| {
-                return encoded;
-            }
-            return (try self.tryExtractEquivalentTryStmtResult(mlir_op, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
+            return try self.encodeTryStmtResultWithMode(mlir_op, result_index, mode);
         }
 
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
@@ -4307,6 +4324,9 @@ pub const Encoder = struct {
             }
             if (try self.tryExtractCanonicalDecrementScfForResult(mlir_op, result_index, mode)) |decrement_result| {
                 return decrement_result;
+            }
+            if (try self.tryExtractGeometricScfForResult(mlir_op, result_index, mode)) |geometric_result| {
+                return geometric_result;
             }
             if (try self.tryExtractIdentityScfForResult(mlir_op, result_index, mode)) |identity_result| {
                 return identity_result;
@@ -5488,28 +5508,7 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
-            const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
-            const op_id = @intFromPtr(mlir_op.ptr);
-            if (try self.tryStmtAlwaysEntersCatch(mlir_op, mode)) {
-                return (try self.extractRegionYield(mlir_op, 1, 0, mode)) orelse
-                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
-            }
-            if (!self.tryStmtMayEnterCatch(mlir_op)) {
-                return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
-                    try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
-            }
-            if (try self.tryExtractTryRegionCatchPredicate(mlir_op, mode)) |catch_pred| {
-                if (try self.extractRegionYieldValue(mlir_op, 0, 0)) |yield_value| {
-                    if (try self.trySummarizeTryValue(yield_value, mode)) |summary| {
-                        if (try self.extractRegionYield(mlir_op, 1, 0, mode)) |catch_expr| {
-                            return try self.encodeControlFlow("scf.if", catch_pred, catch_expr, summary.ok_expr);
-                        }
-                    }
-                }
-            }
-            return (try self.tryExtractEquivalentTryStmtResult(mlir_op, 0, mode)) orelse
-                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
+            return try self.encodeTryStmtResultWithMode(mlir_op, 0, mode);
         }
 
         if (std.mem.eql(u8, op_name, "memref.alloca")) {
@@ -6577,7 +6576,30 @@ pub const Encoder = struct {
         return std.mem.eql(u8, effect, "writes") or std.mem.eql(u8, effect, "readwrites");
     }
 
+    fn functionHasReadEffect(self: *Encoder, func_op: mlir.MlirOperation) bool {
+        _ = self;
+        const effect_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.effect", 10));
+        if (mlir.oraAttributeIsNull(effect_attr)) return false;
+        const effect_ref = mlir.oraStringAttrGetValue(effect_attr);
+        if (effect_ref.data == null or effect_ref.length == 0) return false;
+        const effect = effect_ref.data[0..effect_ref.length];
+        return std.mem.eql(u8, effect, "reads") or std.mem.eql(u8, effect, "readwrites");
+    }
+
+    fn functionHasTrackedEffectMetadata(self: *Encoder, func_op: mlir.MlirOperation) bool {
+        _ = self;
+        const effect_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.effect", 10));
+        if (mlir.oraAttributeIsNull(effect_attr)) return false;
+        const effect_ref = mlir.oraStringAttrGetValue(effect_attr);
+        if (effect_ref.data == null or effect_ref.length == 0) return false;
+        const effect = effect_ref.data[0..effect_ref.length];
+        return std.mem.eql(u8, effect, "reads") or
+            std.mem.eql(u8, effect, "writes") or
+            std.mem.eql(u8, effect, "readwrites");
+    }
+
     fn functionMayWriteTrackedState(self: *Encoder, func_op: mlir.MlirOperation) bool {
+        if (self.functionHasTrackedEffectMetadata(func_op)) return self.functionHasWriteEffect(func_op);
         if (self.functionHasWriteEffect(func_op)) return true;
         return self.operationMayWriteTrackedState(func_op) catch true;
     }
@@ -6597,6 +6619,7 @@ pub const Encoder = struct {
         const has_write_effect = self.functionHasWriteEffect(func_op);
 
         // Prefer explicit metadata when available.
+        var saw_slot_metadata = false;
         const slots_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.write_slots", 15));
         if (!mlir.oraAttributeIsNull(slots_attr)) {
             const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(slots_attr));
@@ -6606,16 +6629,22 @@ pub const Encoder = struct {
                 const slot_ref = mlir.oraStringAttrGetValue(elem);
                 if (slot_ref.data == null or slot_ref.length == 0) continue;
                 const slot_name = slot_ref.data[0..slot_ref.length];
+                saw_slot_metadata = true;
                 try self.appendWriteSlotUnique(write_slots, slot_name);
             }
         }
+
+        // Compiler-emitted slot metadata is the sema summary for tracked state.
+        // Trust it for set recovery; scanning is only the fallback for hand-built
+        // or legacy IR without explicit summary attrs.
+        if (saw_slot_metadata) return;
 
         // Also scan function body and transitive callees to recover missing metadata.
         try self.collectWriteInfoFromOperation(func_op, write_slots, writes_unknown, visited_funcs);
 
         // If function is marked as writing but we still couldn't recover any slots,
         // conservatively model as unknown write set.
-        if (has_write_effect and write_slots.items.len == slots_before) {
+        if (has_write_effect and !saw_slot_metadata and write_slots.items.len == slots_before) {
             writes_unknown.* = true;
         }
     }
@@ -6704,7 +6733,32 @@ pub const Encoder = struct {
         const func_id = @intFromPtr(func_op.ptr);
         if (visited_funcs.contains(func_id)) return;
         try visited_funcs.put(func_id, {});
+
+        const slots_before = read_slots.items.len;
+        const has_read_effect = self.functionHasReadEffect(func_op);
+
+        var saw_slot_metadata = false;
+        const slots_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.read_slots", 14));
+        if (!mlir.oraAttributeIsNull(slots_attr)) {
+            const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(slots_attr));
+            for (0..count) |i| {
+                const elem = mlir.oraArrayAttrGetElement(slots_attr, i);
+                if (mlir.oraAttributeIsNull(elem)) continue;
+                const slot_ref = mlir.oraStringAttrGetValue(elem);
+                if (slot_ref.data == null or slot_ref.length == 0) continue;
+                const slot_name = slot_ref.data[0..slot_ref.length];
+                saw_slot_metadata = true;
+                try self.appendReadSlotUnique(read_slots, slot_name);
+            }
+        }
+
+        if (saw_slot_metadata) return;
+
         try self.collectReadInfoFromOperation(func_op, read_slots, reads_unknown, visited_funcs);
+
+        if (has_read_effect and !saw_slot_metadata and read_slots.items.len == slots_before) {
+            reads_unknown.* = true;
+        }
     }
 
     fn collectReadInfoFromOperation(
@@ -8279,6 +8333,80 @@ pub const Encoder = struct {
         return null;
     }
 
+    fn tryExtractGeometricScfForResult(
+        self: *Encoder,
+        for_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!?z3.Z3_ast {
+        const num_operands: usize = @intCast(mlir.oraOperationGetNumOperands(for_op));
+        if (num_operands < 4) return null;
+        const num_iter_args = num_operands - 3;
+        if (num_iter_args != 1 or result_index != 0) return null;
+
+        const lb_value = mlir.oraOperationGetOperand(for_op, 0);
+        const ub_value = mlir.oraOperationGetOperand(for_op, 1);
+        const step_value = mlir.oraOperationGetOperand(for_op, 2);
+        const step_const = self.tryGetConstIntValue(step_value);
+        if (step_const == null or step_const.? == 0) return null;
+        const step_u64 = std.math.cast(u64, step_const.?) orelse return null;
+
+        const body = mlir.oraScfForOpGetBodyBlock(for_op);
+        if (mlir.oraBlockIsNull(body)) return null;
+        if (mlir.oraBlockGetNumArguments(body) != 2) return null;
+        const carried_arg = mlir.oraBlockGetArgument(body, 1);
+
+        var current = mlir.oraBlockGetFirstOperation(body);
+        while (!mlir.oraOperationIsNull(current)) {
+            const name_ref = self.getOperationName(current);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            const name = if (name_ref.data == null or name_ref.length == 0)
+                ""
+            else
+                name_ref.data[0..name_ref.length];
+
+            if (std.mem.eql(u8, name, "ora.return")) return null;
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                if (mlir.oraOperationGetNumOperands(current) != 1) return null;
+                const yielded = mlir.oraOperationGetOperand(current, 0);
+                if (!mlir.oraValueIsAOpResult(yielded)) return null;
+                const yield_owner = mlir.oraOpResultGetOwner(yielded);
+                if (!self.operationNameEq(yield_owner, "arith.muli")) return null;
+                if (mlir.oraOperationGetNumOperands(yield_owner) != 2) return null;
+
+                const mul_lhs = mlir.oraOperationGetOperand(yield_owner, 0);
+                const mul_rhs = mlir.oraOperationGetOperand(yield_owner, 1);
+                const multiplier_value =
+                    if (mlir.mlirValueEqual(mul_lhs, carried_arg) and self.tryGetConstIntValue(mul_rhs) != null)
+                        mul_rhs
+                    else if (mlir.mlirValueEqual(mul_rhs, carried_arg) and self.tryGetConstIntValue(mul_lhs) != null)
+                        mul_lhs
+                    else
+                        return null;
+
+                const init_value = mlir.oraOperationGetOperand(for_op, 3);
+                const init_ast = try self.encodeValueWithMode(init_value, mode);
+                const lb_ast = try self.encodeValueWithMode(lb_value, mode);
+                const ub_ast = try self.encodeValueWithMode(ub_value, mode);
+                const trip_count_ast = try self.encodeCanonicalPositiveStepScfForTripCount(lb_ast, ub_ast, step_u64);
+                const multiplier_ast = try self.encodeValueWithMode(multiplier_value, mode);
+                const multiplier_type = mlir.oraValueGetType(multiplier_value);
+                const exponent_type = mlir.oraValueGetType(ub_value);
+                const factor = try self.encodePowerOp(
+                    multiplier_ast,
+                    multiplier_type,
+                    trip_count_ast,
+                    exponent_type,
+                    @intFromPtr(for_op.ptr),
+                );
+                return try self.encodeArithmeticOp(.Mul, init_ast, factor);
+            }
+            current = mlir.oraOperationGetNextInBlock(current);
+        }
+
+        return null;
+    }
+
     fn encodeCanonicalPositiveStepScfForTripCount(
         self: *Encoder,
         lb_ast: z3.Z3_ast,
@@ -9608,6 +9736,44 @@ pub const Encoder = struct {
         return try_expr;
     }
 
+    fn encodeTryStmtResultWithMode(
+        self: *Encoder,
+        try_stmt: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const result_value = mlir.oraOperationGetResult(try_stmt, @intCast(result_index));
+        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        const op_id = @intFromPtr(try_stmt.ptr);
+
+        if (try self.tryStmtAlwaysEntersCatch(try_stmt, mode)) {
+            return (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse
+                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
+        }
+
+        if (!self.tryStmtMayEnterCatch(try_stmt)) {
+            return (try self.extractRegionYield(try_stmt, 0, result_index, mode)) orelse
+                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+        }
+
+        if (try self.tryExtractTryRegionCatchPredicate(try_stmt, mode)) |catch_pred| {
+            if (try self.extractRegionYieldValue(try_stmt, 0, result_index)) |yield_value| {
+                if (try self.trySummarizeTryValue(yield_value, mode)) |summary| {
+                    if (try self.extractRegionYield(try_stmt, 1, result_index, mode)) |catch_expr| {
+                        return try self.encodeControlFlow("scf.if", catch_pred, catch_expr, summary.ok_expr);
+                    }
+                }
+            }
+        }
+
+        if (try self.tryExtractDirectErrorUnwrapTryStmtResult(try_stmt, result_index, mode)) |encoded| {
+            return encoded;
+        }
+
+        return (try self.tryExtractEquivalentTryStmtResult(try_stmt, result_index, mode)) orelse
+            try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
+    }
+
     const DirectTryUnwrapInfo = struct {
         is_err: z3.Z3_ast,
         ok_expr: z3.Z3_ast,
@@ -9692,6 +9858,29 @@ pub const Encoder = struct {
         }
 
         if (self.operationNameEq(owner, "ora.try_stmt")) {
+            const result_index = self.getResultIndex(owner, value) orelse return null;
+            if (try self.tryExtractTryRegionCatchPredicate(owner, mode)) |catch_pred| {
+                const try_value = (try self.extractRegionYieldValue(owner, 0, result_index)) orelse return null;
+                const try_summary = (try self.trySummarizeTryValue(try_value, mode)) orelse return null;
+                const effective_catch_pred = self.encodeOr(&.{ catch_pred, try_summary.is_err });
+
+                if (try self.extractRegionYieldValue(owner, 1, result_index)) |catch_value| {
+                    const catch_summary = (try self.trySummarizeTryValue(catch_value, mode)) orelse return null;
+                    return .{
+                        .is_err = self.encodeAnd(&.{ effective_catch_pred, catch_summary.is_err }),
+                        .ok_expr = self.encodeIte(effective_catch_pred, catch_summary.ok_expr, try_summary.ok_expr),
+                    };
+                }
+
+                const catch_region = mlir.oraOperationGetRegion(owner, 1);
+                if (self.regionMayEnterCatch(catch_region)) {
+                    return .{
+                        .is_err = effective_catch_pred,
+                        .ok_expr = try_summary.ok_expr,
+                    };
+                }
+            }
+
             const catch_region = mlir.oraOperationGetRegion(owner, 1);
             if (!self.regionMayEnterCatch(catch_region)) {
                 return .{
@@ -11728,8 +11917,13 @@ pub const Encoder = struct {
         var reads_unknown = false;
         if (self.verify_state) {
             if (func_op) |fop| {
-                try self.collectFunctionWriteInfo(fop, &write_slots, &writes_unknown);
-                try self.collectFunctionReadInfo(fop, &read_slots, &reads_unknown);
+                const has_tracked_effect_metadata = self.functionHasTrackedEffectMetadata(fop);
+                if (!has_tracked_effect_metadata or self.functionHasWriteEffect(fop)) {
+                    try self.collectFunctionWriteInfo(fop, &write_slots, &writes_unknown);
+                }
+                if (!has_tracked_effect_metadata or self.functionHasReadEffect(fop)) {
+                    try self.collectFunctionReadInfo(fop, &read_slots, &reads_unknown);
+                }
                 if (writes_unknown) {
                     self.recordDegradation("failed to recover known callee write set exactly");
                 }
@@ -12035,7 +12229,7 @@ pub const Encoder = struct {
         // Rebuild parent stores from leaf -> root:
         // updated_leaf, then store into each parent map_get site.
         var updated = stored_value;
-        var updated_type = mlir.oraMapTypeGetValueType(mlir.oraValueGetType(map_operand));
+        var updated_type = mlir.oraValueGetType(map_operand);
         for (chain.items, 0..) |ancestor, depth| {
             const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
@@ -12053,7 +12247,7 @@ pub const Encoder = struct {
                 @intFromPtr(ancestor.parent_map.ptr),
             );
             const parent_value = if (mlir.oraTypeIsNull(updated_type))
-                try self.coerceAstToSortOrUndef(updated, value_sort, "nested_map_parent_value", @intFromPtr(ancestor.parent_map.ptr))
+                try self.degradeToUndef(value_sort, "nested_map_parent_value", @intFromPtr(ancestor.parent_map.ptr), "missing nested map parent value type metadata")
             else
                 try self.coerceTypedAstToSortOrUndef(
                     updated,

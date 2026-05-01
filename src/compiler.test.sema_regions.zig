@@ -308,6 +308,33 @@ test "compiler tracks per-function read and write effects" {
     }
 }
 
+test "compiler lowers sema effect summaries onto HIR functions" {
+    const source_text =
+        \\contract Effects {
+        \\    storage total: u256;
+        \\    tstore var pending: u256;
+        \\
+        \\    pub fn mixed(value: u256) -> u256 {
+        \\        pending += value;
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"readwrites\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"total\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"transient:pending\""));
+}
+
 test "compiler composes callee effects into caller summaries" {
     const source_text =
         \\contract Effects {
@@ -1573,4 +1600,3 @@ test "compiler tracks tstore var inside function body" {
     const decl = ast_file.statement(body.statements[0]).VariableDecl;
     try testing.expectEqual(compiler.sema.Region.transient, typecheck.pattern_types[decl.pattern.index()].region);
 }
-

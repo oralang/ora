@@ -8138,6 +8138,61 @@ fn buildStructFieldUpdateMissingMetadataModule(mlir_ctx: mlir.MlirContext) mlir.
     return module;
 }
 
+fn buildStructFieldExtractMissingMetadataModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+
+    const empty_types = [_]mlir.MlirType{};
+    const empty_locs = [_]mlir.MlirLocation{};
+    const empty_vals = [_]mlir.MlirValue{};
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, testStringRef("Pair__u256_extract_missing"));
+
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public_entry"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const func_op = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &func_attrs, func_attrs.len, &empty_types, &empty_locs, 0);
+    const body = mlir.oraFuncOpGetBodyBlock(func_op);
+
+    const pair_placeholder = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, testStringRef("pairWithoutMetadata"), struct_ty);
+    const extract_op = mlir.oraStructFieldExtractOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(pair_placeholder, 0),
+        testStringRef("left"),
+        i256_ty,
+    );
+    const zero_op = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0),
+    );
+    const eq_op = mlir.oraCmpOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("eq"),
+        mlir.oraOperationGetResult(extract_op, 0),
+        mlir.oraOperationGetResult(zero_op, 0),
+        i1_ty,
+    );
+    const ensures_op = mlir.oraEnsuresOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(eq_op, 0));
+    const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_vals, empty_vals.len);
+
+    mlir.oraBlockAppendOwnedOperation(body, pair_placeholder);
+    mlir.oraBlockAppendOwnedOperation(body, extract_op);
+    mlir.oraBlockAppendOwnedOperation(body, zero_op);
+    mlir.oraBlockAppendOwnedOperation(body, eq_op);
+    mlir.oraBlockAppendOwnedOperation(body, ensures_op);
+    mlir.oraBlockAppendOwnedOperation(body, ret_op);
+
+    mlir.oraBlockAppendOwnedOperation(module_body, func_op);
+    return module;
+}
+
 fn buildPublicCallsPrivateEnsuresModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -11170,6 +11225,55 @@ test "struct_field_update metadata loss fails closed in sequential and parallel 
             result.errors.items[0].message,
             1,
             "missing struct field type metadata for struct update",
+        ));
+    }
+}
+
+test "struct_field_extract metadata loss fails closed in sequential and parallel verification" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildStructFieldExtractMissingMetadataModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+
+        var result = try pass.runVerificationPassPreparedSequential(module);
+        defer result.deinit();
+
+        try testing.expect(pass.encoder.isDegraded());
+        try testing.expect(!result.success);
+        try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            result.errors.items[0].message,
+            1,
+            "struct_field_extract requires exact product metadata",
+        ));
+    }
+
+    {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.parallel = true;
+
+        var result = try pass.runVerificationPass(module);
+        defer result.deinit();
+
+        try testing.expect(pass.encoder.isDegraded());
+        try testing.expect(!result.success);
+        try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            result.errors.items[0].message,
+            1,
+            "struct_field_extract requires exact product metadata",
         ));
     }
 }

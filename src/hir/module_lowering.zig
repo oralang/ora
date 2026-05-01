@@ -521,6 +521,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     else => return err,
                 };
             }
+            try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
 
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
@@ -611,6 +612,76 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
             function_lowerer.extra_verification_clauses = try @This().traitGhostClausesForImplMethod(self, item_id);
             try function_lowerer.lower();
+        }
+
+        fn attachEffectSummaryAttrs(
+            self: *Lowerer,
+            attrs: *std.ArrayList(mlir.MlirNamedAttribute),
+            item_id: ast.ItemId,
+        ) anyerror!void {
+            if (item_id.index() >= self.typecheck.item_effects.len) return;
+
+            const effect = self.typecheck.item_effects[item_id.index()];
+            switch (effect) {
+                .pure => return,
+                .external, .side_effects => return,
+                .reads => |read_effect| {
+                    if (try @This().appendEffectSlotAttrs(self, attrs, "ora.read_slots", read_effect.slots)) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "reads"));
+                    }
+                },
+                .writes => |write_effect| {
+                    if (try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", write_effect.slots)) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
+                    }
+                },
+                .reads_writes => |read_write| {
+                    const has_reads = try @This().appendEffectSlotAttrs(self, attrs, "ora.read_slots", read_write.reads);
+                    const has_writes = try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", read_write.writes);
+                    if (has_reads and has_writes) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "readwrites"));
+                    } else if (has_reads) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "reads"));
+                    } else if (has_writes) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
+                    }
+                },
+            }
+        }
+
+        fn appendEffectSlotAttrs(
+            self: *Lowerer,
+            attrs: *std.ArrayList(mlir.MlirNamedAttribute),
+            attr_name: []const u8,
+            slots: []const sema.EffectSlot,
+        ) anyerror!bool {
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer slot_attrs.deinit(self.allocator);
+
+            for (slots) |slot| {
+                switch (slot.region) {
+                    .storage => try slot_attrs.append(
+                        self.allocator,
+                        mlir.oraStringAttrCreate(self.context, strRef(slot.name)),
+                    ),
+                    .transient => {
+                        const slot_name = try std.fmt.allocPrint(self.allocator, "transient:{s}", .{slot.name});
+                        defer self.allocator.free(slot_name);
+                        try slot_attrs.append(
+                            self.allocator,
+                            mlir.oraStringAttrCreate(self.context, strRef(slot_name)),
+                        );
+                    },
+                    else => {},
+                }
+            }
+
+            if (slot_attrs.items.len == 0) return false;
+            try attrs.append(self.allocator, .{
+                .name = identifier(self.context, attr_name),
+                .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(slot_attrs.items.len), slot_attrs.items.ptr),
+            });
+            return true;
         }
 
         fn traitGhostClausesForImplMethod(self: *Lowerer, method_item_id: ast.ItemId) anyerror![]const FunctionLowerer.ExtraVerificationClause {

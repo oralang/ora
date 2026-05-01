@@ -119,10 +119,10 @@ no longer have the earlier unexplained `UNKNOWN` hotspot.
 
 ### Why This Matters
 
-Canonical loops are in much better shape. The remaining loop frontier is now the main non-harness exactness boundary:
+Canonical loops are in much better shape. The remaining loop frontier is now a small fail-closed boundary, not a general open-ended promise of loop exactness:
 
 - non-canonical `scf.while`
-- residual `scf.for` result/state cases that still need loop summaries
+- only concrete `scf.for` result/state cases that come with a real degradation repro
 
 This work determines whether remaining loop degradations are:
 
@@ -142,16 +142,17 @@ Improved already:
 Still live:
 
 - `scf.while result requires loop summary`
-- `scf.for result requires loop summary`
-- general loop state summary non-exactness
+- general loop state summary non-exactness, only when backed by a concrete repro
 
-On the current branch, the explicit residual anchors are concentrated in the `scf.while` family:
+On the current branch, the explicit residual anchors are:
 
-- generic non-canonical `scf.while` result fallback
+- malformed/unsummarizable `scf.while` result fallback with no condition/yield semantics to recover
 - unsigned swapped-compare decrement `scf.while`
 - signed swapped-compare decrement `scf.while`
 
-These are intentionally fail-closed and now regression-tested with exact degradation reasons.
+These are intentionally fail-closed and now regression-tested with exact degradation reasons. The swapped-decrement forms are not a target for a local recognizer unless we first add a sound modular trip-count/ranking proof: the loop control variable moves away from the bound, so routing them through the canonical decrement closed form would be unsound.
+
+`scf.for` has exact coverage for zero-iteration, identity, increment, decrement, positive-step, finite unroll, multi-result derived, geometric constant-multiplier carried updates, and known-callee summary families. Add more `scf.for` work only with a concrete source/MLIR repro.
 
 ### Anchor Repros
 
@@ -198,18 +199,20 @@ Closed or improved:
 - direct path-assumption propagation into helper obligations
 - many structured `try`, `switch`, `execute_region`, and deferred-return paths
 - better write-set and state replay coverage
+- compiler-lowered sema summaries now attach tracked `ora.read_slots` and `ora.write_slots` metadata to HIR functions
+- the encoder treats explicit slot metadata as the authoritative tracked-state set for known-callee read/write recovery
 
-Still live in the encoder:
+Still intentionally fail-closed in the encoder:
 
 - `failed to recover known callee write set exactly`
-- `failed to encode known callee state exactly`
-- `known callee state fell back to opaque UF summary`
+- `failed to recover known callee read set exactly`
 
-On the current branch, the main direct anchor that still remains in-tree is the intentional opaque-case boundary:
+On the current branch, the direct anchors that remain in-tree are intentional opaque-case boundaries:
 
 - known callee with unknown write set delegating to an unresolved writer
+- known callee with unknown read set delegating to an unresolved reader
 
-The broad helper-summary bucket is no longer the right mental model; most remaining work here is narrowing or reclassifying the few explicit opaque/fail-closed cases that are left.
+The broad helper-summary bucket is no longer the right mental model. Compiler-generated slot summaries are exact for tracked storage/transient state; remaining failures are metadata-absent or genuinely unresolved callee boundaries.
 
 ### Anchor Repros
 
@@ -314,6 +317,7 @@ Already covered in large part:
 - `ora.switch_expr`
 - finite/single-iteration loop interactions
 - nested self-caught and composed catch-predicate families
+- nested escaping result summaries when both the try-region value and the catch reachability predicate are recoverable
 
 Remaining gap:
 
@@ -488,7 +492,7 @@ Primary files:
 Focus:
 
 - non-canonical `scf.while`
-- remaining loop-result exactness families
+- concrete loop-result exactness repros, not stale fallback names
 
 Primary files:
 
@@ -552,7 +556,7 @@ Finish residual loop-result exactness.
 
 Primary target:
 
-- remaining `scf.while result requires loop summary` families
+- remaining intentional `scf.while result requires loop summary` boundaries
 
 ### Phase 3
 
@@ -594,13 +598,16 @@ Closeout evidence:
 
 ## Active Workboard
 
+As of 2026-05-01, Phase 5 is closed and the ADT phase work is not blocked on the remaining SMT exactness items. The only SMT work that should stay active is the residual, explicitly classified exactness work below. New SMT work should either attach to one of these rows with a concrete repro or open a new row with a degradation reason and exit criterion.
+
 | Workstream | Owner Type | Current Status | Anchor Repro | Blocking Files | Exit Criteria |
 | --- | --- | --- | --- | --- | --- |
 | Live `UNKNOWN` elimination | Core SMT owners + SMT execution solver/tractability owner | Done | [open_stream_add_unknown.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/open_stream_add_unknown.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [expr_lowering.zig](/Users/logic/Ora/Ora/src/hir/expr_lowering.zig) | No unexplained `UNKNOWN` in the narrow repro; corresponding real-contract obligations resolve to `UNSAT` or real `SAT`. |
-| Non-canonical loop exactness | Core SMT owners + SMT execution loop owner | Active, primary remaining SMT slice | direct loop regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining loop degradations are either exact or explicitly preserved with named regressions and rationale. |
-| Interprocedural summary exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowly residual | helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Common helper shapes stay exact; remaining UF fallbacks are rare, deliberate, and tested. |
-| Struct/frame residuals | Core SMT owners + SMT execution struct/frame owner | Active | struct regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | No silent partial-frame behavior; metadata-miss cases are exact or explicit fail-closed boundaries. |
-| Residual `ora.try_stmt` exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowed | `try` regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining live-try degradations are narrow, justified, and regression-tested. |
+| Non-canonical loop exactness | Core SMT owners + SMT execution loop owner | Residual active; currently limited to intentional `scf.while` fail-closed boundaries unless a concrete `scf.for` repro appears | direct loop regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining loop degradations are either exact or explicitly preserved with named regressions and rationale. |
+| Interprocedural summary exactness | Core SMT owners + SMT execution interprocedural summaries owner | Closed for compiler-generated tracked-state summaries; residual only for metadata-absent or genuinely unresolved callees | helper-heavy regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Compiler-lowered read/write slot summaries stay exact; metadata-absent unresolved callees remain explicit fail-closed boundaries. |
+| Struct/frame residuals | Core SMT owners + SMT execution struct/frame owner | Closed for known metadata-backed product values; metadata-miss cases intentionally fail closed | struct regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), fail-closed guards in [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | No silent partial-frame behavior; product metadata loss aborts verification for both field update and field extract. |
+| Untyped SMT AST coercion fallback | Core SMT owners | Closed for current source repros; remaining direct helper use is defensive/testing-only or legacy untyped API surface | [map_of_arrays.ora](/Users/logic/Ora/Ora/ora-example/corpus/mixing/map_of_arrays.ora), tensor insert/extract regression in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Source-typed paths use typed coercion; unsupported sort-pair coercion remains fail-closed instead of silently manufacturing mismatched ASTs. |
+| Residual `ora.try_stmt` exactness | Core SMT owners + SMT execution interprocedural summaries owner | Residual active; narrowed to exact branch/result summaries | `try` regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining live-try degradations are narrow, justified, and regression-tested. |
 | Guard/context propagation | Core SMT owners + SMT execution solver/tractability owner | Done | guard regressions in [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | Applicable path facts discharge guards consistently without cross-branch leakage. |
 | Harness / reliability / equivalence | SMT execution reliability/harness owner with core SMT owner review | Done for current branch; maintenance only | [fail_loop_invariant_post.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/fail_loop_invariant_post.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora), [erc20_bitfield_comptime_generics.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_bitfield_comptime_generics.ora), [refinement_struct_field_proof.ora](/Users/logic/Ora/Ora/ora-example/corpus/types/refinement/refinement_struct_field_proof.ora), [refinement_adt_payload_proof.ora](/Users/logic/Ora/Ora/ora-example/corpus/types/refinement/refinement_adt_payload_proof.ora) | [compiler.test.match.zig](/Users/logic/Ora/Ora/src/compiler.test.match.zig), [compiler.test.verification.zig](/Users/logic/Ora/Ora/src/compiler.test.verification.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [docs/compiler](/Users/logic/Ora/Ora/docs/compiler) | Probe set remains live, parallel matches sequential on prepared queries, release smoke passes, and docs stay aligned with branch reality. |
 
@@ -617,4 +624,5 @@ Closeout evidence:
 1. Keep the remaining `scf.while` non-canonical degradations explicit, reason-checked, and small.
 2. Only reopen interprocedural or `ora.try_stmt` work if a new non-opaque, structurally recoverable degradation appears.
 3. Leave opaque/disconnected helper and catch-condition cases explicitly fail-closed unless there is a semantics-preserving recovery path.
-4. Keep this document current when new SMT work changes the maintained probe set.
+4. Treat the ADT phases as closed unless a new regression contradicts the phase exit criteria.
+5. Keep this document current when new SMT work changes the maintained probe set.
