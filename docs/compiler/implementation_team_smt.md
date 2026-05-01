@@ -352,17 +352,19 @@ Even when the core SMT logic is right, confidence can decay if coverage is narro
 
 ### Current Status
 
-Already improved:
+Closed on the current branch:
 
 - soundness examples are in the compiler harness
 - complex app probes exist
 - sequential/parallel equivalence has direct prepared-query coverage
+- the maintained probe set is representative of the current branch
+- refined aggregate probes now cover both struct fields and ADT payloads
+- release artifact smoke passed on the maintained artifact corpus
 
-Still needed for "100%":
+Ongoing maintenance:
 
-- keep the probe set representative
-- keep the docs aligned with branch reality
-- prevent stale audit claims from reappearing
+- keep docs aligned with branch reality when new SMT work lands
+- prevent stale audit claims from reappearing as open blockers
 
 ### Anchor Repros
 
@@ -579,6 +581,17 @@ Primary target:
 - sequential/parallel equivalence
 - audit/doc consistency
 
+Status: closed for the current branch on 2026-05-01.
+
+Closeout evidence:
+
+- app probes: `complex SMT app probes match between sequential and parallel verification`
+- soundness corpus: `conditional_return_split`, `overflow_mul_constant`, `switch_arm_path_predicates`, and `fail_loop_invariant_post` stay in the regular compiler harness
+- refined aggregate corpus: `refinement_struct_field_proof.ora` and `refinement_adt_payload_proof.ora` prove end-to-end and match sequential/parallel verification
+- fail-closed corpus: `SMT degradation probes fail closed in sequential and parallel verification`
+- release smoke: `./scripts/release_artifact_smoke.sh /tmp/ora-release-smoke-phase5`
+- full validation: `zig build test-compiler -Dskip-mlir=true --summary failures` and `zig build test --summary failures`
+
 ## Active Workboard
 
 | Workstream | Owner Type | Current Status | Anchor Repro | Blocking Files | Exit Criteria |
@@ -589,7 +602,7 @@ Primary target:
 | Struct/frame residuals | Core SMT owners + SMT execution struct/frame owner | Active | struct regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | No silent partial-frame behavior; metadata-miss cases are exact or explicit fail-closed boundaries. |
 | Residual `ora.try_stmt` exactness | Core SMT owners + SMT execution interprocedural summaries owner | Active, narrowed | `try` regressions in [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | [encoder.zig](/Users/logic/Ora/Ora/src/z3/encoder.zig), [encoder.test.zig](/Users/logic/Ora/Ora/src/z3/encoder.test.zig) | Remaining live-try degradations are narrow, justified, and regression-tested. |
 | Guard/context propagation | Core SMT owners + SMT execution solver/tractability owner | Done | guard regressions in [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig) | Applicable path facts discharge guards consistently without cross-branch leakage. |
-| Harness / reliability / equivalence | SMT execution reliability/harness owner with core SMT owner review | Active | [fail_loop_invariant_post.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/fail_loop_invariant_post.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora), [erc20_bitfield_comptime_generics.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_bitfield_comptime_generics.ora) | [compiler.test.zig](/Users/logic/Ora/Ora/src/compiler.test.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [docs/compiler](/Users/logic/Ora/Ora/docs/compiler) | Probe set remains live, parallel matches sequential on prepared queries, and docs stay aligned with branch reality. |
+| Harness / reliability / equivalence | SMT execution reliability/harness owner with core SMT owner review | Done for current branch; maintenance only | [fail_loop_invariant_post.ora](/Users/logic/Ora/Ora/ora-example/smt/soundness/fail_loop_invariant_post.ora), [erc20_stream_core.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_stream_core.ora), [defi_lending_pool.ora](/Users/logic/Ora/Ora/ora-example/apps/defi_lending_pool.ora), [erc20_bitfield_comptime_generics.ora](/Users/logic/Ora/Ora/ora-example/apps/erc20_bitfield_comptime_generics.ora), [refinement_struct_field_proof.ora](/Users/logic/Ora/Ora/ora-example/corpus/types/refinement/refinement_struct_field_proof.ora), [refinement_adt_payload_proof.ora](/Users/logic/Ora/Ora/ora-example/corpus/types/refinement/refinement_adt_payload_proof.ora) | [compiler.test.match.zig](/Users/logic/Ora/Ora/src/compiler.test.match.zig), [compiler.test.verification.zig](/Users/logic/Ora/Ora/src/compiler.test.verification.zig), [verification.zig](/Users/logic/Ora/Ora/src/z3/verification.zig), [docs/compiler](/Users/logic/Ora/Ora/docs/compiler) | Probe set remains live, parallel matches sequential on prepared queries, release smoke passes, and docs stay aligned with branch reality. |
 
 ## What We Should Not Do
 
@@ -604,4 +617,4 @@ Primary target:
 1. Keep the remaining `scf.while` non-canonical degradations explicit, reason-checked, and small.
 2. Only reopen interprocedural or `ora.try_stmt` work if a new non-opaque, structurally recoverable degradation appears.
 3. Leave opaque/disconnected helper and catch-condition cases explicitly fail-closed unless there is a semantics-preserving recovery path.
-4. Refresh this document as each bucket is narrowed so the implementation team always works from branch reality, not stale audit state.
+4. Keep this document current when new SMT work changes the maintained probe set.

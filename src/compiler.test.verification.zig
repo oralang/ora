@@ -1019,6 +1019,32 @@ test "verification supports multi-error Result match without degradation" {
     try testing.expect(!result.degraded);
 }
 
+test "verification proves refined struct field extraction without manual assert" {
+    const path = "ora-example/corpus/types/refinement/refinement_struct_field_proof.ora";
+
+    var result = try verifyExampleWithoutDegradation(path, "build", false, 5_000);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification proves refined ADT payload extraction without manual assert" {
+    const path = "ora-example/corpus/types/refinement/refinement_adt_payload_proof.ora";
+
+    var result = try verifyExampleWithoutDegradation(path, "build", false, 5_000);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification supports legacy shorthand error union named return without degradation" {
     const source_text =
         \\error ParseError;

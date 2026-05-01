@@ -2616,6 +2616,31 @@ test "SMT release matrix probes match between sequential and parallel verificati
     }
 }
 
+test "refined aggregate probes match between sequential and parallel verification" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8 }{
+        .{ .path = "ora-example/corpus/types/refinement/refinement_struct_field_proof.ora", .function_name = "build" },
+        .{ .path = "ora-example/corpus/types/refinement/refinement_adt_payload_proof.ora", .function_name = "build" },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, false, 5_000);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, probe.function_name, true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expect(seq_result.success);
+        try testing.expect(par_result.success);
+        try testing.expect(!seq_result.degraded);
+        try testing.expect(!par_result.degraded);
+        try testing.expectEqual(@as(usize, 0), seq_result.errors_len);
+        try testing.expectEqual(@as(usize, 0), par_result.errors_len);
+        try testing.expectEqual(@as(usize, 1), seq_result.diagnostics_len);
+        try testing.expectEqual(@as(usize, 1), par_result.diagnostics_len);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
 test "SMT expected-failure probes match between sequential and parallel verification" {
     const probes = [_]struct {
         path: []const u8,

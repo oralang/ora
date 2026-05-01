@@ -2740,6 +2740,9 @@ pub const VerificationPass = struct {
         defer {
             for (results) |entry| {
                 if (entry.err_message) |msg| worker_allocator.free(msg);
+                if (entry.model_str) |model| worker_allocator.free(model);
+                if (entry.explain_str) |explain| worker_allocator.free(explain);
+                if (entry.explain_tags.len > 0) worker_allocator.free(entry.explain_tags);
             }
             worker_allocator.free(results);
         }
@@ -2931,20 +2934,14 @@ pub const VerificationPass = struct {
         if (state.setup_error) |err| return err;
         self.maybeForceTestDegradationAfterParallelWorkers();
 
-        const combined = try self.collectPreparedQueryResults(queries.items, results);
+        var combined = try self.collectPreparedQueryResults(queries.items, results);
         if (self.encoder.isDegraded()) {
             // Parallel workers do not mutate the shared encoder today; this is a
             // defensive fail-closed backstop in case future query orchestration
             // introduces shared lazy encoding after query preparation.
             self.phaseLog("parallel degraded after query collection", .{});
+            combined.deinit();
             return try self.degradedVerificationResult();
-        }
-
-        // Free captured model strings
-        for (results) |entry| {
-            if (entry.model_str) |ms| {
-                worker_allocator.free(ms);
-            }
         }
 
         if (self.verify_stats) {
@@ -4218,12 +4215,18 @@ pub const VerificationPass = struct {
                 try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.path_constraints);
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
                 try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.extra_constraints);
+                for (guard_annotations.items) |guard_ann| {
+                    if (!annotationLocationPrecedes(guard_ann, ann)) continue;
+                    if (!pathConstraintsCompatible(self, guard_ann.path_constraints, ann.path_constraints)) continue;
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, guard_ann.path_constraints, &relevant_symbols);
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, guard_ann.extra_constraints, &relevant_symbols);
+                    if (!astUsesOnlyRelevantSymbols(self, guard_ann.condition, &relevant_symbols)) continue;
+                    try obligation_constraints.append(guard_ann.condition);
+                }
                 for (previous_imported_callee_obligations.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
-                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
-                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.path_constraints);
-                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
-                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.extra_constraints);
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, prev.path_constraints, &relevant_symbols);
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, prev.extra_constraints, &relevant_symbols);
                     if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try obligation_constraints.append(prev.condition);
                     try appendTrackedAssumption(
@@ -4234,10 +4237,8 @@ pub const VerificationPass = struct {
                 }
                 for (previous_imported_callee_ensures.items) |prev| {
                     if (!pathConstraintsCompatible(self, prev.path_constraints, ann.path_constraints)) continue;
-                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.path_constraints, &relevant_symbols);
-                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.path_constraints);
-                    try addRelevantConstraintSlice(self, &obligation_constraints, prev.extra_constraints, &relevant_symbols);
-                    try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, prev.extra_constraints);
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, prev.path_constraints, &relevant_symbols);
+                    try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, prev.extra_constraints, &relevant_symbols);
                     if (!astUsesOnlyRelevantSymbols(self, prev.condition, &relevant_symbols)) continue;
                     try obligation_constraints.append(prev.condition);
                     try appendTrackedAssumption(
@@ -4255,10 +4256,8 @@ pub const VerificationPass = struct {
                     try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.loop_step_extra_constraints);
                     for (loop_post_invariant_annotations.items) |peer_inv_ann| {
                         if (!sameLoopInvariantGroup(self, ann, peer_inv_ann)) continue;
-                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.path_constraints, &relevant_symbols);
-                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, peer_inv_ann.path_constraints);
-                        try addRelevantConstraintSlice(self, &obligation_constraints, peer_inv_ann.extra_constraints, &relevant_symbols);
-                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, peer_inv_ann.extra_constraints);
+                        try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, peer_inv_ann.path_constraints, &relevant_symbols);
+                        try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, peer_inv_ann.extra_constraints, &relevant_symbols);
                         try obligation_constraints.append(peer_inv_ann.condition);
                         try appendTrackedAssumption(
                             &tracked_obligation_assumptions,
@@ -5602,6 +5601,23 @@ fn addRelevantConstraintSlice(
             if (!astUsesOnlyRelevantSymbols(self, constraint, symbols)) continue;
         }
         try list.append(constraint);
+    }
+}
+
+fn addRelevantTrackedSemanticConstraintSlice(
+    self: *VerificationPass,
+    constraints_list: *ManagedArrayList(z3.Z3_ast),
+    tracked_list: *ManagedArrayList(TrackedAssumption),
+    constraints: []const z3.Z3_ast,
+    relevant_symbols: ?*const ManagedArrayList([]const u8),
+) !void {
+    for (constraints) |constraint| {
+        if (relevant_symbols) |symbols| {
+            if (!astUsesOnlyRelevantSymbols(self, constraint, symbols)) continue;
+        }
+        try constraints_list.append(constraint);
+        const tag = self.semantic_constraint_tags.get(@intFromPtr(constraint)) orelse continue;
+        try appendTrackedAssumption(tracked_list, constraint, tag);
     }
 }
 
