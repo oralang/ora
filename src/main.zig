@@ -277,6 +277,8 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
         i += 1;
     }
 
+    if (opts.dap and opts.no_tui) return error.InvalidDebugOptions;
+
     return opts;
 }
 
@@ -1044,8 +1046,11 @@ fn launchDebuggerDap(allocator: std.mem.Allocator) !void {
         // requiring a separate `zig build install` step.
         var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
         build_child.cwd = evm_dir;
-        build_child.stdin_behavior = .Inherit;
-        build_child.stdout_behavior = .Inherit;
+        // stdin/stdout are the DAP JSON-RPC channel. The build step
+        // must neither consume client input nor emit unframed output
+        // before the first Content-Length frame.
+        build_child.stdin_behavior = .Ignore;
+        build_child.stdout_behavior = .Ignore;
         build_child.stderr_behavior = .Inherit;
         try build_child.spawn();
         const term = try build_child.wait();

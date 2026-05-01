@@ -80,8 +80,8 @@ const InstalledBreakpoint = struct {
 
 /// All session-lifetime state lives here so handlers don't pass it
 /// piecemeal. The session + seed are owned (deinit on shutdown);
-/// pending breakpoints are drained once `session_active` flips
-/// true.
+/// pending breakpoints store the client's current intent and are
+/// replayed into the debugger once `session_active` flips true.
 const ServerState = struct {
     allocator: std.mem.Allocator,
     pending_breakpoints: std.ArrayList(PendingBreakpoint) = .{},
@@ -208,16 +208,13 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, cmd, "launch")) {
             try handleLaunch(allocator, stdout_file, stderr_file, &state, seq, request_seq, root);
         } else if (std.mem.eql(u8, cmd, "setBreakpoints")) {
-            try handleSetBreakpoints(allocator, stdout_file, stderr_file, seq, request_seq, root, &state.pending_breakpoints);
-            // If a session is already active, replay the new set
-            // immediately so the client's view stays consistent.
-            if (state.session_active) try replayPendingBreakpoints(&state);
+            try handleSetBreakpoints(allocator, stdout_file, stderr_file, seq, request_seq, root, &state);
         } else if (std.mem.eql(u8, cmd, "threads")) {
             try handleThreads(allocator, stdout_file, seq, request_seq);
         } else if (std.mem.eql(u8, cmd, "stackTrace")) {
             try handleStackTrace(allocator, stdout_file, seq, request_seq, &state);
         } else if (std.mem.eql(u8, cmd, "continue") or std.mem.eql(u8, cmd, "next") or
-                   std.mem.eql(u8, cmd, "stepIn") or std.mem.eql(u8, cmd, "stepOut"))
+            std.mem.eql(u8, cmd, "stepIn") or std.mem.eql(u8, cmd, "stepOut"))
         {
             try handleStep(allocator, stdout_file, stderr_file, seq, request_seq, &state, cmd);
         } else if (std.mem.eql(u8, cmd, "pause")) {
@@ -658,10 +655,10 @@ fn writeError(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request
 ///       "breakpoints": [ { "line": 12 }, { "line": 17 } ] } }
 ///
 /// We replace any prior breakpoints for `source.path` with the new
-/// list and reply with one entry per breakpoint, all `verified:
-/// false` since no Session exists to actually arm them yet. The
-/// future launch handler will drain `pending_breakpoints` into the
-/// debugger core.
+/// list. If a session is active, replay before responding so the
+/// returned `verified` flags describe the actual debugger state.
+/// Before launch, entries remain pending and are reported as
+/// unverified with a `no_session_yet` message.
 fn handleSetBreakpoints(
     allocator: std.mem.Allocator,
     stdout_file: std.fs.File,
@@ -669,7 +666,7 @@ fn handleSetBreakpoints(
     seq: i64,
     request_seq: i64,
     root: std.json.Value,
-    pending_breakpoints: *std.ArrayList(PendingBreakpoint),
+    state: *ServerState,
 ) !void {
     const arguments = root.object.get("arguments") orelse {
         try writeNotImplemented(allocator, stdout_file, seq, request_seq, "setBreakpoints");
@@ -696,6 +693,7 @@ fn handleSetBreakpoints(
         return;
     }
     const path = path_val.string;
+    const pending_breakpoints = &state.pending_breakpoints;
 
     // Drop any prior breakpoints for this source path before
     // installing the new set. DAP semantics: the client always
@@ -710,13 +708,11 @@ fn handleSetBreakpoints(
         }
     }
 
-    // Parse the new breakpoints and append. Build the response in
-    // parallel — one body entry per request entry, in order.
-    var response_body: std.ArrayList(u8) = .{};
-    defer response_body.deinit(allocator);
-    var w = response_body.writer(allocator);
-    try w.writeAll("[");
-    var first = true;
+    // Parse the new breakpoints and append. Keep the requested
+    // lines in order so the response mirrors the request after
+    // active-session replay.
+    var requested_lines: std.ArrayList(u32) = .{};
+    defer requested_lines.deinit(allocator);
 
     if (arguments.object.get("breakpoints")) |bps| {
         if (bps == .array) {
@@ -733,12 +729,33 @@ fn handleSetBreakpoints(
                     .path = path_dup,
                     .line = line,
                 });
-                if (!first) try w.writeAll(",");
-                first = false;
-                try w.print(
-                    \\{{"verified":false,"line":{d},"message":"no_session_yet"}}
-                , .{line});
+                try requested_lines.append(allocator, line);
             }
+        }
+    }
+
+    if (state.session_active) try replayPendingBreakpoints(state);
+
+    var response_body: std.ArrayList(u8) = .{};
+    defer response_body.deinit(allocator);
+    var w = response_body.writer(allocator);
+    try w.writeAll("[");
+    for (requested_lines.items, 0..) |line, index| {
+        if (index > 0) try w.writeAll(",");
+        if (!state.session_active) {
+            try w.print(
+                \\{{"verified":false,"line":{d},"message":"no_session_yet"}}
+            , .{line});
+            continue;
+        }
+        if (state.session.debugger.hasBreakpoint(path, line)) {
+            try w.print(
+                \\{{"verified":true,"line":{d}}}
+            , .{line});
+        } else {
+            try w.print(
+                \\{{"verified":false,"line":{d},"message":"unresolved_source_line"}}
+            , .{line});
         }
     }
     try w.writeAll("]");
