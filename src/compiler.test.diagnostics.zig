@@ -634,6 +634,42 @@ test "compiler rejects public ABI signatures using payload-carrying enums" {
     try expectDiagnosticProbeContains(source_text, .typecheck, "unsupported ABI type");
 }
 
+test "compiler package driver surfaces payload enum ABI diagnostics before HIR lowering" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\}
+        \\
+        \\contract Entry {
+        \\    pub fn accept(value: Event) -> u256 {
+        \\        return 0;
+        \\    }
+        \\
+        \\    pub fn make(flag: bool) -> Event {
+        \\        if (flag) return Event.Value(1);
+        \\        return Event.Empty;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "public function parameter 'value' uses unsupported ABI type 'Event'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "public function 'make' uses unsupported return ABI type 'Event'"));
+}
+
 test "compiler rejects payload enum constructors with wrong arity" {
     const source_text =
         \\enum Event {

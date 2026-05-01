@@ -70,6 +70,26 @@ namespace mlir
         }
 
         // Storage operation conversions
+        class NormalizeAdtSLoadOp : public OpRewritePattern<ora::SLoadOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::SLoadOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeAdtSStoreOp : public OpRewritePattern<ora::SStoreOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::SStoreOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class ConvertSLoadOp : public OpConversionPattern<ora::SLoadOp>
         {
         public:

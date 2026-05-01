@@ -6624,6 +6624,26 @@ const TypeChecker = struct {
         has_payload: bool,
     };
 
+    const SumMatchCoverage = struct {
+        kind: enum { enum_, error_union },
+        success_covered: bool = false,
+        error_fallback_covered: bool = false,
+        named_variant_count: usize = 0,
+        named_variants_covered: usize = 0,
+
+        fn exhaustive(self: SumMatchCoverage) bool {
+            return switch (self.kind) {
+                .enum_ => self.named_variants_covered == self.named_variant_count,
+                .error_union => self.success_covered and
+                    (self.error_fallback_covered or self.named_variants_covered == self.named_variant_count),
+            };
+        }
+
+        fn namedVariantsExhaustive(self: SumMatchCoverage) bool {
+            return self.named_variants_covered == self.named_variant_count;
+        }
+    };
+
     fn matchPatternNamedErrorDeclInfo(
         self: *const TypeChecker,
         condition_type: Type,
@@ -6664,18 +6684,12 @@ const TypeChecker = struct {
     ) !void {
         if (has_else) return;
 
-        switch (condition_type.kind()) {
-            .error_union => {
-                if (!self.errorUnionPatternsAreExhaustive(condition_type, arms)) {
-                    try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{});
-                }
-            },
-            .enum_ => {
-                if (!self.enumPatternsAreExhaustive(condition_type, arms)) {
-                    try self.emitRangeError(range, "match on enum must cover all variants or provide else", .{});
-                }
-            },
-            else => {},
+        const coverage = self.sumMatchCoverage(condition_type, arms) orelse return;
+        if (coverage.exhaustive()) return;
+
+        switch (coverage.kind) {
+            .error_union => try self.emitRangeError(range, "match on Result/error union must cover both Ok(...) and Err(...), or provide else", .{}),
+            .enum_ => try self.emitRangeError(range, "match on enum must cover all variants or provide else", .{}),
         }
     }
 
@@ -6688,94 +6702,10 @@ const TypeChecker = struct {
     ) !void {
         if (!has_else) return;
 
-        const wildcard_covers_named_variant = switch (condition_type.kind()) {
-            .error_union => !self.errorUnionNamedErrorsAreExhaustive(condition_type, arms),
-            .enum_ => !self.enumPatternsAreExhaustive(condition_type, arms),
-            else => false,
-        };
-        if (!wildcard_covers_named_variant) return;
+        const coverage = self.sumMatchCoverage(condition_type, arms) orelse return;
+        if (coverage.namedVariantsExhaustive()) return;
 
         try self.emitRangeWarning(range, "wildcard match arm covers named variants; list variants explicitly to preserve exhaustiveness diagnostics", .{});
-    }
-
-    fn errorUnionPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
-        var seen_ok = false;
-        var seen_err = false;
-        const all_named_errors_covered = self.errorUnionNamedErrorsAreExhaustive(condition_type, arms);
-        for (arms) |arm| self.collectErrorUnionOkErrCoverage(arm.pattern, &seen_ok, &seen_err);
-
-        return seen_ok and (seen_err or all_named_errors_covered);
-    }
-
-    fn collectErrorUnionOkErrCoverage(self: *const TypeChecker, pattern: ast.SwitchPattern, seen_ok: *bool, seen_err: *bool) void {
-        switch (pattern) {
-            .Ok => seen_ok.* = true,
-            .Err => seen_err.* = true,
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| self.collectErrorUnionOkErrCoverage(alternative, seen_ok, seen_err),
-            else => {},
-        }
-    }
-
-    fn errorUnionNamedErrorsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
-        var all_named_errors_covered = true;
-        for (arms) |arm| {
-            if (self.errorUnionPatternUsesPayloadNamedExpr(condition_type, arm.pattern)) {
-                all_named_errors_covered = false;
-            }
-        }
-
-        for (condition_type.errorTypes()) |error_type| {
-            const error_name = error_type.name() orelse {
-                all_named_errors_covered = false;
-                continue;
-            };
-            var found = false;
-            for (arms) |arm| {
-                if (self.errorUnionPatternCoversName(condition_type, arm.pattern, error_name)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                all_named_errors_covered = false;
-                break;
-            }
-        }
-
-        return all_named_errors_covered;
-    }
-
-    fn errorUnionPatternUsesPayloadNamedExpr(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern) bool {
-        switch (pattern) {
-            .Expr => {
-                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, pattern) orelse return false;
-                return named_error.has_payload;
-            },
-            .Or => |or_pattern| {
-                for (or_pattern.alternatives) |alternative| {
-                    if (self.errorUnionPatternUsesPayloadNamedExpr(condition_type, alternative)) return true;
-                }
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    fn errorUnionPatternCoversName(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, error_name: []const u8) bool {
-        switch (pattern) {
-            .Or => |or_pattern| {
-                for (or_pattern.alternatives) |alternative| {
-                    if (self.errorUnionPatternCoversName(condition_type, alternative, error_name)) return true;
-                }
-                return false;
-            },
-            else => {
-                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, pattern) orelse return false;
-                if (named_error.has_payload and pattern != .NamedError) return false;
-                const item = self.file.item(named_error.item_id).*;
-                return item == .ErrorDecl and std.mem.eql(u8, item.ErrorDecl.name, error_name);
-            },
-        }
     }
 
     fn emitRangeWarning(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
@@ -6787,44 +6717,107 @@ const TypeChecker = struct {
         });
     }
 
-    fn enumPatternsAreExhaustive(self: *const TypeChecker, condition_type: Type, arms: anytype) bool {
-        const enum_name = condition_type.name() orelse return false;
-        const variant_count = if (self.instantiatedEnumByName(enum_name)) |instantiated|
-            instantiated.variants.len
-        else blk: {
-            const item_id = self.item_index.lookup(enum_name) orelse return false;
-            const enum_item = switch (self.file.item(item_id).*) {
-                .Enum => |enum_item| enum_item,
-                else => return false,
-            };
-            break :blk enum_item.variants.len;
+    fn sumMatchCoverage(self: *const TypeChecker, condition_type: Type, arms: anytype) ?SumMatchCoverage {
+        return switch (condition_type.kind()) {
+            .error_union => self.errorUnionMatchCoverage(condition_type, arms),
+            .enum_ => self.enumMatchCoverage(condition_type, arms),
+            else => null,
         };
+    }
 
+    fn enumMatchCoverage(self: *const TypeChecker, condition_type: Type, arms: anytype) SumMatchCoverage {
+        const variant_count = self.enumVariantCount(condition_type) orelse return .{
+            .kind = .enum_,
+            .named_variant_count = 1,
+            .named_variants_covered = 0,
+        };
         var seen = std.AutoHashMap(usize, void).init(self.arena);
         defer seen.deinit();
 
         for (arms) |arm| {
-            if (arm.pattern == .Else) return true;
-            if (!self.collectEnumPatternVariantIndexes(condition_type, arm.pattern, &seen)) return false;
+            self.collectEnumPatternVariantIndexes(condition_type, arm.pattern, &seen);
         }
 
-        return seen.count() == variant_count;
+        return .{
+            .kind = .enum_,
+            .named_variant_count = variant_count,
+            .named_variants_covered = seen.count(),
+        };
     }
 
-    fn collectEnumPatternVariantIndexes(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(usize, void)) bool {
+    fn enumVariantCount(self: *const TypeChecker, condition_type: Type) ?usize {
+        const enum_name = condition_type.name() orelse return null;
+        if (self.instantiatedEnumByName(enum_name)) |instantiated| return instantiated.variants.len;
+        const item_id = self.item_index.lookup(enum_name) orelse return null;
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return null,
+        };
+        return enum_item.variants.len;
+    }
+
+    fn collectEnumPatternVariantIndexes(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(usize, void)) void {
         switch (pattern) {
             .Or => |or_pattern| {
                 for (or_pattern.alternatives) |alternative| {
-                    if (!self.collectEnumPatternVariantIndexes(condition_type, alternative, seen)) return false;
+                    self.collectEnumPatternVariantIndexes(condition_type, alternative, seen);
                 }
-                return true;
             },
             else => {
-                const variant_index = self.enumPatternVariantIndex(condition_type, pattern) orelse return false;
-                seen.put(variant_index, {}) catch return false;
-                return true;
+                const variant_index = self.enumPatternVariantIndex(condition_type, pattern) orelse return;
+                seen.put(variant_index, {}) catch return;
             },
         }
+    }
+
+    fn errorUnionMatchCoverage(self: *const TypeChecker, condition_type: Type, arms: anytype) SumMatchCoverage {
+        var seen_errors = std.AutoHashMap(usize, void).init(self.arena);
+        defer seen_errors.deinit();
+
+        var coverage: SumMatchCoverage = .{
+            .kind = .error_union,
+            .named_variant_count = condition_type.errorTypes().len,
+        };
+
+        for (arms) |arm| {
+            self.collectErrorUnionPatternCoverage(condition_type, arm.pattern, &coverage, &seen_errors);
+        }
+        coverage.named_variants_covered = seen_errors.count();
+        return coverage;
+    }
+
+    fn collectErrorUnionPatternCoverage(
+        self: *const TypeChecker,
+        condition_type: Type,
+        pattern: ast.SwitchPattern,
+        coverage: *SumMatchCoverage,
+        seen_errors: *std.AutoHashMap(usize, void),
+    ) void {
+        switch (pattern) {
+            .Ok => coverage.success_covered = true,
+            .Err => coverage.error_fallback_covered = true,
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    self.collectErrorUnionPatternCoverage(condition_type, alternative, coverage, seen_errors);
+                }
+            },
+            else => {
+                const named_error = self.matchPatternNamedErrorDeclInfo(condition_type, pattern) orelse return;
+                if (named_error.has_payload and pattern != .NamedError) return;
+                const item = self.file.item(named_error.item_id).*;
+                if (item != .ErrorDecl) return;
+                const index = self.errorUnionErrorIndex(condition_type, item.ErrorDecl.name) orelse return;
+                seen_errors.put(index, {}) catch return;
+            },
+        }
+    }
+
+    fn errorUnionErrorIndex(self: *const TypeChecker, condition_type: Type, error_name: []const u8) ?usize {
+        _ = self;
+        for (condition_type.errorTypes(), 0..) |error_type, index| {
+            if (std.mem.eql(u8, error_type.name() orelse "", error_name)) return index;
+        }
+        return null;
     }
 
     fn enumPatternVariantIndex(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern) ?usize {

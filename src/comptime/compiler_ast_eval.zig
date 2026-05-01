@@ -556,6 +556,7 @@ const ConstEvaluator = struct {
                 break :blk CtValue{ .tuple_ref = heap_id };
             },
             .StructLiteral => |struct_literal| blk: {
+                if (try self.evalEnumStructLiteralCtValue(expr_id, struct_literal, use_cache)) |enum_value| break :blk enum_value;
                 const type_id = (try self.structTypeIdForExpr(expr_id, struct_literal)) orelse break :blk null;
                 const fields = try self.allocator.alloc(CtAggregate.StructField, struct_literal.fields.len);
                 for (struct_literal.fields, 0..) |field, idx| {
@@ -802,7 +803,7 @@ const ConstEvaluator = struct {
         if (item != .Enum) return null;
         for (item.Enum.variants, 0..) |variant, idx| {
             if (std.mem.eql(u8, variant.name, variant_name)) {
-                return CtValue{ .enum_val = CtEnum{
+                return CtValue{ .adt_val = CtEnum{
                     .type_id = self.namedTypeId(item_id),
                     .variant_id = @intCast(idx),
                     .payload = null,
@@ -836,6 +837,22 @@ const ConstEvaluator = struct {
         if (item != .Enum) return null;
         for (item.Enum.variants, 0..) |variant, index| {
             if (std.mem.eql(u8, variant.name, field.name)) {
+                return .{ .item_id = item_id, .variant_id = @intCast(index) };
+            }
+        }
+        return null;
+    }
+
+    fn enumVariantRefFromStructLiteral(self: *ConstEvaluator, struct_literal: ast.StructLiteralExpr) ?EnumVariantRef {
+        const dot_index = std.mem.lastIndexOfScalar(u8, struct_literal.type_name, '.') orelse return null;
+        if (dot_index == 0 or dot_index + 1 >= struct_literal.type_name.len) return null;
+        const enum_name = struct_literal.type_name[0..dot_index];
+        const variant_name = struct_literal.type_name[dot_index + 1 ..];
+        const item_id = self.lookupNamedItem(enum_name) orelse return null;
+        const item = self.file.item(item_id).*;
+        if (item != .Enum) return null;
+        for (item.Enum.variants, 0..) |variant, index| {
+            if (std.mem.eql(u8, variant.name, variant_name)) {
                 return .{ .item_id = item_id, .variant_id = @intCast(index) };
             }
         }
@@ -913,7 +930,7 @@ const ConstEvaluator = struct {
             elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
         }
         const payload_id: ?comptime_mod.HeapId = if (elems.len == 0) null else try self.env.heap.allocTuple(elems);
-        return CtValue{ .enum_val = CtEnum{
+        return CtValue{ .adt_val = CtEnum{
             .type_id = self.namedTypeId(item_id),
             .variant_id = 0,
             .payload = payload_id,
@@ -931,9 +948,42 @@ const ConstEvaluator = struct {
             elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
         }
         const payload_id: ?comptime_mod.HeapId = if (elems.len == 0) null else try self.env.heap.allocTuple(elems);
-        return CtValue{ .enum_val = .{
+        return CtValue{ .adt_val = .{
             .type_id = self.namedTypeId(item_id),
             .variant_id = 0,
+            .payload = payload_id,
+        } };
+    }
+
+    fn evalEnumStructLiteralCtValue(self: *ConstEvaluator, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr, comptime use_cache: bool) anyerror!?CtValue {
+        const typecheck = (try self.currentTypeCheckResult()) orelse return null;
+        if (typecheck.exprType(expr_id).kind() != .enum_) return null;
+        const variant_ref = self.enumVariantRefFromStructLiteral(struct_literal) orelse return null;
+
+        const payload_fields = try self.enumVariantNamedPayloadFields(expr_id, variant_ref);
+        if (payload_fields == null) {
+            if (struct_literal.fields.len != 0) return null;
+            return CtValue{ .adt_val = .{
+                .type_id = self.namedTypeId(variant_ref.item_id),
+                .variant_id = variant_ref.variant_id,
+                .payload = null,
+            } };
+        }
+
+        const fields = payload_fields.?;
+        const elems = try self.allocator.alloc(CtValue, fields.len);
+        for (fields, 0..) |payload_field, index| {
+            const init = findStructFieldInit(struct_literal.fields, payload_field.name) orelse return null;
+            _ = try self.evalExprImpl(init.value, use_cache);
+            const value = (try self.evalExprCtValueImpl(init.value, use_cache, true)) orelse return null;
+            if (!try self.validateCtValueForType(value, payload_field.ty, init.range)) return null;
+            elems[index] = value;
+        }
+
+        const payload_id = try self.env.heap.allocTuple(elems);
+        return CtValue{ .adt_val = .{
+            .type_id = self.namedTypeId(variant_ref.item_id),
+            .variant_id = variant_ref.variant_id,
             .payload = payload_id,
         } };
     }
@@ -951,7 +1001,7 @@ const ConstEvaluator = struct {
             }
             break :blk try self.env.heap.allocTuple(elems);
         };
-        return CtValue{ .enum_val = .{
+        return CtValue{ .adt_val = .{
             .type_id = self.namedTypeId(variant_ref.item_id),
             .variant_id = variant_ref.variant_id,
             .payload = payload_id,
@@ -986,8 +1036,8 @@ const ConstEvaluator = struct {
                 .bytes_ref => |other| std.mem.eql(u8, self.env.heap.getBytes(heap_id), self.env.heap.getBytes(other)),
                 else => false,
             },
-            .enum_val => |value| switch (rhs) {
-                .enum_val => |other| value.type_id == other.type_id and value.variant_id == other.variant_id and value.payload == other.payload,
+            .adt_val => |value| switch (rhs) {
+                .adt_val => |other| value.type_id == other.type_id and value.variant_id == other.variant_id and value.payload == other.payload,
                 else => false,
             },
             .error_union_val => |value| switch (rhs) {
@@ -1078,6 +1128,42 @@ const ConstEvaluator = struct {
             if (std.mem.eql(u8, field.name, field_name)) return try self.modelTypeFromTypeExpr(field.type_expr);
         }
         return null;
+    }
+
+    fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const model.AnonymousStructField {
+        if (try self.currentTypeCheckResult()) |typecheck| {
+            const expr_type = typecheck.exprType(expr_id);
+            if (expr_type == .enum_) {
+                if (typecheck.instantiatedEnumByName(expr_type.enum_.name)) |instantiated| {
+                    if (variant_ref.variant_id >= instantiated.variants.len) return null;
+                    const payload = instantiated.variants[variant_ref.variant_id].payload_type orelse return null;
+                    return switch (payload) {
+                        .anonymous_struct => |struct_type| struct_type.fields,
+                        else => null,
+                    };
+                }
+            }
+        }
+
+        const item = self.file.item(variant_ref.item_id).*;
+        if (item != .Enum or variant_ref.variant_id >= item.Enum.variants.len) return null;
+        return try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(variant_ref.variant_id)].payload);
+    }
+
+    fn enumNamedPayloadFieldsFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload) !?[]const model.AnonymousStructField {
+        return switch (payload) {
+            .named => |fields| blk: {
+                const result = try self.allocator.alloc(model.AnonymousStructField, fields.len);
+                for (fields, 0..) |field, index| {
+                    result[index] = .{
+                        .name = field.name,
+                        .ty = (try self.modelTypeFromTypeExpr(field.type_expr)) orelse .{ .unknown = {} },
+                    };
+                }
+                break :blk result;
+            },
+            else => null,
+        };
     }
 
     fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?model.Type {
@@ -1230,6 +1316,20 @@ const ConstEvaluator = struct {
         const field_id: comptime_mod.FieldId = @intCast(field_index);
         for (struct_data.fields) |field| {
             if (field.field_id == field_id) return field.value;
+        }
+        return null;
+    }
+
+    fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field;
+        }
+        return null;
+    }
+
+    fn findAnonymousStructFieldIndex(fields: []const model.AnonymousStructField, name: []const u8) ?usize {
+        for (fields, 0..) |field, index| {
+            if (std.mem.eql(u8, field.name, name)) return index;
         }
         return null;
     }
@@ -1763,7 +1863,7 @@ const ConstEvaluator = struct {
             return false;
         }
         switch (condition) {
-            .enum_val => |enum_value| {
+            .adt_val => |enum_value| {
                 if (self.sumVariantRefFromPattern(pattern)) |variant_ref| {
                     return enum_value.type_id == self.namedTypeId(variant_ref.item_id) and
                         enum_value.variant_id == variant_ref.variant_id;
@@ -1779,7 +1879,7 @@ const ConstEvaluator = struct {
                         const payload = self.env.heap.getTuple(error_union.payload);
                         if (payload.elems.len == 0) break :blk false;
                         const error_value = switch (payload.elems[0]) {
-                            .enum_val => |value| value,
+                            .adt_val => |value| value,
                             else => break :blk false,
                         };
                         const variant_ref = self.sumVariantRefFromPattern(pattern) orelse break :blk false;
@@ -1829,7 +1929,7 @@ const ConstEvaluator = struct {
                 if (payload.elems.len == 0) return;
                 const error_value = payload.elems[0];
                 switch (error_value) {
-                    .enum_val => |enum_value| if (enum_value.payload) |payload_id| {
+                    .adt_val => |enum_value| if (enum_value.payload) |payload_id| {
                         const error_payload = self.env.heap.getTuple(payload_id);
                         if (error_payload.elems.len == 1) {
                             try self.bindPatternCtValue(pattern_id, error_payload.elems[0]);
@@ -1852,13 +1952,13 @@ const ConstEvaluator = struct {
                     else => return,
                 };
                 const enum_value = switch (condition) {
-                    .enum_val => |enum_value| enum_value,
+                    .adt_val => |enum_value| enum_value,
                     .error_union_val => |result| result_blk: {
                         if (!result.is_error) return;
                         const result_payload = self.env.heap.getTuple(result.payload);
                         if (result_payload.elems.len == 0) return;
                         break :result_blk switch (result_payload.elems[0]) {
-                            .enum_val => |enum_value| enum_value,
+                            .adt_val => |enum_value| enum_value,
                             else => return,
                         };
                     },
@@ -1878,13 +1978,13 @@ const ConstEvaluator = struct {
             else => return,
         };
         const enum_value = switch (condition) {
-            .enum_val => |enum_value| enum_value,
+            .adt_val => |enum_value| enum_value,
             .error_union_val => |result| blk: {
                 if (!result.is_error) return;
                 const result_payload = self.env.heap.getTuple(result.payload);
                 if (result_payload.elems.len == 0) return;
                 break :blk switch (result_payload.elems[0]) {
-                    .enum_val => |enum_value| enum_value,
+                    .adt_val => |enum_value| enum_value,
                     else => return,
                 };
             },
@@ -1892,10 +1992,31 @@ const ConstEvaluator = struct {
         };
         const payload_id = enum_value.payload orelse return;
         const payload = self.env.heap.getTuple(payload_id);
+        if (named.bindings.len == 1 and try self.bindEnumNamedPayloadDestructureCtValue(enum_value, named.bindings[0], payload)) {
+            return;
+        }
         for (named.bindings, 0..) |binding, index| {
             if (index >= payload.elems.len) return;
             try self.bindPatternCtValue(binding, payload.elems[index]);
         }
+    }
+
+    fn bindEnumNamedPayloadDestructureCtValue(self: *ConstEvaluator, enum_value: CtEnum, pattern_id: ast.PatternId, payload: CtAggregate.TupleData) !bool {
+        const destructure = switch (self.file.pattern(pattern_id).*) {
+            .StructDestructure => |destructure| destructure,
+            else => return false,
+        };
+        const item_id = self.itemIdForNamedTypeId(enum_value.type_id) orelse return false;
+        const item = self.file.item(item_id).*;
+        if (item != .Enum or enum_value.variant_id >= item.Enum.variants.len) return false;
+        const fields = (try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(enum_value.variant_id)].payload)) orelse return false;
+
+        for (destructure.fields) |field| {
+            const index = findAnonymousStructFieldIndex(fields, field.name) orelse return false;
+            if (index >= payload.elems.len) return false;
+            try self.bindPatternCtValue(field.binding, payload.elems[index]);
+        }
+        return true;
     }
 
     fn evalBuiltin(self: *ConstEvaluator, builtin: ast.BuiltinExpr) anyerror!?ConstValue {

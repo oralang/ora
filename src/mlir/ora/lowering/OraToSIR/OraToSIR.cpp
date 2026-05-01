@@ -1019,6 +1019,8 @@ public:
         // Memref lowering happens in Phase 4; do not add memref patterns here.
         if (enable_storage)
         {
+            patterns.add<NormalizeAdtSLoadOp>(ctx);
+            patterns.add<NormalizeAdtSStoreOp>(ctx);
             patterns.add<ConvertSLoadOp>(typeConverter, ctx);
             patterns.add<ConvertSStoreOp>(typeConverter, ctx);
             patterns.add<ConvertTLoadOp>(typeConverter, ctx);

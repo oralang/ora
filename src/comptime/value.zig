@@ -49,8 +49,8 @@ pub const CtValue = union(enum) {
     tuple_ref: HeapId,
     struct_ref: HeapId,
 
-    // Enum (payload may reference heap)
-    enum_val: CtEnum,
+    // ADT/sum value (payload may reference heap)
+    adt_val: CtAdt,
     error_union_val: CtErrorUnion,
 
     // Type-level (stable handle)
@@ -62,7 +62,7 @@ pub const CtValue = union(enum) {
     pub fn isHeapBacked(self: CtValue) bool {
         return switch (self) {
             .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => true,
-            .enum_val => |e| e.payload != null,
+            .adt_val => |e| e.payload != null,
             .error_union_val => true,
             else => false,
         };
@@ -72,18 +72,21 @@ pub const CtValue = union(enum) {
     pub fn getHeapId(self: CtValue) ?HeapId {
         return switch (self) {
             .bytes_ref, .string_ref, .array_ref, .slice_ref, .map_ref, .tuple_ref, .struct_ref => |id| id,
+            .adt_val => |value| value.payload,
             .error_union_val => |value| value.payload,
             else => null,
         };
     }
 };
 
-/// Enum value with optional payload
-pub const CtEnum = struct {
+/// ADT/sum value with optional payload.
+pub const CtAdt = struct {
     type_id: TypeId,
     variant_id: VariantId,
     payload: ?HeapId,
 };
+
+pub const CtEnum = CtAdt;
 
 /// Result/error-union value. Payload is a one-element tuple containing either
 /// the success value or the error value.
@@ -240,11 +243,25 @@ pub const type_ids = struct {
 test "CtValue heap detection" {
     const int_val = CtValue{ .integer = 42 };
     const arr_val = CtValue{ .array_ref = 0 };
+    const adt_payload_val = CtValue{ .adt_val = .{
+        .type_id = 100,
+        .variant_id = 1,
+        .payload = 7,
+    } };
+    const adt_payloadless_val = CtValue{ .adt_val = .{
+        .type_id = 100,
+        .variant_id = 0,
+        .payload = null,
+    } };
 
     try std.testing.expect(!int_val.isHeapBacked());
     try std.testing.expect(arr_val.isHeapBacked());
+    try std.testing.expect(adt_payload_val.isHeapBacked());
+    try std.testing.expect(!adt_payloadless_val.isHeapBacked());
     try std.testing.expectEqual(@as(?HeapId, null), int_val.getHeapId());
     try std.testing.expectEqual(@as(?HeapId, 0), arr_val.getHeapId());
+    try std.testing.expectEqual(@as(?HeapId, 7), adt_payload_val.getHeapId());
+    try std.testing.expectEqual(@as(?HeapId, null), adt_payloadless_val.getHeapId());
 }
 
 test "ConstValue primitive detection" {

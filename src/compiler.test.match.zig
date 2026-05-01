@@ -417,6 +417,31 @@ test "compiler allows payloadless named error arms on multi-error Result" {
     try testing.expect(std.mem.indexOf(u8, rendered, "arith.cmpi eq") != null);
 }
 
+test "compiler treats named error or-patterns as exhaustive on multi-error Result" {
+    const source_text =
+        \\error Failure;
+        \\error Denied;
+        \\pub fn run(value: !u256 | Failure | Denied) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Failure | Denied => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.match_expr") != null or
+        std.mem.indexOf(u8, rendered, "scf.") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "placeholder") == null);
+}
+
 test "compiler allows payload-carrying named error arms on multi-error Result" {
     const source_text =
         \\error Failure(code: u256, owner: address);

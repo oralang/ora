@@ -2,6 +2,7 @@ const std = @import("std");
 const import_graph = @import("ora_imports");
 const ast = @import("../ast/mod.zig");
 const db = @import("../db/mod.zig");
+const diagnostics = @import("../diagnostics/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const embedded_stdlib = @import("../stdlib_embedded.zig");
@@ -15,6 +16,13 @@ fn compilerPhaseDebugEnabled() bool {
 fn compilerPhaseLog(comptime fmt: []const u8, args: anytype) void {
     if (!compilerPhaseDebugEnabled()) return;
     std.debug.print("compiler-phase: " ++ fmt ++ "\n", args);
+}
+
+fn diagnosticsHaveErrors(list: *const diagnostics.DiagnosticList) bool {
+    for (list.items.items) |diag| {
+        if (diag.severity == .Error) return true;
+    }
+    return false;
 }
 
 pub const Compilation = struct {
@@ -59,8 +67,11 @@ pub fn compilePackageWithResolverOptions(
         compilerPhaseLog("module {s} item-index", .{module.name});
         _ = try compilation.db.resolveNames(module_id);
         compilerPhaseLog("module {s} resolve", .{module.name});
-        _ = try compilation.db.moduleTypeCheck(module_id);
+        const typecheck = try compilation.db.moduleTypeCheck(module_id);
         compilerPhaseLog("module {s} typecheck", .{module.name});
+        if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
+            return compilation;
+        }
         _ = try compilation.db.constEval(module_id);
         compilerPhaseLog("module {s} consteval", .{module.name});
         _ = try compilation.db.moduleVerificationFacts(module_id);

@@ -185,6 +185,45 @@ test "compiler converts named aggregate ADT payload structural matches through O
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts ADT storage load and store through carrier slots" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Pair(u256, u256),
+        \\}
+        \\
+        \\contract Entry {
+        \\    storage var saved: Event;
+        \\
+        \\    pub fn set(amount: u256) {
+        \\        saved = Event.Value(amount);
+        \\    }
+        \\
+        \\    pub fn read() -> u256 {
+        \\        return match (saved) {
+        \\            Event.Empty => 0,
+        \\            Event.Value(x) => x,
+        \\            Event.Pair(a, _) => a,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sload"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts nested ADT fields through compiler-managed handle storage" {
     const source_text =
         \\struct Holder {

@@ -3453,6 +3453,104 @@ test "compiler const eval matches payload enum values" {
     try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler const eval matches payload enum or-patterns" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Value(u256),
+        \\    Other(u256),
+        \\    Done,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let event = Event.Other(41);
+        \\        let out = match (event) {
+        \\            Event.Value(value) | Event.Other(value) => value + 1,
+        \\            Event.Empty | Event.Done => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval constructs named enum payload literals" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let event = Event.Named { amount: 41, code: 1 };
+        \\        let out = match (event) {
+        \\            Event.Empty => 0,
+        \\            Event.Named { amount: value, code } => value + code,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval matches named enum payload rest destructures" {
+    const source_text =
+        \\enum Event {
+        \\    Empty,
+        \\    Named { code: u256, amount: u256 },
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let event = Event.Named { code: 99, amount: 41 };
+        \\        let out = match (event) {
+        \\            Event.Empty => 0,
+        \\            Event.Named { amount: value, .. } => value + 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
 test "compiler const eval matches Result error variants" {
     const source_text =
         \\error Failure(code: u256);
@@ -3487,6 +3585,43 @@ test "compiler const eval matches Result error variants" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqual(@as(i128, 10), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
+}
+
+test "compiler const eval matches Result named error or-patterns" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\error Denied(code: u256);
+        \\
+        \\comptime fn choose(flag: bool) -> !u256 | Failure | Denied {
+        \\    if (flag) {
+        \\        return Failure(7);
+        \\    }
+        \\    return Denied(41);
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let maybe = choose(false);
+        \\        let out = match (maybe) {
+        \\            Ok(value) => value,
+        \\            Failure(code) | Denied(code) => code + 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[3]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(i128, 42), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
 test "compiler const eval executes grouped direct function calls" {

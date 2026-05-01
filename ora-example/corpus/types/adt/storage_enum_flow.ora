@@ -1,0 +1,26 @@
+// ADT STORAGE FLOW
+// Payload-carrying enums stored in contract state lower through the compiler
+// ADT carrier layout: one storage slot for the tag and one for the payload
+// carrier word.
+
+enum Event {
+    Empty,
+    Value(u256),
+    Pair(u256, u256),
+}
+
+contract StorageEnumFlow {
+    storage var saved: Event;
+
+    pub fn set_value(amount: u256) {
+        saved = Event.Value(amount);
+    }
+
+    pub fn read_value() -> u256 {
+        return match (saved) {
+            Event.Empty => 0,
+            Event.Value(value) => value,
+            Event.Pair(first, _) => first,
+        };
+    }
+}

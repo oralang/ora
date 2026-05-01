@@ -132,8 +132,8 @@ pub const ConstPool = struct {
             },
             .map_ref => error.UnsupportedComptimeValue,
 
-            // === Enum: intern payload if present ===
-            .enum_val => |e| {
+            // === ADT/sum value: intern payload if present ===
+            .adt_val => |e| {
                 const payload_id = try self.internOptionalTuplePayload(env, e.payload);
                 return try self.store(.{ .enum_val = .{
                     .type_id = e.type_id,
@@ -300,7 +300,7 @@ test "ConstPool string interning" {
     try std.testing.expectEqualStrings("world", pool.get(id3).string);
 }
 
-test "ConstPool interns enum tuple payloads" {
+test "ConstPool interns ADT tuple payloads" {
     const env_mod = @import("env.zig");
 
     var pool = ConstPool.init(std.testing.allocator);
@@ -310,7 +310,7 @@ test "ConstPool interns enum tuple payloads" {
     defer env.deinit();
 
     const payload_heap_id = try env.heap.allocTuple(&[_]CtValue{.{ .integer = 42 }});
-    const enum_id = try pool.intern(&env, .{ .enum_val = .{
+    const enum_id = try pool.intern(&env, .{ .adt_val = .{
         .type_id = 100,
         .variant_id = 1,
         .payload = payload_heap_id,
