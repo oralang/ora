@@ -217,6 +217,36 @@ static FailureOr<Value> phase0FromI256(PatternRewriter &rewriter, Location loc, 
     return failure();
 }
 
+static std::optional<unsigned> getOraBitWidth(Type type);
+
+static bool valueFitsNarrowErrorPayload(Value value)
+{
+    if (!value)
+        return false;
+
+    // Propagated error discriminants are declaration IDs, not user payloads; they
+    // are allocated by the compiler and fit the packed narrow carrier.
+    if (value.getDefiningOp<ora::ErrorGetErrorOp>())
+        return true;
+
+    if (Operation *def = value.getDefiningOp())
+    {
+        if (def->hasAttr("ora.error_id") || def->hasAttr("sir.error_id"))
+            return true;
+        if (auto constant = llvm::dyn_cast<arith::ConstantOp>(def))
+        {
+            if (auto attr = llvm::dyn_cast<IntegerAttr>(constant.getValue()))
+            {
+                const APInt &bits = attr.getValue();
+                return !bits.isNegative() && bits.getActiveBits() <= 255;
+            }
+        }
+    }
+
+    auto width = getOraBitWidth(value.getType());
+    return width && *width <= 255;
+}
+
 static Value phase0PackErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
@@ -224,6 +254,9 @@ static Value phase0PackErrorUnion(
     Type errorUnionType,
     bool isError)
 {
+    if (isError && !valueFitsNarrowErrorPayload(operand))
+        return Value();
+
     auto payloadOr = phase0ToI256(rewriter, loc, operand);
     if (failed(payloadOr))
         return Value();
@@ -4297,7 +4330,8 @@ LogicalResult NormalizeErrorErrOp::matchAndRewrite(
 {
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
     {
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()))
+        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) ||
+            !valueFitsNarrowErrorPayload(op.getValue()))
         {
             rewriter.replaceOp(op, phase0BuildWideErrorUnion(rewriter, op.getLoc(), op.getValue(), op.getType(), true));
             return success();

@@ -2230,6 +2230,36 @@ test "compiler lowers payload-bearing narrow success error unions through OraToS
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.err"));
 }
 
+test "compiler keeps wide error payloads out of narrow packed error-union carrier" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn run(flag: bool, code: u256) -> !bool | Failure {
+        \\        if (flag) {
+        \\            return Failure(code);
+        \\        }
+        \\        return false;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.addptr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.error.return"));
+}
+
 test "compiler carries payload-bearing narrow error unions across function calls through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);
