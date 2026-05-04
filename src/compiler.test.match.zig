@@ -1780,6 +1780,60 @@ test "compiler emits error selector and error-union ABI attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
 }
 
+test "compiler uses selector-derived ids for imported Result errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\error Failure;
+        \\
+        \\pub fn choose(flag: bool) -> Result<u256, Failure> {
+        \\    if (flag) {
+        \\        return Err(Failure);
+        \\    }
+        \\    return Ok(1);
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\pub contract Main {
+        \\    pub fn run(flag: bool) -> u256 {
+        \\        return match (dep.choose(flag)) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const rendered = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(rendered);
+
+    const selector_id = compiler.hir.abi.keccakSelectorValue("Failure()");
+    const selector_text = try std.fmt.allocPrint(testing.allocator, "ora.error_id = {d}", .{selector_id});
+    defer testing.allocator.free(selector_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sym_name = \"dep.Failure\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, selector_text));
+}
+
 test "compiler emits tuple ABI return attrs for public error unions" {
     const source_text =
         \\error Failure();

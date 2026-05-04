@@ -1769,7 +1769,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.parent.context,
                             self.parent.location(range),
                             defaultIntegerType(self.parent.context),
-                            @intCast(item_id.index() + 1),
+                            try self.parent.errorDeclRuntimeIdForItem(item_id),
                         ),
                     );
                     const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(range), cmpPredicate("eq"), raw_error_value, expected_error_id);
@@ -1797,7 +1797,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.parent.context,
                             self.parent.location(range),
                             defaultIntegerType(self.parent.context),
-                            @intCast(item_id.index() + 1),
+                            try self.parent.errorDeclRuntimeIdForItem(item_id),
                         ),
                     );
                     const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(range), cmpPredicate("eq"), raw_error_value, expected_error_id);

@@ -1272,7 +1272,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
             try attrs.append(self.allocator, .{
                 .name = identifier(self.context, "ora.error_id"),
-                .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(item_id.index() + 1)),
+                .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), try @This().errorDeclRuntimeId(self, error_decl)),
             });
 
             const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
@@ -1318,6 +1318,27 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .error_decl, symbol_name, error_decl.range, op);
+        }
+
+        pub fn errorDeclRuntimeIdForItem(self: *Lowerer, item_id: ast.ItemId) anyerror!i64 {
+            const item = self.file.item(item_id).*;
+            if (item != .ErrorDecl) return error.UnsupportedAbiType;
+            return @This().errorDeclRuntimeId(self, item.ErrorDecl);
+        }
+
+        fn errorDeclRuntimeId(self: *Lowerer, error_decl: ast.ErrorDeclItem) anyerror!i64 {
+            const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
+            defer self.allocator.free(param_types);
+            for (error_decl.parameters, 0..) |param, index| {
+                param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
+            }
+
+            const signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+                error.UnsupportedAbiType => try std.fmt.allocPrint(self.allocator, "{s}#ora-internal-error/{d}", .{ error_decl.name, error_decl.parameters.len }),
+                else => return err,
+            };
+            defer self.allocator.free(signature);
+            return @intCast(abi_support.keccakSelectorValue(signature));
         }
 
         pub fn attachBitfieldParamMetadata(self: *Lowerer, func_op: mlir.MlirOperation, type_expr_id: ast.TypeExprId, index: c_uint) !void {
@@ -1508,9 +1529,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (self.errorTypeHasPayload(error_union.error_types[0])) return null;
 
             const error_name = error_union.error_types[0].name() orelse return null;
-            const item_id = self.item_index.lookup(error_name) orelse return null;
-            if (self.file.item(item_id).* != .ErrorDecl) return null;
-            return @intCast(item_id.index() + 1);
+            if (self.item_index.lookup(error_name)) |item_id| {
+                if (self.file.item(item_id).* != .ErrorDecl) return null;
+                return @This().errorDeclRuntimeIdForItem(self, item_id) catch null;
+            }
+
+            var signature_buf: [256]u8 = undefined;
+            const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{error_name}) catch return null;
+            return @intCast(abi_support.keccakSelectorValue(signature));
         }
 
         fn publicResultInputMode(self: *Lowerer, ty: sema.Type) enum { none, narrow_payloadless, wide_payloadless, wide_single_error } {

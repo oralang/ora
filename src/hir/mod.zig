@@ -239,6 +239,7 @@ const Lowerer = struct {
     pub const lowerConstant = ModuleLowering.lowerConstant;
     pub const lowerLogDecl = ModuleLowering.lowerLogDecl;
     pub const lowerErrorDecl = ModuleLowering.lowerErrorDecl;
+    pub const errorDeclRuntimeIdForItem = ModuleLowering.errorDeclRuntimeIdForItem;
     pub const lowerDeclPlaceholder = ModuleLowering.lowerDeclPlaceholder;
     pub const createNamedPlaceholderOp = ModuleLowering.createNamedPlaceholderOp;
     pub const createPlaceholderOp = ModuleLowering.createPlaceholderOp;

@@ -149,14 +149,27 @@ pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_se
 }
 
 pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
-    var hash: [32]u8 = undefined;
-    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
-    const selector = hash[0..4];
-
+    const value = keccakSelectorValue(signature);
     var hex: [8]u8 = undefined;
-    for (selector, 0..) |byte, index| {
+    const bytes = [_]u8{
+        @intCast((value >> 24) & 0xff),
+        @intCast((value >> 16) & 0xff),
+        @intCast((value >> 8) & 0xff),
+        @intCast(value & 0xff),
+    };
+    for (bytes, 0..) |byte, index| {
         hex[index * 2] = std.fmt.hex_charset[byte >> 4];
         hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
     }
     return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
+}
+
+pub fn keccakSelectorValue(signature: []const u8) u32 {
+    var hash: [32]u8 = undefined;
+    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
+    const selector = hash[0..4];
+    return (@as(u32, selector[0]) << 24) |
+        (@as(u32, selector[1]) << 16) |
+        (@as(u32, selector[2]) << 8) |
+        @as(u32, selector[3]);
 }
