@@ -4550,6 +4550,11 @@ pub const Encoder = struct {
     }
 
     fn encodeMLIRTypeForSymbol(self: *Encoder, mlir_type: mlir.MlirType) EncodeError!z3.Z3_sort {
+        // Symbol declarations may need a sort before the defining product metadata
+        // has been registered. This path is safe only for uninterpreted symbols that
+        // will later be constrained through exact metadata-backed operations. Use
+        // encodeMLIRType for operation/result encoding so missing product metadata
+        // records degradation instead of silently proving over an opaque fallback.
         return self.encodeMLIRTypeWithProductFallback(mlir_type, false);
     }
 

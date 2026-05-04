@@ -1320,15 +1320,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn appendSwitchPatternData(self: *FunctionLowerer, pattern: ast.SwitchPattern, data: *SwitchPatternData) anyerror!bool {
             switch (pattern) {
                 .Expr => |pattern_expr| {
-                    const value = self.switchPatternValue(pattern_expr) orelse return false;
+                    const value = (try @This().switchPatternValueStrict(self, pattern_expr)) orelse return false;
                     try data.case_values.append(self.parent.allocator, value);
                     try data.range_starts.append(self.parent.allocator, 0);
                     try data.range_ends.append(self.parent.allocator, 0);
                     try data.case_kinds.append(self.parent.allocator, 0);
                 },
                 .Range => |range_pattern| {
-                    const start_value = self.switchPatternValue(range_pattern.start) orelse return false;
-                    var end_value = self.switchPatternValue(range_pattern.end) orelse return false;
+                    const start_value = (try @This().switchPatternValueStrict(self, range_pattern.start)) orelse return false;
+                    var end_value = (try @This().switchPatternValueStrict(self, range_pattern.end)) orelse return false;
                     if (!range_pattern.inclusive) {
                         end_value = std.math.sub(i64, end_value, 1) catch return false;
                     }
@@ -1338,7 +1338,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try data.case_kinds.append(self.parent.allocator, 1);
                 },
                 .NamedError => |named_error| {
-                    const value = self.switchPatternValue(named_error.callee) orelse return false;
+                    const value = (try @This().switchPatternValueStrict(self, named_error.callee)) orelse return false;
                     try data.case_values.append(self.parent.allocator, value);
                     try data.range_starts.append(self.parent.allocator, 0);
                     try data.range_ends.append(self.parent.allocator, 0);
@@ -1984,6 +1984,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            return @This().switchPatternValueStrict(self, expr_id) catch null;
+        }
+
+        fn switchPatternValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?i64 {
             switch (self.parent.file.expression(expr_id).*) {
                 .IntegerLiteral => |literal| return support.parseIntLiteral(literal.text),
                 .BoolLiteral => |literal| return if (literal.value) 1 else 0,
@@ -1993,16 +1997,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return switch (value) {
                     .integer => |integer| integer.toInt(i64) catch null,
                     .boolean => |boolean| if (boolean) 1 else 0,
-                    else => @This().enumPatternValue(self, expr_id),
+                    else => try @This().enumPatternValueStrict(self, expr_id),
                 };
             }
-            return @This().enumPatternValue(self, expr_id);
+            return try @This().enumPatternValueStrict(self, expr_id);
         }
 
         fn enumPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            return @This().enumPatternValueStrict(self, expr_id) catch null;
+        }
+
+        fn enumPatternValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?i64 {
             const expr = self.parent.file.expression(expr_id).*;
             return switch (expr) {
-                .Group => |group| @This().enumPatternValue(self, group.expr),
+                .Group => |group| try @This().enumPatternValueStrict(self, group.expr),
                 .Field => |field| blk: {
                     const base_type = self.parent.typecheck.exprType(field.base);
                     const enum_name = base_type.name() orelse break :blk null;
@@ -2024,7 +2032,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     var next_value: i64 = 0;
                     for (enum_item.variants) |variant| {
                         const resolved_value = if (variant.value) |value_expr|
-                            @This().enumPatternIntegerValue(self, value_expr) orelse next_value
+                            try @This().enumPatternIntegerValueStrict(self, value_expr)
                         else
                             next_value;
                         if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
@@ -2037,11 +2045,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn enumPatternIntegerValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
-            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return @This().enumPatternIntegerValueStrict(self, expr_id) catch null;
+        }
+
+        fn enumPatternIntegerValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return error.EnumPatternValueNotConstant;
             return switch (value) {
-                .integer => |integer| integer.toInt(i64) catch null,
+                .integer => |integer| integer.toInt(i64) catch error.EnumPatternValueOutOfRange,
                 .boolean => |boolean| if (boolean) 1 else 0,
-                else => null,
+                else => error.EnumPatternValueNotInteger,
             };
         }
     };
