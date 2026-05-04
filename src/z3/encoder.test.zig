@@ -108,7 +108,7 @@ test "encodeMLIRType maps anonymous struct to product sort" {
     try testing.expect(!encoder.isDegraded());
 }
 
-test "encodeMLIRType keeps named struct opaque without declaration metadata" {
+test "encodeMLIRType degrades named struct opaque fallback without declaration metadata" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -124,7 +124,8 @@ test "encodeMLIRType keeps named struct opaque without declaration metadata" {
     const struct_sort = try encoder.encodeMLIRType(struct_ty);
     try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, struct_sort))));
     try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, struct_sort))));
-    try testing.expect(!encoder.isDegraded());
+    try testing.expect(encoder.isDegraded());
+    try testing.expect(std.mem.indexOf(u8, encoder.degradationReason() orelse "", "product MLIR type missing exact metadata") != null);
 }
 
 test "sortFromPrintedType maps tuple and anonymous struct to product sorts" {

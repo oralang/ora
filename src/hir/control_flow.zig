@@ -2125,19 +2125,40 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_type = self.parent.typecheck.exprType(field.base);
                     const enum_name = base_type.name() orelse break :blk null;
                     if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                        for (instantiated.variants, 0..) |variant, index| {
-                            if (std.mem.eql(u8, variant.name, field.name)) break :blk @intCast(index);
+                        var next_value: i64 = 0;
+                        for (instantiated.variants) |variant| {
+                            const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
+                                .integer => |literal| literal,
+                                else => next_value,
+                            } else next_value;
+                            if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                            next_value = resolved_value + 1;
                         }
                         break :blk null;
                     }
                     const item_id = self.parent.item_index.lookup(enum_name) orelse break :blk null;
                     if (self.parent.file.item(item_id).* != .Enum) break :blk null;
                     const enum_item = self.parent.file.item(item_id).Enum;
-                    for (enum_item.variants, 0..) |variant, index| {
-                        if (std.mem.eql(u8, variant.name, field.name)) break :blk @intCast(index);
+                    var next_value: i64 = 0;
+                    for (enum_item.variants) |variant| {
+                        const resolved_value = if (variant.value) |value_expr|
+                            @This().enumPatternIntegerValue(self, value_expr) orelse next_value
+                        else
+                            next_value;
+                        if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                        next_value = resolved_value + 1;
                     }
                     break :blk null;
                 },
+                else => null,
+            };
+        }
+
+        fn enumPatternIntegerValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                .boolean => |boolean| if (boolean) 1 else 0,
                 else => null,
             };
         }

@@ -2534,7 +2534,7 @@ pub const Encoder = struct {
         if (num_results < 1) return error.UnsupportedOperation;
         const result_value = mlir.oraOperationGetResult(mlir_op, 0);
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
 
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
         if (num_operands < 1) return error.InvalidOperandCount;
@@ -3420,7 +3420,7 @@ pub const Encoder = struct {
         if (num_results < 1) return current;
         const result_value = mlir.oraOperationGetResult(mlir_op, 0);
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         return try self.coerceTypedAstToSortOrUndef(current, result_type, result_sort, "tensor_extract_result", @intFromPtr(mlir_op.ptr));
     }
 
@@ -3666,7 +3666,7 @@ pub const Encoder = struct {
 
         // if no defining operation, create a fresh variable
         const value_type = mlir.oraValueGetType(mlir_value);
-        const sort = try self.encodeMLIRType(value_type);
+        const sort = try self.encodeMLIRTypeForSymbol(value_type);
         const var_name = try self.resolveValueName(mlir_value, value_id);
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
@@ -4251,7 +4251,7 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "scf.execute_region")) {
             const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
-            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
             return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
                 try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
@@ -4285,7 +4285,7 @@ pub const Encoder = struct {
         if (result_index >= num_results) return error.UnsupportedOperation;
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         const op_id = @intFromPtr(mlir_op.ptr);
         const label = try std.fmt.allocPrint(self.allocator, "op_result_{d}", .{result_index});
         defer self.allocator.free(label);
@@ -4301,7 +4301,7 @@ pub const Encoder = struct {
     ) EncodeError!?z3.Z3_ast {
         if (std.mem.eql(u8, op_name, "scf.while")) {
             const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
-            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
             return (try self.tryExtractZeroIterationScfWhileResult(mlir_op, result_index, mode)) orelse
                 (try self.tryExtractCanonicalUnsignedScfWhileResult(mlir_op, result_index, mode)) orelse
@@ -4314,7 +4314,7 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "scf.for")) {
             const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
-            const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+            const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
             if (try self.tryExtractCanonicalScfForDerivedResult(mlir_op, result_index, mode)) |derived_result| {
                 return derived_result;
@@ -4345,7 +4345,7 @@ pub const Encoder = struct {
         const condition = try self.encodeValueWithMode(condition_value, mode);
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         const op_id = @intFromPtr(mlir_op.ptr);
         const then_expr = try self.extractRegionYieldGuarded(mlir_op, 0, result_index, mode, condition);
         const else_expr = try self.extractRegionYieldGuarded(mlir_op, 1, result_index, mode, self.encodeNot(condition));
@@ -4372,7 +4372,7 @@ pub const Encoder = struct {
         defer metadata.deinit(self.allocator);
 
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
-        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
         const op_id = @intFromPtr(mlir_op.ptr);
         var branch_exprs = try self.allocator.alloc(z3.Z3_ast, num_regions);
         defer self.allocator.free(branch_exprs);
@@ -4528,7 +4528,7 @@ pub const Encoder = struct {
         if (result_index >= num_results) return error.InvalidOperandCount;
         const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
 
         const op_id = @intFromPtr(mlir_op.ptr);
         const fn_name = try std.fmt.allocPrint(self.allocator, "{s}_summary_{d}_{d}", .{ op_name, op_id, result_index });
@@ -4546,11 +4546,19 @@ pub const Encoder = struct {
 
     /// Encode MLIR type to Z3 sort
     pub fn encodeMLIRType(self: *Encoder, mlir_type: mlir.MlirType) EncodeError!z3.Z3_sort {
+        return self.encodeMLIRTypeWithProductFallback(mlir_type, true);
+    }
+
+    fn encodeMLIRTypeForSymbol(self: *Encoder, mlir_type: mlir.MlirType) EncodeError!z3.Z3_sort {
+        return self.encodeMLIRTypeWithProductFallback(mlir_type, false);
+    }
+
+    fn encodeMLIRTypeWithProductFallback(self: *Encoder, mlir_type: mlir.MlirType, record_product_degradation: bool) EncodeError!z3.Z3_sort {
         if (mlir.oraTypeIsNull(mlir_type)) return error.UnsupportedOperation;
 
         const refinement_base = mlir.oraRefinementTypeGetBaseType(mlir_type);
         if (!mlir.oraTypeIsNull(refinement_base)) {
-            return self.encodeMLIRType(refinement_base);
+            return self.encodeMLIRTypeWithProductFallback(refinement_base, record_product_degradation);
         }
         if (mlir.oraTypeIsAddressType(mlir_type)) {
             return self.mkBitVectorSort(160);
@@ -4616,11 +4624,11 @@ pub const Encoder = struct {
 
         const map_value_type = mlir.oraMapTypeGetValueType(mlir_type);
         if (!mlir.oraTypeIsNull(map_value_type)) {
-            const value_sort = try self.encodeMLIRType(map_value_type);
+            const value_sort = try self.encodeMLIRTypeWithProductFallback(map_value_type, record_product_degradation);
             // Get the actual key type from the map (e.g., address is 160 bits, not 256)
             const map_key_type = mlir.oraMapTypeGetKeyType(mlir_type);
             const key_sort = if (!mlir.oraTypeIsNull(map_key_type))
-                try self.encodeMLIRType(map_key_type)
+                try self.encodeMLIRTypeWithProductFallback(map_key_type, record_product_degradation)
             else blk: {
                 self.recordDegradation("map type missing key type encoded via opaque bv256 fallback");
                 break :blk self.mkBitVectorSort(256);
@@ -4635,7 +4643,7 @@ pub const Encoder = struct {
                 return self.mkBitVectorSort(256);
             }
 
-            var sort = try self.encodeMLIRType(elem_type);
+            var sort = try self.encodeMLIRTypeWithProductFallback(elem_type, record_product_degradation);
             const rank_i = mlir.oraShapedTypeGetRank(mlir_type);
             if (rank_i <= 0) return sort;
 
@@ -4662,6 +4670,9 @@ pub const Encoder = struct {
             std.mem.startsWith(u8, trimmed_type, "!ora.struct_anon<") or
             std.mem.startsWith(u8, trimmed_type, "!ora.tuple<"))
         {
+            if (record_product_degradation) {
+                self.recordDegradation("product MLIR type missing exact metadata encoded via opaque bv256 fallback");
+            }
             return self.mkBitVectorSort(256);
         }
 
@@ -4830,7 +4841,7 @@ pub const Encoder = struct {
             if (num_results < 1) return error.UnsupportedOperation;
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_type = mlir.oraValueGetType(result_value);
-            const sort = try self.encodeMLIRType(result_type);
+            const sort = try self.encodeMLIRTypeForSymbol(result_type);
             const name = self.getStringAttr(mlir_op, "name") orelse "placeholder";
             if (self.lookupQuantifiedBinding(name, sort)) |bound| {
                 return bound;
@@ -5823,7 +5834,7 @@ pub const Encoder = struct {
         for (0..effective_error_count) |index| {
             const error_type = if (error_count == 0) mlir.MlirType{ .ptr = null } else mlir.oraErrorUnionTypeGetErrorType(error_union_type, index);
             if (error_count != 0 and mlir.oraTypeIsNull(error_type)) return error.UnsupportedOperation;
-            const payload_sort = if (error_count == 0) self.mkBitVectorSort(256) else try self.encodeMLIRType(error_type);
+            const payload_sort = if (error_count == 0) self.mkBitVectorSort(256) else try self.errorVariantPayloadSort(error_type);
             variant_payload_types[index] = error_type;
             variant_payload_sorts[index] = payload_sort;
 
@@ -5945,6 +5956,56 @@ pub const Encoder = struct {
             if (std.mem.endsWith(u8, sym_name, struct_name) and sym_name.len > struct_name.len and sym_name[sym_name.len - struct_name.len - 1] == '.') return true;
         }
         return false;
+    }
+
+    fn errorPayloadFieldCount(self: *Encoder, error_type: mlir.MlirType) !?usize {
+        const type_text = try self.printMlirTypeOwned(error_type);
+        defer self.allocator.free(type_text);
+        const trimmed_type = std.mem.trim(u8, type_text, " \t\n\r");
+
+        const struct_decl = blk: {
+            if (self.struct_decl_ops.get(trimmed_type)) |direct| break :blk direct;
+            const parsed_name = parseStructTypeName(trimmed_type) orelse return null;
+            const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+            break :blk self.struct_decl_ops.get(struct_name) orelse return null;
+        };
+
+        var fields_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.param_names", 15));
+        if (mlir.oraAttributeIsNull(fields_attr)) {
+            fields_attr = mlir.oraOperationGetAttributeByName(struct_decl, mlir.oraStringRefCreate("ora.field_names", 15));
+        }
+        if (!mlir.oraAttributeIsNull(fields_attr)) {
+            return @intCast(mlir.oraArrayAttrGetNumElements(fields_attr));
+        }
+
+        if (self.struct_field_names_csv.get(trimmed_type)) |field_names| {
+            if (field_names.len == 0) return 0;
+            return std.mem.count(u8, field_names, ",") + 1;
+        }
+        const parsed_name = parseStructTypeName(trimmed_type) orelse return null;
+        const struct_name = self.resolveRegisteredStructName(parsed_name) orelse parsed_name;
+        if (self.struct_field_names_csv.get(struct_name)) |field_names| {
+            if (field_names.len == 0) return 0;
+            return std.mem.count(u8, field_names, ",") + 1;
+        }
+        return null;
+    }
+
+    fn errorVariantPayloadSort(self: *Encoder, error_type: mlir.MlirType) EncodeError!z3.Z3_sort {
+        if (mlir.oraTypeIsNull(error_type)) return self.mkBitVectorSort(256);
+
+        const maybe_product = self.getProductSort(error_type) catch |err| switch (err) {
+            error.UnsupportedOperation => null,
+            else => return err,
+        };
+        if (maybe_product) |product| return product.sort;
+
+        const payload_field_count = (try self.errorPayloadFieldCount(error_type)) orelse return try self.encodeMLIRType(error_type);
+        if (payload_field_count == 0) {
+            return self.mkBitVectorSort(256);
+        }
+
+        return try self.encodeMLIRType(error_type);
     }
 
     fn sourceErrorUnionTypeForDiscriminant(_: *Encoder, value: mlir.MlirValue) ?mlir.MlirType {
@@ -6397,7 +6458,7 @@ pub const Encoder = struct {
         }
 
         const result_type = mlir.oraValueGetType(result_value);
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         if (!self.verify_calls) {
             const op_id = @intFromPtr(mlir_op.ptr);
             const label = try std.fmt.allocPrint(self.allocator, "call_r{d}", .{result_index});
@@ -9743,7 +9804,7 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!z3.Z3_ast {
         const result_value = mlir.oraOperationGetResult(try_stmt, @intCast(result_index));
-        const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
+        const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
         const op_id = @intFromPtr(try_stmt.ptr);
 
         if (try self.tryStmtAlwaysEntersCatch(try_stmt, mode)) {
@@ -13380,7 +13441,7 @@ pub const Encoder = struct {
         const result_value = mlir.oraOperationGetResult(mlir_op, 0);
         const result_type = mlir.oraValueGetType(result_value);
 
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         const op_id = @intFromPtr(mlir_op.ptr);
         const in_width = self.getTypeBitWidth(operand_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine operand cast width");
         const out_width = self.getTypeBitWidth(result_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine result cast width");

@@ -81,6 +81,25 @@ pub const LocalEnv = struct {
         }
     }
 
+    pub fn aliasPattern(self: *LocalEnv, file: *const ast.AstFile, source_pattern: ast.PatternId, target_pattern: ast.PatternId) !void {
+        const source = bindingRefFromPattern(file, source_pattern) orelse return;
+        const target = bindingRefFromPattern(file, target_pattern) orelse return;
+        try self.visible_names.put(source.name, source.id);
+        if (self.values.get(target.id)) |value| {
+            try self.values.put(source.id, value);
+        }
+        if (self.known_ints.get(target.id)) |known_int| {
+            try self.known_ints.put(source.id, known_int);
+        } else {
+            _ = self.known_ints.remove(source.id);
+        }
+        if (self.known_bools.get(target.id)) |known_bool| {
+            try self.known_bools.put(source.id, known_bool);
+        } else {
+            _ = self.known_bools.remove(source.id);
+        }
+    }
+
     pub fn lookupName(self: *const LocalEnv, name: []const u8) ?LocalId {
         return self.visible_names.get(name);
     }

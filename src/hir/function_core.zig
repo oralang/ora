@@ -126,7 +126,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try @This().emitGuardClauses(self, function, &self.locals);
                 for (self.extra_verification_clauses) |clause| {
                     if (clause.kind != .requires) continue;
-                    const condition = try self.lowerExpr(clause.expr, &self.locals);
+                    const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, &self.locals);
                     const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     if (clause.verification_context) |context| {
@@ -177,7 +177,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .ensures) continue;
-                const condition = try self.lowerExpr(clause.expr, locals);
+                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                 if (clause.verification_context) |context| {
@@ -198,12 +198,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn emitExtraGuardClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .guard) continue;
+                var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
                 try @This().emitRuntimeGuard(self, .{
                     .range = clause.range,
                     .kind = .guard,
                     .expr = clause.expr,
-                }, locals);
+                }, &clause_locals);
             }
+        }
+
+        fn lowerExtraVerificationClauseCondition(self: *FunctionLowerer, clause: FunctionLowerer.ExtraVerificationClause, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
+            return self.lowerExpr(clause.expr, &clause_locals);
+        }
+
+        fn localsWithExtraVerificationAliases(self: *FunctionLowerer, locals: *LocalEnv, clause: FunctionLowerer.ExtraVerificationClause) anyerror!LocalEnv {
+            var clause_locals = try self.cloneLocals(locals);
+            for (clause.pattern_aliases) |alias| {
+                try clause_locals.aliasPattern(self.parent.file, alias.source, alias.target);
+            }
+            return clause_locals;
         }
 
         fn emitRuntimeGuard(self: *FunctionLowerer, clause: ast.SpecClause, locals: *LocalEnv) anyerror!void {
@@ -983,7 +997,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 }
                                 for (self.extra_verification_clauses) |clause| {
                                     if (clause.kind != .ensures) continue;
-                                    const condition = try self.lowerExpr(clause.expr, locals);
+                                    const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                                     const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                                     if (clause.verification_context) |context| {
@@ -1032,7 +1046,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                             for (self.extra_verification_clauses) |clause| {
                                 if (clause.kind != .ensures) continue;
-                                const condition = try self.lowerExpr(clause.expr, locals);
+                                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                                 if (clause.verification_context) |context| {
@@ -1074,7 +1088,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         for (self.extra_verification_clauses) |clause| {
                             if (clause.kind != .ensures) continue;
-                            const condition = try self.lowerExpr(clause.expr, locals);
+                            const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                             const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                             if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                             if (clause.verification_context) |context| {

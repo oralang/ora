@@ -664,6 +664,35 @@ test "compiler lowers Result constructors in declaration and return position" {
         std.mem.indexOf(u8, rendered, "ora.error.return") != null);
 }
 
+test "compiler lowers Result constructors in match expression arms" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\contract Sample {
+        \\    fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure(7));
+        \\    }
+        \\
+        \\    pub fn pass_through(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        let maybe = choose(flag, value);
+        \\        return match (maybe) {
+        \\            Ok(inner) => Ok(inner),
+        \\            Failure(code) => Err(Failure(code)),
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.call @Ok") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.call @Err") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.return") != null);
+}
+
 test "compiler emits error-union ABI attrs for public Result returns" {
     const source_text =
         \\error Failure();

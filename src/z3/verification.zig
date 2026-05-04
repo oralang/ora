@@ -3049,6 +3049,25 @@ pub const VerificationPass = struct {
             if (inconsistent_functions.contains(query.function_name)) continue;
             if (unknown_base_functions.contains(query.function_name)) continue;
 
+            if (entry.vacuous) {
+                if (vacuousCoreContainsRequires(entry.explain_tags)) {
+                    try combined.addError(.{
+                        .error_type = .PreconditionViolation,
+                        .message = try std.fmt.allocPrint(
+                            self.allocator,
+                            "verification assumptions are inconsistent for {s} in {s}",
+                            .{ queryKindLabel(query.kind), query.function_name },
+                        ),
+                        .file = try self.allocator.dupe(u8, query.file),
+                        .line = query.line,
+                        .column = query.column,
+                        .counterexample = null,
+                        .allocator = self.allocator,
+                    });
+                }
+                continue;
+            }
+
             switch (query.kind) {
                 .Obligation => {
                     if (entry.status == z3.Z3_L_TRUE) {
@@ -6149,6 +6168,13 @@ const PreparedQueryResult = struct {
     vacuous: bool = false,
     vacuity_unknown: bool = false,
 };
+
+fn vacuousCoreContainsRequires(tags: []const AssumptionTag) bool {
+    for (tags) |tag| {
+        if (tag.kind == .requires) return true;
+    }
+    return false;
+}
 
 fn querySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
     return switch (logic) {
@@ -11993,6 +12019,11 @@ test "explain mode reports contradictory requires as vacuous" {
     var verification_result = try pass.runVerificationPass(module);
     defer verification_result.deinit();
 
+    try testing.expect(!verification_result.success);
+    try testing.expectEqual(@as(usize, 1), verification_result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
+    try testing.expectEqual(@as(usize, 0), verification_result.proven_guard_positions.items.len);
+
     const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
     defer testing.allocator.free(artifacts.markdown);
     defer testing.allocator.free(artifacts.json);
@@ -12019,6 +12050,9 @@ test "runVerificationPass explain mode remains on canonical prepared-query path"
 
     var verification_result = try pass.runVerificationPass(module);
     defer verification_result.deinit();
+
+    try testing.expect(!verification_result.success);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
 
     const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
     defer testing.allocator.free(artifacts.markdown);

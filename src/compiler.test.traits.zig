@@ -871,6 +871,48 @@ test "compiler verifies trait ghost method calls with self end to end" {
     try testing.expectEqual(@as(usize, 0), result.errors.items.len);
 }
 
+test "compiler inherits trait method clauses onto impl methods" {
+    const source_text =
+        \\trait Echo {
+        \\    fn echo(self, amount: u256) -> u256
+        \\        requires(amount > 0)
+        \\        ensures(result == amount);
+        \\}
+        \\
+        \\contract Counter {}
+        \\
+        \\impl Echo for Counter {
+        \\    fn echo(self, value: u256) -> u256 {
+        \\        return value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.requires"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "trait_method_contract"));
+
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.parallel = false;
+
+    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+}
+
 test "compiler reports trait method body parse error" {
     const source_text =
         \\trait ERC20 {
@@ -1110,7 +1152,7 @@ test "compiler parses and lowers trait bounds on generic functions" {
         \\    fn compare(self, other: u256) -> bool;
         \\}
         \\
-        \\fn keep(comptime T: type, value: T) -> T where T: Comparable, T: Comparable {
+        \\fn keep(comptime T: type, value: T) -> T where T: Comparable {
         \\    return value;
         \\}
     ;
@@ -1125,9 +1167,27 @@ test "compiler parses and lowers trait bounds on generic functions" {
 
     const ast_file = try compilation.db.astFile(module.file_id);
     const function = ast_file.item(ast_file.root_items[1]).Function;
-    try testing.expectEqual(@as(usize, 2), function.trait_bounds.len);
+    try testing.expectEqual(@as(usize, 1), function.trait_bounds.len);
     try testing.expectEqualStrings("T", function.trait_bounds[0].parameter_name);
     try testing.expectEqualStrings("Comparable", function.trait_bounds[0].trait_name);
+}
+
+test "compiler rejects duplicate trait bounds" {
+    const source_text =
+        \\trait Comparable {
+        \\    fn compare(self, other: u256) -> bool;
+        \\}
+        \\
+        \\fn keep(comptime T: type, value: T) -> T where T: Comparable, T: Comparable {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "duplicate trait bound 'T: Comparable'"));
 }
 
 test "compiler accepts bounded generic calls for implemented trait types" {
@@ -1162,6 +1222,219 @@ test "compiler accepts bounded generic calls for implemented trait types" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler accepts imported bounded generic calls for implemented trait types" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return self.value > 0;
+        \\    }
+        \\}
+        \\
+        \\fn keep(comptime T: type, value: T) -> T where T: Marker {
+        \\    return value;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\fn run(value: dep.Box) -> dep.Box {
+        \\    return dep.keep(value);
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @dep.keep__Box"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @dep.keep__Box"));
+}
+
+test "compiler rejects imported bounded generic calls for unimplemented trait types" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\fn keep(comptime T: type, value: T) -> T where T: Marker {
+        \\    return value;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\struct Other {
+        \\    value: u256,
+        \\}
+        \\
+        \\fn run(value: Other) -> Other {
+        \\    return dep.keep(value);
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "type 'Other' does not implement trait 'Marker'"));
+}
+
+test "compiler lowers imported trait-bound generic value method calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return self.value > 0;
+        \\    }
+        \\}
+        \\
+        \\fn choose(comptime T: type, value: T) -> bool where T: Marker {
+        \\    return value.marked();
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\fn run(value: dep.Box) -> bool {
+        \\    return dep.choose(value);
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @dep.choose__Box"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked"));
+}
+
+test "compiler lowers imported trait-bound generic associated method calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\trait Factory {
+        \\    fn make() -> bool;
+        \\}
+        \\
+        \\struct Box {}
+        \\
+        \\impl Factory for Box {
+        \\    fn make() -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        \\
+        \\fn choose(comptime T: type) -> bool where T: Factory {
+        \\    return T.make();
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\fn run() -> bool {
+        \\    return dep.choose(dep.Box);
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @dep.choose__Box"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Factory.Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Factory.Box.make"));
 }
 
 test "compiler resolves trait-bound methods in generic bodies" {

@@ -1,0 +1,17 @@
+// Extern trait interface declaration.
+// External methods are ABI-facing call/staticcall declarations, not local impls.
+
+error InsufficientBalance;
+error InvalidRecipient;
+
+extern trait ERC20View {
+    call fn transfer(self, to: address, amount: u256) -> bool errors(InsufficientBalance, InvalidRecipient);
+    staticcall fn balanceOf(self, owner: address) -> u256;
+    staticcall fn totalSupply(self) -> u256;
+}
+
+contract ExternTraitInterface {
+    pub fn ok() -> bool {
+        return true;
+    }
+}

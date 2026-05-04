@@ -389,6 +389,36 @@ test "compiler lowers explicit integer enum values and continued ordinals" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum_ordinal = 10 : i256"));
 }
 
+test "compiler lowers explicit integer enum pattern values" {
+    const source_text =
+        \\enum Priority : u8 {
+        \\    Low = 1,
+        \\    Medium = 5,
+        \\    High = 10,
+        \\}
+        \\
+        \\pub fn score(priority: Priority) -> u256 {
+        \\    return match (priority) {
+        \\        Priority.Low => 1,
+        \\        Priority.Medium => 2,
+        \\        Priority.High => 3,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "case 1 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "case 5 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "case 10 =>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "case 0 =>"));
+}
+
 test "compiler lowers compile-time integer enum value expressions" {
     const source_text =
         \\enum Status : u8 {

@@ -1092,6 +1092,12 @@ const FunctionLowerer = struct {
         expr: ast.ExprId,
         range: source.TextRange,
         verification_context: ?[]const u8 = null,
+        pattern_aliases: []const PatternAlias = &.{},
+    };
+
+    pub const PatternAlias = struct {
+        source: ast.PatternId,
+        target: ast.PatternId,
     };
 
     parent: *Lowerer,
