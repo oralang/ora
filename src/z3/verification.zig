@@ -3049,6 +3049,21 @@ pub const VerificationPass = struct {
             if (inconsistent_functions.contains(query.function_name)) continue;
             if (unknown_base_functions.contains(query.function_name)) continue;
 
+            if (entry.vacuity_unknown) {
+                try self.addUnknownVerificationError(
+                    &combined,
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "vacuity check was inconclusive for {s} in {s}",
+                        .{ queryKindLabel(query.kind), query.function_name },
+                    ),
+                    query.file,
+                    query.line,
+                    query.column,
+                );
+                continue;
+            }
+
             if (entry.vacuous) {
                 if (vacuousCoreContainsRequires(entry.explain_tags)) {
                     try combined.addError(.{
@@ -11419,6 +11434,44 @@ test "parallel result collection taints function on unknown base" {
     try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
     try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
+}
+
+test "result collection fails closed on inconclusive vacuity check" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const queries = [_]PreparedQuery{
+        .{
+            .kind = .Obligation,
+            .function_name = "f",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/test.ora",
+            .line = 7,
+            .column = 3,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "verification: f [ensures]"),
+        },
+    };
+    defer {
+        var mutable_queries = queries;
+        for (&mutable_queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const results = [_]PreparedQueryResult{
+        .{
+            .status = z3.Z3_L_FALSE,
+            .vacuity_unknown = true,
+        },
+    };
+
+    var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+    defer collected.deinit();
+
+    try testing.expect(!collected.success);
+    try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "vacuity check was inconclusive for obligation in f"));
+    try testing.expectEqual(@as(usize, 0), collected.proven_guard_positions.items.len);
 }
 
 test "parallel result collection includes captured Z3 API message" {
