@@ -4584,6 +4584,22 @@ LogicalResult NormalizeAdtTagOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult NormalizeAdtConstructOp::matchAndRewrite(
+    ora::AdtConstructOp op,
+    PatternRewriter &rewriter) const
+{
+    SmallVector<Value, 2> parts;
+    if (failed(materializeSplitAdtValue(rewriter, op.getLoc(), op.getResult(), parts)))
+        return rewriter.notifyMatchFailure(op, "failed to materialize ADT construct carrier");
+    if (parts.size() != 2)
+        return rewriter.notifyMatchFailure(op, "ADT construct carrier must have tag and payload");
+
+    Value replacement = ora::createMaterializationCast(
+        rewriter, op.getLoc(), op.getResult().getType(), ValueRange(parts), mat_kind::kNormalizedAdt);
+    rewriter.replaceOp(op, replacement);
+    return success();
+}
+
 LogicalResult NormalizeAdtPayloadOp::matchAndRewrite(
     ora::AdtPayloadOp op,
     PatternRewriter &rewriter) const

@@ -1266,6 +1266,7 @@ public:
             phase0Patterns.add<NormalizeErrorOkOp>(ctx);
             phase0Patterns.add<NormalizeErrorErrOp>(ctx);
             phase0Patterns.add<NormalizeErrorUnionCastOp>(ctx);
+            phase0Patterns.add<NormalizeAdtConstructOp>(ctx);
             phase0Patterns.add<NormalizeAdtTagOp>(ctx);
             phase0Patterns.add<NormalizeAdtPayloadOp>(ctx);
             phase0Patterns.add<NormalizeScfYieldOp>(ctx);

@@ -115,7 +115,7 @@ const Resolver = struct {
                     try self.bindPatternIfName(&function_env, parameter.pattern);
                 }
                 for (function.clauses) |clause| {
-                    try self.resolveExpr(clause.expr, &function_env);
+                    try self.resolveSpecClause(clause, &function_env);
                 }
                 try self.resolveBody(function.body, &function_env);
             },
@@ -127,7 +127,7 @@ const Resolver = struct {
                         try self.bindPatternIfName(&method_env, parameter.pattern);
                     }
                     for (method.clauses) |clause| {
-                        try self.resolveExpr(clause.expr, &method_env);
+                        try self.resolveSpecClause(clause, &method_env);
                     }
                 }
             },
@@ -292,11 +292,26 @@ const Resolver = struct {
         }
     }
 
+    const ResolveExprOptions = struct {
+        allow_result_name: bool = false,
+    };
+
+    fn resolveSpecClause(self: *Resolver, clause: ast.SpecClause, env: *const Env) anyerror!void {
+        try self.resolveExprWithOptions(clause.expr, env, .{
+            .allow_result_name = clause.kind == .ensures,
+        });
+    }
+
     fn resolveExpr(self: *Resolver, expr_id: ast.ExprId, env: *const Env) anyerror!void {
+        try self.resolveExprWithOptions(expr_id, env, .{});
+    }
+
+    fn resolveExprWithOptions(self: *Resolver, expr_id: ast.ExprId, env: *const Env, options: ResolveExprOptions) anyerror!void {
         switch (self.file.expression(expr_id).*) {
             .Name => |name| {
                 self.bindings[expr_id.index()] = env.lookup(name.name);
-                if (self.bindings[expr_id.index()] == null and !self.isRecognizedTypeValueName(name.name)) {
+                const is_allowed_result = options.allow_result_name and std.mem.eql(u8, name.name, "result");
+                if (self.bindings[expr_id.index()] == null and !is_allowed_result and !self.isRecognizedTypeValueName(name.name)) {
                     var buffer: [256]u8 = undefined;
                     const message = try std.fmt.bufPrint(&buffer, "undefined name '{s}'", .{name.name});
                     try self.diagnostics.appendError(message, .{
@@ -306,29 +321,29 @@ const Resolver = struct {
                 }
             },
             .TypeValue => {},
-            .Unary => |unary| try self.resolveExpr(unary.operand, env),
+            .Unary => |unary| try self.resolveExprWithOptions(unary.operand, env, options),
             .Binary => |binary| {
-                try self.resolveExpr(binary.lhs, env);
-                try self.resolveExpr(binary.rhs, env);
+                try self.resolveExprWithOptions(binary.lhs, env, options);
+                try self.resolveExprWithOptions(binary.rhs, env, options);
             },
             .Tuple => |tuple| {
-                for (tuple.elements) |element| try self.resolveExpr(element, env);
+                for (tuple.elements) |element| try self.resolveExprWithOptions(element, env, options);
             },
             .ArrayLiteral => |array| {
-                for (array.elements) |element| try self.resolveExpr(element, env);
+                for (array.elements) |element| try self.resolveExprWithOptions(element, env, options);
             },
             .StructLiteral => |struct_literal| {
-                for (struct_literal.fields) |field| try self.resolveExpr(field.value, env);
+                for (struct_literal.fields) |field| try self.resolveExprWithOptions(field.value, env, options);
             },
             .Switch => |switch_expr| {
-                try self.resolveExpr(switch_expr.condition, env);
+                try self.resolveExprWithOptions(switch_expr.condition, env, options);
                 for (switch_expr.arms) |arm| {
                     var arm_env = try Env.init(self.arena, env);
                     switch (arm.pattern) {
-                        .Expr => |pattern_expr| try self.resolveExpr(pattern_expr, env),
+                        .Expr => |pattern_expr| try self.resolveExprWithOptions(pattern_expr, env, options),
                         .Range => |range_pattern| {
-                            try self.resolveExpr(range_pattern.start, env);
-                            try self.resolveExpr(range_pattern.end, env);
+                            try self.resolveExprWithOptions(range_pattern.start, env, options);
+                            try self.resolveExprWithOptions(range_pattern.end, env, options);
                         },
                         .Or => |or_pattern| {
                             for (or_pattern.alternatives) |alternative| {
@@ -337,41 +352,41 @@ const Resolver = struct {
                         },
                         .Ok, .Err => |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id),
                         .NamedError => |named_error| {
-                            try self.resolveExpr(named_error.callee, env);
+                            try self.resolveExprWithOptions(named_error.callee, env, options);
                             for (named_error.bindings) |pattern_id| try self.bindPatternIfName(&arm_env, pattern_id);
                         },
                         .Else => {},
                     }
-                    try self.resolveExpr(arm.value, &arm_env);
+                    try self.resolveExprWithOptions(arm.value, &arm_env, options);
                 }
-                if (switch_expr.else_expr) |else_expr| try self.resolveExpr(else_expr, env);
+                if (switch_expr.else_expr) |else_expr| try self.resolveExprWithOptions(else_expr, env, options);
             },
             .Comptime => |comptime_expr| try self.resolveBody(comptime_expr.body, env),
             .ErrorReturn => |error_return| {
-                for (error_return.args) |arg| try self.resolveExpr(arg, env);
+                for (error_return.args) |arg| try self.resolveExprWithOptions(arg, env, options);
             },
             .Call => |call| {
-                try self.resolveExpr(call.callee, env);
-                for (call.args) |arg| try self.resolveExpr(arg, env);
+                try self.resolveExprWithOptions(call.callee, env, options);
+                for (call.args) |arg| try self.resolveExprWithOptions(arg, env, options);
             },
             .Builtin => |builtin| {
-                for (builtin.args) |arg| try self.resolveExpr(arg, env);
+                for (builtin.args) |arg| try self.resolveExprWithOptions(arg, env, options);
             },
             .Field => |field| {
                 if (self.emitDeprecatedErrorNamespace(expr_id, field)) return;
-                try self.resolveExpr(field.base, env);
+                try self.resolveExprWithOptions(field.base, env, options);
             },
             .Index => |index| {
-                try self.resolveExpr(index.base, env);
-                try self.resolveExpr(index.index, env);
+                try self.resolveExprWithOptions(index.base, env, options);
+                try self.resolveExprWithOptions(index.index, env, options);
             },
-            .Group => |group| try self.resolveExpr(group.expr, env),
-            .Old => |old| try self.resolveExpr(old.expr, env),
+            .Group => |group| try self.resolveExprWithOptions(group.expr, env, options),
+            .Old => |old| try self.resolveExprWithOptions(old.expr, env, options),
             .Quantified => |quantified| {
                 var quant_env = try Env.init(self.arena, env);
                 try self.bindPatternIfName(&quant_env, quantified.pattern);
-                if (quantified.condition) |condition| try self.resolveExpr(condition, &quant_env);
-                try self.resolveExpr(quantified.body, &quant_env);
+                if (quantified.condition) |condition| try self.resolveExprWithOptions(condition, &quant_env, options);
+                try self.resolveExprWithOptions(quantified.body, &quant_env, options);
             },
             else => {},
         }

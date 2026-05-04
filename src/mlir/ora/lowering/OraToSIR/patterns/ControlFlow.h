@@ -144,6 +144,16 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
+        class NormalizeAdtConstructOp : public OpRewritePattern<ora::AdtConstructOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtConstructOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class NormalizeAdtPayloadOp : public OpRewritePattern<ora::AdtPayloadOp>
         {
         public:

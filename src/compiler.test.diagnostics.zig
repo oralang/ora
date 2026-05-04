@@ -99,6 +99,51 @@ test "compiler diagnostic release matrix stays readable" {
     );
 }
 
+test "compiler treats result as an ensures-only reserved pseudo variable" {
+    {
+        const source_text =
+            \\pub fn ok(value: u256) -> u256
+            \\    ensures(result >= value)
+            \\{
+            \\    return value;
+            \\}
+        ;
+
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const resolution_diags = try compilation.db.resolutionDiagnostics(compilation.root_module_id);
+        try testing.expectEqual(@as(usize, 0), resolution_diags.len());
+    }
+
+    try expectDiagnosticProbeContains(
+        \\pub fn bad(value: u256) -> u256
+        \\    requires(result >= value)
+        \\{
+        \\    return value;
+        \\}
+    ,
+        .resolution,
+        "undefined name 'result'",
+    );
+
+    {
+        const source_text =
+            \\pub fn bad() -> u256 {
+            \\    let result = 1;
+            \\    return 0;
+            \\}
+        ;
+
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+        try testing.expect(diagnosticMessagesContain(ast_diags, "'result' is a reserved keyword and cannot be used as a variable name"));
+    }
+}
+
 test "compiler rejects payloadless named error arms that bind a payload" {
     const source_text =
         \\error Failure;
