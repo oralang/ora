@@ -121,6 +121,20 @@ pub const ProvenGuardPosition = struct {
     }
 };
 
+pub const Z3ProofArtifact = struct {
+    file: []const u8,
+    line: u32,
+    column: u32,
+    query: []const u8,
+    proof: []const u8,
+
+    pub fn deinit(self: *Z3ProofArtifact, allocator: std.mem.Allocator) void {
+        allocator.free(self.file);
+        allocator.free(self.query);
+        allocator.free(self.proof);
+    }
+};
+
 /// Result of verification pass
 pub const VerificationResult = struct {
     success: bool,
@@ -129,6 +143,7 @@ pub const VerificationResult = struct {
     seen_keys: std.StringHashMap(void),
     proven_guard_ids: std.StringHashMap(void),
     proven_guard_positions: std.ArrayList(ProvenGuardPosition),
+    z3_proofs: std.ArrayList(Z3ProofArtifact),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) VerificationResult {
@@ -139,6 +154,7 @@ pub const VerificationResult = struct {
             .seen_keys = std.StringHashMap(void).init(allocator),
             .proven_guard_ids = std.StringHashMap(void).init(allocator),
             .proven_guard_positions = .{},
+            .z3_proofs = .{},
             .allocator = allocator,
         };
     }
@@ -164,6 +180,8 @@ pub const VerificationResult = struct {
         self.proven_guard_ids.deinit();
         for (self.proven_guard_positions.items) |*pos| pos.deinit(self.allocator);
         self.proven_guard_positions.deinit(self.allocator);
+        for (self.z3_proofs.items) |*proof| proof.deinit(self.allocator);
+        self.z3_proofs.deinit(self.allocator);
     }
 
     pub fn addError(self: *VerificationResult, err: VerificationError) !void {

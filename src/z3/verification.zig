@@ -2575,6 +2575,7 @@ pub const VerificationPass = struct {
             for (results) |entry| {
                 if (entry.err_message) |msg| self.allocator.free(msg);
                 if (entry.model_str) |model| self.allocator.free(model);
+                if (entry.proof_str) |proof| self.allocator.free(proof);
                 if (entry.explain_str) |explain| self.allocator.free(explain);
                 if (entry.explain_tags.len > 0) self.allocator.free(entry.explain_tags);
             }
@@ -2642,6 +2643,9 @@ pub const VerificationPass = struct {
                         results[idx].model_str = try self.allocator.dupe(u8, std.mem.span(raw));
                     }
                 }
+            }
+            if (self.proofs_enabled and status == z3.Z3_L_FALSE) {
+                results[idx].proof_str = try active_solver.getProofStringOwned();
             }
 
             self.maybeForceTestDegradationAfterQuery(idx);
@@ -2716,8 +2720,12 @@ pub const VerificationPass = struct {
             return errors.VerificationResult.init(self.allocator);
         }
 
-        if (preparedQueriesRequireSequentialExecution(queries.items)) {
-            std.debug.print("note: datatype-backed prepared queries disable parallel execution; running sequentially\n", .{});
+        if (preparedQueriesRequireSequentialExecution(queries.items) or self.proofs_enabled) {
+            if (self.proofs_enabled) {
+                std.debug.print("note: z3 proofs require sequential execution; running sequentially\n", .{});
+            } else {
+                std.debug.print("note: datatype-backed prepared queries disable parallel execution; running sequentially\n", .{});
+            }
             return try self.executePreparedQueriesSequential(queries.items);
         }
 
@@ -2741,6 +2749,7 @@ pub const VerificationPass = struct {
             for (results) |entry| {
                 if (entry.err_message) |msg| worker_allocator.free(msg);
                 if (entry.model_str) |model| worker_allocator.free(model);
+                if (entry.proof_str) |proof| worker_allocator.free(proof);
                 if (entry.explain_str) |explain| worker_allocator.free(explain);
                 if (entry.explain_tags.len > 0) worker_allocator.free(entry.explain_tags);
             }
@@ -3012,6 +3021,15 @@ pub const VerificationPass = struct {
                 );
             }
             const query = queries[idx];
+            if (entry.proof_str) |proof| {
+                try combined.z3_proofs.append(combined.allocator, .{
+                    .file = try combined.allocator.dupe(u8, query.file),
+                    .line = query.line,
+                    .column = query.column,
+                    .query = try combined.allocator.dupe(u8, queryKindLabel(query.kind)),
+                    .proof = try combined.allocator.dupe(u8, proof),
+                });
+            }
             if (query.kind != .Base) continue;
 
             if (entry.status == z3.Z3_L_FALSE) {
@@ -6178,6 +6196,7 @@ const PreparedQueryResult = struct {
     err: ?anyerror = null,
     err_message: ?[]const u8 = null,
     model_str: ?[]const u8 = null,
+    proof_str: ?[]const u8 = null,
     explain_str: ?[]const u8 = null,
     explain_tags: []const AssumptionTag = &.{},
     vacuous: bool = false,
@@ -6327,6 +6346,16 @@ fn mergeVerificationResults(
             const key_copy = try allocator.dupe(u8, key);
             try dest.proven_guard_ids.put(key_copy, {});
         }
+    }
+
+    for (src.z3_proofs.items) |proof| {
+        try dest.z3_proofs.append(allocator, .{
+            .file = try allocator.dupe(u8, proof.file),
+            .line = proof.line,
+            .column = proof.column,
+            .query = try allocator.dupe(u8, proof.query),
+            .proof = try allocator.dupe(u8, proof.proof),
+        });
     }
 }
 
@@ -9084,6 +9113,34 @@ test "query execution failure result includes captured Z3 API message" {
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "solver check"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "Z3:"));
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, expected_message));
+}
+
+test "prepared verification extracts z3 proofs into verification result" {
+    var pass = try VerificationPass.initWithProofs(testing.allocator, true);
+    defer pass.deinit();
+
+    const contradiction = z3.Z3_mk_false(pass.context.ctx);
+    var query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "proved",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/proved.ora",
+        .line = 12,
+        .column = 4,
+        .constraints = try testing.allocator.dupe(z3.Z3_ast, &[_]z3.Z3_ast{contradiction}),
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
+    };
+    defer query.deinit(testing.allocator);
+
+    var result = try pass.executePreparedQueriesSequential((&[_]PreparedQuery{query})[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 1), result.z3_proofs.items.len);
+    try testing.expectEqualStrings("/tmp/proved.ora", result.z3_proofs.items[0].file);
+    try testing.expectEqualStrings("obligation", result.z3_proofs.items[0].query);
+    try testing.expect(result.z3_proofs.items[0].proof.len > 0);
 }
 
 test "prepared queries include invariant-post for scf.for" {
