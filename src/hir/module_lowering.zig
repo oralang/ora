@@ -32,7 +32,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
                 .Trait => {},
-                .Impl => |impl_item| try @This().lowerImpl(self, item_id, impl_item, parent_block),
+                .Impl => |impl_item| try @This().lowerImpl(self, impl_item, parent_block),
                 .TypeAlias => {},
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
@@ -100,10 +100,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{}, null, null);
         }
 
-        pub fn lowerImpl(self: *Lowerer, impl_item_id: ast.ItemId, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
-            _ = impl_item_id;
-            _ = parent_block;
-            const impl_parent_block = @This().implParentBlock(self, impl_item.target_name);
+        pub fn lowerImpl(self: *Lowerer, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
+            const impl_parent_block = @This().implParentBlock(self, impl_item.target_name, parent_block);
 
             for (impl_item.methods) |method_item_id| {
                 const function = switch (self.file.item(method_item_id).*) {
@@ -439,7 +437,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             parent_block_override: ?mlir.MlirBlock,
         ) anyerror![]const u8 {
             const base_symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
-            const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name);
+            const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name, self.module_body);
             if (function.is_generic) {
                 const method_call = call orelse return base_symbol_name;
                 const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return base_symbol_name;
@@ -460,14 +458,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return symbol_name;
         }
 
-        fn implParentBlock(self: *Lowerer, target_name: []const u8) mlir.MlirBlock {
+        fn implParentBlock(self: *Lowerer, target_name: []const u8, fallback_block: mlir.MlirBlock) mlir.MlirBlock {
             if (self.item_index.lookup(target_name)) |target_item_id| {
                 if (self.file.item(target_item_id).* == .Contract) {
                     const block = self.contract_body_blocks[target_item_id.index()];
                     if (!mlir.oraBlockIsNull(block)) return block;
                 }
             }
-            return self.module_body;
+            return fallback_block;
         }
 
         fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
