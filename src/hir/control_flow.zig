@@ -1077,7 +1077,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return seen_true and seen_false;
             }
 
-            return @This().sumSwitchPatternsAreExhaustive(self, condition_expr, condition_type, arms);
+            return @This().semaGuaranteedSumSwitchExhaustive(self, condition_type);
         }
 
         fn collectBoolSwitchPatternCoverage(self: *FunctionLowerer, pattern: ast.SwitchPattern, seen_true: *bool, seen_false: *bool) bool {
@@ -1105,134 +1105,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        const SumSwitchCoverage = struct {
-            kind: enum { enum_, error_union },
-            success_covered: bool = false,
-            error_fallback_covered: bool = false,
-            named_variant_count: usize = 0,
-            named_variants_covered: usize = 0,
-
-            fn exhaustive(self: @This()) bool {
-                return switch (self.kind) {
-                    .enum_ => self.named_variants_covered == self.named_variant_count,
-                    .error_union => self.success_covered and
-                        (self.error_fallback_covered or self.named_variants_covered == self.named_variant_count),
-                };
-            }
-        };
-
-        fn sumSwitchPatternsAreExhaustive(
-            self: *FunctionLowerer,
-            condition_expr: ast.ExprId,
-            condition_type: anytype,
-            arms: anytype,
-        ) bool {
-            const coverage = switch (condition_type.kind()) {
-                .error_union => @This().errorUnionSwitchCoverage(self, condition_expr, condition_type, arms),
-                .enum_ => @This().enumSwitchCoverage(self, condition_type, arms),
+        fn semaGuaranteedSumSwitchExhaustive(self: *FunctionLowerer, condition_type: anytype) bool {
+            switch (condition_type.kind()) {
+                .enum_, .error_union => {},
                 else => return false,
-            };
-            return coverage.exhaustive();
-        }
-
-        fn enumSwitchCoverage(self: *FunctionLowerer, condition_type: anytype, arms: anytype) SumSwitchCoverage {
-            const variant_count = @This().enumVariantCount(self, condition_type) orelse return .{
-                .kind = .enum_,
-                .named_variant_count = 1,
-                .named_variants_covered = 0,
-            };
-            var seen = std.AutoHashMap(i64, void).init(self.parent.allocator);
-            defer seen.deinit();
-
-            for (arms) |arm| {
-                @This().collectSwitchPatternOrdinals(self, arm.pattern, &seen);
             }
 
-            return .{
-                .kind = .enum_,
-                .named_variant_count = variant_count,
-                .named_variants_covered = seen.count(),
-            };
-        }
-
-        fn enumVariantCount(self: *FunctionLowerer, condition_type: anytype) ?usize {
-            const enum_name = condition_type.name() orelse return null;
-            if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| return instantiated.variants.len;
-            const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
-            const enum_item = switch (self.parent.file.item(item_id).*) {
-                .Enum => |item| item,
-                else => return null,
-            };
-            return enum_item.variants.len;
-        }
-
-        fn collectSwitchPatternOrdinals(self: *FunctionLowerer, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(i64, void)) void {
-            switch (pattern) {
-                .Or => |or_pattern| {
-                    for (or_pattern.alternatives) |alternative| {
-                        @This().collectSwitchPatternOrdinals(self, alternative, seen);
-                    }
-                },
-                else => {
-                    const value = @This().switchPatternOrdinal(self, pattern) orelse return;
-                    seen.put(value, {}) catch return;
-                },
+            for (self.parent.typecheck.diagnostics.items.items) |diagnostic| {
+                if (diagnostic.severity == .Error) return false;
             }
-        }
-
-        fn errorUnionSwitchCoverage(
-            self: *FunctionLowerer,
-            condition_expr: ast.ExprId,
-            condition_type: anytype,
-            arms: anytype,
-        ) SumSwitchCoverage {
-            var seen_errors = std.AutoHashMap(usize, void).init(self.parent.allocator);
-            defer seen_errors.deinit();
-
-            var coverage: SumSwitchCoverage = .{
-                .kind = .error_union,
-                .named_variant_count = condition_type.errorTypes().len,
-            };
-            for (arms) |arm| {
-                @This().collectErrorUnionSwitchCoverage(self, condition_expr, arm.pattern, &coverage, &seen_errors);
-            }
-            coverage.named_variants_covered = seen_errors.count();
-            return coverage;
-        }
-
-        fn collectErrorUnionSwitchCoverage(
-            self: *FunctionLowerer,
-            condition_expr: ast.ExprId,
-            pattern: ast.SwitchPattern,
-            coverage: *SumSwitchCoverage,
-            seen_errors: *std.AutoHashMap(usize, void),
-        ) void {
-            switch (pattern) {
-                .Ok => coverage.success_covered = true,
-                .Err => coverage.error_fallback_covered = true,
-                .Or => |or_pattern| {
-                    for (or_pattern.alternatives) |alternative| {
-                        @This().collectErrorUnionSwitchCoverage(self, condition_expr, alternative, coverage, seen_errors);
-                    }
-                },
-                else => {
-                    const item_id = @This().matchPatternNamedErrorDeclItem(self, condition_expr, pattern) orelse return;
-                    const item = self.parent.file.item(item_id).*;
-                    if (item != .ErrorDecl) return;
-                    const index = @This().errorUnionPatternErrorIndex(self, condition_expr, item.ErrorDecl.name) orelse return;
-                    seen_errors.put(index, {}) catch return;
-                },
-            }
-        }
-
-        fn errorUnionPatternErrorIndex(self: *FunctionLowerer, condition_expr: ast.ExprId, error_name: []const u8) ?usize {
-            const condition_type = self.parent.typecheck.exprType(condition_expr);
-            for (condition_type.errorTypes(), 0..) |error_type, index| {
-                if (std.mem.eql(u8, error_type.name() orelse "", error_name)) {
-                    return index;
-                }
-            }
-            return null;
+            return true;
         }
 
         fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
