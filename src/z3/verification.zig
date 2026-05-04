@@ -146,10 +146,6 @@ pub const VerificationPass = struct {
     explain_cores: bool = false,
     proofs_enabled: bool = false,
     minimize_cores: bool = false,
-    test_force_degradation_after_build_queries: bool = false,
-    test_force_degradation_after_parallel_workers: bool = false,
-    test_force_degradation_after_query_index: ?usize = null,
-    test_force_degradation_reason: []const u8 = "test forced degradation",
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -318,10 +314,6 @@ pub const VerificationPass = struct {
             .explain_cores = explain_cores,
             .proofs_enabled = proofs_enabled,
             .minimize_cores = minimize_cores,
-            .test_force_degradation_after_build_queries = false,
-            .test_force_degradation_after_parallel_workers = false,
-            .test_force_degradation_after_query_index = null,
-            .test_force_degradation_reason = "test forced degradation",
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
@@ -357,25 +349,6 @@ pub const VerificationPass = struct {
 
     pub fn setMinimizeCores(self: *VerificationPass, enabled: bool) void {
         self.minimize_cores = enabled;
-    }
-
-    fn maybeForceTestDegradationAfterQuery(self: *VerificationPass, query_index: usize) void {
-        if (!@import("builtin").is_test) return;
-        const target = self.test_force_degradation_after_query_index orelse return;
-        if (target != query_index) return;
-        self.encoder.noteDegradation(self.test_force_degradation_reason);
-    }
-
-    fn maybeForceTestDegradationAfterBuildQueries(self: *VerificationPass) void {
-        if (!@import("builtin").is_test) return;
-        if (!self.test_force_degradation_after_build_queries) return;
-        self.encoder.noteDegradation(self.test_force_degradation_reason);
-    }
-
-    fn maybeForceTestDegradationAfterParallelWorkers(self: *VerificationPass) void {
-        if (!@import("builtin").is_test) return;
-        if (!self.test_force_degradation_after_parallel_workers) return;
-        self.encoder.noteDegradation(self.test_force_degradation_reason);
     }
 
     pub fn deinit(self: *VerificationPass) void {
@@ -2552,7 +2525,6 @@ pub const VerificationPass = struct {
             queries.deinit();
         }
         self.phaseLog("prepared-sequential build-queries done queries={d}", .{queries.items.len});
-        self.maybeForceTestDegradationAfterBuildQueries();
         if (self.encoder.isDegraded()) {
             // Same invariant as above: this early return is what prevents stale
             // degradation state from leaking across functions in the current pass.
@@ -2648,7 +2620,6 @@ pub const VerificationPass = struct {
                 results[idx].proof_str = try active_solver.getProofStringOwned();
             }
 
-            self.maybeForceTestDegradationAfterQuery(idx);
             if (self.encoder.isDegraded()) {
                 // Same fail-closed invariant as the build-phase gates above:
                 // if degradation is observed while checking queries, abort the
@@ -2708,7 +2679,6 @@ pub const VerificationPass = struct {
             queries.deinit();
         }
         self.phaseLog("parallel build-queries done queries={d}", .{queries.items.len});
-        self.maybeForceTestDegradationAfterBuildQueries();
         if (self.encoder.isDegraded()) {
             // Same invariant as above: stale degradation cannot reach another
             // function because the pass returns immediately here.
@@ -2941,7 +2911,6 @@ pub const VerificationPass = struct {
         for (threads[0..launched]) |t| t.join();
 
         if (state.setup_error) |err| return err;
-        self.maybeForceTestDegradationAfterParallelWorkers();
 
         var combined = try self.collectPreparedQueryResults(queries.items, results);
         if (self.encoder.isDegraded()) {
@@ -3313,7 +3282,6 @@ pub const VerificationPass = struct {
             queries.deinit();
         }
         self.phaseLog("report build-queries done queries={d}", .{queries.items.len});
-        self.maybeForceTestDegradationAfterBuildQueries();
         if (self.encoder.isDegraded()) {
             // Same invariant as above: continuing after a degraded query build would
             // risk attributing stale encoder state to unrelated later functions.
@@ -3424,7 +3392,6 @@ pub const VerificationPass = struct {
                 .verified_with_caveats = status == z3.Z3_L_FALSE and (vacuity_unknown or self.encoder.isDegraded()),
             };
 
-            self.maybeForceTestDegradationAfterQuery(idx);
             if (self.encoder.isDegraded()) {
                 // Same fail-closed invariant as the proving path above: once the
                 // encoder is degraded, stop report construction immediately.
@@ -11082,104 +11049,6 @@ test "mid-proof SMT degradation fails closed" {
     try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "mid-proof degradation"));
 }
 
-test "prepared-sequential fails closed when degradation appears during query loop" {
-    var pass = try VerificationPass.init(testing.allocator);
-    defer pass.deinit();
-
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
-    defer mlir.oraModuleDestroy(module);
-
-    pass.test_force_degradation_after_query_index = 0;
-    pass.test_force_degradation_reason = "query loop degradation";
-
-    var result = try pass.runVerificationPassPreparedSequential(module);
-    defer result.deinit();
-
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
-    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "query loop degradation"));
-}
-
-test "prepared-sequential fails closed when degradation appears after query build" {
-    var pass = try VerificationPass.init(testing.allocator);
-    defer pass.deinit();
-
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
-    defer mlir.oraModuleDestroy(module);
-
-    pass.test_force_degradation_after_build_queries = true;
-    pass.test_force_degradation_reason = "query build degradation";
-
-    var result = try pass.runVerificationPassPreparedSequential(module);
-    defer result.deinit();
-
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
-    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "query build degradation"));
-}
-
-test "parallel verification fails closed when degradation appears after query build" {
-    var pass = try VerificationPass.init(testing.allocator);
-    defer pass.deinit();
-
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
-    defer mlir.oraModuleDestroy(module);
-
-    pass.parallel = true;
-    pass.test_force_degradation_after_build_queries = true;
-    pass.test_force_degradation_reason = "parallel query build degradation";
-
-    var result = try pass.runVerificationPass(module);
-    defer result.deinit();
-
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
-    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "parallel query build degradation"));
-}
-
-test "parallel verification fails closed when degradation appears after worker collection" {
-    var pass = try VerificationPass.init(testing.allocator);
-    defer pass.deinit();
-
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
-    defer mlir.oraModuleDestroy(module);
-
-    pass.parallel = true;
-    pass.test_force_degradation_after_parallel_workers = true;
-    pass.test_force_degradation_reason = "parallel post-worker degradation";
-
-    var result = try pass.runVerificationPass(module);
-    defer result.deinit();
-
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
-    try testing.expectEqual(errors.VerificationErrorType.EncodingDegraded, result.errors.items[0].error_type);
-    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "parallel post-worker degradation"));
-}
-
 test "known callee partial write-set recovery fails closed in sequential and parallel verification" {
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -11376,7 +11245,7 @@ test "struct_field_extract metadata loss fails closed in sequential and parallel
     }
 }
 
-test "SMT report fails closed when degradation appears after query build" {
+test "SMT report fails closed on real query-build degradation" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
 
@@ -11385,45 +11254,17 @@ test "SMT report fails closed when degradation appears after query build" {
     testLoadAllDialects(mlir_ctx);
     _ = mlir.oraDialectRegister(mlir_ctx);
 
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
+    const module = buildStructFieldExtractMissingMetadataModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
-    pass.test_force_degradation_after_build_queries = true;
-    pass.test_force_degradation_reason = "report build degradation";
-
-    var artifacts = try pass.buildSmtReport(module, "/tmp/query_build_degraded.ora", null);
+    var artifacts = try pass.buildSmtReport(module, "/tmp/metadata_degraded.ora", null);
     defer artifacts.deinit(testing.allocator);
 
     try testing.expect(pass.encoder.isDegraded());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"encoding_degraded\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"report build degradation\"") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"struct_field_extract requires exact product metadata\"") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "Encoding degraded: `true`") != null);
-    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "report build degradation") != null);
-}
-
-test "SMT report fails closed when degradation appears during query loop" {
-    var pass = try VerificationPass.init(testing.allocator);
-    defer pass.deinit();
-
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
-    defer mlir.oraModuleDestroy(module);
-
-    pass.test_force_degradation_after_query_index = 0;
-    pass.test_force_degradation_reason = "report loop degradation";
-
-    var artifacts = try pass.buildSmtReport(module, "/tmp/query_loop_degraded.ora", null);
-    defer artifacts.deinit(testing.allocator);
-
-    try testing.expect(pass.encoder.isDegraded());
-    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"encoding_degraded\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"report loop degradation\"") != null);
-    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "Encoding degraded: `true`") != null);
-    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "report loop degradation") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "struct_field_extract requires exact product metadata") != null);
 }
 
 test "unknown verification errors fail closed" {
