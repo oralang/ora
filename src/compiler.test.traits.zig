@@ -334,6 +334,44 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
 }
 
+test "compiler lowers extern trait calls with aggregate and enum parameters to ABI layouts" {
+    const source_text =
+        \\struct Snapshot {
+        \\    owner: address;
+        \\    amount: u256;
+        \\}
+        \\
+        \\enum Status : u8 {
+        \\    Open,
+        \\    Closed,
+        \\}
+        \\
+        \\extern trait Sink {
+        \\    staticcall fn submit(self, snapshot: Snapshot, status: Status, quote: (u256, bool)) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var target: address;
+        \\
+        \\    pub fn probe(owner: address, amount: u256, status: Status) -> !bool | ExternalCallFailed {
+        \\        let snapshot: Snapshot = Snapshot{ owner: owner, amount: amount };
+        \\        return external<Sink>(target, gas: 50000).submit(snapshot, status, (amount, true));
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"(address,uint256)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"uint8\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"(uint256,bool)\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.external_call"));
+}
+
 test "compiler lowers zero-payload extern trait errors clauses into selector matching" {
     const source_text =
         \\extern trait ERC20 {

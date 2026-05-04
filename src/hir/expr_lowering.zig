@@ -1471,10 +1471,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
             defer arg_type_attrs.deinit(self.parent.allocator);
+            var signature_parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (signature_parts.items) |part| self.parent.allocator.free(part);
+                signature_parts.deinit(self.parent.allocator);
+            }
             for (resolved.method.param_types) |param_type| {
-                const abi_type = try abi_support.canonicalAbiType(self.parent.allocator, param_type);
+                const abi_type = try self.parent.abiLayoutForType(param_type);
                 defer self.parent.allocator.free(abi_type);
                 try arg_type_attrs.append(self.parent.allocator, mlir.oraStringAttrCreate(self.parent.context, strRef(abi_type)));
+                try signature_parts.append(self.parent.allocator, try self.parent.allocator.dupe(u8, abi_type));
             }
             const arg_types_attr = mlir.oraArrayAttrCreate(self.parent.context, @intCast(arg_type_attrs.items.len), if (arg_type_attrs.items.len == 0) null else arg_type_attrs.items.ptr);
 
@@ -1484,11 +1490,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return_type_attrs[0] = mlir.oraStringAttrCreate(self.parent.context, strRef(abi_return));
             const return_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &return_type_attrs);
 
-            const signature = try abi_support.signatureForMethod(
+            const signature = try abi_support.signatureForAbiTypes(
                 self.parent.allocator,
                 resolved.method.name,
-                resolved.method.receiver_kind != .none,
-                resolved.method.param_types,
+                signature_parts.items,
             );
             defer self.parent.allocator.free(signature);
             const selector_text = try abi_support.keccakSelectorHex(self.parent.allocator, signature);

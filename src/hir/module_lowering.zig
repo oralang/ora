@@ -1470,7 +1470,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return error.UnsupportedAbiType;
         }
 
-        fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
+        pub fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             return switch (ty) {
                 .bool, .address, .string, .bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
                 .enum_ => |named| @This().abiLayoutForNamedEnum(self, named.name),

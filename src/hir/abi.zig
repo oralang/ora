@@ -148,6 +148,12 @@ pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_se
     return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
 }
 
+pub fn signatureForAbiTypes(allocator: std.mem.Allocator, name: []const u8, abi_types: []const []const u8) ![]const u8 {
+    const joined = try std.mem.join(allocator, ",", abi_types);
+    defer allocator.free(joined);
+    return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
+}
+
 pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
     const value = keccakSelectorValue(signature);
     var hex: [8]u8 = undefined;
