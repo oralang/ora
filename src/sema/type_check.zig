@@ -502,6 +502,7 @@ pub fn typeCheck(
     for (file.root_items) |item_id| {
         try typechecker.visitItem(item_id);
     }
+    try typechecker.checkDuplicateImplsAcrossVisibleModules();
 
     result.item_types = item_types;
     result.item_regions = item_regions;
@@ -1487,21 +1488,6 @@ const TypeChecker = struct {
             },
         }
 
-        var impl_count: usize = 0;
-        for (self.item_index.impl_entries) |entry| {
-            if (std.mem.eql(u8, entry.trait_name, impl_item.trait_name) and
-                std.mem.eql(u8, entry.target_name, impl_item.target_name))
-            {
-                impl_count += 1;
-            }
-        }
-        if (impl_count > 1) {
-            try self.emitRangeError(impl_item.range, "duplicate impl for trait '{s}' and type '{s}'", .{
-                impl_item.trait_name,
-                impl_item.target_name,
-            });
-        }
-
         for (trait_item.methods) |trait_method| {
             const impl_method = self.findImplMethodByName(impl_item, trait_method.name);
             if (impl_method == null) {
@@ -1743,6 +1729,60 @@ const TypeChecker = struct {
             .param_types = param_types,
             .return_type = return_type,
         };
+    }
+
+    fn checkDuplicateImplsAcrossVisibleModules(self: *TypeChecker) anyerror!void {
+        // Impl declarations currently store only simple trait/type identifiers, not
+        // qualified nominal origins. Enforce coherence over the visible simple-name
+        // pair until the AST grows origin-aware impl targets.
+        var seen = std.StringHashMap(void).init(self.arena);
+        var reported = std.StringHashMap(void).init(self.arena);
+
+        for (self.item_index.impl_entries) |entry| {
+            const item = self.file.item(entry.item_id).*;
+            const range = switch (item) {
+                .Impl => |impl_item| impl_item.range,
+                else => source.TextRange.empty(0),
+            };
+            try self.recordVisibleImplKey(&seen, &reported, entry.trait_name, entry.target_name, range);
+        }
+
+        const query = self.import_query orelse return;
+        var imported_modules = std.AutoHashMap(source.ModuleId, void).init(self.arena);
+        for (self.file.root_items) |item_id| {
+            const item = self.file.item(item_id).*;
+            if (item != .Import) continue;
+            const alias = item.Import.alias orelse continue;
+            const module_id = (query.resolve_import_alias(query.context, self.module_id, alias) catch null) orelse continue;
+            if (imported_modules.contains(module_id)) continue;
+            try imported_modules.put(module_id, {});
+
+            const imported_typecheck = query.module_typecheck(query.context, module_id) catch continue;
+            for (imported_typecheck.impl_interfaces) |impl_interface| {
+                try self.recordVisibleImplKey(&seen, &reported, impl_interface.trait_name, impl_interface.target_name, item.Import.range);
+            }
+        }
+    }
+
+    fn recordVisibleImplKey(
+        self: *TypeChecker,
+        seen: *std.StringHashMap(void),
+        reported: *std.StringHashMap(void),
+        trait_name: []const u8,
+        target_name: []const u8,
+        range: source.TextRange,
+    ) anyerror!void {
+        const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ trait_name, target_name });
+        if (!seen.contains(key)) {
+            try seen.put(key, {});
+            return;
+        }
+        if (reported.contains(key)) return;
+        try reported.put(key, {});
+        try self.emitRangeError(range, "duplicate impl for trait '{s}' and type '{s}'", .{
+            trait_name,
+            target_name,
+        });
     }
 
     fn recordTraitInterface(self: *TypeChecker, trait_item_id: ast.ItemId, trait_item: anytype) anyerror!void {

@@ -1148,6 +1148,50 @@ test "compiler reports duplicate impl for same trait and target" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "duplicate impl for trait 'ERC20' and type 'Token'"));
 }
 
+test "compiler reports duplicate impls across imported modules" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dependency_source =
+        \\trait Marker {
+        \\    fn marked(self) -> bool;
+        \\}
+        \\
+        \\struct Box {
+        \\    value: u256,
+        \\}
+        \\
+        \\impl Marker for Box {
+        \\    fn marked(self) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    try tmp.dir.writeFile(.{ .sub_path = "a.ora", .data = dependency_source });
+    try tmp.dir.writeFile(.{ .sub_path = "b.ora", .data = dependency_source });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const a = @import("./a.ora");
+        \\comptime const b = @import("./b.ora");
+        \\
+        \\fn run() -> bool {
+        \\    return true;
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compiler.compilePackage(testing.allocator, root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "duplicate impl for trait 'Marker' and type 'Box'"));
+}
+
 test "compiler exposes trait and impl interfaces in sema" {
     const source_text =
         \\trait ERC20 {
