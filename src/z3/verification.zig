@@ -9654,9 +9654,9 @@ test "branch merge preserves untouched global base state" {
 
     var solver = try Solver.init(pass.encoder.context, testing.allocator);
     defer solver.deinit();
-    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
-    solver.assert(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
-    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
+    try solver.assertChecked(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
+    try solver.assertChecked(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
+    try solver.assertChecked(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
@@ -9723,10 +9723,10 @@ test "many-branch merge preserves untouched global base state" {
     var solver = try Solver.init(pass.encoder.context, testing.allocator);
     defer solver.deinit();
     for (conditions) |cond| {
-        solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
+        try solver.assertChecked(z3.Z3_mk_not(pass.encoder.context.ctx, cond));
     }
-    solver.assert(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
-    solver.assert(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
+    try solver.assertChecked(z3.Z3_mk_eq(pass.encoder.context.ctx, merged, one));
+    try solver.assertChecked(z3.Z3_mk_not(pass.encoder.context.ctx, z3.Z3_mk_eq(pass.encoder.context.ctx, untouched_base, one)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
@@ -10499,8 +10499,8 @@ test "path constraint normalization flattens boolean ite ladders" {
 
     var solver = try Solver.init(pass.encoder.context, testing.allocator);
     defer solver.deinit();
-    for (constraints) |constraint| solver.assert(constraint);
-    solver.assert(z3.Z3_mk_not(pass.context.ctx, nested));
+    for (constraints) |constraint| try solver.assertChecked(constraint);
+    try solver.assertChecked(z3.Z3_mk_not(pass.context.ctx, nested));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
