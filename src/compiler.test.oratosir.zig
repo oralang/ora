@@ -274,6 +274,43 @@ test "compiler converts nested ADT fields through compiler-managed handle storag
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "OraToSIR lowers struct_field_store with declaration field index layout" {
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(ctx, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    "ora.struct.decl"() ({
+        \\    }) {name = "Pair", sym_name = "Pair", ora.field_names = ["first", "second"], ora.field_types = [!ora.int<256, false>, !ora.int<256, false>]} : () -> ()
+        \\    func.func @store(%pair: !ora.struct<"Pair">, %value: !ora.int<256, false>) {
+        \\      "ora.struct_field_store"(%pair, %value) {field_name = "second"} : (!ora.struct<"Pair">, !ora.int<256, false>) -> ()
+        \\      ora.return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(!mlir.oraModuleIsNull(module));
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.addptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 32 : !sir.u256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.struct_field_store"));
+}
+
 test "compiler converts source scalar ADT constructors through OraToSIR" {
     const source_text =
         \\enum Event {

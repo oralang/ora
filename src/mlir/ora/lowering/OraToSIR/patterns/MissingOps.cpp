@@ -94,48 +94,6 @@ static Value buildDebugNamedMemoryPtr(
     return rewriter.create<sir::BitcastOp>(loc, ptrType, addr);
 }
 
-static std::optional<unsigned> getAdtPayloadBitWidth(Type type)
-{
-    if (!type)
-        return std::nullopt;
-    if (llvm::isa<mlir::NoneType>(type))
-        return 0u;
-    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
-        return intType.getWidth();
-    if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
-        return intType.getWidth();
-    if (llvm::isa<ora::BoolType>(type))
-        return 1u;
-    if (llvm::isa<ora::AddressType>(type))
-        return 160u;
-    if (auto enumType = llvm::dyn_cast<ora::EnumType>(type))
-        return getAdtPayloadBitWidth(enumType.getReprType());
-    if (auto minType = llvm::dyn_cast<ora::MinValueType>(type))
-        return getAdtPayloadBitWidth(minType.getBaseType());
-    if (auto maxType = llvm::dyn_cast<ora::MaxValueType>(type))
-        return getAdtPayloadBitWidth(maxType.getBaseType());
-    if (auto rangeType = llvm::dyn_cast<ora::InRangeType>(type))
-        return getAdtPayloadBitWidth(rangeType.getBaseType());
-    if (auto scaledType = llvm::dyn_cast<ora::ScaledType>(type))
-        return getAdtPayloadBitWidth(scaledType.getBaseType());
-    if (auto exactType = llvm::dyn_cast<ora::ExactType>(type))
-        return getAdtPayloadBitWidth(exactType.getBaseType());
-    return std::nullopt;
-}
-
-static bool isNarrowAdt(ora::AdtType type)
-{
-    if (type.getVariantNames().size() > 256)
-        return false;
-    for (Type payloadType : type.getPayloadTypes())
-    {
-        auto width = getAdtPayloadBitWidth(payloadType);
-        if (!width || *width > 248)
-            return false;
-    }
-    return true;
-}
-
 static FailureOr<Value> lowerAdtPayloadToCarrier(
     PatternRewriter &rewriter,
     Location loc,
@@ -482,41 +440,6 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
         payload = *carrier;
     }
     rewriter.replaceOp(op, ValueRange{tag, payload});
-    return success();
-}
-
-// ---------------------------------------------------------------------------
-// ora.struct_field_store → sir.addptr + sir.store
-// ---------------------------------------------------------------------------
-LogicalResult ConvertStructFieldStoreOp::matchAndRewrite(
-    ora::StructFieldStoreOp op,
-    typename ora::StructFieldStoreOp::Adaptor adaptor,
-    ConversionPatternRewriter &rewriter) const
-{
-    auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-
-    Value structVal = adaptor.getStructValue();
-    if (!llvm::isa<sir::PtrType>(structVal.getType()))
-        structVal = rewriter.create<sir::BitcastOp>(loc, ptrType, structVal);
-
-    // Compute field offset: hash the field name to get a deterministic slot index,
-    // then multiply by word size. A proper struct layout pass should replace this
-    // with actual offsets; for now this is a placeholder that preserves semantics.
-    StringRef fieldName = op.getFieldName();
-    uint64_t fieldIndex = 0;
-    for (char c : fieldName)
-        fieldIndex = fieldIndex * 31 + static_cast<uint64_t>(c);
-    fieldIndex %= 256; // Clamp to reasonable range.
-
-    Value offset = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, fieldIndex * evm::kWordBytes));
-    Value fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, structVal, offset);
-    Value val = ensureU256(rewriter, loc, adaptor.getValue());
-    rewriter.create<sir::StoreOp>(loc, fieldPtr, val);
-    rewriter.eraseOp(op);
     return success();
 }
 

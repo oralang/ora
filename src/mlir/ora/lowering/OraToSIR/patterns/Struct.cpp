@@ -1,5 +1,6 @@
 #include "Struct.h"
 
+#include "patterns/MissingOps.h"
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
@@ -513,6 +514,116 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     }
 
     rewriter.replaceOp(op, result);
+    return success();
+}
+
+LogicalResult ConvertStructFieldStoreOp::matchAndRewrite(
+    ora::StructFieldStoreOp op,
+    typename ora::StructFieldStoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    StringRef fieldName = op.getFieldName();
+    size_t fieldIndex = 0;
+    bool found = false;
+    Type expected = adaptor.getValue().getType();
+
+    if (auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType()))
+    {
+        SmallVector<StringRef, 8> fieldNames;
+        SmallVector<Type, 8> fieldTypes;
+        if (succeeded(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+        {
+            for (size_t i = 0; i < fieldNames.size(); ++i)
+            {
+                if (fieldNames[i] != fieldName)
+                    continue;
+                fieldIndex = i;
+                expected = fieldTypes[i];
+                found = true;
+                break;
+            }
+        }
+    }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        auto fieldNames = anonType.getFieldNames();
+        auto fieldTypes = anonType.getFieldTypes();
+        for (size_t i = 0; i < fieldNames.size(); ++i)
+        {
+            if (fieldNames[i] != fieldName)
+                continue;
+            fieldIndex = i;
+            expected = fieldTypes[i];
+            found = true;
+            break;
+        }
+    }
+
+    if (!found && parseNumericFieldIndex(fieldName, fieldIndex))
+        found = true;
+
+    if (!found && succeeded(resolveFieldByDeclScan(op.getOperation(), fieldName, adaptor.getValue().getType(), fieldIndex, expected)))
+        found = true;
+
+    if (!found)
+        return rewriter.notifyMatchFailure(op, "unknown field in struct_field_store");
+
+    Value basePtr = adaptor.getStructValue();
+    if (llvm::isa<sir::U256Type>(basePtr.getType()))
+    {
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    }
+    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+    {
+        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (castOp.getNumOperands() == 1)
+            {
+                Value src = castOp.getOperand(0);
+                if (llvm::isa<sir::PtrType>(src.getType()))
+                {
+                    basePtr = src;
+                }
+                else if (llvm::isa<sir::U256Type>(src.getType()))
+                {
+                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+                }
+            }
+        }
+    }
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+
+    Value fieldPtr = basePtr;
+    if (fieldIndex > 0)
+    {
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(fieldIndex) * 32ULL);
+        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
+    Value val = adaptor.getValue();
+    if (auto aggregateWord = materializeAggregateFieldWord(loc, rewriter, val))
+    {
+        val = *aggregateWord;
+    }
+    else
+    {
+        Type converted = getTypeConverter()->convertType(expected);
+        if (converted && converted != val.getType())
+            val = rewriter.create<sir::BitcastOp>(loc, converted, val);
+        if (!llvm::isa<sir::U256Type>(val.getType()))
+            val = rewriter.create<sir::BitcastOp>(loc, u256Type, val);
+    }
+
+    rewriter.create<sir::StoreOp>(loc, fieldPtr, val);
+    rewriter.eraseOp(op);
     return success();
 }
 
