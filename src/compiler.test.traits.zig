@@ -160,6 +160,23 @@ test "compiler rejects invalid extern trait semantics" {
     try testing.expect(diagnosticMessagesContain(diags, "extern trait 'Bad' cannot be implemented with an impl block"));
 }
 
+test "compiler rejects external call modifiers on non-extern trait methods" {
+    const source_text =
+        \\trait Bad {
+        \\    call fn transfer(self, to: address, amount: u256) -> bool;
+        \\    staticcall fn balanceOf(self, owner: address) -> u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &typecheck.diagnostics;
+    try testing.expect(diagnosticMessagesContain(diags, "non-extern trait method 'transfer' cannot use 'call fn' or 'staticcall fn'"));
+    try testing.expect(diagnosticMessagesContain(diags, "non-extern trait method 'balanceOf' cannot use 'call fn' or 'staticcall fn'"));
+}
+
 test "compiler type checks external proxy method calls" {
     const source_text =
         \\extern trait ERC20 {

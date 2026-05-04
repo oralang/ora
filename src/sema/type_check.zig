@@ -821,6 +821,11 @@ const TypeChecker = struct {
                             method.name,
                         });
                     }
+                    if (!trait_item.is_extern and method.extern_call_kind != .none) {
+                        try self.emitRangeError(method.range, "non-extern trait method '{s}' cannot use 'call fn' or 'staticcall fn'", .{
+                            method.name,
+                        });
+                    }
                     for (method.errors) |error_name| {
                         const error_item_id = self.item_index.lookup(error_name);
                         if (error_item_id == null or self.file.item(error_item_id.?).* != .ErrorDecl) {
