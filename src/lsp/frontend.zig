@@ -117,6 +117,17 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         defer item_index.deinit();
         var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
         defer resolution.deinit();
+        for (resolution.diagnostics.items.items) |diag| {
+            const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
+            const message = try allocator.dupe(u8, diag.message);
+            try diagnostics.append(allocator, Diagnostic{
+                .source = .sema,
+                .severity = mapCompilerSeverity(diag.severity),
+                .range = textRangeToRange(allocator, source, label) catch eofTokenRange(tokens),
+                .message = message,
+            });
+        }
+
         var const_eval_result = try compiler.comptime_eval.constEval(allocator, &lower_result.file, .{});
         defer const_eval_result.deinit();
 
@@ -133,7 +144,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         );
         defer typecheck_result.deinit();
 
-        sema_had_diagnostics = typecheck_result.diagnostics.items.items.len != 0;
+        sema_had_diagnostics = resolution.diagnostics.items.items.len != 0 or typecheck_result.diagnostics.items.items.len != 0;
         for (typecheck_result.diagnostics.items.items) |diag| {
             const label = if (diag.labels.len > 0) diag.labels[0].location.range else compiler.TextRange.empty(0);
             const message = try allocator.dupe(u8, diag.message);

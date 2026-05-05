@@ -79,3 +79,25 @@ test "lsp completion: non-matching prefix returns empty" {
 
     try testing.expectEqual(@as(usize, 0), items.len);
 }
+
+test "lsp completion: includes current language keywords and types" {
+    const source =
+        \\pub fn run() {
+        \\    
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "    ", 0);
+
+    const items = try completion.completionAt(testing.allocator, source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    try testing.expect(hasLabel(items, "match"));
+    try testing.expect(hasLabel(items, "type"));
+    try testing.expect(hasLabel(items, "tstore"));
+    try testing.expect(hasLabel(items, "staticcall"));
+    try testing.expect(hasLabel(items, "errors"));
+    try testing.expect(hasLabel(items, "bytes"));
+    try testing.expect(hasLabel(items, "slice"));
+    try testing.expect(hasLabel(items, "result"));
+}

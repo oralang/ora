@@ -38,11 +38,11 @@
       "patterns": [
         {
           "name": "keyword.control.ora",
-          "match": "\\b(if|else|while|for|break|continue|return|switch|try|catch)\\b"
+          "match": "\\b(if|else|while|for|break|continue|return|switch|match|try|catch)\\b"
         },
         {
           "name": "keyword.declaration.ora",
-          "match": "\\b(contract|fn|let|var|const|pub|import|struct|bitfield|enum|trait|impl|extern|log|error|init)\\b"
+          "match": "\\b(contract|fn|let|var|const|pub|import|struct|bitfield|enum|trait|impl|extern|log|error|init|type)\\b"
         },
         {
           "name": "keyword.other.ora",
@@ -58,7 +58,7 @@
         },
         {
           "name": "support.type.collection.ora",
-          "match": "\\b(map|Map|Slice|Bytes)\\b"
+          "match": "\\b(map|slice|bytes)\\b"
         }
       ]
     },
@@ -74,7 +74,7 @@
       "patterns": [
         {
           "name": "storage.modifier.ora",
-          "match": "\\b(storage|memory|transient|immutable)\\b"
+          "match": "\\b(storage|memory|tstore|transient|immutable)\\b"
         }
       ]
     },
