@@ -1,0 +1,14 @@
+contract DivisionBuiltins {
+    pub fn signed_rounding() -> i256 {
+        let trunc = @divTrunc(@cast(i256, -7), @cast(i256, 3));
+        let floor = @divFloor(@cast(i256, -7), @cast(i256, 3));
+        let ceil = @divCeil(@cast(i256, -7), @cast(i256, 3));
+        return trunc + floor + ceil;
+    }
+
+    pub fn exact_and_divmod() -> u256 {
+        let exact = @divExact(12, 4);
+        let pair = @divmod(17, 5);
+        return exact + pair.0 * 5 + pair.1;
+    }
+}

@@ -7,6 +7,7 @@ const Frame = ora_evm.Frame(.{});
 const Debugger = ora_evm.Debugger(.{});
 const SourceMap = ora_evm.SourceMap;
 const DebugInfo = ora_evm.DebugInfo;
+const Session = ora_evm.DebugSession(.{});
 
 const ProbeConfig = struct {
     bytecode_path: []const u8,
@@ -16,6 +17,7 @@ const ProbeConfig = struct {
     abi_path: ?[]const u8 = null,
     calldata: []u8 = &.{},
     max_statements: usize = 64,
+    limits: ora_evm.DebugLimits = .{},
 
     fn deinit(self: *ProbeConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode_path);
@@ -35,30 +37,33 @@ pub fn main() !void {
     var config = try parseArgs(allocator);
     defer config.deinit(allocator);
 
-    const bytecode_hex = try std.fs.cwd().readFileAlloc(allocator, config.bytecode_path, 16 * 1024 * 1024);
+    const limits = config.limits;
+
+    const bytecode_hex = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.bytecode_path, limits.artifact_max_bytes);
     defer allocator.free(bytecode_hex);
     const bytecode = try decodeHexAlloc(allocator, bytecode_hex);
     defer allocator.free(bytecode);
 
-    const source_map_json = try std.fs.cwd().readFileAlloc(allocator, config.source_map_path, 16 * 1024 * 1024);
+    const source_map_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_map_path, limits.artifact_max_bytes);
     defer allocator.free(source_map_json);
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
-    defer source_map.deinit();
+    var source_map_transferred = false;
+    defer if (!source_map_transferred) source_map.deinit();
 
-    const source_text = try std.fs.cwd().readFileAlloc(allocator, config.source_path, 16 * 1024 * 1024);
+    const source_text = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_path, limits.artifact_max_bytes);
     defer allocator.free(source_text);
 
     var debug_info_json: ?[]u8 = null;
     defer if (debug_info_json) |bytes| allocator.free(bytes);
     var debug_info: ?DebugInfo = null;
     if (config.debug_info_path) |path| {
-        debug_info_json = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+        debug_info_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, path, limits.artifact_max_bytes);
         debug_info = try DebugInfo.loadFromJson(allocator, debug_info_json.?);
     }
     defer if (debug_info) |*info| info.deinit();
 
     var evm: Evm = undefined;
-    try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+    try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
     defer evm.deinit();
 
     const caller = primitives.Address.fromU256(0x100);
@@ -67,10 +72,16 @@ pub fn main() !void {
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(contract);
 
-    const runtime_bytecode = try deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode);
+    const runtime_bytecode = try Session.deployRuntimeBytecode(allocator, &evm, .{
+        .caller = caller,
+        .contract = contract,
+        .deployment_bytecode = bytecode,
+        .gas_limit = limits.gas_limit,
+        .step_cap = limits.deploy_step_cap,
+    });
     defer allocator.free(runtime_bytecode);
     if (source_map.runtime_start_pc) |_| {
-        const runtime_source_map = try rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
+        const runtime_source_map = try Session.rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
         source_map.deinit();
         source_map = runtime_source_map;
     }
@@ -78,7 +89,7 @@ pub fn main() !void {
     try evm.frames.append(evm.arena.allocator(), try Frame.init(
         evm.arena.allocator(),
         runtime_bytecode,
-        5_000_000,
+        limits.gas_limit,
         caller,
         contract,
         0,
@@ -95,7 +106,9 @@ pub fn main() !void {
         }
         break :blk try Debugger.init(allocator, &evm, source_map, source_text);
     };
+    source_map_transferred = true;
     defer debugger.deinit();
+    debugger.max_steps = limits.max_steps;
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file = std.fs.File.stdout().writer(&stdout_buffer);
@@ -134,77 +147,6 @@ pub fn main() !void {
         }
     }
     try stdout.flush();
-}
-
-fn deployRuntimeBytecode(
-    allocator: std.mem.Allocator,
-    evm: *Evm,
-    caller: primitives.Address,
-    contract: primitives.Address,
-    deployment_bytecode: []const u8,
-) ![]u8 {
-    try evm.frames.append(evm.arena.allocator(), try Frame.init(
-        evm.arena.allocator(),
-        deployment_bytecode,
-        5_000_000,
-        caller,
-        contract,
-        0,
-        &.{},
-        @as(*anyopaque, @ptrCast(evm)),
-        evm.hardfork,
-        false,
-    ));
-
-    while (evm.getCurrentFrame()) |frame| {
-        if (frame.stopped) break;
-        try evm.step();
-    }
-
-    const frame = evm.getCurrentFrame() orelse return try allocator.dupe(u8, deployment_bytecode);
-    defer evm.frames.clearRetainingCapacity();
-
-    if (frame.reverted or frame.output.len == 0) {
-        return try allocator.dupe(u8, deployment_bytecode);
-    }
-    return try allocator.dupe(u8, frame.output);
-}
-
-fn rebaseSourceMapForRuntime(
-    allocator: std.mem.Allocator,
-    creation_source_map: *const SourceMap,
-    runtime_bytecode: []const u8,
-) !SourceMap {
-    const runtime_start_pc = creation_source_map.runtime_start_pc orelse {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    };
-    if (runtime_bytecode.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-
-    var rebased: std.ArrayList(SourceMap.Entry) = .{};
-    defer rebased.deinit(allocator);
-
-    for (creation_source_map.entries) |entry| {
-        if (entry.pc < runtime_start_pc) continue;
-        const rebased_pc = entry.pc - runtime_start_pc;
-        if (rebased_pc >= runtime_bytecode.len) continue;
-        try rebased.append(allocator, .{
-            .idx = entry.idx,
-            .pc = @intCast(rebased_pc),
-            .file = entry.file,
-            .line = entry.line,
-            .col = entry.col,
-            .is_statement = entry.is_statement,
-        });
-    }
-
-    if (rebased.items.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-    var runtime_map = try SourceMap.fromEntries(allocator, rebased.items);
-    runtime_map.runtime_start_pc = 0;
-    return runtime_map;
 }
 
 fn printStop(
@@ -302,6 +244,22 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
             config.max_statements = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--gas-limit")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.gas_limit = try std.fmt.parseInt(i64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--max-steps")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.max_steps = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.deploy_step_cap = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.artifact_max_bytes = try std.fmt.parseInt(usize, args[i], 10);
         } else {
             try printUsage();
             return error.InvalidArguments;
@@ -311,7 +269,7 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
     if (signature) |sig| {
         allocator.free(config.calldata);
         if (config.abi_path) |abi_path| {
-            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            const abi_bytes = try ora_evm.loadDebuggerArtifact(allocator, abi_path);
             defer allocator.free(abi_bytes);
             config.calldata = try encodeAbiCallDataAlloc(allocator, abi_bytes, sig, raw_args.items);
         } else {
@@ -328,7 +286,19 @@ fn printUsage() !void {
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:
-        \\  zig build debug-probe -- <bytecode.hex> <source-map.json> <source.ora> [--debug-info <debug.json>] [--abi <abi.json>] [--signature <sig> [--arg <value>]...] [--calldata-hex <hex>] [--max-statements <n>]
+        \\  zig build debug-probe -- <bytecode.hex> <source-map.json> <source.ora> [options]
+        \\
+        \\options:
+        \\  --debug-info <debug.json>    Load source-scope debug info
+        \\  --abi <abi.json>             Load ABI for signature-driven calldata
+        \\  --signature <sig>            Function signature, e.g. add(u256,u256)
+        \\  --arg <value>                Argument value (repeatable, in order)
+        \\  --calldata-hex <hex>         Raw calldata as hex
+        \\  --max-statements <n>         Cap source-stop count (default 64)
+        \\  --gas-limit <i64>            Frame gas budget (default 5000000)
+        \\  --max-steps <u64>            Per-command opcode safety cap (default 10000000)
+        \\  --deploy-step-cap <usize>    Deployment opcode cap (default 200000)
+        \\  --artifact-max-bytes <usize> Per-file artifact load cap (default 16777216)
         \\
         \\examples:
         \\  zig build debug-probe -- ../artifacts/debugger_selector_probe/comptime_shift_probe.hex ../artifacts/debugger_selector_probe/comptime_shift_probe.sourcemap.json ../ora-example/comptime/comptime_shift_probe.ora --signature test_large_shr() --max-statements 8

@@ -10,16 +10,22 @@ const LoopContext = support.LoopContext;
 const BlockContext = support.BlockContext;
 const SwitchContext = support.SwitchContext;
 const SwitchPatternData = support.SwitchPatternData;
+const UnrolledLoopContext = support.UnrolledLoopContext;
+const UnrolledLoopSignal = support.UnrolledLoopSignal;
+const runtime_loop_unroll_limit = support.runtime_loop_unroll_limit;
+const runtime_total_unroll_budget = support.runtime_total_unroll_budget;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
 const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
 const appendEmptyYield = support.appendEmptyYield;
+const appendScfYieldValues = support.appendScfYieldValues;
 const appendOraYieldValues = support.appendOraYieldValues;
 const appendOp = support.appendOp;
 const appendValueOp = support.appendValueOp;
 const blockEndsWithTerminator = support.blockEndsWithTerminator;
 const boolType = support.boolType;
+const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
 const exprRange = support.exprRange;
@@ -331,6 +337,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(init_continue)) return error.MlirOperationCreationFailed;
             appendOp(self.block, init_continue);
 
+            const exit_flag_alloc = mlir.oraMemrefAllocaOpCreate(self.parent.context, loc, memRefType(self.parent.context, boolType(self.parent.context)));
+            if (mlir.oraOperationIsNull(exit_flag_alloc)) return error.MlirOperationCreationFailed;
+            const exit_flag = appendValueOp(self.block, exit_flag_alloc);
+            const exit_false = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const init_exit = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, exit_false, exit_flag, null, 0);
+            if (mlir.oraOperationIsNull(init_exit)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, init_exit);
+
             var carried_locals: LocalIdList = .{};
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, block_stmt.body, locals, &carried_locals, &carried_seen)) {
@@ -425,6 +439,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .parent = self.block_context,
                 .label = block_stmt.label,
                 .continue_flag = continue_flag,
+                .exit_flag = exit_flag,
                 .carried_locals = carried_locals.items,
             };
             body_lowerer.block_context = &block_context;
@@ -436,6 +451,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue, continue_flag, null, 0);
             if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
             appendOp(after_block, clear_continue_store);
+            const clear_exit = appendValueOp(after_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            const clear_exit_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_exit, exit_flag, null, 0);
+            if (mlir.oraOperationIsNull(clear_exit_store)) return error.MlirOperationCreationFailed;
+            appendOp(after_block, clear_exit_store);
             const terminated = try body_lowerer.lowerBody(block_stmt.body, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, block_stmt.range, &body_locals, carried_locals.items);
@@ -455,6 +474,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
+            if (try @This().lowerUnrolledFiniteWhileStmt(self, while_stmt, locals)) |terminated| {
+                return terminated;
+            }
+
             const has_return = bodyMayReturn(self.parent.file, while_stmt.body);
             if (bodyContainsStructuredLoopControl(self.parent.file, while_stmt.body)) {
                 try self.appendUnsupportedControlPlaceholder("ora.while_placeholder", while_stmt.range);
@@ -637,16 +660,324 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return false;
         }
 
+        fn lowerUnrolledFiniteWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!?bool {
+            if (while_stmt.invariants.len != 0) return null;
+            if (bodyMayReturn(self.parent.file, while_stmt.body)) return null;
+
+            var simulated_locals = try locals.clone();
+            var trip_count: u64 = 0;
+            while (true) {
+                const condition = FunctionLowerer.evalKnownBoolExpr(self, while_stmt.condition, &simulated_locals) orelse return null;
+                if (!condition) break;
+                if (trip_count >= runtime_loop_unroll_limit) return null;
+                const signal = try @This().simulateUnrolledWhileBody(self, while_stmt.body, &simulated_locals, while_stmt.label) orelse return null;
+                trip_count += 1;
+                switch (signal) {
+                    .none, .continue_loop => {},
+                    .break_loop => break,
+                }
+            }
+            if (trip_count == 0) return false;
+            if (self.unroll_multiplier > runtime_total_unroll_budget / trip_count) return null;
+
+            var unrolled_loop_context = UnrolledLoopContext{
+                .parent = self.unrolled_loop_context,
+                .label = while_stmt.label,
+            };
+            const prev_unrolled_loop_context = self.unrolled_loop_context;
+            self.unrolled_loop_context = &unrolled_loop_context;
+            defer self.unrolled_loop_context = prev_unrolled_loop_context;
+            const prev_unroll_multiplier = self.unroll_multiplier;
+            self.unroll_multiplier *= trip_count;
+            defer self.unroll_multiplier = prev_unroll_multiplier;
+
+            var iteration: u64 = 0;
+            while (iteration < trip_count) : (iteration += 1) {
+                self.parent.pushSyntheticFrame(@intCast(iteration), @intCast(trip_count));
+                defer self.parent.popSyntheticFrame();
+
+                const body_terminated = try self.lowerBody(while_stmt.body, locals);
+                switch (unrolled_loop_context.signal) {
+                    .none => if (body_terminated) return true,
+                    .continue_loop => {
+                        unrolled_loop_context.signal = .none;
+                        continue;
+                    },
+                    .break_loop => {
+                        unrolled_loop_context.signal = .none;
+                        break;
+                    },
+                }
+            }
+            return false;
+        }
+
+        fn simulateUnrolledWhileBody(
+            self: *FunctionLowerer,
+            body_id: ast.BodyId,
+            locals: *LocalEnv,
+            loop_label: ?[]const u8,
+        ) anyerror!?UnrolledLoopSignal {
+            const body = self.parent.file.body(body_id).*;
+            for (body.statements) |statement_id| {
+                const signal = try @This().simulateUnrolledWhileStmt(self, statement_id, locals, loop_label) orelse return null;
+                switch (signal) {
+                    .none => {},
+                    .continue_loop, .break_loop => return signal,
+                }
+            }
+            return .none;
+        }
+
+        fn simulateUnrolledWhileStmt(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            locals: *LocalEnv,
+            loop_label: ?[]const u8,
+        ) anyerror!?UnrolledLoopSignal {
+            return switch (self.parent.file.statement(statement_id).*) {
+                .VariableDecl => |decl| blk: {
+                    const expr_id = decl.value orelse break :blk null;
+                    try locals.bindPatternWithoutValue(self.parent.file, decl.pattern);
+                    if (FunctionLowerer.evalKnownIntExpr(self, expr_id, locals)) |known_int| {
+                        try locals.setPatternKnownInt(self.parent.file, decl.pattern, known_int);
+                    } else if (FunctionLowerer.evalKnownBoolExpr(self, expr_id, locals)) |known_bool| {
+                        try locals.setPatternKnownBool(self.parent.file, decl.pattern, known_bool);
+                    } else {
+                        break :blk null;
+                    }
+                    break :blk .none;
+                },
+                .Assign => |assign| blk: {
+                    const local_id = locals.resolvePatternTarget(self.parent.file, assign.target) orelse break :blk null;
+                    const known_int = switch (assign.op) {
+                        .assign => FunctionLowerer.evalKnownIntExpr(self, assign.value, locals),
+                        .add_assign => add_blk: {
+                            const lhs = locals.getKnownInt(local_id) orelse break :add_blk null;
+                            const rhs = FunctionLowerer.evalKnownIntExpr(self, assign.value, locals) orelse break :add_blk null;
+                            break :add_blk std.math.add(i64, lhs, rhs) catch null;
+                        },
+                        .sub_assign => sub_blk: {
+                            const lhs = locals.getKnownInt(local_id) orelse break :sub_blk null;
+                            const rhs = FunctionLowerer.evalKnownIntExpr(self, assign.value, locals) orelse break :sub_blk null;
+                            break :sub_blk std.math.sub(i64, lhs, rhs) catch null;
+                        },
+                        else => null,
+                    };
+                    if (known_int) |integer| {
+                        try locals.setKnownInt(local_id, integer);
+                        break :blk .none;
+                    }
+                    if (assign.op == .assign) {
+                        if (FunctionLowerer.evalKnownBoolExpr(self, assign.value, locals)) |known_bool| {
+                            try locals.setKnownBool(local_id, known_bool);
+                            break :blk .none;
+                        }
+                    }
+                    break :blk null;
+                },
+                .If => |if_stmt| blk: {
+                    const condition = FunctionLowerer.evalKnownBoolExpr(self, if_stmt.condition, locals) orelse break :blk null;
+                    if (condition) {
+                        break :blk try @This().simulateUnrolledWhileBody(self, if_stmt.then_body, locals, loop_label);
+                    }
+                    if (if_stmt.else_body) |else_body| {
+                        break :blk try @This().simulateUnrolledWhileBody(self, else_body, locals, loop_label);
+                    }
+                    break :blk .none;
+                },
+                .While => |nested_while| blk: {
+                    if (nested_while.invariants.len != 0) break :blk null;
+                    if (bodyMayReturn(self.parent.file, nested_while.body)) break :blk null;
+
+                    var trip_count: u64 = 0;
+                    while (true) {
+                        const condition = FunctionLowerer.evalKnownBoolExpr(self, nested_while.condition, locals) orelse break :blk null;
+                        if (!condition) break;
+                        if (trip_count >= runtime_loop_unroll_limit) break :blk null;
+                        const signal = try @This().simulateUnrolledWhileBody(self, nested_while.body, locals, nested_while.label) orelse break :blk null;
+                        trip_count += 1;
+                        switch (signal) {
+                            .none, .continue_loop => {},
+                            .break_loop => break,
+                        }
+                    }
+                    break :blk .none;
+                },
+                .Break => |jump| blk: {
+                    if (jump.label == null or (loop_label != null and std.mem.eql(u8, jump.label.?, loop_label.?))) {
+                        break :blk .break_loop;
+                    }
+                    break :blk null;
+                },
+                .Continue => |jump| blk: {
+                    if (jump.label == null or (loop_label != null and std.mem.eql(u8, jump.label.?, loop_label.?))) {
+                        break :blk .continue_loop;
+                    }
+                    break :blk null;
+                },
+                .Block => |block_stmt| try @This().simulateUnrolledWhileBody(self, block_stmt.body, locals, loop_label),
+                .Expr => |expr_stmt| blk: {
+                    _ = FunctionLowerer.evalKnownExprValue(self, expr_stmt.expr, locals) orelse break :blk null;
+                    break :blk .none;
+                },
+                else => null,
+            };
+        }
+
         pub fn lowerSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
             if (switch_stmt.label != null) {
                 return @This().lowerLabeledSwitchStmt(self, switch_stmt, locals);
             }
-            return @This().lowerSwitchStmtWithCondition(self, switch_stmt, try self.lowerExpr(switch_stmt.condition, locals), locals);
+            const raw_condition = try @This().lowerSwitchRawCondition(self, switch_stmt.condition, locals);
+            const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_stmt.range);
+            if (try @This().lowerErrorUnionMatchStmt(self, switch_stmt, condition, locals)) |terminated| return terminated;
+            return @This().lowerSwitchStmtWithCondition(self, switch_stmt, raw_condition, condition, locals);
+        }
+
+        fn lowerSwitchRawCondition(self: *FunctionLowerer, condition_expr: ast.ExprId, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            switch (self.parent.file.expression(condition_expr).*) {
+                .BoolLiteral => |literal| {
+                    const op = createIntegerConstant(
+                        self.parent.context,
+                        self.parent.location(literal.range),
+                        defaultIntegerType(self.parent.context),
+                        if (literal.value) 1 else 0,
+                    );
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, op);
+                },
+                else => {},
+            }
+
+            const raw_condition = try self.lowerExpr(condition_expr, locals);
+            if (!mlir.oraValueIsNull(raw_condition) and !mlir.oraTypeIsNull(mlir.oraValueGetType(raw_condition))) return raw_condition;
+
+            return error.MlirOperationCreationFailed;
+        }
+
+        fn lowerSwitchCondition(self: *FunctionLowerer, condition: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const condition_type = mlir.oraValueGetType(condition);
+            if (!mlir.oraTypeIsAAdt(condition_type)) return condition;
+
+            const op = mlir.oraAdtTagOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                condition,
+                defaultIntegerType(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+            return mlir.oraOperationGetResult(op, 0);
+        }
+
+        fn lowerErrorUnionMatchStmt(
+            self: *FunctionLowerer,
+            switch_stmt: ast.SwitchStmt,
+            condition: mlir.MlirValue,
+            locals: *LocalEnv,
+        ) anyerror!?bool {
+            if (!@This().switchUsesErrorUnionMatchPatterns(self, switch_stmt)) return null;
+            if (self.parent.typecheck.exprType(switch_stmt.condition).kind() != .error_union) return null;
+
+            const has_return = switchMayReturn(self.parent.file, switch_stmt);
+            const created_deferred_return = has_return and self.deferred_return_flag == null;
+            if (created_deferred_return) {
+                try self.ensureDeferredReturnSlots(switch_stmt.range);
+            }
+
+            var carried_locals: LocalIdList = .{};
+            var carried_seen = LocalIdSet.init(self.parent.allocator);
+            if (!try collectSwitchCarriedLocals(self.parent.allocator, self.parent.file, switch_stmt, locals, &carried_locals, &carried_seen)) {
+                try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
+                return false;
+            }
+            carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
+
+            const terminated = try @This().lowerErrorUnionMatchStmtChain(self, switch_stmt, 0, condition, locals, carried_locals.items, has_return);
+            if (has_return and self.deferred_return_flag != null) {
+                try self.appendDeferredReturnCheck(switch_stmt.range, locals);
+                if (terminated and !blockEndsWithTerminator(self.block)) {
+                    try self.appendDeferredReturnTerminator(switch_stmt.range, locals);
+                }
+            }
+            return terminated;
+        }
+
+        fn lowerErrorUnionMatchStmtChain(
+            self: *FunctionLowerer,
+            switch_stmt: ast.SwitchStmt,
+            arm_index: usize,
+            condition: mlir.MlirValue,
+            locals: *LocalEnv,
+            carried_locals: []const LocalId,
+            has_return: bool,
+        ) anyerror!bool {
+            if (arm_index >= switch_stmt.arms.len) {
+                if (switch_stmt.else_body) |else_body| {
+                    return self.lowerBody(else_body, locals);
+                }
+                return false;
+            }
+
+            const arm = switch_stmt.arms[arm_index];
+            const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, switch_stmt.condition, condition, arm.pattern, arm.range)) orelse return false;
+            const result_types = if (carried_locals.len == 0)
+                std.ArrayList(mlir.MlirType){}
+            else
+                (try self.buildCarriedResultTypes(locals, carried_locals)) orelse return false;
+
+            const op = mlir.oraScfIfOpCreate(
+                self.parent.context,
+                self.parent.location(arm.range),
+                branch_condition,
+                result_types.items.ptr,
+                result_types.items.len,
+                true,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            then_lowerer.current_scf_carried_locals = carried_locals;
+            if (has_return) {
+                then_lowerer.deferred_return_kind = .scf_yield;
+                then_lowerer.deferred_return_carried_locals = carried_locals;
+            }
+            var then_locals = try self.cloneLocals(locals);
+            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, arm.range, &then_locals);
+            const then_terminated = try then_lowerer.lowerBody(arm.body, &then_locals);
+            if (!blockEndsWithTerminator(then_block)) {
+                try then_lowerer.appendScfYieldFromLocals(then_block, arm.range, &then_locals, carried_locals);
+            }
+
+            var else_lowerer = self.*;
+            else_lowerer.block = else_block;
+            else_lowerer.current_scf_carried_locals = carried_locals;
+            if (has_return) {
+                else_lowerer.deferred_return_kind = .scf_yield;
+                else_lowerer.deferred_return_carried_locals = carried_locals;
+            }
+            var else_locals = try self.cloneLocals(locals);
+            const else_terminated = try @This().lowerErrorUnionMatchStmtChain(&else_lowerer, switch_stmt, arm_index + 1, condition, &else_locals, carried_locals, has_return);
+            if (!blockEndsWithTerminator(else_block)) {
+                try else_lowerer.appendScfYieldFromLocals(else_block, arm.range, &else_locals, carried_locals);
+            }
+
+            try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals, op);
+            FunctionLowerer.annotateCarriedLocalResults(self, carried_locals, op);
+            return then_terminated and else_terminated;
         }
 
         fn lowerSwitchStmtWithCondition(
             self: *FunctionLowerer,
             switch_stmt: ast.SwitchStmt,
+            raw_condition: mlir.MlirValue,
             condition: mlir.MlirValue,
             locals: *LocalEnv,
         ) anyerror!bool {
@@ -686,17 +1017,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
-            var all_cases_terminate = @This().switchIsExhaustive(self, switch_stmt);
-            for (switch_stmt.arms, 0..) |arm, case_index| {
-                const arm_terminated = try self.lowerSwitchCaseBlock(op, case_index, arm.body, arm.range, locals, carried_locals.items, has_return);
+            var all_cases_terminate = @This().switchPatternsAreExhaustive(
+                self,
+                switch_stmt.condition,
+                switch_stmt.arms,
+                switch_stmt.else_body != null,
+            );
+            var case_index: usize = 0;
+            for (switch_stmt.arms) |arm| {
+                const arm_terminated = try @This().lowerSwitchArmCases(self, op, &case_index, arm.body, arm.pattern, raw_condition, arm.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and arm_terminated;
             }
 
             if (switch_stmt.else_body) |else_body| {
-                const else_terminated = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, else_body, switch_stmt.range, locals, carried_locals.items, has_return);
+                const else_terminated = try self.lowerSwitchCaseBlock(op, case_index, else_body, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
                 all_cases_terminate = all_cases_terminate and else_terminated;
             } else if (carried_locals.items.len > 0) {
-                _ = try self.lowerSwitchCaseBlock(op, switch_stmt.arms.len, null, switch_stmt.range, locals, carried_locals.items, has_return);
+                _ = try self.lowerSwitchCaseBlock(op, case_index, null, null, raw_condition, switch_stmt.range, locals, carried_locals.items, has_return);
             }
 
             mlir.oraSwitchOpSetCasePatterns(
@@ -722,47 +1059,62 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return all_cases_terminate;
         }
 
-        fn switchIsExhaustive(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt) bool {
-            if (switch_stmt.else_body != null) return true;
+        fn switchPatternsAreExhaustive(
+            self: *FunctionLowerer,
+            condition_expr: ast.ExprId,
+            arms: anytype,
+            has_else: bool,
+        ) bool {
+            if (has_else) return true;
 
-            const condition_type = self.parent.typecheck.exprType(switch_stmt.condition);
+            const condition_type = self.parent.typecheck.exprType(condition_expr);
             if (condition_type.kind() == .bool) {
                 var seen_true = false;
                 var seen_false = false;
-                for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| {
-                            const value = self.switchPatternValue(pattern_expr) orelse continue;
-                            if (value == 0) seen_false = true;
-                            if (value == 1) seen_true = true;
-                        },
-                        else => return false,
-                    }
+                for (arms) |arm| {
+                    if (!@This().collectBoolSwitchPatternCoverage(self, arm.pattern, &seen_true, &seen_false)) return false;
                 }
                 return seen_true and seen_false;
             }
 
-            const enum_name = condition_type.name() orelse return false;
-            const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
-            const enum_item = switch (self.parent.file.item(item_id).*) {
-                .Enum => |item| item,
-                else => return false,
+            return @This().semaGuaranteedSumSwitchExhaustive(self, condition_type);
+        }
+
+        fn collectBoolSwitchPatternCoverage(self: *FunctionLowerer, pattern: ast.SwitchPattern, seen_true: *bool, seen_false: *bool) bool {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        if (!@This().collectBoolSwitchPatternCoverage(self, alternative, seen_true, seen_false)) return false;
+                    }
+                    return true;
+                },
+                else => {
+                    const value = @This().switchPatternOrdinal(self, pattern) orelse return false;
+                    if (value == 0) seen_false.* = true;
+                    if (value == 1) seen_true.* = true;
+                    return true;
+                },
+            }
+        }
+
+        fn switchPatternOrdinal(self: *FunctionLowerer, pattern: ast.SwitchPattern) ?i64 {
+            return switch (pattern) {
+                .Expr => |pattern_expr| self.switchPatternValue(pattern_expr),
+                .NamedError => |named_error| self.switchPatternValue(named_error.callee),
+                else => null,
             };
+        }
 
-            var seen = std.AutoHashMap(i64, void).init(self.parent.allocator);
-            defer seen.deinit();
-
-            for (switch_stmt.arms) |arm| {
-                switch (arm.pattern) {
-                    .Expr => |pattern_expr| {
-                        const value = self.switchPatternValue(pattern_expr) orelse return false;
-                        seen.put(value, {}) catch return false;
-                    },
-                    else => return false,
-                }
+        fn semaGuaranteedSumSwitchExhaustive(self: *FunctionLowerer, condition_type: anytype) bool {
+            switch (condition_type.kind()) {
+                .enum_, .error_union => {},
+                else => return false,
             }
 
-            return seen.count() == enum_item.variants.len;
+            for (self.parent.typecheck.diagnostics.items.items) |diagnostic| {
+                if (diagnostic.severity == .Error) return false;
+            }
+            return true;
         }
 
         fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
@@ -896,7 +1248,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             });
             var unlabeled_switch = switch_stmt;
             unlabeled_switch.label = null;
-            _ = try @This().lowerSwitchStmtWithCondition(&body_lowerer, unlabeled_switch, current_condition, &body_locals);
+            _ = try @This().lowerSwitchStmtWithCondition(&body_lowerer, unlabeled_switch, current_condition, current_condition, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, switch_stmt.range, &body_locals, carried_locals.items);
             }
@@ -912,7 +1264,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn buildSwitchPatternData(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, synthesize_default_case: bool) anyerror!?SwitchPatternData {
-            const total_cases: usize = switch_stmt.arms.len + (if (switch_stmt.else_body != null or synthesize_default_case) @as(usize, 1) else 0);
+            var total_cases: usize = if (switch_stmt.else_body != null or synthesize_default_case) 1 else 0;
+            for (switch_stmt.arms) |arm| total_cases += @This().switchPatternCaseCount(arm.pattern);
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
@@ -938,7 +1291,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn buildSwitchExprPatternData(self: *FunctionLowerer, switch_expr: ast.SwitchExpr) anyerror!?SwitchPatternData {
-            const total_cases: usize = switch_expr.arms.len + (if (switch_expr.else_expr != null) @as(usize, 1) else 0);
+            var total_cases: usize = if (switch_expr.else_expr != null) 1 else 0;
+            for (switch_expr.arms) |arm| total_cases += @This().switchPatternCaseCount(arm.pattern);
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
@@ -966,15 +1320,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn appendSwitchPatternData(self: *FunctionLowerer, pattern: ast.SwitchPattern, data: *SwitchPatternData) anyerror!bool {
             switch (pattern) {
                 .Expr => |pattern_expr| {
-                    const value = self.switchPatternValue(pattern_expr) orelse return false;
+                    const value = (try @This().switchPatternValueStrict(self, pattern_expr)) orelse return false;
                     try data.case_values.append(self.parent.allocator, value);
                     try data.range_starts.append(self.parent.allocator, 0);
                     try data.range_ends.append(self.parent.allocator, 0);
                     try data.case_kinds.append(self.parent.allocator, 0);
                 },
                 .Range => |range_pattern| {
-                    const start_value = self.switchPatternValue(range_pattern.start) orelse return false;
-                    var end_value = self.switchPatternValue(range_pattern.end) orelse return false;
+                    const start_value = (try @This().switchPatternValueStrict(self, range_pattern.start)) orelse return false;
+                    var end_value = (try @This().switchPatternValueStrict(self, range_pattern.end)) orelse return false;
                     if (!range_pattern.inclusive) {
                         end_value = std.math.sub(i64, end_value, 1) catch return false;
                     }
@@ -983,9 +1337,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try data.range_ends.append(self.parent.allocator, end_value);
                     try data.case_kinds.append(self.parent.allocator, 1);
                 },
+                .NamedError => |named_error| {
+                    const value = (try @This().switchPatternValueStrict(self, named_error.callee)) orelse return false;
+                    try data.case_values.append(self.parent.allocator, value);
+                    try data.range_starts.append(self.parent.allocator, 0);
+                    try data.range_ends.append(self.parent.allocator, 0);
+                    try data.case_kinds.append(self.parent.allocator, 0);
+                },
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        if (!try self.appendSwitchPatternData(alternative, data)) return false;
+                    }
+                },
+                .Ok, .Err => return false,
                 .Else => unreachable,
             }
             return true;
+        }
+
+        fn switchPatternCaseCount(pattern: ast.SwitchPattern) usize {
+            return switch (pattern) {
+                .Or => |or_pattern| blk: {
+                    var count: usize = 0;
+                    for (or_pattern.alternatives) |alternative| count += @This().switchPatternCaseCount(alternative);
+                    break :blk count;
+                },
+                else => 1,
+            };
         }
 
         pub fn lowerSwitchCaseBlock(
@@ -993,6 +1371,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             op: mlir.MlirOperation,
             case_index: usize,
             body_id: ?ast.BodyId,
+            pattern: ?ast.SwitchPattern,
+            condition: mlir.MlirValue,
             range: source.TextRange,
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
@@ -1013,6 +1393,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             case_lowerer.switch_context = &switch_context;
             var case_locals = try self.cloneLocals(locals);
+            if (pattern) |arm_pattern| {
+                try @This().bindAdtMatchPatternValue(&case_lowerer, condition, arm_pattern, range, &case_locals);
+            }
             var terminated = false;
             if (body_id) |body| {
                 terminated = try case_lowerer.lowerBody(body, &case_locals);
@@ -1027,8 +1410,39 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return terminated;
         }
 
+        fn lowerSwitchArmCases(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            case_index: *usize,
+            body: ast.BodyId,
+            pattern: ast.SwitchPattern,
+            raw_condition: mlir.MlirValue,
+            range: source.TextRange,
+            locals: *LocalEnv,
+            carried_locals: []const LocalId,
+            has_return: bool,
+        ) anyerror!bool {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    var all_terminate = true;
+                    for (or_pattern.alternatives) |alternative| {
+                        const terminated = try @This().lowerSwitchArmCases(self, op, case_index, body, alternative, raw_condition, range, locals, carried_locals, has_return);
+                        all_terminate = all_terminate and terminated;
+                    }
+                    return all_terminate;
+                },
+                else => {
+                    const terminated = try self.lowerSwitchCaseBlock(op, case_index.*, body, pattern, raw_condition, range, locals, carried_locals, has_return);
+                    case_index.* += 1;
+                    return terminated;
+                },
+            }
+        }
+
         pub fn lowerSwitchExpr(self: *FunctionLowerer, expr_id: ast.ExprId, switch_expr: ast.SwitchExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            const condition = try self.lowerExpr(switch_expr.condition, locals);
+            const raw_condition = try @This().lowerSwitchRawCondition(self, switch_expr.condition, locals);
+            const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_expr.range);
+            if (try @This().lowerErrorUnionMatchExpr(self, expr_id, switch_expr, condition, locals)) |value| return value;
             const pattern_data = (try self.buildSwitchExprPatternData(switch_expr)) orelse {
                 const op = try self.createAggregatePlaceholder("ora.switch_expr", switch_expr.range, &.{}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
@@ -1045,23 +1459,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
-            for (switch_expr.arms, 0..) |arm, case_index| {
-                const case_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index);
-                if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
-
-                var case_lowerer = self.*;
-                case_lowerer.block = case_block;
-                const value = try case_lowerer.lowerExpr(arm.value, locals);
-                try appendOraYieldValues(self.parent.context, case_block, self.parent.location(arm.range), &[_]mlir.MlirValue{value});
+            var case_index: usize = 0;
+            for (switch_expr.arms) |arm| {
+                try @This().lowerSwitchExprArmCases(self, op, &case_index, arm.value, arm.pattern, raw_condition, arm.range, locals, result_type);
             }
 
             if (switch_expr.else_expr) |else_expr| {
-                const else_block = mlir.oraSwitchExprOpGetCaseBlock(op, switch_expr.arms.len);
+                const else_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index);
                 if (mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
 
                 var else_lowerer = self.*;
                 else_lowerer.block = else_block;
-                const value = try else_lowerer.lowerExpr(else_expr, locals);
+                const raw_value = try else_lowerer.lowerExpr(else_expr, locals);
+                const value = try else_lowerer.convertValueForFlow(raw_value, result_type, switch_expr.range);
                 try appendOraYieldValues(self.parent.context, else_block, self.parent.location(switch_expr.range), &[_]mlir.MlirValue{value});
             }
 
@@ -1077,33 +1487,573 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn lowerSwitchExprArmCases(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            case_index: *usize,
+            value_expr: ast.ExprId,
+            pattern: ast.SwitchPattern,
+            raw_condition: mlir.MlirValue,
+            range: source.TextRange,
+            locals: *LocalEnv,
+            result_type: mlir.MlirType,
+        ) anyerror!void {
+            switch (pattern) {
+                .Or => |or_pattern| {
+                    for (or_pattern.alternatives) |alternative| {
+                        try @This().lowerSwitchExprArmCases(self, op, case_index, value_expr, alternative, raw_condition, range, locals, result_type);
+                    }
+                },
+                else => {
+                    const case_block = mlir.oraSwitchExprOpGetCaseBlock(op, case_index.*);
+                    if (mlir.oraBlockIsNull(case_block)) return error.MlirOperationCreationFailed;
+
+                    var case_lowerer = self.*;
+                    case_lowerer.block = case_block;
+                    var case_locals = try self.cloneLocals(locals);
+                    try @This().bindAdtMatchPatternValue(&case_lowerer, raw_condition, pattern, range, &case_locals);
+                    const raw_value = try case_lowerer.lowerExpr(value_expr, &case_locals);
+                    const value = try case_lowerer.convertValueForFlow(raw_value, result_type, range);
+                    try appendOraYieldValues(self.parent.context, case_block, self.parent.location(range), &[_]mlir.MlirValue{value});
+                    case_index.* += 1;
+                },
+            }
+        }
+
+        fn lowerErrorUnionMatchExpr(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            switch_expr: ast.SwitchExpr,
+            condition: mlir.MlirValue,
+            locals: *LocalEnv,
+        ) anyerror!?mlir.MlirValue {
+            if (!@This().switchExprUsesErrorUnionMatchPatterns(self, switch_expr)) return null;
+            if (self.parent.typecheck.exprType(switch_expr.condition).kind() != .error_union) return null;
+            return try @This().lowerErrorUnionMatchExprChain(self, expr_id, switch_expr, 0, condition, locals);
+        }
+
+        fn lowerErrorUnionMatchExprChain(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            switch_expr: ast.SwitchExpr,
+            arm_index: usize,
+            condition: mlir.MlirValue,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            if (arm_index >= switch_expr.arms.len) {
+                if (switch_expr.else_expr) |else_expr| {
+                    const result_type = self.parent.lowerExprType(expr_id);
+                    const raw_value = try self.lowerExpr(else_expr, locals);
+                    return self.convertValueForFlow(raw_value, result_type, switch_expr.range);
+                }
+                if (@This().switchPatternsAreExhaustive(
+                    self,
+                    switch_expr.condition,
+                    switch_expr.arms,
+                    switch_expr.else_expr != null,
+                )) {
+                    return self.defaultValue(self.parent.lowerExprType(expr_id), switch_expr.range);
+                }
+                const op = try self.createAggregatePlaceholder("ora.match_expr", switch_expr.range, &.{condition}, self.parent.lowerExprType(expr_id));
+                return appendValueOp(self.block, op);
+            }
+
+            const arm = switch_expr.arms[arm_index];
+            const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, switch_expr.condition, condition, arm.pattern, arm.range)) orelse {
+                const op = try self.createAggregatePlaceholder("ora.match_expr", arm.range, &.{condition}, self.parent.lowerExprType(expr_id));
+                return appendValueOp(self.block, op);
+            };
+            const result_type = self.parent.lowerExprType(expr_id);
+            const op = mlir.oraScfIfOpCreate(self.parent.context, self.parent.location(arm.range), branch_condition, &[_]mlir.MlirType{result_type}, 1, true);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
+
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            var then_locals = try self.cloneLocals(locals);
+            try @This().bindErrorUnionMatchPatternValue(&then_lowerer, condition, arm.pattern, arm.range, &then_locals);
+            const raw_then_value = try then_lowerer.lowerExpr(arm.value, &then_locals);
+            const then_value = try then_lowerer.convertValueForFlow(raw_then_value, result_type, arm.range);
+            try appendScfYieldValues(self.parent.context, then_block, self.parent.location(arm.range), &[_]mlir.MlirValue{then_value});
+
+            var else_lowerer = self.*;
+            else_lowerer.block = else_block;
+            var else_locals = try self.cloneLocals(locals);
+            const raw_else_value = try @This().lowerErrorUnionMatchExprChain(&else_lowerer, expr_id, switch_expr, arm_index + 1, condition, &else_locals);
+            const else_value = try else_lowerer.convertValueForFlow(raw_else_value, result_type, arm.range);
+            try appendScfYieldValues(self.parent.context, else_block, self.parent.location(arm.range), &[_]mlir.MlirValue{else_value});
+
+            return mlir.oraOperationGetResult(op, 0);
+        }
+
+        fn switchUsesErrorUnionMatchPatterns(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt) bool {
+            for (switch_stmt.arms) |arm| {
+                switch (arm.pattern) {
+                    .Ok, .Err, .NamedError => return true,
+                    .Expr => if (@This().matchPatternNamedPayloadlessErrorDeclItem(self, switch_stmt.condition, arm.pattern)) |_| return true,
+                    else => {},
+                }
+            }
+            return false;
+        }
+
+        fn switchExprUsesErrorUnionMatchPatterns(self: *FunctionLowerer, switch_expr: ast.SwitchExpr) bool {
+            for (switch_expr.arms) |arm| {
+                switch (arm.pattern) {
+                    .Ok, .Err, .NamedError => return true,
+                    .Expr => if (@This().matchPatternNamedPayloadlessErrorDeclItem(self, switch_expr.condition, arm.pattern)) |_| return true,
+                    else => {},
+                }
+            }
+            return false;
+        }
+
+        fn lowerErrorUnionMatchCondition(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            condition: mlir.MlirValue,
+            pattern: ast.SwitchPattern,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            switch (pattern) {
+                .Ok => {
+                    const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, self.parent.location(range), condition);
+                    if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+                    const is_error_value = appendValueOp(self.block, is_error);
+                    const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(range), boolType(self.parent.context), 1));
+                    const not_op = mlir.oraArithXorIOpCreate(self.parent.context, self.parent.location(range), is_error_value, true_val);
+                    if (mlir.oraOperationIsNull(not_op)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, not_op);
+                },
+                .Err => {
+                    const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, self.parent.location(range), condition);
+                    if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, is_error);
+                },
+                .NamedError => |named_error| {
+                    const item_id = @This().matchPatternNamedErrorDeclItem(self, condition_expr_id, .{ .NamedError = named_error }) orelse return null;
+
+                    const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, self.parent.location(range), condition);
+                    if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+                    const is_error_value = appendValueOp(self.block, is_error);
+
+                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, defaultIntegerType(self.parent.context));
+                    if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
+                    const raw_error_value = appendValueOp(self.block, raw_error);
+
+                    const expected_error_id = appendValueOp(
+                        self.block,
+                        createIntegerConstant(
+                            self.parent.context,
+                            self.parent.location(range),
+                            defaultIntegerType(self.parent.context),
+                            try self.parent.errorDeclRuntimeIdForItem(item_id),
+                        ),
+                    );
+                    const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(range), cmpPredicate("eq"), raw_error_value, expected_error_id);
+                    if (mlir.oraOperationIsNull(cmp_op)) return error.MlirOperationCreationFailed;
+                    const matches_error = appendValueOp(self.block, cmp_op);
+
+                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(range), is_error_value, matches_error);
+                    if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, and_op);
+                },
+                .Expr => {
+                    const item_id = @This().matchPatternNamedPayloadlessErrorDeclItem(self, condition_expr_id, pattern) orelse return null;
+
+                    const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, self.parent.location(range), condition);
+                    if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+                    const is_error_value = appendValueOp(self.block, is_error);
+
+                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, defaultIntegerType(self.parent.context));
+                    if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
+                    const raw_error_value = appendValueOp(self.block, raw_error);
+
+                    const expected_error_id = appendValueOp(
+                        self.block,
+                        createIntegerConstant(
+                            self.parent.context,
+                            self.parent.location(range),
+                            defaultIntegerType(self.parent.context),
+                            try self.parent.errorDeclRuntimeIdForItem(item_id),
+                        ),
+                    );
+                    const cmp_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(range), cmpPredicate("eq"), raw_error_value, expected_error_id);
+                    if (mlir.oraOperationIsNull(cmp_op)) return error.MlirOperationCreationFailed;
+                    const matches_error = appendValueOp(self.block, cmp_op);
+
+                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(range), is_error_value, matches_error);
+                    if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+                    return appendValueOp(self.block, and_op);
+                },
+                else => return null,
+            }
+        }
+
+        fn matchPatternNamedPayloadlessErrorDeclItem(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            pattern: ast.SwitchPattern,
+        ) ?ast.ItemId {
+            const item_id = @This().matchPatternNamedErrorDeclItem(self, condition_expr_id, pattern) orelse return null;
+            const item = self.parent.file.item(item_id).*;
+            if (item != .ErrorDecl or item.ErrorDecl.parameters.len != 0) return null;
+            return item_id;
+        }
+
+        fn matchPatternNamedErrorDeclItem(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            pattern: ast.SwitchPattern,
+        ) ?ast.ItemId {
+            if (self.parent.typecheck.exprType(condition_expr_id).kind() != .error_union) return null;
+            const expr_id = switch (pattern) {
+                .Expr => |expr_id| expr_id,
+                .NamedError => |named_error| named_error.callee,
+                else => return null,
+            };
+            const binding = self.parent.resolution.expr_bindings[expr_id.index()] orelse return null;
+            const item_id = switch (binding) {
+                .item => |item_id| item_id,
+                else => return null,
+            };
+            const item = self.parent.file.item(item_id).*;
+            if (item != .ErrorDecl) return null;
+
+            for (self.parent.typecheck.exprType(condition_expr_id).errorTypes()) |error_type| {
+                if (std.mem.eql(u8, error_type.name() orelse "", item.ErrorDecl.name)) return item_id;
+            }
+            return null;
+        }
+
+        fn bindAdtMatchPatternValue(
+            self: *FunctionLowerer,
+            condition: mlir.MlirValue,
+            pattern: ast.SwitchPattern,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!void {
+            if (!mlir.oraTypeIsAAdt(mlir.oraValueGetType(condition))) return;
+            const named = switch (pattern) {
+                .NamedError => |named| named,
+                else => return,
+            };
+
+            var any_uses = false;
+            for (named.bindings) |pattern_id| {
+                if (@This().patternNeedsBinding(self, pattern_id)) {
+                    any_uses = true;
+                    break;
+                }
+            }
+            if (!any_uses) return;
+
+            const variant_name = @This().adtPatternVariantName(self, named.callee) orelse return;
+            const payload_type = @This().adtPayloadTypeForVariant(self, mlir.oraValueGetType(condition), variant_name) orelse return;
+            if (mlir.oraTypeIsANone(payload_type)) return;
+
+            const payload = mlir.oraAdtPayloadOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                condition,
+                strRef(variant_name),
+                payload_type,
+            );
+            if (mlir.oraOperationIsNull(payload)) return error.MlirOperationCreationFailed;
+            const aggregate = appendValueOp(self.block, payload);
+
+            const tuple_count = mlir.oraTupleTypeGetNumElements(payload_type);
+            if (tuple_count == named.bindings.len and tuple_count != 0) {
+                for (named.bindings, 0..) |pattern_id, index| {
+                    if (!@This().patternNeedsBinding(self, pattern_id)) continue;
+                    const element_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const extract = mlir.oraTupleExtractOpCreate(
+                        self.parent.context,
+                        self.parent.location(range),
+                        aggregate,
+                        @intCast(index),
+                        element_type,
+                    );
+                    if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
+                    try self.bindPatternValue(pattern_id, appendValueOp(self.block, extract), locals);
+                }
+                return;
+            }
+
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(payload_type);
+            if (field_count != 0 and named.bindings.len == 1) {
+                switch (self.parent.file.pattern(named.bindings[0]).*) {
+                    .StructDestructure => |destructure| {
+                        try @This().bindAdtNamedPayloadDestructure(self, aggregate, destructure, range, locals);
+                        return;
+                    },
+                    else => {},
+                }
+            }
+            if (field_count == named.bindings.len and field_count != 0) {
+                for (named.bindings, 0..) |pattern_id, index| {
+                    if (!@This().patternNeedsBinding(self, pattern_id)) continue;
+                    const field_name = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
+                    const field_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const extract = mlir.oraStructFieldExtractOpCreate(
+                        self.parent.context,
+                        self.parent.location(range),
+                        aggregate,
+                        field_name,
+                        field_type,
+                    );
+                    if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
+                    try self.bindPatternValue(pattern_id, appendValueOp(self.block, extract), locals);
+                }
+                return;
+            }
+
+            if (named.bindings.len == 1) {
+                try self.bindPatternValue(named.bindings[0], aggregate, locals);
+            }
+        }
+
+        fn bindAdtNamedPayloadDestructure(
+            self: *FunctionLowerer,
+            aggregate: mlir.MlirValue,
+            destructure: ast.nodes.StructDestructurePattern,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!void {
+            _ = range;
+            for (destructure.fields) |field| {
+                if (!@This().patternNeedsBinding(self, field.binding)) continue;
+                const field_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[field.binding.index()].type, field.range);
+                const extract = mlir.oraStructFieldExtractOpCreate(
+                    self.parent.context,
+                    self.parent.location(field.range),
+                    aggregate,
+                    strRef(field.name),
+                    field_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
+                try self.bindPatternValue(field.binding, appendValueOp(self.block, extract), locals);
+            }
+        }
+
+        fn adtPatternVariantName(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().adtPatternVariantName(self, group.expr),
+                .Field => |field| field.name,
+                else => null,
+            };
+        }
+
+        fn adtPayloadTypeForVariant(self: *FunctionLowerer, adt_type: mlir.MlirType, variant_name: []const u8) ?mlir.MlirType {
+            _ = self;
+            const count = mlir.oraAdtTypeGetNumVariants(adt_type);
+            for (0..count) |index| {
+                const name_ref = mlir.oraAdtTypeGetVariantName(adt_type, index);
+                if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], variant_name)) {
+                    const payload_type = mlir.oraAdtTypeGetVariantPayloadType(adt_type, index);
+                    if (mlir.oraTypeIsNull(payload_type)) return null;
+                    return payload_type;
+                }
+            }
+            return null;
+        }
+
+        fn bindErrorUnionMatchPatternValue(
+            self: *FunctionLowerer,
+            condition: mlir.MlirValue,
+            pattern: ast.SwitchPattern,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!void {
+            switch (pattern) {
+                .Ok => |pattern_id| {
+                    if (!@This().patternNeedsBinding(self, pattern_id)) return;
+                    const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
+                    if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+                    const value = appendValueOp(self.block, unwrap);
+                    try self.bindPatternValue(pattern_id, value, locals);
+                },
+                .Err => |pattern_id| {
+                    if (!@This().patternNeedsBinding(self, pattern_id)) return;
+                    const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
+                    if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
+                    const value = appendValueOp(self.block, get_error);
+                    try self.bindPatternValue(pattern_id, value, locals);
+                },
+                .NamedError => |named_error| {
+                    var any_uses = false;
+                    for (named_error.bindings) |pattern_id| {
+                        if (@This().patternNeedsBinding(self, pattern_id)) {
+                            any_uses = true;
+                            break;
+                        }
+                    }
+                    if (!any_uses) return;
+
+                    const item_id = switch (self.parent.resolution.expr_bindings[named_error.callee.index()] orelse return) {
+                        .item => |item_id| item_id,
+                        else => return,
+                    };
+                    const error_decl = switch (self.parent.file.item(item_id).*) {
+                        .ErrorDecl => |error_decl| error_decl,
+                        else => return,
+                    };
+
+                    if (named_error.bindings.len == 1) {
+                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[named_error.bindings[0].index()].type, range);
+                        const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, result_type);
+                        if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
+                        const value = appendValueOp(self.block, get_error);
+                        try self.bindPatternValue(named_error.bindings[0], value, locals);
+                        return;
+                    }
+
+                    var field_types: std.ArrayList(mlir.MlirType) = .{};
+                    defer field_types.deinit(self.parent.allocator);
+                    for (error_decl.parameters) |param| {
+                        try field_types.append(self.parent.allocator, self.parent.lowerSemaType(self.parent.typecheck.pattern_types[param.pattern.index()].type, range));
+                    }
+                    const tuple_type = mlir.oraTupleTypeGet(
+                        self.parent.context,
+                        field_types.items.len,
+                        if (field_types.items.len == 0) null else field_types.items.ptr,
+                    );
+                    const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, tuple_type);
+                    if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
+                    const aggregate = appendValueOp(self.block, get_error);
+
+                    for (named_error.bindings, 0..) |pattern_id, index| {
+                        if (!@This().patternNeedsBinding(self, pattern_id)) continue;
+                        const element_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                        const extract = mlir.oraTupleExtractOpCreate(
+                            self.parent.context,
+                            self.parent.location(range),
+                            aggregate,
+                            @intCast(index),
+                            element_type,
+                        );
+                        if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
+                        const field_value = appendValueOp(self.block, extract);
+                        try self.bindPatternValue(pattern_id, field_value, locals);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        fn patternNeedsBinding(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            return @This().patternHasUses(self, pattern_id) or @This().patternBindsUsableName(self, pattern_id);
+        }
+
+        fn patternBindsUsableName(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| !std.mem.eql(u8, name.name, "_"),
+                .StructDestructure => |destructure| blk: {
+                    for (destructure.fields) |field| {
+                        if (@This().patternBindsUsableName(self, field.binding)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                else => false,
+            };
+        }
+
+        fn patternHasUses(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
+            switch (self.parent.file.pattern(pattern_id).*) {
+                .StructDestructure => |destructure| {
+                    for (destructure.fields) |field| {
+                        if (@This().patternHasUses(self, field.binding)) return true;
+                    }
+                },
+                else => {},
+            }
+            for (self.parent.resolution.expr_bindings) |binding| {
+                if (binding) |resolved| switch (resolved) {
+                    .pattern => |bound_pattern_id| if (bound_pattern_id == pattern_id) return true,
+                    else => {},
+                };
+            }
+            return false;
+        }
+
         pub fn switchPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            return @This().switchPatternValueStrict(self, expr_id) catch null;
+        }
+
+        fn switchPatternValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?i64 {
+            switch (self.parent.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| return support.parseIntLiteral(literal.text),
+                .BoolLiteral => |literal| return if (literal.value) 1 else 0,
+                else => {},
+            }
             if (self.parent.const_eval.values[expr_id.index()]) |value| {
                 return switch (value) {
                     .integer => |integer| integer.toInt(i64) catch null,
                     .boolean => |boolean| if (boolean) 1 else 0,
-                    else => @This().enumPatternValue(self, expr_id),
+                    else => try @This().enumPatternValueStrict(self, expr_id),
                 };
             }
-            return @This().enumPatternValue(self, expr_id);
+            return try @This().enumPatternValueStrict(self, expr_id);
         }
 
         fn enumPatternValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            return @This().enumPatternValueStrict(self, expr_id) catch null;
+        }
+
+        fn enumPatternValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?i64 {
             const expr = self.parent.file.expression(expr_id).*;
             return switch (expr) {
-                .Group => |group| @This().enumPatternValue(self, group.expr),
+                .Group => |group| try @This().enumPatternValueStrict(self, group.expr),
                 .Field => |field| blk: {
                     const base_type = self.parent.typecheck.exprType(field.base);
                     const enum_name = base_type.name() orelse break :blk null;
+                    if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                        var next_value: i64 = 0;
+                        for (instantiated.variants) |variant| {
+                            const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
+                                .integer => |literal| literal,
+                                else => next_value,
+                            } else next_value;
+                            if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                            next_value = resolved_value + 1;
+                        }
+                        break :blk null;
+                    }
                     const item_id = self.parent.item_index.lookup(enum_name) orelse break :blk null;
                     if (self.parent.file.item(item_id).* != .Enum) break :blk null;
                     const enum_item = self.parent.file.item(item_id).Enum;
-                    for (enum_item.variants, 0..) |variant, index| {
-                        if (std.mem.eql(u8, variant.name, field.name)) break :blk @intCast(index);
+                    var next_value: i64 = 0;
+                    for (enum_item.variants) |variant| {
+                        const resolved_value = if (variant.value) |value_expr|
+                            try @This().enumPatternIntegerValueStrict(self, value_expr)
+                        else
+                            next_value;
+                        if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                        next_value = resolved_value + 1;
                     }
                     break :blk null;
                 },
                 else => null,
+            };
+        }
+
+        fn enumPatternIntegerValue(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            return @This().enumPatternIntegerValueStrict(self, expr_id) catch null;
+        }
+
+        fn enumPatternIntegerValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return error.EnumPatternValueNotConstant;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch error.EnumPatternValueOutOfRange,
+                .boolean => |boolean| if (boolean) 1 else 0,
+                else => error.EnumPatternValueNotInteger,
             };
         }
     };

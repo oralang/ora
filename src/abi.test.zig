@@ -257,3 +257,198 @@ test "abi type ids are stable across repeated generation for same source" {
 
     try testing.expectEqualStrings(json_a, json_b);
 }
+
+test "abi projects public Result return as payload output" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure();
+        \\contract MatchContract {
+        \\    pub fn quote(flag: bool, amount: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(amount);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const quote = findCallable(contract_abi, .function, "quote") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), quote.inputs.len);
+    try testing.expectEqual(@as(usize, 1), quote.outputs.len);
+
+    const output_type = contract_abi.findType(quote.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(output_type.wire_type != null);
+    try testing.expectEqualStrings("uint256", output_type.wire_type.?);
+}
+
+test "abi exposes supported public Result input as tagged tuple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure();
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,uint256)", input_type.wire_type.?);
+}
+
+test "abi exposes payload-carrying public Result input as tagged triple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure(code: u256);
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,uint256,uint256)", input_type.wire_type.?);
+}
+
+test "abi exposes multi-word public Result input with static payload layouts" {
+    const allocator = testing.allocator;
+    const source =
+        \\struct Pair {
+        \\    left: u256,
+        \\    right: u256,
+        \\}
+        \\error Failure(code: u256, owner: address);
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<Pair, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.left,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,(uint256,uint256),(uint256,address))", input_type.wire_type.?);
+}
+
+test "abi exposes dynamic bytes public Result input as tagged tuple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure();
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<bytes, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => 1,
+        \\            Err(err) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,bytes)", input_type.wire_type.?);
+}
+
+test "abi exposes dynamic bytes public Result input with payload error as tagged triple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure(code: u256);
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<bytes, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => 1,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,bytes,uint256)", input_type.wire_type.?);
+}
+
+test "abi exposes dynamic slice public Result input with payload error as tagged triple" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure(code: u256);
+        \\contract MatchContract {
+        \\    pub fn run(value: Result<slice[u256], Failure>) -> u256 {
+        \\        let total = 0;
+        \\        match (value) {
+        \\            Ok(inner) => {
+        \\                for (inner) |item| {
+        \\                    total = total + item;
+        \\                }
+        \\            },
+        \\            Err(err) => {
+        \\                total = err.code;
+        \\            }
+        \\        }
+        \\        return total;
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const run = findCallable(contract_abi, .function, "run") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), run.inputs.len);
+
+    const input_type = contract_abi.findType(run.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(input_type.wire_type != null);
+    try testing.expectEqualStrings("(bool,uint256[],uint256)", input_type.wire_type.?);
+}

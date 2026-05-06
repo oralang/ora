@@ -1,0 +1,32 @@
+error Failure;
+
+pub contract ResultConstructors {
+    pub fn make_ok(value: u256) -> Result<u256, Failure> {
+        return Ok(value);
+    }
+
+    pub fn make_err(flag: bool) -> Result<u256, Failure> {
+        if (flag) {
+            return Err(Failure());
+        }
+        return Ok(1);
+    }
+
+    pub fn unwrap_or_zero(flag: bool, value: u256) -> u256 {
+        if (flag) {
+            return 0;
+        }
+        let maybe: Result<u256, Failure> = Ok(value);
+        return match (maybe) {
+            Ok(inner) => inner,
+            Err(err) => 0,
+        };
+    }
+
+    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        return match (value) {
+            Ok(inner) => inner,
+            Err(err) => 0,
+        };
+    }
+}

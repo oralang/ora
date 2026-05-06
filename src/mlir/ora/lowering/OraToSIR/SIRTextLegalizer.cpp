@@ -320,7 +320,9 @@ namespace mlir
                             // Lowered/aliasable ops.
                             s.insert("sir.addptr");
                             s.insert("sir.load");
+                            s.insert("sir.load8");
                             s.insert("sir.store");
+                            s.insert("sir.store8");
                             s.insert("sir.bitcast");
                             s.insert("sir.error.decl");
 
@@ -512,11 +514,6 @@ namespace mlir
                                 if (isa<sir::StringConstantOp>(op))
                                 {
                                     report(&op, "string.constant must be lowered to data segments before SIR text emission");
-                                    break;
-                                }
-                                if (isa<sir::Load8Op, sir::Store8Op>(op))
-                                {
-                                    report(&op, "load8/store8 are not directly representable in SIR text; lower to addptr + mload/mstore");
                                     break;
                                 }
                                 if (!isAllowedSIRTextOp(op))

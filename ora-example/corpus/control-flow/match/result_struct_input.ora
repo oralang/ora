@@ -1,0 +1,15 @@
+struct Pair {
+    left: u256,
+    right: u256,
+}
+
+error Failure(code: u256, owner: address);
+
+pub contract ResultStructInput {
+    pub fn consume(value: Result<Pair, Failure>) -> u256 {
+        return match (value) {
+            Ok(inner) => inner.left,
+            Err(err) => err.code,
+        };
+    }
+}

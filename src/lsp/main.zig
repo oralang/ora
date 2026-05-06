@@ -1462,6 +1462,9 @@ fn completionKindToLsp(kind: completion_api.Kind) types.CompletionItemKind {
         .bitfield_decl => .Struct,
         .enum_decl => .Enum,
         .enum_member => .EnumMember,
+        .trait_decl => .Interface,
+        .impl_decl => .Class,
+        .type_alias => .Struct,
         .event => .Event,
         .error_decl => .Class,
     };

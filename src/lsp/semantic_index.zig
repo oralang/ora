@@ -16,6 +16,9 @@ pub const SymbolKind = enum {
     bitfield_decl,
     enum_decl,
     enum_member,
+    trait_decl,
+    impl_decl,
+    type_alias,
     event,
     error_decl,
 };
@@ -212,10 +215,40 @@ fn collectItem(
             }
         },
         .Enum => |enum_decl| {
-            const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.range, parent, null);
+            const enum_detail = try formatEnumDetailAlloc(builder.allocator, file, enum_decl);
+            const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.range, parent, enum_detail);
             for (enum_decl.variants) |variant| {
-                _ = try builder.addSymbol(variant.name, .enum_member, variant.range, enum_index, null);
+                const variant_detail = try formatEnumVariantDetailAlloc(builder.allocator, file, variant);
+                _ = try builder.addSymbol(variant.name, .enum_member, variant.range, enum_index, variant_detail);
             }
+        },
+        .Trait => |trait_decl| {
+            const trait_index = try builder.addSymbol(trait_decl.name, .trait_decl, trait_decl.range, parent, null);
+            for (trait_decl.methods) |method| {
+                const method_detail = try formatTraitMethodDetailAlloc(builder.allocator, file, method);
+                const method_index = try builder.addSymbol(method.name, .method, method.range, trait_index, method_detail);
+                for (method.parameters) |parameter| {
+                    const parameter_name = patternName(file, parameter.pattern) orelse continue;
+                    const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                    _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, method_index, parameter_type);
+                }
+            }
+            if (trait_decl.ghost_block) |ghost_id| {
+                try collectItem(builder, file, ghost_id, trait_index, false);
+            }
+        },
+        .Impl => |impl_decl| {
+            const impl_name = try std.fmt.allocPrint(builder.allocator, "impl {s} for {s}", .{ impl_decl.trait_name, impl_decl.target_name });
+            defer builder.allocator.free(impl_name);
+            const impl_detail = try std.fmt.allocPrint(builder.allocator, "for {s}", .{impl_decl.target_name});
+            const impl_index = try builder.addSymbolWithSelectionName(impl_name, impl_decl.trait_name, .impl_decl, impl_decl.range, parent, impl_detail);
+            for (impl_decl.methods) |method_id| {
+                try collectItem(builder, file, method_id, impl_index, true);
+            }
+        },
+        .TypeAlias => |alias_decl| {
+            const alias_detail = try formatTypeExprAlloc(builder.allocator, file, alias_decl.target_type);
+            _ = try builder.addSymbol(alias_decl.name, .type_alias, alias_decl.range, parent, alias_detail);
         },
         .LogDecl => |log_decl| {
             const log_detail = try formatLogDetailAlloc(builder.allocator, file, log_decl);
@@ -418,6 +451,120 @@ fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFil
     return buffer.toOwnedSlice(allocator);
 }
 
+fn formatEnumDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, enum_decl: compiler.ast.EnumItem) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    if (enum_decl.template_parameters.len > 0) {
+        try writer.writeByte('(');
+        for (enum_decl.template_parameters, 0..) |parameter, i| {
+            if (i > 0) try writer.writeAll(", ");
+            const parameter_name = patternName(file, parameter.pattern) orelse "_";
+            try writer.print("{s}: ", .{parameter_name});
+            const parameter_type = try formatTypeExprAlloc(allocator, file, parameter.type_expr);
+            defer allocator.free(parameter_type);
+            try writer.writeAll(parameter_type);
+        }
+        try writer.writeByte(')');
+    }
+
+    if (enum_decl.base_type) |base_type| {
+        const base_text = try formatTypeExprAlloc(allocator, file, base_type);
+        defer allocator.free(base_text);
+        try writer.print(": {s}", .{base_text});
+    }
+
+    return buffer.toOwnedSlice(allocator);
+}
+
+fn formatEnumVariantDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, variant: compiler.ast.EnumVariant) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    switch (variant.payload) {
+        .none => {},
+        .positional => |payload| {
+            try writer.writeByte('(');
+            for (payload, 0..) |type_expr, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeTypeExpr(writer, file, type_expr);
+            }
+            try writer.writeByte(')');
+        },
+        .named => |fields| {
+            try writer.writeAll("{ ");
+            for (fields, 0..) |field, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{s}: ", .{field.name});
+                try writeTypeExpr(writer, file, field.type_expr);
+            }
+            try writer.writeAll(" }");
+        },
+    }
+
+    if (variant.value) |value_expr| {
+        try writer.writeAll(" = ");
+        try writeExprText(writer, file, value_expr);
+    }
+
+    return buffer.toOwnedSlice(allocator);
+}
+
+fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, method: anytype) ![]u8 {
+    var buffer = std.ArrayList(u8){};
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    try writer.writeByte('(');
+    var wrote_parameter = false;
+    if (method.receiver_kind != .none) {
+        try writer.writeAll("self");
+        wrote_parameter = true;
+    }
+    for (method.parameters) |parameter| {
+        if (wrote_parameter) try writer.writeAll(", ");
+        const parameter_name = patternName(file, parameter.pattern) orelse "_";
+        try writer.print("{s}: ", .{parameter_name});
+        const parameter_type = try formatTypeExprAlloc(allocator, file, parameter.type_expr);
+        defer allocator.free(parameter_type);
+        try writer.writeAll(parameter_type);
+        wrote_parameter = true;
+    }
+    try writer.writeByte(')');
+
+    if (method.return_type) |return_type| {
+        const return_type_text = try formatTypeExprAlloc(allocator, file, return_type);
+        defer allocator.free(return_type_text);
+        try writer.writeAll(" -> ");
+        try writer.writeAll(return_type_text);
+    }
+
+    if (method.errors.len > 0) {
+        try writer.writeAll(" errors(");
+        for (method.errors, 0..) |error_name, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(error_name);
+        }
+        try writer.writeByte(')');
+    }
+
+    for (method.clauses) |clause| {
+        try writer.writeByte('\n');
+        try writer.writeAll(switch (clause.kind) {
+            .requires => "    requires(",
+            .guard => "    guard(",
+            .ensures => "    ensures(",
+            .invariant => "    invariant(",
+        });
+        try writeExprText(writer, file, clause.expr);
+        try writer.writeByte(')');
+    }
+
+    return buffer.toOwnedSlice(allocator);
+}
+
 fn formatLogDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, log_decl: compiler.ast.LogDeclItem) ![]u8 {
     var buffer = std.ArrayList(u8){};
     errdefer buffer.deinit(allocator);
@@ -554,6 +701,9 @@ pub fn toLspKind(kind: SymbolKind) u8 {
         .bitfield_decl => 23,
         .enum_decl => 10,
         .enum_member => 22,
+        .trait_decl => 11,
+        .impl_decl => 5,
+        .type_alias => 23,
         .event => 24,
         .error_decl => 5,
     };
@@ -604,6 +754,18 @@ const SymbolBuilder = struct {
         parent: ?usize,
         detail: ?[]u8,
     ) !usize {
+        return self.addSymbolWithSelectionName(name, name, kind, range, parent, detail);
+    }
+
+    fn addSymbolWithSelectionName(
+        self: *SymbolBuilder,
+        name: []const u8,
+        selection_name: []const u8,
+        kind: SymbolKind,
+        range: compiler.TextRange,
+        parent: ?usize,
+        detail: ?[]u8,
+    ) !usize {
         const name_copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_copy);
         errdefer if (detail) |detail_text| self.allocator.free(detail_text);
@@ -616,7 +778,7 @@ const SymbolBuilder = struct {
             .doc_comment = doc,
             .kind = kind,
             .range = self.textRangeToRange(range),
-            .selection_range = self.textRangeToSelectionRange(range, name),
+            .selection_range = self.textRangeToSelectionRange(range, selection_name),
             .parent = parent,
         });
 
@@ -722,7 +884,7 @@ const SymbolBuilder = struct {
         const start: usize = @intCast(@min(range.start, self.source_text.len));
         const end: usize = @intCast(@min(range.end, self.source_text.len));
         if (start <= end and end <= self.source_text.len) {
-            if (std.mem.indexOf(u8, self.source_text[start..end], name)) |relative| {
+            if (indexOfIdentifier(self.source_text[start..end], name)) |relative| {
                 const relative_u32 = std.math.cast(u32, relative) orelse std.math.maxInt(u32);
                 name_start = std.math.add(u32, range.start, relative_u32) catch range.start;
             }
@@ -737,3 +899,19 @@ const SymbolBuilder = struct {
         return selection;
     }
 };
+
+fn indexOfIdentifier(haystack: []const u8, needle: []const u8) ?usize {
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, offset, needle)) |index| {
+        const before_ok = index == 0 or !isIdentChar(haystack[index - 1]);
+        const after_index = index + needle.len;
+        const after_ok = after_index >= haystack.len or !isIdentChar(haystack[after_index]);
+        if (before_ok and after_ok) return index;
+        offset = index + needle.len;
+    }
+    return null;
+}
+
+fn isIdentChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}

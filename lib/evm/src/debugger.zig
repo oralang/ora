@@ -2,6 +2,7 @@
 /// Wraps the EVM with breakpoints, statement-level stepping, and state inspection.
 /// Does NOT modify evm.zig or frame.zig — it drives them externally via step().
 const std = @import("std");
+const primitives = @import("voltaire");
 const source_map = @import("source_map.zig");
 const SourceMap = source_map.SourceMap;
 const debug_info_mod = @import("debug_info.zig");
@@ -9,6 +10,7 @@ const DebugInfo = debug_info_mod.DebugInfo;
 const opcode_utils = @import("opcode.zig");
 const evm_mod = @import("evm.zig");
 const evm_config = @import("evm_config.zig");
+const debug_session = @import("debug_session.zig");
 
 pub fn Debugger(comptime config: evm_config.EvmConfig) type {
     const EvmType = evm_mod.Evm(config);
@@ -22,6 +24,31 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         source_text: []const u8,
         source_lines: []const LineSlice,
         breakpoints: std.AutoHashMap(u32, void),
+        /// Active storage watchpoints. Checked after every opcode; if any
+        /// slot has changed since the last check, execution pauses with
+        /// stop_reason == .watchpoint_hit and `last_watchpoint_id` is
+        /// set to the triggering id.
+        watchpoints: std.ArrayList(Watchpoint),
+        next_watchpoint_id: u32,
+        last_watchpoint_id: ?u32,
+        /// Set of source-map entry idx values whose statement boundary the
+        /// debugger should ignore: their op_meta is "invalid" / "sir.invalid"
+        /// but another entry in the same statement_id surfaces a real op.
+        /// Built once at the time debug_info is bound; queried in O(1) on
+        /// every step. Empty when debug_info isn't set.
+        ignored_invalid_idx: std.AutoHashMap(u32, void),
+        /// Per-source-line statement-boundary hit counts. Bumped on every
+        /// distinct statement-line transition; never reset across the
+        /// session. Exposed via `getLineHits` / `getLineHitsTopN` for the
+        /// `:cov` command. Lines that don't host any statement boundary
+        /// (whitespace, comments) never appear here.
+        line_hits: std.AutoHashMap(u32, u32),
+        /// Per-source-line cumulative gas spent. Each opcode's gas cost
+        /// is attributed to the source line of the most recent statement
+        /// boundary (`last_statement_line`). Surfaces via `getLineGas`
+        /// and the `:gascov` command. Negative deltas (refunds) are
+        /// clamped to 0 to avoid wraparound.
+        line_gas: std.AutoHashMap(u32, u64),
         state: State,
         stop_reason: StopReason,
         allocator: std.mem.Allocator,
@@ -33,6 +60,17 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         last_statement_line: ?u32,
         last_statement_sir_line: ?u32,
         last_error_name: ?[]const u8,
+        /// Set when a best-effort instrumentation path (gas
+        /// accounting, watchpoint polling) hit a recoverable error
+        /// the user wouldn't otherwise see. The TUI surfaces this
+        /// as a `[degraded]` suffix on the status line so users
+        /// don't quietly trust stale coverage / gas / watchpoint
+        /// state. Sticky once set; cleared only by session
+        /// rebuild.
+        instrumentation_degraded: bool,
+        /// Last reason the degraded flag was set, for diagnostics.
+        /// Borrowed from a static string; never freed.
+        instrumentation_degraded_reason: ?[]const u8,
 
         pub const State = enum {
             paused,
@@ -43,11 +81,26 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         pub const StopReason = enum {
             not_started,
             breakpoint_hit,
+            watchpoint_hit,
             step_complete,
             execution_finished,
             execution_reverted,
             execution_error,
             step_limit_reached,
+        };
+
+        /// A storage watchpoint pauses execution when the value at
+        /// `(address, slot)` changes since the watchpoint was last
+        /// observed. `last_seen` is the value at the moment the
+        /// watchpoint was added (or last serviced); `name` is the
+        /// human-readable label rendered in `:info watch` and the
+        /// watchpoint-hit status line.
+        pub const Watchpoint = struct {
+            id: u32,
+            slot: u256,
+            address: primitives.Address,
+            last_seen: u256,
+            name: []const u8,
         };
 
         pub const LineSlice = struct {
@@ -77,15 +130,23 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .source_text = source_text,
                 .source_lines = lines,
                 .breakpoints = std.AutoHashMap(u32, void).init(allocator),
+                .watchpoints = .{},
+                .next_watchpoint_id = 1,
+                .last_watchpoint_id = null,
+                .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
+                .line_hits = std.AutoHashMap(u32, u32).init(allocator),
+                .line_gas = std.AutoHashMap(u32, u64).init(allocator),
                 .state = .paused,
                 .stop_reason = .not_started,
                 .allocator = allocator,
                 .steps_executed = 0,
-                .max_steps = 10_000_000,
+                .max_steps = debug_session.kDefaultMaxSteps,
                 .last_statement_id = null,
                 .last_statement_line = null,
                 .last_statement_sir_line = null,
                 .last_error_name = null,
+                .instrumentation_degraded = false,
+                .instrumentation_degraded_reason = null,
             };
             self.updateLastStatementLine();
             return self;
@@ -93,6 +154,11 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
         pub fn deinit(self: *Self) void {
             self.breakpoints.deinit();
+            self.ignored_invalid_idx.deinit();
+            self.line_hits.deinit();
+            self.line_gas.deinit();
+            for (self.watchpoints.items) |wp| self.allocator.free(wp.name);
+            self.watchpoints.deinit(self.allocator);
             if (self.debug_info) |*debug_info| debug_info.deinit();
             self.src_map.deinit();
             self.allocator.free(self.source_lines);
@@ -107,7 +173,55 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         ) !Self {
             var self = try Self.init(allocator, evm, src_map, source_text);
             self.debug_info = debug_info;
+            try self.buildIgnoredInvalidIdxSet();
             return self;
+        }
+
+        /// Walks the source map once and records every entry whose op_meta
+        /// is "invalid" / "sir.invalid" *and* shares its statement_id with
+        /// at least one entry whose op is a real opcode. Step-time we then
+        /// just check `ignored_invalid_idx.contains(idx)` — O(1) per step
+        /// instead of the previous O(N) scan whose inner getOpMetaForIdx
+        /// itself was O(N) (so O(N²) overall).
+        fn buildIgnoredInvalidIdxSet(self: *Self) !void {
+            const debug_info = self.debug_info orelse return;
+            // Bucket entries by statement_id, splitting into invalid-op idx
+            // and "has at least one real op" flag.
+            const ScratchEntry = struct {
+                invalid_idxs: std.ArrayList(u32) = .{},
+                has_real_op: bool = false,
+            };
+            var by_stmt = std.AutoHashMap(u32, ScratchEntry).init(self.allocator);
+            defer {
+                var it = by_stmt.valueIterator();
+                while (it.next()) |bucket| bucket.invalid_idxs.deinit(self.allocator);
+                by_stmt.deinit();
+            }
+
+            for (self.src_map.entries) |entry| {
+                const stmt_id = entry.statement_id orelse continue;
+                const idx = entry.idx orelse continue;
+                const op_meta = debug_info.getOpMetaForIdx(idx) orelse continue;
+                const is_invalid = std.mem.eql(u8, op_meta.op, "invalid") or
+                    std.mem.eql(u8, op_meta.op, "sir.invalid");
+
+                const gop = try by_stmt.getOrPut(stmt_id);
+                if (!gop.found_existing) gop.value_ptr.* = .{};
+                const bucket = gop.value_ptr;
+                if (is_invalid) {
+                    try bucket.invalid_idxs.append(self.allocator, idx);
+                } else {
+                    bucket.has_real_op = true;
+                }
+            }
+
+            var it = by_stmt.valueIterator();
+            while (it.next()) |bucket| {
+                if (!bucket.has_real_op) continue;
+                for (bucket.invalid_idxs.items) |idx| {
+                    try self.ignored_invalid_idx.put(idx, {});
+                }
+            }
         }
 
         // ====================================================================
@@ -153,27 +267,286 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         // ====================================================================
+        // Watchpoints
+        // ====================================================================
+
+        /// Watch a raw storage slot at the current frame's address.
+        /// Returns the watchpoint id so callers can remove it later.
+        pub fn addWatchpointBySlot(self: *Self, slot: u256) !u32 {
+            const frame = self.evm.getCurrentFrame() orelse return error.NoActiveFrame;
+            const current_value = try self.evm.storage.get(frame.address, slot);
+            const id = self.next_watchpoint_id;
+            self.next_watchpoint_id += 1;
+
+            const buf = try std.fmt.allocPrint(self.allocator, "slot 0x{x}", .{slot});
+            errdefer self.allocator.free(buf);
+            try self.watchpoints.append(self.allocator, .{
+                .id = id,
+                .slot = slot,
+                .address = frame.address,
+                .last_seen = current_value,
+                .name = buf,
+            });
+            return id;
+        }
+
+        /// Watch a source-level binding by name. Resolves to its
+        /// runtime storage slot via the active scope's debug info.
+        /// Returns null if the binding isn't visible at the current op
+        /// or isn't backed by a writable storage slot.
+        pub fn addWatchpointByBindingName(self: *Self, name: []const u8) !?u32 {
+            const binding = try self.findVisibleBindingByName(self.allocator, name) orelse return null;
+            if (!std.mem.eql(u8, binding.runtime_kind, "storage_field")) return null;
+            const location_kind = binding.runtime_location_kind orelse return null;
+            if (!std.mem.eql(u8, location_kind, "storage_root")) return null;
+            const slot64 = binding.runtime_location_slot orelse return null;
+            const slot: u256 = slot64;
+
+            const frame = self.evm.getCurrentFrame() orelse return error.NoActiveFrame;
+            const current_value = try self.evm.storage.get(frame.address, slot);
+            const id = self.next_watchpoint_id;
+            self.next_watchpoint_id += 1;
+
+            const buf = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(buf);
+            try self.watchpoints.append(self.allocator, .{
+                .id = id,
+                .slot = slot,
+                .address = frame.address,
+                .last_seen = current_value,
+                .name = buf,
+            });
+            return id;
+        }
+
+        /// Remove a watchpoint by id. Returns true if a watchpoint with
+        /// that id existed.
+        pub fn removeWatchpoint(self: *Self, id: u32) bool {
+            for (self.watchpoints.items, 0..) |wp, i| {
+                if (wp.id != id) continue;
+                self.allocator.free(wp.name);
+                _ = self.watchpoints.orderedRemove(i);
+                return true;
+            }
+            return false;
+        }
+
+        pub fn getWatchpoints(self: *const Self) []const Watchpoint {
+            return self.watchpoints.items;
+        }
+
+        pub fn lastWatchpointId(self: *const Self) ?u32 {
+            return self.last_watchpoint_id;
+        }
+
+        /// Hit count for a single source line; `null` if the line never
+        /// had a statement boundary visited at runtime.
+        pub fn getLineHits(self: *const Self, line: u32) ?u32 {
+            return self.line_hits.get(line);
+        }
+
+        pub const LineHit = struct {
+            line: u32,
+            count: u32,
+        };
+
+        /// Returns the `n` hottest lines by hit count, sorted descending.
+        /// Caller owns the returned slice.
+        pub fn getLineHitsTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineHit {
+            var entries: std.ArrayList(LineHit) = .{};
+            errdefer entries.deinit(allocator);
+            try entries.ensureTotalCapacity(allocator, self.line_hits.count());
+            var it = self.line_hits.iterator();
+            while (it.next()) |kv| {
+                try entries.append(allocator, .{ .line = kv.key_ptr.*, .count = kv.value_ptr.* });
+            }
+            const items = entries.items;
+            std.sort.heap(LineHit, items, {}, struct {
+                fn lessThan(_: void, a: LineHit, b: LineHit) bool {
+                    if (a.count != b.count) return a.count > b.count;
+                    return a.line < b.line;
+                }
+            }.lessThan);
+            if (items.len > n) {
+                const trimmed = try allocator.dupe(LineHit, items[0..n]);
+                entries.deinit(allocator);
+                return trimmed;
+            }
+            return entries.toOwnedSlice(allocator);
+        }
+
+        /// Total distinct lines that have been hit at least once.
+        pub fn lineHitsCount(self: *const Self) usize {
+            return self.line_hits.count();
+        }
+
+        /// Cumulative gas spent on a single source line; `null` if no
+        /// gas-spending opcode has been attributed to this line yet.
+        pub fn getLineGas(self: *const Self, line: u32) ?u64 {
+            return self.line_gas.get(line);
+        }
+
+        pub const LineGas = struct {
+            line: u32,
+            gas: u64,
+        };
+
+        /// Returns the `n` lines with the most cumulative gas spent,
+        /// sorted descending. Caller owns the returned slice.
+        pub fn getLineGasTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineGas {
+            var entries: std.ArrayList(LineGas) = .{};
+            errdefer entries.deinit(allocator);
+            try entries.ensureTotalCapacity(allocator, self.line_gas.count());
+            var it = self.line_gas.iterator();
+            while (it.next()) |kv| {
+                try entries.append(allocator, .{ .line = kv.key_ptr.*, .gas = kv.value_ptr.* });
+            }
+            const items = entries.items;
+            std.sort.heap(LineGas, items, {}, struct {
+                fn lessThan(_: void, a: LineGas, b: LineGas) bool {
+                    if (a.gas != b.gas) return a.gas > b.gas;
+                    return a.line < b.line;
+                }
+            }.lessThan);
+            if (items.len > n) {
+                const trimmed = try allocator.dupe(LineGas, items[0..n]);
+                entries.deinit(allocator);
+                return trimmed;
+            }
+            return entries.toOwnedSlice(allocator);
+        }
+
+        /// Total distinct lines that have been attributed any gas cost.
+        pub fn lineGasCount(self: *const Self) usize {
+            return self.line_gas.count();
+        }
+
+        /// True iff a best-effort instrumentation path (gas
+        /// accounting, watchpoint polling) failed at any point in
+        /// this session. Sticky once set; cleared only by session
+        /// rebuild (`Session.init`). Surfaced by the TUI as a
+        /// `[degraded]` suffix on the status line so users don't
+        /// quietly trust stale displayed state.
+        pub fn instrumentationDegraded(self: *const Self) bool {
+            return self.instrumentation_degraded;
+        }
+
+        /// Last reason `instrumentation_degraded` was raised.
+        /// Borrowed from a static string, never freed.
+        pub fn instrumentationDegradedReason(self: *const Self) ?[]const u8 {
+            return self.instrumentation_degraded_reason;
+        }
+
+        fn markInstrumentationDegraded(self: *Self, reason: []const u8) void {
+            self.instrumentation_degraded = true;
+            self.instrumentation_degraded_reason = reason;
+        }
+
+        /// True iff the last executeOneOpcode pausing was a watchpoint
+        /// trigger. The stepping loops use this to short-circuit out of
+        /// their drive loop and surface the pause to the caller.
+        fn pausedOnWatchpoint(self: *const Self) bool {
+            return self.state == .paused and self.stop_reason == .watchpoint_hit;
+        }
+
+        /// Sample every watchpoint and return the id of the first one
+        /// whose value has changed since the last sample. Updates
+        /// `last_seen` on every watchpoint regardless. Cost is one
+        /// `storage.get` per watchpoint per call.
+        fn pollWatchpoints(self: *Self) !?u32 {
+            var triggered: ?u32 = null;
+            for (self.watchpoints.items) |*wp| {
+                const current_value = try self.evm.storage.get(wp.address, wp.slot);
+                if (current_value != wp.last_seen) {
+                    if (triggered == null) triggered = wp.id;
+                    wp.last_seen = current_value;
+                }
+            }
+            return triggered;
+        }
+
+        // ====================================================================
         // Stepping commands
         // ====================================================================
 
-        /// Step In: execute until the source line changes (at any call depth).
-        /// Enters function calls.
-        pub fn stepIn(self: *Self) !void {
-            if (self.isHalted()) return;
+        /// Stop conditions for the unified `runUntil` engine. Each
+        /// public stepping method is a thin wrapper that picks one
+        /// of these and lets `runUntil` drive the loop.
+        const StopCondition = union(enum) {
+            /// Stop on the next statement-boundary transition,
+            /// regardless of call depth.
+            step_in: ?StatementKey,
+            /// Stop on the next statement-boundary transition at
+            /// the original or shallower call depth.
+            step_over: struct { start_statement: ?StatementKey, start_depth: usize },
+            /// Stop at the first statement boundary after returning
+            /// from the current frame (call_depth < start_depth).
+            step_out: struct { start_depth: usize },
+            /// Run until a breakpoint at a statement boundary or
+            /// halt. Initial opcode runs unguarded so a `:c` from
+            /// an existing breakpoint doesn't immediately re-fire.
+            continue_,
+            /// Execute exactly one opcode then pause.
+            step_opcode,
+        };
 
-            const start_statement = self.currentStatementKey();
+        /// Single drive loop for every stepping mode. Each public
+        /// step method is a 3–5 line wrapper that builds a
+        /// `StopCondition` and delegates here. Shared concerns
+        /// (running flag, step-cap, halt/watchpoint detection,
+        /// step-limit_reached fallback, post-pause stop_reason)
+        /// live in one place so a future "step to next loop
+        /// iteration" / "step to next call site" mode plugs in
+        /// without duplicating the harness.
+        fn runUntil(self: *Self, condition: StopCondition) !void {
+            if (self.isHalted()) return;
+            self.state = .running;
             self.steps_executed = 0;
 
-            while (true) {
+            // continue_ runs the first opcode unguarded — otherwise
+            // a continue from a paused-on-breakpoint state would
+            // re-fire the same breakpoint immediately.
+            const skip_first_breakpoint_check = condition == .continue_;
+            if (skip_first_breakpoint_check) {
                 try self.executeOneOpcode();
-                if (self.isHalted()) return;
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
+            }
+
+            while (true) {
                 if (self.steps_executed >= self.max_steps) {
                     self.stop_reason = .step_limit_reached;
                     self.state = .paused;
                     return;
                 }
 
-                if (self.currentStatementKeyChanged(start_statement)) {
+                // Pre-step breakpoint check (only for continue_).
+                if (condition == .continue_) {
+                    const pc = self.getPC();
+                    if (self.breakpoints.contains(pc) and self.isAtStatementBoundary()) {
+                        self.stop_reason = .breakpoint_hit;
+                        self.state = .paused;
+                        return;
+                    }
+                }
+
+                try self.executeOneOpcode();
+                if (self.isHalted() or self.pausedOnWatchpoint()) return;
+
+                // Per-mode post-step check.
+                const should_stop = switch (condition) {
+                    .step_in => |start_stmt| self.currentStatementKeyChanged(start_stmt),
+                    .step_over => |args| blk: {
+                        if (self.getCallDepth() > args.start_depth) break :blk false;
+                        break :blk self.currentStatementKeyChanged(args.start_statement);
+                    },
+                    .step_out => |args| blk: {
+                        if (self.getCallDepth() >= args.start_depth) break :blk false;
+                        break :blk self.isAtStatementBoundary();
+                    },
+                    .step_opcode => true,
+                    .continue_ => false,
+                };
+                if (should_stop) {
                     self.stop_reason = .step_complete;
                     self.state = .paused;
                     return;
@@ -181,111 +554,39 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             }
         }
 
+        /// Step In: execute until the source line changes (at any call depth).
+        /// Enters function calls.
+        pub fn stepIn(self: *Self) !void {
+            return self.runUntil(.{ .step_in = self.currentStatementKey() });
+        }
+
         /// Step Opcode: execute exactly one opcode and pause immediately.
         /// This is useful for inspecting the transient EVM operand stack between
         /// source-level statement boundaries.
         pub fn stepOpcode(self: *Self) !void {
-            if (self.isHalted()) return;
-
-            self.steps_executed = 0;
-            try self.executeOneOpcode();
-            if (self.isHalted()) return;
-            self.stop_reason = .step_complete;
-            self.state = .paused;
+            return self.runUntil(.step_opcode);
         }
 
         /// Step Over: execute until the source line changes at the same or lower call depth.
         /// Skips over function calls.
         pub fn stepOver(self: *Self) !void {
-            if (self.isHalted()) return;
-
-            const start_statement = self.currentStatementKey();
-            const start_depth = self.getCallDepth();
-            self.steps_executed = 0;
-
-            while (true) {
-                try self.executeOneOpcode();
-                if (self.isHalted()) return;
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                const current_depth = self.getCallDepth();
-                // Only consider stopping if we're at same or shallower depth
-                if (current_depth <= start_depth) {
-                    if (self.currentStatementKeyChanged(start_statement)) {
-                        self.stop_reason = .step_complete;
-                        self.state = .paused;
-                        return;
-                    }
-                }
-            }
+            return self.runUntil(.{ .step_over = .{
+                .start_statement = self.currentStatementKey(),
+                .start_depth = self.getCallDepth(),
+            } });
         }
 
         /// Step Out: execute until the call depth is less than current.
         /// Returns from the current function.
         pub fn stepOut(self: *Self) !void {
-            if (self.isHalted()) return;
-
             const start_depth = self.getCallDepth();
-            if (start_depth == 0) {
-                // Already at top level — run to completion
-                return self.continue_();
-            }
-
-            self.steps_executed = 0;
-
-            while (true) {
-                try self.executeOneOpcode();
-                if (self.isHalted()) return;
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                if (self.getCallDepth() < start_depth) {
-                    // Wait for the next statement boundary after returning
-                    if (self.isAtStatementBoundary()) {
-                        self.stop_reason = .step_complete;
-                        self.state = .paused;
-                        return;
-                    }
-                }
-            }
+            if (start_depth == 0) return self.continue_();
+            return self.runUntil(.{ .step_out = .{ .start_depth = start_depth } });
         }
 
         /// Continue: run until a breakpoint is hit or execution finishes.
         pub fn continue_(self: *Self) !void {
-            if (self.isHalted()) return;
-
-            self.state = .running;
-            self.steps_executed = 0;
-
-            // Step past current PC first (so we don't immediately re-hit the same breakpoint)
-            try self.executeOneOpcode();
-            if (self.isHalted()) return;
-
-            while (true) {
-                if (self.steps_executed >= self.max_steps) {
-                    self.stop_reason = .step_limit_reached;
-                    self.state = .paused;
-                    return;
-                }
-
-                // Check breakpoint before executing
-                const pc = self.getPC();
-                if (self.breakpoints.contains(pc) and self.isAtStatementBoundary()) {
-                    self.stop_reason = .breakpoint_hit;
-                    self.state = .paused;
-                    return;
-                }
-
-                try self.executeOneOpcode();
-                if (self.isHalted()) return;
-            }
+            return self.runUntil(.continue_);
         }
 
         // ====================================================================
@@ -567,6 +868,13 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 return;
             }
 
+            // Snapshot the gas pre-step so we can attribute the cost to
+            // whichever source line is currently active. Use the line we
+            // most recently transitioned to (`last_statement_line`) so
+            // multi-opcode statements accumulate their full cost.
+            const gas_before = frame.gas_remaining;
+            const attributed_line = self.last_statement_line;
+
             self.evm.step() catch |err| {
                 self.state = .halted;
                 self.stop_reason = .execution_error;
@@ -574,8 +882,59 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 return err;
             };
 
+            // Best-effort gas accounting. Three cases skip attribution:
+            //   1. The post-step frame differs from pre-step (CALL pushed
+            //      a new frame, or RETURN popped — the caller's snapshot
+            //      isn't comparable to whatever the new top is).
+            //   2. The current PC has no source-map entry. This is what
+            //      blocks mis-attribution while executing inside a callee
+            //      contract: the debugger's source map covers the primary
+            //      contract only, so callee opcodes have no entry and
+            //      we'd otherwise pin their gas to the caller's last
+            //      statement line.
+            //   3. We don't have a `last_statement_line` to attribute
+            //      against (early prologue before the first statement).
+            if (self.evm.getCurrentFrame()) |post_frame| {
+                if (post_frame == frame and gas_before > post_frame.gas_remaining) {
+                    if (self.src_map.getEntry(post_frame.pc) != null) {
+                        const delta: u64 = @intCast(gas_before - post_frame.gas_remaining);
+                        if (attributed_line) |line| {
+                            if (self.line_gas.getOrPut(line)) |entry| {
+                                if (!entry.found_existing) entry.value_ptr.* = 0;
+                                entry.value_ptr.* +%= delta;
+                            } else |_| {
+                                self.markInstrumentationDegraded("line_gas allocation failed");
+                            }
+                        }
+                    }
+                }
+            }
+
             self.steps_executed += 1;
             self.updateLastStatementLine();
+
+            // Watchpoints fire on the first step after any of their
+            // slots changes. Sampling on every step (rather than only
+            // on SSTORE) keeps the check uniform with cross-frame
+            // calls — a callee's SSTORE on a delegate-shared address
+            // surfaces here too.
+            if (self.watchpoints.items.len != 0) {
+                if (self.pollWatchpoints()) |maybe_wp| {
+                    if (maybe_wp) |wp_id| {
+                        self.last_watchpoint_id = wp_id;
+                        self.state = .paused;
+                        self.stop_reason = .watchpoint_hit;
+                        return;
+                    }
+                } else |_| {
+                    // Polling failed (storage host error / OOM).
+                    // Mark degraded so the user knows the
+                    // displayed state isn't watchpoint-checked
+                    // beyond this step. Continue execution rather
+                    // than aborting the session.
+                    self.markInstrumentationDegraded("watchpoint poll failed");
+                }
+            }
 
             // Check if frame finished after step
             if (self.evm.getCurrentFrame()) |f| {
@@ -604,6 +963,16 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         fn updateLastStatementLine(self: *Self) void {
             const entry = self.currentEntry() orelse return;
             if (!entry.is_statement) return;
+            // Bump the coverage counter on every distinct statement-line
+            // transition. Re-entering the same statement (loop iteration,
+            // recursion) counts as a fresh hit. OOM is non-fatal — the
+            // counter just stops updating.
+            const prev_line = self.last_statement_line;
+            if (prev_line == null or prev_line.? != entry.line or self.last_statement_id != entry.statement_id) {
+                const gop = self.line_hits.getOrPut(entry.line) catch return;
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* +%= 1;
+            }
             self.last_statement_id = entry.statement_id;
             self.last_statement_line = entry.line;
             self.last_statement_sir_line = entry.sir_line;
@@ -639,24 +1008,10 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         fn shouldIgnoreStatementBoundary(self: *const Self, entry: *const SourceMap.Entry) bool {
-            const stmt_id = entry.statement_id orelse return false;
+            // Population is gated on having debug_info; without it the set is
+            // empty and we fall through immediately.
             const idx = entry.idx orelse return false;
-            const debug_info = self.debug_info orelse return false;
-            const op_meta = debug_info.getOpMetaForIdx(idx) orelse return false;
-            if (!(std.mem.eql(u8, op_meta.op, "invalid") or std.mem.eql(u8, op_meta.op, "sir.invalid"))) {
-                return false;
-            }
-
-            for (self.src_map.entries) |candidate| {
-                if (candidate.statement_id != stmt_id) continue;
-                if (candidate.idx == null or candidate.idx == idx) continue;
-                const candidate_meta = debug_info.getOpMetaForIdx(candidate.idx.?) orelse continue;
-                if (std.mem.eql(u8, candidate_meta.op, "invalid") or std.mem.eql(u8, candidate_meta.op, "sir.invalid")) {
-                    continue;
-                }
-                return true;
-            }
-            return false;
+            return self.ignored_invalid_idx.contains(idx);
         }
 
         fn bindingHasWritableRuntimeHome(self: *const Self, binding: DebugInfo.VisibleBinding) bool {

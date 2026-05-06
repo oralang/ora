@@ -1,0 +1,23 @@
+// Returns true when the Result holds an Ok payload.
+fn is_ok(comptime T: type, comptime E: type, value: Result<T, E>) -> bool {
+    return match (value) {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+}
+
+// Returns true when the Result holds an Err value.
+fn is_err(comptime T: type, comptime E: type, value: Result<T, E>) -> bool {
+    return match (value) {
+        Ok(_) => false,
+        Err(_) => true,
+    };
+}
+
+// Returns the Ok payload or the provided fallback when the Result is Err.
+fn unwrap_or(comptime T: type, comptime E: type, value: Result<T, E>, fallback: T) -> T {
+    return match (value) {
+        Ok(inner) => inner,
+        Err(_) => fallback,
+    };
+}

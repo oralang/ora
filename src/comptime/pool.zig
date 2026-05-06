@@ -79,7 +79,7 @@ pub const ConstPool = struct {
     }
 
     /// Error set for intern operations
-    pub const InternError = error{OutOfMemory};
+    pub const InternError = error{ OutOfMemory, UnsupportedComptimeValue };
 
     /// Intern a CtValue from a CtEnv (deep-copy heap data into pool)
     pub fn intern(self: *ConstPool, env: anytype, v: CtValue) InternError!ConstId {
@@ -112,6 +112,11 @@ pub const ConstPool = struct {
                 const elem_ids = try self.internElements(env, agg.elems);
                 return try self.store(.{ .array = elem_ids });
             },
+            .slice_ref => |heap_id| {
+                const agg = env.heap.getSlice(heap_id);
+                const elem_ids = try self.internElements(env, agg.elems);
+                return try self.store(.{ .array = elem_ids });
+            },
             .tuple_ref => |heap_id| {
                 const agg = env.heap.getTuple(heap_id);
                 const elem_ids = try self.internElements(env, agg.elems);
@@ -125,16 +130,21 @@ pub const ConstPool = struct {
                     .fields = fields,
                 } });
             },
+            .map_ref => error.UnsupportedComptimeValue,
 
-            // === Enum: intern payload if present ===
-            .enum_val => |e| {
-                const payload_id: ?ConstId = if (e.payload) |p| blk: {
-                    const payload_val = env.heap.get(p);
-                    break :blk try self.intern(env, payload_val.toCtValue());
-                } else null;
+            // === ADT/sum value: intern payload if present ===
+            .adt_val => |e| {
+                const payload_id = try self.internOptionalTuplePayload(env, e.payload);
                 return try self.store(.{ .enum_val = .{
                     .type_id = e.type_id,
                     .variant_id = e.variant_id,
+                    .payload = payload_id,
+                } });
+            },
+            .error_union_val => |e| {
+                const payload_id = try self.internTuplePayload(env, e.payload);
+                return try self.store(.{ .error_union_val = .{
+                    .is_error = e.is_error,
                     .payload = payload_id,
                 } });
             },
@@ -182,6 +192,17 @@ pub const ConstPool = struct {
             });
         }
         return self.field_arena.items[start..];
+    }
+
+    fn internOptionalTuplePayload(self: *ConstPool, env: anytype, payload: ?HeapId) InternError!?ConstId {
+        const heap_id = payload orelse return null;
+        return try self.internTuplePayload(env, heap_id);
+    }
+
+    fn internTuplePayload(self: *ConstPool, env: anytype, heap_id: HeapId) InternError!ConstId {
+        const tuple = env.heap.getTuple(heap_id);
+        const elem_ids = try self.internElements(env, tuple.elems);
+        return try self.store(.{ .tuple = elem_ids });
     }
 
     /// Intern a string (with deduplication)
@@ -277,4 +298,53 @@ test "ConstPool string interning" {
 
     try std.testing.expectEqualStrings("hello", pool.get(id1).string);
     try std.testing.expectEqualStrings("world", pool.get(id3).string);
+}
+
+test "ConstPool interns ADT tuple payloads" {
+    const env_mod = @import("env.zig");
+
+    var pool = ConstPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var env = env_mod.CtEnv.init(std.testing.allocator, .{});
+    defer env.deinit();
+
+    const payload_heap_id = try env.heap.allocTuple(&[_]CtValue{.{ .integer = 42 }});
+    const enum_id = try pool.intern(&env, .{ .adt_val = .{
+        .type_id = 100,
+        .variant_id = 1,
+        .payload = payload_heap_id,
+    } });
+
+    const enum_value = pool.get(enum_id).enum_val;
+    try std.testing.expectEqual(@as(TypeId, 100), enum_value.type_id);
+    try std.testing.expectEqual(@as(value.VariantId, 1), enum_value.variant_id);
+
+    const payload_id = enum_value.payload orelse return error.TestUnexpectedResult;
+    const payload = pool.get(payload_id).tuple;
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+    try std.testing.expectEqual(@as(u256, 42), pool.get(payload[0]).integer);
+}
+
+test "ConstPool interns error union values" {
+    const env_mod = @import("env.zig");
+
+    var pool = ConstPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var env = env_mod.CtEnv.init(std.testing.allocator, .{});
+    defer env.deinit();
+
+    const payload_heap_id = try env.heap.allocTuple(&[_]CtValue{.{ .boolean = true }});
+    const result_id = try pool.intern(&env, .{ .error_union_val = .{
+        .is_error = false,
+        .payload = payload_heap_id,
+    } });
+
+    const result = pool.get(result_id).error_union_val;
+    try std.testing.expect(!result.is_error);
+
+    const payload = pool.get(result.payload).tuple;
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+    try std.testing.expectEqual(true, pool.get(payload[0]).boolean);
 }

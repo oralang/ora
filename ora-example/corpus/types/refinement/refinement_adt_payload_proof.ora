@@ -1,0 +1,19 @@
+// Refinement facts attached to ADT variant payloads should remain usable after
+// construction and pattern extraction.
+
+enum MaybeAmount {
+    None,
+    Value(MinValue<u256, 10>),
+}
+
+contract RefinementAdtPayloadProof {
+    pub fn build(raw: MinValue<u256, 10>) -> u256
+        ensures(result >= 10)
+    {
+        let maybe = MaybeAmount.Value(raw);
+        return match (maybe) {
+            MaybeAmount.Value(value) => value,
+            MaybeAmount.None => 10,
+        };
+    }
+}

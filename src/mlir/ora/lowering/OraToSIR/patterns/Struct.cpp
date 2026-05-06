@@ -1,7 +1,10 @@
 #include "Struct.h"
 
+#include "patterns/MissingOps.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
+#include "patterns/AdtCarrierHelpers.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -125,6 +128,39 @@ namespace
         return success();
     }
 
+    static std::optional<Value> materializeAggregateFieldWord(Location loc, ConversionPatternRewriter &rewriter, Value value)
+    {
+        auto *ctx = rewriter.getContext();
+        auto u256Type = sir::U256Type::get(ctx);
+
+        if (auto castOp = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) && castOp.getNumOperands() == 2)
+            {
+                Value basePtr = ora::adt_helpers::materializeAdtHandle(
+                    rewriter, loc, castOp.getOperand(0), castOp.getOperand(1));
+                return rewriter.create<sir::BitcastOp>(loc, u256Type, basePtr).getResult();
+            }
+
+            if (castOp.getNumOperands() == 1)
+            {
+                Value src = castOp.getOperand(0);
+                if (llvm::isa<sir::PtrType, sir::U256Type>(src.getType()))
+                {
+                    if (!llvm::isa<sir::U256Type>(src.getType()))
+                        src = rewriter.create<sir::BitcastOp>(loc, u256Type, src);
+                    return src;
+                }
+            }
+        }
+
+        if (llvm::isa<sir::PtrType>(value.getType()))
+            return rewriter.create<sir::BitcastOp>(loc, u256Type, value).getResult();
+        if (llvm::isa<sir::U256Type>(value.getType()))
+            return value;
+        return std::nullopt;
+    }
+
     static Value buildStructBuffer(Location loc, ConversionPatternRewriter &rewriter, ValueRange fieldValues)
     {
         auto *ctx = rewriter.getContext();
@@ -142,10 +178,10 @@ namespace
         for (size_t i = 0; i < fieldValues.size(); ++i)
         {
             Value val = fieldValues[i];
-            if (!llvm::isa<sir::U256Type>(val.getType()))
-            {
+            if (auto aggregateWord = materializeAggregateFieldWord(loc, rewriter, val))
+                val = *aggregateWord;
+            else if (!llvm::isa<sir::U256Type>(val.getType()))
                 val = rewriter.create<sir::BitcastOp>(loc, u256Type, val);
-            }
 
             if (i == 0)
             {
@@ -241,15 +277,109 @@ LogicalResult ConvertTupleExtractOp::matchAndRewrite(
     }
 
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
-    if (!resultType)
-        return rewriter.notifyMatchFailure(op, "could not convert tuple extract result type");
     Value loaded = rewriter.create<sir::LoadOp>(loc, u256Type, slotPtr);
+    if (!resultType)
+    {
+        if (llvm::isa<ora::AdtType>(op.getResult().getType()))
+        {
+            Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
+            rewriter.replaceOp(op, view);
+            return success();
+        }
+        return rewriter.notifyMatchFailure(op, "could not convert tuple extract result type");
+    }
     if (resultType == u256Type)
     {
         rewriter.replaceOp(op, loaded);
         return success();
     }
     if (auto intType = llvm::dyn_cast<mlir::IntegerType>(resultType))
+    {
+        rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+
+    if (llvm::isa<ora::AdtType>(op.getResult().getType()))
+    {
+        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
+        rewriter.replaceOp(op, view);
+        return success();
+    }
+
+    rewriter.replaceOpWithNewOp<mlir::UnrealizedConversionCastOp>(op, resultType, loaded);
+    return success();
+}
+
+LogicalResult LateLowerTupleExtractOp::matchAndRewrite(
+    ora::TupleExtractOp op,
+    PatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value basePtr = op.getTupleValue();
+    if (llvm::isa<sir::U256Type>(basePtr.getType()))
+    {
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    }
+    else if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (castOp.getNumOperands() == 1)
+        {
+            Value src = castOp.getOperand(0);
+            if (llvm::isa<sir::PtrType>(src.getType()))
+            {
+                basePtr = src;
+            }
+            else if (llvm::isa<sir::U256Type>(src.getType()))
+            {
+                basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+            }
+        }
+    }
+
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        return failure();
+
+    Value slotPtr = basePtr;
+    const uint64_t fieldIndex = static_cast<uint64_t>(op.getIndex());
+    if (fieldIndex != 0)
+    {
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL));
+        slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
+    Type resultType = op.getResult().getType();
+    if (typeConverter)
+    {
+        if (Type converted = typeConverter->convertType(resultType))
+            resultType = converted;
+    }
+
+    Value loaded = rewriter.create<sir::LoadOp>(loc, u256Type, slotPtr);
+    if (resultType == u256Type)
+    {
+        rewriter.replaceOp(op, loaded);
+        return success();
+    }
+    if (llvm::isa<mlir::IntegerType>(resultType))
+    {
+        rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+    if (llvm::isa<ora::AdtType>(op.getResult().getType()))
+    {
+        Value view = ora::createMaterializationCast(rewriter, loc, op.getResult().getType(), loaded, mat_kind::kAdtHandleView);
+        rewriter.replaceOp(op, view);
+        return success();
+    }
+    if (llvm::isa<sir::PtrType>(resultType))
     {
         rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, resultType, loaded);
         return success();
@@ -292,6 +422,22 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
                 found = true;
                 break;
             }
+        }
+    }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        auto fieldNames = anonType.getFieldNames();
+        auto fieldTypes = anonType.getFieldTypes();
+        for (size_t i = 0; i < fieldNames.size(); ++i)
+        {
+            if (fieldNames[i] != fieldName)
+            {
+                continue;
+            }
+            fieldIndex = i;
+            expected = fieldTypes[i];
+            found = true;
+            break;
         }
     }
 
@@ -352,6 +498,12 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     Type converted = getTypeConverter()->convertType(expected);
     if (!converted)
     {
+        if (llvm::isa<ora::AdtType>(expected))
+        {
+            Value view = ora::createMaterializationCast(rewriter, loc, expected, raw, mat_kind::kAdtHandleView);
+            rewriter.replaceOp(op, view);
+            return success();
+        }
         converted = u256Type;
     }
 
@@ -362,6 +514,116 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     }
 
     rewriter.replaceOp(op, result);
+    return success();
+}
+
+LogicalResult ConvertStructFieldStoreOp::matchAndRewrite(
+    ora::StructFieldStoreOp op,
+    typename ora::StructFieldStoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    StringRef fieldName = op.getFieldName();
+    size_t fieldIndex = 0;
+    bool found = false;
+    Type expected = adaptor.getValue().getType();
+
+    if (auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType()))
+    {
+        SmallVector<StringRef, 8> fieldNames;
+        SmallVector<Type, 8> fieldTypes;
+        if (succeeded(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+        {
+            for (size_t i = 0; i < fieldNames.size(); ++i)
+            {
+                if (fieldNames[i] != fieldName)
+                    continue;
+                fieldIndex = i;
+                expected = fieldTypes[i];
+                found = true;
+                break;
+            }
+        }
+    }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        auto fieldNames = anonType.getFieldNames();
+        auto fieldTypes = anonType.getFieldTypes();
+        for (size_t i = 0; i < fieldNames.size(); ++i)
+        {
+            if (fieldNames[i] != fieldName)
+                continue;
+            fieldIndex = i;
+            expected = fieldTypes[i];
+            found = true;
+            break;
+        }
+    }
+
+    if (!found && parseNumericFieldIndex(fieldName, fieldIndex))
+        found = true;
+
+    if (!found && succeeded(resolveFieldByDeclScan(op.getOperation(), fieldName, adaptor.getValue().getType(), fieldIndex, expected)))
+        found = true;
+
+    if (!found)
+        return rewriter.notifyMatchFailure(op, "unknown field in struct_field_store");
+
+    Value basePtr = adaptor.getStructValue();
+    if (llvm::isa<sir::U256Type>(basePtr.getType()))
+    {
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    }
+    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+    {
+        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (castOp.getNumOperands() == 1)
+            {
+                Value src = castOp.getOperand(0);
+                if (llvm::isa<sir::PtrType>(src.getType()))
+                {
+                    basePtr = src;
+                }
+                else if (llvm::isa<sir::U256Type>(src.getType()))
+                {
+                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+                }
+            }
+        }
+    }
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+
+    Value fieldPtr = basePtr;
+    if (fieldIndex > 0)
+    {
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(fieldIndex) * 32ULL);
+        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
+    Value val = adaptor.getValue();
+    if (auto aggregateWord = materializeAggregateFieldWord(loc, rewriter, val))
+    {
+        val = *aggregateWord;
+    }
+    else
+    {
+        Type converted = getTypeConverter()->convertType(expected);
+        if (converted && converted != val.getType())
+            val = rewriter.create<sir::BitcastOp>(loc, converted, val);
+        if (!llvm::isa<sir::U256Type>(val.getType()))
+            val = rewriter.create<sir::BitcastOp>(loc, u256Type, val);
+    }
+
+    rewriter.create<sir::StoreOp>(loc, fieldPtr, val);
+    rewriter.eraseOp(op);
     return success();
 }
 
@@ -376,17 +638,23 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType());
-    if (!structType)
-    {
-        return rewriter.notifyMatchFailure(op, "struct_field_update expects ora.struct type");
-    }
-
     SmallVector<StringRef, 8> fieldNames;
     SmallVector<Type, 8> fieldTypes;
-    if (failed(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+    if (auto structType = dyn_cast<ora::StructType>(op.getStructValue().getType()))
     {
-        return rewriter.notifyMatchFailure(op, "failed to resolve struct fields");
+        if (failed(getStructFields(op.getOperation(), structType.getName(), fieldNames, fieldTypes)))
+        {
+            return rewriter.notifyMatchFailure(op, "failed to resolve struct fields");
+        }
+    }
+    else if (auto anonType = dyn_cast<ora::AnonymousStructType>(op.getStructValue().getType()))
+    {
+        fieldNames.append(anonType.getFieldNames().begin(), anonType.getFieldNames().end());
+        fieldTypes.append(anonType.getFieldTypes().begin(), anonType.getFieldTypes().end());
+    }
+    else
+    {
+        return rewriter.notifyMatchFailure(op, "struct_field_update expects ora.struct or ora.struct_anon type");
     }
 
     StringRef fieldName = op.getFieldName();
@@ -455,10 +723,10 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
         if (i == fieldIndex)
         {
             fieldVal = adaptor.getValue();
-            if (!llvm::isa<sir::U256Type>(fieldVal.getType()))
-            {
+            if (auto aggregateWord = materializeAggregateFieldWord(loc, rewriter, fieldVal))
+                fieldVal = *aggregateWord;
+            else if (!llvm::isa<sir::U256Type>(fieldVal.getType()))
                 fieldVal = rewriter.create<sir::BitcastOp>(loc, u256Type, fieldVal);
-            }
         }
 
         Value outPtr = newPtr;
@@ -495,7 +763,7 @@ LogicalResult StripStructMaterializeOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "expected single operand/result");
     }
 
-    if (!llvm::isa<ora::StructType>(op.getResult(0).getType()))
+    if (!llvm::isa<ora::StructType, ora::AnonymousStructType>(op.getResult(0).getType()))
     {
         return rewriter.notifyMatchFailure(op, "not a struct materialization");
     }

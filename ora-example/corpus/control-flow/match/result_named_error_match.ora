@@ -1,0 +1,22 @@
+error Failure;
+error Denied;
+
+pub contract ResultNamedErrorMatch {
+    fn decide(flag: u256) -> !u256 | Failure | Denied {
+        if (flag == 0) {
+            return 10;
+        }
+        if (flag == 1) {
+            return error.Failure();
+        }
+        return error.Denied();
+    }
+
+    pub fn project(flag: u256) -> u256 {
+        return match (decide(flag)) {
+            Ok(inner) => inner,
+            Failure => 7,
+            Denied => 9,
+        };
+    }
+}

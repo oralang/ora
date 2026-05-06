@@ -1,0 +1,126 @@
+// Fixed-rate swap pool with internal balance accounting.
+//
+// Demonstrates v0.2 features that fully verify under `ora build`:
+//   - multi-error error unions (!u256 | E1 | E2 | E3)
+//   - sum-match exhaustiveness across declared variants
+//   - refinement types (NonZero<u256>, NonZeroAddress)
+//   - ghost state with state-transition invariants
+//   - pure helpers with verified preconditions
+//
+// Internal balances mean users `deposit` token A or B before swapping;
+// real ERC-20 transfers are handled by an external integration layer.
+// See the v0.2 blog post for the extern-trait syntax — full SMT
+// verification of external call return values lands in v0.3.
+//
+// We use a stored exchange rate rather than constant-product (`x*y=k`)
+// to keep the SMT proofs fast. The verifier handles the AMM formula in
+// principle but quadratic terms across many obligations time out today.
+
+comptime const std = @import("std");
+
+error InsufficientLiquidity(requested: u256, available: u256);
+error InsufficientInput;
+error InsufficientBalance(required: u256, available: u256);
+error SlippageExceeded(quoted: u256, min_out: u256);
+error PriceOverflow;
+
+pub contract Pool {
+    storage var reserve_a: u256 = 0;
+    storage var reserve_b: u256 = 0;
+    storage var price_b_per_a: u256 = 1;
+    storage var balance_a: map<address, u256>;
+    storage var balance_b: map<address, u256>;
+
+    // Ghost: tracks the sum of every account's balance for token A.
+    // The verifier proves this stays equal to reserve_a after every
+    // operation that mutates user balances.
+    ghost storage spec_total_a: u256 = 0;
+
+    log Swap(account: address, in_amount: u256, out_amount: u256, a_to_b: bool);
+    log Deposit(account: address, token: u256, amount: u256);
+
+    pub fn deposit_a(amount: NonZero<u256>)
+        requires(balance_a[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(reserve_a <= std.constants.U256_MAX - amount)
+        requires(spec_total_a <= std.constants.U256_MAX - amount)
+        ensures(reserve_a == old(reserve_a) + amount)
+        ensures(spec_total_a == old(spec_total_a) + amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        balance_a[sender] += amount;
+        reserve_a += amount;
+        spec_total_a += amount;
+        log Deposit(sender, 0, amount);
+    }
+
+    pub fn deposit_b(amount: NonZero<u256>)
+        requires(balance_b[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(reserve_b <= std.constants.U256_MAX - amount)
+        ensures(reserve_b == old(reserve_b) + amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        balance_b[sender] += amount;
+        reserve_b += amount;
+        log Deposit(sender, 1, amount);
+    }
+
+    // Pure quote at the stored exchange rate. Verified to never overflow.
+    fn quote(in_amount: u256) -> !u256 | PriceOverflow
+        requires(price_b_per_a > 0)
+    {
+        if (in_amount > std.constants.U256_MAX / price_b_per_a) {
+            return PriceOverflow;
+        }
+        return in_amount * price_b_per_a;
+    }
+
+    pub fn swap_a_for_b(in_amount: NonZero<u256>, min_out: u256)
+        -> !u256 | InsufficientLiquidity | InsufficientInput | InsufficientBalance | SlippageExceeded | PriceOverflow
+        requires(price_b_per_a > 0)
+        requires(reserve_a <= std.constants.U256_MAX - in_amount)
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let user_a: u256 = balance_a[sender];
+        if (user_a < in_amount) {
+            return InsufficientBalance(in_amount, user_a);
+        }
+        if (reserve_b == 0) {
+            return InsufficientLiquidity(in_amount, 0);
+        }
+
+        let out_amount: u256 = try quote(in_amount);
+
+        if (out_amount == 0) {
+            return InsufficientInput;
+        }
+        if (out_amount > reserve_b) {
+            return InsufficientLiquidity(out_amount, reserve_b);
+        }
+        if (out_amount < min_out) {
+            return SlippageExceeded(out_amount, min_out);
+        }
+        if (balance_b[sender] > std.constants.U256_MAX - out_amount) {
+            return InsufficientLiquidity(out_amount, reserve_b);
+        }
+
+        balance_a[sender] = user_a - in_amount;
+        balance_b[sender] += out_amount;
+        reserve_a += in_amount;
+        reserve_b -= out_amount;
+
+        log Swap(sender, in_amount, out_amount, true);
+        return out_amount;
+    }
+
+    pub fn balance_of_a(account: address) -> u256 {
+        return balance_a[account];
+    }
+
+    pub fn balance_of_b(account: address) -> u256 {
+        return balance_b[account];
+    }
+
+    pub fn reserves() -> (u256, u256) {
+        return (reserve_a, reserve_b);
+    }
+}

@@ -179,7 +179,8 @@ namespace mlir
                 const size_t range_ends_size = rangeEndsAttr ? static_cast<size_t>(rangeEndsAttr.size()) : 0;
                 const int64_t defaultIndex = defaultIndexAttr ? defaultIndexAttr.getInt() : -1;
 
-                for (size_t i = 0; i < op.getCases().size(); ++i)
+                const size_t numRegions = op->getNumRegions();
+                for (size_t i = 0; i < numRegions; ++i)
                 {
                     p.printNewline();
                     p << "  ";
@@ -208,7 +209,7 @@ namespace mlir
                     }
 
                     p << " => ";
-                    auto &region = op.getCases()[i];
+                    auto &region = op->getRegion(i);
                     if (region.empty())
                     {
                         p << "{}";
@@ -263,7 +264,8 @@ namespace mlir
             if (parser.parseGreater())
                 return {};
 
-            return StructType::get(parser.getContext(), name);
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return StructType::get(parser.getContext(), nameRef);
         }
 
         void StructType::print(::mlir::AsmPrinter &printer) const
@@ -271,6 +273,125 @@ namespace mlir
             printer << "<\"";
             printer << getName();
             printer << "\">";
+        }
+
+        // AdtType: !ora.adt<"adt_name", ("Variant", payload_type), ...>
+        ::mlir::Type AdtType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            std::string name;
+            if (parser.parseString(&name))
+                return {};
+
+            ::llvm::SmallVector<::llvm::StringRef> variantNames;
+            ::llvm::SmallVector<::mlir::Type> payloadTypes;
+
+            while (parser.parseOptionalComma().succeeded())
+            {
+                if (parser.parseLParen())
+                    return {};
+
+                std::string variantName;
+                if (parser.parseString(&variantName))
+                    return {};
+
+                if (parser.parseComma())
+                    return {};
+
+                ::mlir::Type payloadType;
+                if (parser.parseType(payloadType))
+                    return {};
+
+                if (parser.parseRParen())
+                    return {};
+
+                variantNames.push_back(parser.getBuilder().getStringAttr(variantName).getValue());
+                payloadTypes.push_back(payloadType);
+            }
+
+            if (parser.parseGreater())
+                return {};
+
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return AdtType::get(parser.getContext(), nameRef, variantNames, payloadTypes);
+        }
+
+        void AdtType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<\"";
+            printer << getName();
+            printer << "\"";
+            auto variantNames = getVariantNames();
+            auto payloadTypes = getPayloadTypes();
+            for (size_t i = 0; i < variantNames.size(); ++i)
+            {
+                printer << ", (\"" << variantNames[i] << "\", ";
+                printer.printType(payloadTypes[i]);
+                printer << ")";
+            }
+            printer << ">";
+        }
+
+        // AnonymousStructType: !ora.struct_anon<("field", type), ...>
+        ::mlir::Type AnonymousStructType::parse(::mlir::AsmParser &parser)
+        {
+            if (parser.parseLess())
+                return {};
+
+            ::llvm::SmallVector<::llvm::StringRef> fieldNames;
+            ::llvm::SmallVector<::mlir::Type> fieldTypes;
+
+            if (parser.parseOptionalGreater().succeeded())
+                return AnonymousStructType::get(parser.getContext(), fieldNames, fieldTypes);
+
+            while (true)
+            {
+                if (parser.parseLParen())
+                    return {};
+
+                std::string name;
+                if (parser.parseString(&name))
+                    return {};
+
+                if (parser.parseComma())
+                    return {};
+
+                ::mlir::Type fieldType;
+                if (parser.parseType(fieldType))
+                    return {};
+
+                if (parser.parseRParen())
+                    return {};
+
+                fieldNames.push_back(parser.getBuilder().getStringAttr(name).getValue());
+                fieldTypes.push_back(fieldType);
+
+                if (parser.parseOptionalGreater().succeeded())
+                    break;
+
+                if (parser.parseComma())
+                    return {};
+            }
+
+            return AnonymousStructType::get(parser.getContext(), fieldNames, fieldTypes);
+        }
+
+        void AnonymousStructType::print(::mlir::AsmPrinter &printer) const
+        {
+            printer << "<";
+            auto fieldNames = getFieldNames();
+            auto fieldTypes = getFieldTypes();
+            for (size_t i = 0; i < fieldNames.size(); ++i)
+            {
+                if (i > 0)
+                    printer << ", ";
+                printer << "(\"" << fieldNames[i] << "\", ";
+                printer.printType(fieldTypes[i]);
+                printer << ")";
+            }
+            printer << ">";
         }
 
         // EnumType: !ora.enum<"enum_name", repr_type>
@@ -293,7 +414,8 @@ namespace mlir
             if (parser.parseGreater())
                 return {};
 
-            return EnumType::get(parser.getContext(), name, reprType);
+            auto nameRef = parser.getBuilder().getStringAttr(name).getValue();
+            return EnumType::get(parser.getContext(), nameRef, reprType);
         }
 
         void EnumType::print(::mlir::AsmPrinter &printer) const
@@ -366,31 +488,40 @@ namespace mlir
             printer << ">";
         }
 
-        // UnionType: !ora.union<type1, type2, ...>
-        ::mlir::Type UnionType::parse(::mlir::AsmParser &parser)
+        // ErrorUnionType: !ora.error_union<success_type[, error_type...]>
+        ::mlir::Type ErrorUnionType::parse(::mlir::AsmParser &parser)
         {
             if (parser.parseLess())
                 return {};
 
-            ::llvm::SmallVector<::mlir::Type> elementTypes;
-            if (parser.parseTypeList(elementTypes))
+            ::mlir::Type successType;
+            if (parser.parseType(successType))
                 return {};
+
+            ::llvm::SmallVector<::mlir::Type> errorTypes;
+            while (parser.parseOptionalComma().succeeded())
+            {
+                ::mlir::Type errorType;
+                if (parser.parseType(errorType))
+                    return {};
+                errorTypes.push_back(errorType);
+            }
 
             if (parser.parseGreater())
                 return {};
 
-            return UnionType::get(parser.getContext(), elementTypes);
+            return ErrorUnionType::get(parser.getContext(), successType, errorTypes);
         }
 
-        void UnionType::print(::mlir::AsmPrinter &printer) const
+        void ErrorUnionType::print(::mlir::AsmPrinter &printer) const
         {
             printer << "<";
-            auto elementTypes = getElementTypes();
-            for (size_t i = 0; i < elementTypes.size(); ++i)
+            printer.printType(getSuccessType());
+            auto errorTypes = getErrorTypes();
+            for (auto errorType : errorTypes)
             {
-                if (i > 0)
-                    printer << ", ";
-                printer.printType(elementTypes[i]);
+                printer << ", ";
+                printer.printType(errorType);
             }
             printer << ">";
         }
@@ -689,6 +820,31 @@ namespace mlir
 
                 return op->emitError() << "unknown field '" << fieldName << "' on struct '" << structType.getName() << "'";
             }
+
+            static ::mlir::LogicalResult getStructFieldInfo(
+                Operation *op,
+                AnonymousStructType structType,
+                StringRef fieldName,
+                size_t &fieldIndex,
+                ::mlir::Type &fieldType)
+            {
+                auto fieldNames = structType.getFieldNames();
+                auto fieldTypes = structType.getFieldTypes();
+                if (fieldNames.size() != fieldTypes.size())
+                    return op->emitError("anonymous struct type has malformed field metadata");
+
+                for (size_t i = 0; i < fieldNames.size(); ++i)
+                {
+                    if (fieldNames[i] == fieldName)
+                    {
+                        fieldIndex = i;
+                        fieldType = fieldTypes[i];
+                        return success();
+                    }
+                }
+
+                return op->emitError() << "unknown field '" << fieldName << "' on anonymous struct";
+            }
         } // namespace
 
         ::mlir::LogicalResult DivOp::verify()
@@ -739,34 +895,53 @@ namespace mlir
 
         ::mlir::LogicalResult StructInitOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getResult().getType());
-            if (!structType)
-                return emitOpError("result type must be !ora.struct<...>");
+            SmallVector<Type, 8> expectedFieldTypes;
+            std::string typeLabel;
 
-            auto structDecl = findStructDecl(*this, structType.getName());
-            if (!structDecl)
-                return emitOpError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
-
-            auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
-            if (!fieldTypesAttr)
-                return emitOpError() << "struct declaration for '" << structType.getName() << "' is missing ora.field_types";
-
-            if (getFieldValues().size() != fieldTypesAttr.size())
+            if (auto structType = llvm::dyn_cast<StructType>(getResult().getType()))
             {
-                return emitOpError() << "expected " << fieldTypesAttr.size()
-                                     << " field values for struct '" << structType.getName()
-                                     << "', got " << getFieldValues().size();
+                auto structDecl = findStructDecl(*this, structType.getName());
+                if (!structDecl)
+                    return emitOpError() << "missing ora.struct.decl for struct '" << structType.getName() << "'";
+
+                auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+                if (!fieldTypesAttr)
+                    return emitOpError() << "struct declaration for '" << structType.getName() << "' is missing ora.field_types";
+
+                for (auto attr : fieldTypesAttr)
+                {
+                    auto typeAttr = llvm::dyn_cast<TypeAttr>(attr);
+                    if (!typeAttr)
+                        return emitOpError() << "struct declaration for '" << structType.getName() << "' has invalid field type metadata";
+                    expectedFieldTypes.push_back(typeAttr.getValue());
+                }
+                typeLabel = ("struct '" + structType.getName()).str();
+                typeLabel += "'";
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getResult().getType()))
+            {
+                auto fieldTypes = anonType.getFieldTypes();
+                expectedFieldTypes.append(fieldTypes.begin(), fieldTypes.end());
+                typeLabel = "anonymous struct";
+            }
+            else
+            {
+                return emitOpError("result type must be !ora.struct<...> or !ora.struct_anon<...>");
             }
 
-            for (size_t i = 0; i < fieldTypesAttr.size(); ++i)
+            if (getFieldValues().size() != expectedFieldTypes.size())
             {
-                auto typeAttr = llvm::dyn_cast<TypeAttr>(fieldTypesAttr[i]);
-                if (!typeAttr)
-                    return emitOpError() << "struct declaration for '" << structType.getName() << "' has invalid field type metadata";
-                if (getFieldValues()[i].getType() != typeAttr.getValue())
+                return emitOpError() << "expected " << expectedFieldTypes.size()
+                                     << " field values for " << typeLabel
+                                     << ", got " << getFieldValues().size();
+            }
+
+            for (size_t i = 0; i < expectedFieldTypes.size(); ++i)
+            {
+                if (getFieldValues()[i].getType() != expectedFieldTypes[i])
                 {
                     return emitOpError() << "field operand #" << i << " has type " << getFieldValues()[i].getType()
-                                         << " but struct '" << structType.getName() << "' expects " << typeAttr.getValue();
+                                         << " but " << typeLabel << " expects " << expectedFieldTypes[i];
                 }
             }
 
@@ -826,14 +1001,22 @@ namespace mlir
 
         ::mlir::LogicalResult StructFieldExtractOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
-            if (!structType)
-                return emitOpError("struct operand must have !ora.struct<...> type");
-
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                return failure();
+            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else
+            {
+                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+            }
 
             if (getResult().getType() != fieldType)
             {
@@ -845,19 +1028,145 @@ namespace mlir
             return success();
         }
 
+        static ::mlir::LogicalResult getAdtVariantInfo(
+            ::mlir::Operation *op,
+            AdtType adtType,
+            ::llvm::StringRef variantName,
+            size_t &variantIndex,
+            ::mlir::Type &payloadType)
+        {
+            auto variantNames = adtType.getVariantNames();
+            auto payloadTypes = adtType.getPayloadTypes();
+            if (variantNames.size() != payloadTypes.size())
+            {
+                return op->emitError() << "ADT type '" << adtType.getName()
+                                       << "' has malformed variant metadata";
+            }
+
+            for (size_t i = 0; i < variantNames.size(); ++i)
+            {
+                if (variantNames[i] == variantName)
+                {
+                    variantIndex = i;
+                    payloadType = payloadTypes[i];
+                    return success();
+                }
+            }
+
+            return op->emitError() << "unknown variant '" << variantName
+                                   << "' on ADT '" << adtType.getName() << "'";
+        }
+
+        ::mlir::LogicalResult AdtConstructOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getResult().getType());
+            if (!adtType)
+                return emitOpError("result type must be !ora.adt<...>");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
+
+            if (llvm::isa<::mlir::NoneType>(payloadType))
+            {
+                if (!getPayloadValues().empty())
+                {
+                    return emitOpError() << "unit variant '" << getVariantName()
+                                         << "' expects no payload operands";
+                }
+                return success();
+            }
+
+            if (getPayloadValues().size() != 1)
+            {
+                return emitOpError() << "variant '" << getVariantName()
+                                     << "' expects exactly one payload operand";
+            }
+
+            if (getPayloadValues().front().getType() != payloadType)
+            {
+                return emitOpError() << "payload operand type " << getPayloadValues().front().getType()
+                                     << " does not match variant '" << getVariantName()
+                                     << "' payload type " << payloadType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtTagOp::verify()
+        {
+            auto resultType = getResult().getType();
+            if (!llvm::isa<ora::IntegerType, ::mlir::IntegerType>(resultType))
+            {
+                return emitOpError() << "result type must be an integer tag type, got " << resultType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtPayloadOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getValue().getType());
+            if (!adtType)
+                return emitOpError("operand must have !ora.adt<...> type");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
+
+            if (llvm::isa<::mlir::NoneType>(payloadType))
+            {
+                return emitOpError() << "unit variant '" << getVariantName()
+                                     << "' has no payload to extract";
+            }
+
+            if (getResult().getType() != payloadType)
+            {
+                return emitOpError() << "result type " << getResult().getType()
+                                     << " does not match variant '" << getVariantName()
+                                     << "' payload type " << payloadType;
+            }
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AdtMatchArmOp::verify()
+        {
+            auto adtType = llvm::dyn_cast<AdtType>(getValue().getType());
+            if (!adtType)
+                return emitOpError("operand must have !ora.adt<...> type");
+
+            size_t variantIndex = 0;
+            ::mlir::Type payloadType;
+            if (failed(getAdtVariantInfo(*this, adtType, getVariantName(), variantIndex, payloadType)))
+                return failure();
+
+            return success();
+        }
+
         ::mlir::LogicalResult StructFieldUpdateOp::verify()
         {
-            auto structType = llvm::dyn_cast<StructType>(getStructValue().getType());
-            if (!structType)
-                return emitOpError("struct operand must have !ora.struct<...> type");
-
             if (getResult().getType() != getStructValue().getType())
                 return emitOpError("result type must match the input struct type");
 
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                return failure();
+            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
+            {
+                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
+                    return failure();
+            }
+            else
+            {
+                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+            }
 
             if (getValue().getType() != fieldType)
             {

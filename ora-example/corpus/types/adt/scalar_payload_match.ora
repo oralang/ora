@@ -1,0 +1,29 @@
+// ADT scalar payload matching.
+//
+// Covers source-level construction, symbolic dispatch, tuple payload extraction,
+// wildcard payload discard, and an end-to-end SMT proof over the extracted value.
+
+enum MeterEvent {
+    Empty,
+    Value(u256),
+    Pair(u256, u256),
+}
+
+contract ScalarPayloadMatch {
+    fn choose(flag: bool, amount: u256) -> MeterEvent {
+        if (flag) {
+            return MeterEvent.Value(amount);
+        }
+        return MeterEvent.Pair(amount, 1);
+    }
+
+    pub fn project(flag: bool, amount: u256) -> u256
+        ensures(result == amount)
+    {
+        return match (choose(flag, amount)) {
+            MeterEvent.Empty => amount,
+            MeterEvent.Value(value) => value,
+            MeterEvent.Pair(first, _) => first,
+        };
+    }
+}

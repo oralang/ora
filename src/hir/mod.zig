@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const sema_model = @import("../sema/model.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -11,8 +12,20 @@ const hir_locals = @import("locals.zig");
 const module_lowering = @import("module_lowering.zig");
 const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 
 pub const abi = @import("abi.zig");
+
+pub const ModuleQuery = struct {
+    context: *anyopaque,
+    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
+    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult,
+    resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult,
+    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult,
+    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult,
+    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
+    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
+};
 
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
@@ -58,6 +71,11 @@ pub const TypeFallbackRecord = struct {
     location: source.SourceLocation,
 };
 
+const SyntheticFrame = struct {
+    index: u32,
+    count: u32,
+};
+
 pub const LoweringResult = struct {
     arena: std.heap.ArenaAllocator,
     context: mlir.MlirContext = std.mem.zeroes(mlir.MlirContext),
@@ -101,6 +119,7 @@ pub fn lowerModule(
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    module_query: ?ModuleQuery,
 ) !LoweringResult {
     var result = LoweringResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -125,12 +144,14 @@ pub fn lowerModule(
     var lowerer = Lowerer{
         .allocator = result.arena.allocator(),
         .context = result.context,
+        .module_id = module_id,
         .sources = sources,
         .file = file,
         .item_index = item_index,
         .resolution = resolution,
         .const_eval = const_eval,
         .typecheck = typecheck,
+        .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
@@ -184,12 +205,14 @@ const Lowerer = struct {
 
     allocator: std.mem.Allocator,
     context: mlir.MlirContext,
+    module_id: source.ModuleId,
     sources: *const source.SourceStore,
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    module_query: ?ModuleQuery,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
@@ -198,6 +221,10 @@ const Lowerer = struct {
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
     current_statement_id: ?ast.StmtId = null,
+    current_synthetic_index: ?u32 = null,
+    current_synthetic_count: ?u32 = null,
+    synthetic_stack_len: u8 = 0,
+    synthetic_stack: [16]SyntheticFrame = undefined,
 
     const ModuleLowering = module_lowering.mixin(Lowerer, ContractLowerer, FunctionLowerer, HirSymbolKind);
     pub const lowerItem = ModuleLowering.lowerItem;
@@ -212,12 +239,15 @@ const Lowerer = struct {
     pub const lowerConstant = ModuleLowering.lowerConstant;
     pub const lowerLogDecl = ModuleLowering.lowerLogDecl;
     pub const lowerErrorDecl = ModuleLowering.lowerErrorDecl;
+    pub const errorDeclRuntimeIdForItem = ModuleLowering.errorDeclRuntimeIdForItem;
+    pub const abiLayoutForType = ModuleLowering.abiLayoutForType;
     pub const lowerDeclPlaceholder = ModuleLowering.lowerDeclPlaceholder;
     pub const createNamedPlaceholderOp = ModuleLowering.createNamedPlaceholderOp;
     pub const createPlaceholderOp = ModuleLowering.createPlaceholderOp;
     pub const appendItemHandle = ModuleLowering.appendItemHandle;
     pub const enclosingContractForItem = ModuleLowering.enclosingContractForItem;
     pub const ensureMonomorphizedFunction = ModuleLowering.ensureMonomorphizedFunction;
+    pub const ensureImportedFunctionSymbol = ModuleLowering.ensureImportedFunctionSymbol;
     pub const ensureLoweredImplMethod = ModuleLowering.ensureLoweredImplMethod;
     pub const attachBitfieldParamMetadata = ModuleLowering.attachBitfieldParamMetadata;
     pub const attachBitfieldParamMetadataForType = ModuleLowering.attachBitfieldParamMetadataForType;
@@ -230,7 +260,45 @@ const Lowerer = struct {
     pub const bitfieldFieldSign = ModuleLowering.bitfieldFieldSign;
 
     pub fn location(self: *const Lowerer, range: source.TextRange) mlir.MlirLocation {
-        return support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
+        var loc = support.locationFromRangeWithStmt(self.context, self.sources, self.file.file_id, range, self.current_statement_id);
+        var i: usize = 0;
+        while (i < self.synthetic_stack_len) : (i += 1) {
+            const frame = self.synthetic_stack[i];
+            loc = mlir.oraLocationSyntheticTaggedGet(
+                self.context,
+                loc,
+                frame.index,
+                frame.count,
+            );
+        }
+        return loc;
+    }
+
+    pub fn pushSyntheticFrame(self: *Lowerer, index: u32, count: u32) void {
+        // This stack should never overflow under the current nested-unroll policy.
+        // Keep the bound explicit so future budget changes do not silently truncate provenance.
+        std.debug.assert(self.synthetic_stack_len < self.synthetic_stack.len);
+        self.synthetic_stack[self.synthetic_stack_len] = .{ .index = index, .count = count };
+        self.synthetic_stack_len += 1;
+        self.current_synthetic_index = index;
+        self.current_synthetic_count = count;
+    }
+
+    pub fn popSyntheticFrame(self: *Lowerer) void {
+        if (self.synthetic_stack_len == 0) {
+            self.current_synthetic_index = null;
+            self.current_synthetic_count = null;
+            return;
+        }
+        self.synthetic_stack_len -= 1;
+        if (self.synthetic_stack_len == 0) {
+            self.current_synthetic_index = null;
+            self.current_synthetic_count = null;
+            return;
+        }
+        const frame = self.synthetic_stack[self.synthetic_stack_len - 1];
+        self.current_synthetic_index = frame.index;
+        self.current_synthetic_count = frame.count;
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
@@ -285,7 +353,20 @@ const Lowerer = struct {
             },
             .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
-            .ErrorUnion => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerTypeExpr(error_union.payload)),
+            .ErrorUnion => |error_union| blk: {
+                const payload_type = self.lowerTypeExpr(error_union.payload);
+                var error_types: std.ArrayList(mlir.MlirType) = .{};
+                for (error_union.errors) |error_type_expr| {
+                    error_types.append(self.allocator, self.lowerTypeExpr(error_type_expr)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
+                }
+                break :blk mlir.oraErrorUnionTypeGetWithErrors(
+                    self.context,
+                    payload_type,
+                    error_types.items.len,
+                    if (error_types.items.len == 0) null else error_types.items.ptr,
+                );
+            },
             .Error => self.recordTypeFallback(.syntax_error_type, self.typeExprRange(type_expr_id)),
         };
     }
@@ -348,25 +429,27 @@ const Lowerer = struct {
                         var base_copy = substituted_base;
                         var refinement_copy = refinement;
                         refinement_copy.base_type = &base_copy;
-                        break :blk support.lowerRefinementType(self.context, refinement_copy);
+                        break :blk support.lowerRefinementType(self.context, refinement_copy, self.allocator) catch
+                            return self.recordTypeFallback(.unsupported_syntax_type, range);
                     }
                 }
-                break :blk support.lowerRefinementType(self.context, refinement);
+                break :blk support.lowerRefinementType(self.context, refinement, self.allocator) catch
+                    return self.recordTypeFallback(.unsupported_syntax_type, range);
             },
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
             .bitfield => support.defaultIntegerType(self.context),
-            .enum_ => support.defaultIntegerType(self.context),
+            .enum_ => |named| self.lowerEnumSemaType(named.name, range),
             .named => |named| if (self.substitutedType(named.name)) |substituted|
                 self.lowerSemaType(substituted, range)
             else blk: {
                 if (self.item_index.lookup(named.name)) |item_id| {
-                    if (self.file.item(item_id).* == .Enum) break :blk support.defaultIntegerType(self.context);
+                    if (self.file.item(item_id).* == .Enum) break :blk self.lowerEnumSemaType(named.name, range);
                 }
                 break :blk mlir.oraStructTypeGet(self.context, support.strRef(named.name));
             },
-            .error_union => |error_union| mlir.oraErrorUnionTypeGet(self.context, self.lowerSemaType(error_union.payload_type.*, range)),
+            .error_union => |error_union| self.lowerErrorUnionSemaType(error_union, range),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => |function| blk: {
                 var param_types: std.ArrayList(mlir.MlirType) = .{};
@@ -402,18 +485,153 @@ const Lowerer = struct {
                 );
             },
             .anonymous_struct => |struct_type| blk: {
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
                 var field_types: std.ArrayList(mlir.MlirType) = .{};
                 for (struct_type.fields) |field| {
+                    field_names.append(self.allocator, support.strRef(field.name)) catch
+                        break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
                     field_types.append(self.allocator, self.lowerSemaType(field.ty, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
                 }
-                break :blk mlir.oraTupleTypeGet(
+                break :blk mlir.oraAnonymousStructTypeGet(
                     self.context,
                     field_types.items.len,
+                    if (field_names.items.len == 0) null else field_names.items.ptr,
                     if (field_types.items.len == 0) null else field_types.items.ptr,
                 );
             },
         };
+    }
+
+    fn lowerEnumSemaType(self: *Lowerer, name: []const u8, range: source.TextRange) mlir.MlirType {
+        if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
+            if (enumInstHasPayload(instantiated)) return self.lowerInstantiatedEnumAdtType(instantiated, range);
+            if (instantiated.repr_type) |repr| return self.lowerSemaType(repr, range);
+            return support.defaultIntegerType(self.context);
+        }
+        const item_id = self.item_index.lookup(name) orelse return support.defaultIntegerType(self.context);
+        const enum_item = switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item,
+            else => return support.defaultIntegerType(self.context),
+        };
+        if (enumItemHasPayload(enum_item)) return self.lowerEnumAdtType(enum_item, range);
+        const base_type = enum_item.base_type orelse return support.defaultIntegerType(self.context);
+        const repr = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, base_type) catch
+            return self.recordTypeFallback(.unsupported_syntax_type, range);
+        return self.lowerSemaType(repr, range);
+    }
+
+    fn enumItemHasPayload(enum_item: ast.EnumItem) bool {
+        for (enum_item.variants) |variant| {
+            switch (variant.payload) {
+                .none => {},
+                else => return true,
+            }
+        }
+        return false;
+    }
+
+    fn enumInstHasPayload(instantiated: sema.InstantiatedEnum) bool {
+        for (instantiated.variants) |variant| {
+            if (variant.payload_type != null) return true;
+        }
+        return false;
+    }
+
+    fn lowerInstantiatedEnumAdtType(self: *Lowerer, instantiated: sema.InstantiatedEnum, range: source.TextRange) mlir.MlirType {
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
+        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        for (instantiated.variants) |variant| {
+            variant_names.append(self.allocator, support.strRef(variant.name)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+            payload_types.append(
+                self.allocator,
+                if (variant.payload_type) |payload| self.lowerSemaType(payload, range) else mlir.oraNoneTypeCreate(self.context),
+            ) catch return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraAdtTypeGet(
+            self.context,
+            support.strRef(instantiated.mangled_name),
+            variant_names.items.len,
+            if (variant_names.items.len == 0) null else variant_names.items.ptr,
+            if (payload_types.items.len == 0) null else payload_types.items.ptr,
+        );
+    }
+
+    fn lowerEnumAdtType(self: *Lowerer, enum_item: ast.EnumItem, range: source.TextRange) mlir.MlirType {
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
+        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        for (enum_item.variants) |variant| {
+            variant_names.append(self.allocator, support.strRef(variant.name)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+            payload_types.append(self.allocator, self.lowerEnumVariantPayloadType(variant.payload, variant.range)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraAdtTypeGet(
+            self.context,
+            support.strRef(enum_item.name),
+            variant_names.items.len,
+            if (variant_names.items.len == 0) null else variant_names.items.ptr,
+            if (payload_types.items.len == 0) null else payload_types.items.ptr,
+        );
+    }
+
+    fn lowerEnumVariantPayloadType(self: *Lowerer, payload: ast.EnumVariantPayload, range: source.TextRange) mlir.MlirType {
+        return switch (payload) {
+            .none => mlir.oraNoneTypeCreate(self.context),
+            .positional => |types| blk: {
+                if (types.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
+                if (types.len == 1) break :blk self.lowerEnumPayloadTypeExpr(types[0], range);
+                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                for (types) |type_expr| {
+                    element_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(type_expr, range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk mlir.oraTupleTypeGet(
+                    self.context,
+                    element_types.items.len,
+                    if (element_types.items.len == 0) null else element_types.items.ptr,
+                );
+            },
+            .named => |fields| blk: {
+                if (fields.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
+                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                for (fields) |field| {
+                    field_names.append(self.allocator, support.strRef(field.name)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                    field_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(field.type_expr, field.range)) catch
+                        break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk mlir.oraAnonymousStructTypeGet(
+                    self.context,
+                    field_types.items.len,
+                    if (field_names.items.len == 0) null else field_names.items.ptr,
+                    if (field_types.items.len == 0) null else field_types.items.ptr,
+                );
+            },
+        };
+    }
+
+    fn lowerEnumPayloadTypeExpr(self: *Lowerer, type_expr: ast.TypeExprId, range: source.TextRange) mlir.MlirType {
+        const ty = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr) catch
+            return self.recordTypeFallback(.unsupported_syntax_type, range);
+        return self.lowerSemaType(ty, range);
+    }
+
+    fn lowerErrorUnionSemaType(self: *Lowerer, error_union: sema_model.ErrorUnionType, range: source.TextRange) mlir.MlirType {
+        const payload_type = self.lowerSemaType(error_union.payload_type.*, range);
+        var error_types: std.ArrayList(mlir.MlirType) = .{};
+        for (error_union.error_types) |error_type| {
+            error_types.append(self.allocator, self.lowerSemaType(error_type, range)) catch
+                return self.recordTypeFallback(.unsupported_syntax_type, range);
+        }
+        return mlir.oraErrorUnionTypeGetWithErrors(
+            self.context,
+            payload_type,
+            error_types.items.len,
+            if (error_types.items.len == 0) null else error_types.items.ptr,
+        );
     }
 
     pub fn lowerNamedPathType(self: *Lowerer, name: []const u8) mlir.MlirType {
@@ -659,6 +877,7 @@ const Lowerer = struct {
     }
 
     pub fn callSuppliesMethodReceiver(self: *const Lowerer, expr_id: ast.ExprId) bool {
+        if (expr_id.index() >= self.file.expressions.len) return false;
         return switch (self.file.expression(expr_id).*) {
             .Field => true,
             .Group => |group| self.callSuppliesMethodReceiver(group.expr),
@@ -754,31 +973,61 @@ const Lowerer = struct {
         arg_type: sema.Type,
         bindings: []GenericTypeBinding,
     ) !void {
-        const type_expr_node = self.file.typeExpr(param.type_expr).*;
-        const name = switch (type_expr_node) {
-            .Path => |path| path.name,
-            else => return,
-        };
+        try self.inferHirBindingsFromTypeExpr(function, generic_count, param.type_expr, arg_type, bindings);
+    }
 
-        for (function.parameters[0..generic_count], 0..) |generic_param, index| {
-            const param_name = self.patternName(generic_param.pattern) orelse continue;
-            if (!std.mem.eql(u8, name, param_name)) continue;
-            if (!self.isGenericTypeParameter(generic_param)) continue;
+    fn inferHirBindingsFromTypeExpr(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        type_expr_id: ast.TypeExprId,
+        arg_type: sema.Type,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        switch (self.file.typeExpr(type_expr_id).*) {
+            .Path => |path| {
+                const name = path.name;
+                for (function.parameters[0..generic_count], 0..) |generic_param, index| {
+                    const param_name = self.patternName(generic_param.pattern) orelse continue;
+                    if (!std.mem.eql(u8, name, param_name)) continue;
+                    if (!self.isGenericTypeParameter(generic_param)) continue;
 
-            if (bindings[index].mangle_name.len > 0) {
-                const existing = hirGenericBindingType(bindings[index]) orelse return;
-                const existing_mangle = try self.typeMangleName(existing);
-                const arg_mangle = try self.typeMangleName(arg_type);
-                if (!std.mem.eql(u8, existing_mangle, arg_mangle)) {
-                    bindings[index].mangle_name = "";
-                    bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                    if (bindings[index].mangle_name.len > 0) {
+                        const existing = hirGenericBindingType(bindings[index]) orelse return;
+                        if (shouldDeferLiteralMangleBinding(existing, arg_type)) return;
+                        const existing_mangle = try self.typeMangleName(existing);
+                        const arg_mangle = try self.typeMangleName(arg_type);
+                        if (!std.mem.eql(u8, existing_mangle, arg_mangle)) {
+                            bindings[index].mangle_name = "";
+                            bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                        }
+                        return;
+                    }
+
+                    bindings[index].value = .{ .ty = arg_type };
+                    bindings[index].mangle_name = try self.typeMangleName(arg_type);
+                    return;
                 }
-                return;
-            }
-
-            bindings[index].value = .{ .ty = arg_type };
-            bindings[index].mangle_name = try self.typeMangleName(arg_type);
-            return;
+            },
+            .Generic => |generic| {
+                const base_name = std.mem.trim(u8, generic.name, " \t\n\r");
+                if (std.mem.eql(u8, base_name, "Result") and generic.args.len == 2 and arg_type.kind() == .error_union) {
+                    if (generic.args[0] == .Type) {
+                        try self.inferHirBindingsFromTypeExpr(function, generic_count, generic.args[0].Type, arg_type.error_union.payload_type.*, bindings);
+                    }
+                    if (generic.args[1] == .Type and arg_type.error_union.error_types.len == 1) {
+                        try self.inferHirBindingsFromTypeExpr(function, generic_count, generic.args[1].Type, arg_type.error_union.error_types[0], bindings);
+                    }
+                }
+            },
+            .ErrorUnion => |error_union| {
+                if (arg_type.kind() != .error_union) return;
+                try self.inferHirBindingsFromTypeExpr(function, generic_count, error_union.payload, arg_type.error_union.payload_type.*, bindings);
+                if (error_union.errors.len == 1 and arg_type.error_union.error_types.len == 1) {
+                    try self.inferHirBindingsFromTypeExpr(function, generic_count, error_union.errors[0], arg_type.error_union.error_types[0], bindings);
+                }
+            },
+            else => {},
         }
     }
 
@@ -789,7 +1038,12 @@ const Lowerer = struct {
         };
     }
 
-    fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
+    fn shouldDeferLiteralMangleBinding(existing: sema.Type, candidate: sema.Type) bool {
+        if (existing.kind() != .integer or candidate.kind() != .integer) return false;
+        return candidate.integer.spelling == null;
+    }
+
+    pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
         var name = std.ArrayList(u8){};
         try appendSemaTypeMangleName(self.allocator, &name, ty);
         return name.toOwnedSlice(self.allocator);
@@ -839,6 +1093,13 @@ const FunctionLowerer = struct {
         kind: ast.SpecClauseKind,
         expr: ast.ExprId,
         range: source.TextRange,
+        verification_context: ?[]const u8 = null,
+        pattern_aliases: []const PatternAlias = &.{},
+    };
+
+    pub const PatternAlias = struct {
+        source: ast.PatternId,
+        target: ast.PatternId,
     };
 
     parent: *Lowerer,
@@ -861,6 +1122,8 @@ const FunctionLowerer = struct {
     loop_context: ?*const support.LoopContext = null,
     block_context: ?*const support.BlockContext = null,
     switch_context: ?*const support.SwitchContext = null,
+    unrolled_loop_context: ?*support.UnrolledLoopContext = null,
+    unroll_multiplier: u64 = 1,
 
     const FunctionCore = function_core.mixin(FunctionLowerer, Lowerer);
     const ControlFlow = control_flow.mixin(FunctionLowerer, Lowerer);
@@ -878,6 +1141,7 @@ const FunctionLowerer = struct {
     pub const bindPatternValue = FunctionCore.bindPatternValue;
     pub const storePattern = FunctionCore.storePattern;
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
+    pub const convertValueForSemaFlow = FunctionCore.convertValueForSemaFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
     pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;
@@ -886,6 +1150,9 @@ const FunctionLowerer = struct {
     pub const filterCarriedLocals = FunctionCore.filterCarriedLocals;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const materializeCarriedLocalValue = FunctionCore.materializeCarriedLocalValue;
+    pub const evalKnownIntExpr = FunctionCore.evalKnownIntExpr;
+    pub const evalKnownBoolExpr = FunctionCore.evalKnownBoolExpr;
+    pub const evalKnownExprValue = FunctionCore.evalKnownExprValue;
     pub const appendOraYieldFromLocals = FunctionCore.appendOraYieldFromLocals;
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
@@ -929,6 +1196,18 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             else => lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
         return mlir.oraMapTypeGet(lowerer.context, key_type, value_type);
+    }
+    if (std.mem.eql(u8, generic.name, "Result") and generic.args.len == 2) {
+        const payload_type = switch (generic.args[0]) {
+            .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
+            else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
+        };
+        const error_type = switch (generic.args[1]) {
+            .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
+            else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
+        };
+        var error_types = [_]mlir.MlirType{error_type};
+        return mlir.oraErrorUnionTypeGetWithErrors(lowerer.context, payload_type, error_types.len, &error_types);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
         const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;

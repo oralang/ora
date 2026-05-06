@@ -1,0 +1,17 @@
+error Failure(code: u256, owner: address);
+
+pub contract MatchDiscardProbe {
+    fn decide(flag: u256) -> !u256 | Failure {
+        if (flag == 0) {
+            return 10;
+        }
+        return Failure(7, 0x0000000000000000000000000000000000000000);
+    }
+
+    pub fn project(flag: u256) -> u256 {
+        return match (decide(flag)) {
+            Ok(_) => 1,
+            Failure(_, owner) => 2,
+        };
+    }
+}

@@ -195,6 +195,7 @@ pub const TokenType = enum {
 
     // control flow keywords
     Switch,
+    Match,
 
     // function modifiers
     Ghost,
@@ -581,6 +582,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "havoc", .Havoc },
     .{ "ghost", .Ghost },
     .{ "switch", .Switch },
+    .{ "match", .Match },
     .{ "void", .Void },
     .{ "comptime", .Comptime },
     .{ "as", .As },

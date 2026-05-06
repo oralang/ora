@@ -176,7 +176,7 @@ pub const ContractAbi = struct {
         self.type_lookup.deinit();
     }
 
-    fn findType(self: *const ContractAbi, type_id: []const u8) ?*const AbiTypeNode {
+    pub fn findType(self: *const ContractAbi, type_id: []const u8) ?*const AbiTypeNode {
         if (self.type_lookup.get(type_id)) |idx| {
             return &self.types[idx];
         }
@@ -703,6 +703,7 @@ const CompilerAbiGenerator = struct {
     global_structs: std.StringHashMap(CompilerNamedTypeRef),
     global_bitfields: std.StringHashMap(CompilerNamedTypeRef),
     global_enums: std.StringHashMap(CompilerNamedTypeRef),
+    global_errors: std.StringHashMap(CompilerNamedTypeRef),
 
     contract_count: usize,
     primary_contract_name: ?[]const u8,
@@ -718,6 +719,7 @@ const CompilerAbiGenerator = struct {
             .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_bitfields = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_enums = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
+            .global_errors = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .contract_count = 0,
             .primary_contract_name = null,
         };
@@ -739,6 +741,7 @@ const CompilerAbiGenerator = struct {
         self.global_structs.deinit();
         self.global_bitfields.deinit();
         self.global_enums.deinit();
+        self.global_errors.deinit();
     }
 
     fn generate(self: *CompilerAbiGenerator) anyerror!ContractAbi {
@@ -803,6 +806,18 @@ const CompilerAbiGenerator = struct {
                             try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = item_id });
                         }
                     },
+                    .Contract => |contract| {
+                        for (contract.members) |member_id| {
+                            switch (ctx.file.item(member_id).*) {
+                                .Struct => |struct_item| {
+                                    if (!self.global_structs.contains(struct_item.name)) {
+                                        try self.global_structs.put(struct_item.name, .{ .module_id = module_id, .item_id = member_id });
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    },
                     .Bitfield => |bitfield_item| {
                         if (!self.global_bitfields.contains(bitfield_item.name)) {
                             try self.global_bitfields.put(bitfield_item.name, .{ .module_id = module_id, .item_id = item_id });
@@ -811,6 +826,11 @@ const CompilerAbiGenerator = struct {
                     .Enum => |enum_item| {
                         if (!self.global_enums.contains(enum_item.name)) {
                             try self.global_enums.put(enum_item.name, .{ .module_id = module_id, .item_id = item_id });
+                        }
+                    },
+                    .ErrorDecl => |error_item| {
+                        if (!self.global_errors.contains(error_item.name)) {
+                            try self.global_errors.put(error_item.name, .{ .module_id = module_id, .item_id = item_id });
                         }
                     },
                     else => {},
@@ -878,7 +898,10 @@ const CompilerAbiGenerator = struct {
 
         for (function.parameters[offset..], 0..) |parameter, index| {
             const param_type = function_type.param_types[index + offset];
-            const resolved = try self.resolveSemaType(ctx, param_type, &.{});
+            const resolved = switch (param_type) {
+                .error_union => try self.resolvePublicResultInputType(ctx, param_type),
+                else => try self.resolveSemaType(ctx, param_type, &.{}),
+            };
             try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
             try inputs.append(self.allocator, .{
                 .name = patternName(ctx.file, parameter.pattern),
@@ -1080,6 +1103,150 @@ const CompilerAbiGenerator = struct {
         }
     }
 
+    fn resolvePublicResultInputType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) !ResolvedType {
+        const error_union = switch (ty) {
+            .error_union => |error_union| error_union,
+            else => return error.UnsupportedAbiType,
+        };
+        if (error_union.error_types.len != 1) return error.UnsupportedAbiType;
+        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.payload_type.*)) return error.UnsupportedAbiType;
+        const payload_words = self.publicAbiStaticWordCount(ctx, error_union.payload_type.*);
+
+        const payload = error_union.payload_type.*;
+        if (!self.publicAbiErrorTypeHasPayload(ctx, error_union.error_types[0])) {
+            return self.resolveTupleType(ctx, &.{ .bool, payload });
+        }
+        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.error_types[0])) return error.UnsupportedAbiType;
+        const error_words = self.publicAbiStaticWordCount(ctx, error_union.error_types[0]);
+        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return error.UnsupportedAbiType;
+        return self.resolveTupleType(ctx, &.{ .bool, payload, error_union.error_types[0] });
+    }
+
+    fn publicAbiSupportsResultCarrierType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
+        if (self.publicAbiStaticWordCount(ctx, ty) != null) return true;
+        return switch (ty) {
+            .bytes, .string => true,
+            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(ctx, slice.element_type.*),
+            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(ctx, array.element_type.*),
+            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(ctx, refinement.base_type.*),
+            else => false,
+        };
+    }
+
+    fn publicAbiSupportsResultDynamicArrayElement(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
+        return switch (ty) {
+            .bool, .address, .integer, .enum_, .bitfield => true,
+            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(ctx, refinement.base_type.*),
+            .named => |named| blk: {
+                const item_id = ctx.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (ctx.file.item(item_id).*) {
+                    .Enum, .Bitfield => true,
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn publicAbiErrorTypeHasPayload(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
+        _ = self;
+        const name = ty.name() orelse return true;
+        const item_id = ctx.item_index.lookup(name) orelse return true;
+        return switch (ctx.file.item(item_id).*) {
+            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
+            else => true,
+        };
+    }
+
+    fn publicAbiStaticWordCount(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) ?usize {
+        return switch (ty) {
+            .bool, .address, .integer, .enum_, .bitfield => 1,
+            .refinement => |refinement| self.publicAbiStaticWordCount(ctx, refinement.base_type.*),
+            .tuple => |elements| blk: {
+                var total: usize = 0;
+                for (elements) |element| {
+                    total += self.publicAbiStaticWordCount(ctx, element) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .array => |array| blk: {
+                const len = array.len orelse break :blk null;
+                const element_words = self.publicAbiStaticWordCount(ctx, array.element_type.*) orelse break :blk null;
+                break :blk element_words * len;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                var total: usize = 0;
+                for (struct_type.fields) |field| {
+                    total += self.publicAbiStaticWordCount(ctx, field.ty) orelse break :blk null;
+                }
+                break :blk total;
+            },
+            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
+            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
+                if (parseIntegerSpelling(named.name) != null) break :blk 1;
+                const item_id = ctx.item_index.lookup(named.name) orelse break :blk null;
+                break :blk switch (ctx.file.item(item_id).*) {
+                    .Enum, .Bitfield => 1,
+                    .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, named.name),
+                    .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, named.name),
+                    .ErrorDecl => |error_decl| blk2: {
+                        var total: usize = 0;
+                        for (error_decl.parameters) |parameter| {
+                            total += self.publicAbiStaticWordCount(ctx, ctx.typecheck.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
+                        }
+                        break :blk2 total;
+                    },
+                    else => null,
+                };
+            },
+            else => null,
+        };
+    }
+
+    fn publicAbiStaticWordCountForNamedStruct(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
+        const item_id = ctx.item_index.lookup(name) orelse return null;
+        return switch (ctx.file.item(item_id).*) {
+            .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, name),
+            .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, name),
+            else => null,
+        };
+    }
+
+    fn publicAbiStaticWordCountForStructDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
+        const item_id = ctx.item_index.lookup(name) orelse return null;
+        const struct_item = switch (ctx.file.item(item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return null,
+        };
+        var total: usize = 0;
+        for (struct_item.fields) |field| {
+            total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr) catch return null) orelse return null;
+        }
+        return total;
+    }
+
+    fn publicAbiStaticWordCountForContractDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
+        const item_id = ctx.item_index.lookup(name) orelse return null;
+        const contract_item = switch (ctx.file.item(item_id).*) {
+            .Contract => |contract_item| contract_item,
+            else => return null,
+        };
+        var total: usize = 0;
+        for (contract_item.members) |member_id| {
+            switch (ctx.file.item(member_id).*) {
+                .Field => |field| {
+                    if (field.type_expr) |type_expr| {
+                        total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, type_expr) catch return null) orelse return null;
+                    } else return null;
+                },
+                else => {},
+            }
+        }
+        return total;
+    }
+
     fn appendEffectFlags(
         self: *CompilerAbiGenerator,
         has_external: bool,
@@ -1147,13 +1314,7 @@ const CompilerAbiGenerator = struct {
             .array => |array| return self.resolveArrayType(ctx, array),
             .slice => |slice| return self.resolveSliceType(ctx, slice),
             .tuple => |elements| return self.resolveTupleType(ctx, elements),
-            .anonymous_struct => |struct_type| {
-                const elements = try self.allocator.alloc(compiler.sema.Type, struct_type.fields.len);
-                for (struct_type.fields, 0..) |field, index| {
-                    elements[index] = field.ty;
-                }
-                return self.resolveTupleType(ctx, elements);
-            },
+            .anonymous_struct => |struct_type| return self.resolveAnonymousStructType(ctx, struct_type.fields),
             .struct_ => |named| return self.resolveNamedStructType(ctx, named.name),
             .bitfield => |named| return self.resolveNamedBitfieldType(ctx, named.name),
             .enum_ => |named| return self.resolveNamedEnumType(ctx, named.name),
@@ -1162,6 +1323,7 @@ const CompilerAbiGenerator = struct {
                 if (self.global_structs.contains(named.name)) return self.resolveNamedStructType(ctx, named.name);
                 if (self.global_bitfields.contains(named.name)) return self.resolveNamedBitfieldType(ctx, named.name);
                 if (self.global_enums.contains(named.name)) return self.resolveNamedEnumType(ctx, named.name);
+                if (self.global_errors.contains(named.name)) return self.resolveNamedErrorType(ctx, named.name);
                 if (std.mem.eql(u8, named.name, "bool")) return self.resolveSemaType(ctx, .bool, &.{});
                 if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{});
                 if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{});
@@ -1257,6 +1419,40 @@ const CompilerAbiGenerator = struct {
         return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
     }
 
+    fn resolveAnonymousStructType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        fields_input: []const compiler.sema.AnonymousStructField,
+    ) anyerror!ResolvedType {
+        var fields = try self.allocator.alloc(AbiFieldRef, fields_input.len);
+        errdefer self.allocator.free(fields);
+        var wire_parts: std.ArrayList([]const u8) = .{};
+        defer {
+            for (wire_parts.items) |part| self.allocator.free(part);
+            wire_parts.deinit(self.allocator);
+        }
+        for (fields_input, 0..) |field, index| {
+            const resolved = try self.resolveSemaType(ctx, field.ty, &.{});
+            fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
+            try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
+        }
+        const joined = try std.mem.join(self.allocator, ",", wire_parts.items);
+        defer self.allocator.free(joined);
+        const wire = try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
+        var node = AbiTypeNode{
+            .kind = .struct_,
+            .allocator = self.allocator,
+            .name = "__anon_struct__",
+            .wire_type = wire,
+            .fields = fields,
+            .ui_label = "anonymous struct",
+            .ui_widget = "json",
+        };
+        const type_id = try self.ensureTypeNode(&node);
+        const idx = self.type_lookup.get(type_id).?;
+        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
     fn resolveNamedStructType(
         self: *CompilerAbiGenerator,
         ctx: CompilerModuleContext,
@@ -1334,8 +1530,9 @@ const CompilerAbiGenerator = struct {
         ctx: CompilerModuleContext,
         name: []const u8,
     ) anyerror!ResolvedType {
-        if (ctx.typecheck.instantiatedEnumByName(name) != null) {
-            const repr = try self.resolveSemaType(ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+        if (ctx.typecheck.instantiatedEnumByName(name)) |instantiated| {
+            const repr_type = instantiated.repr_type orelse defaultEnumReprType();
+            const repr = try self.resolveSemaType(ctx, repr_type, &.{});
             var node = AbiTypeNode{
                 .kind = .enum_,
                 .allocator = self.allocator,
@@ -1354,7 +1551,11 @@ const CompilerAbiGenerator = struct {
         const ref = self.global_enums.get(name) orelse return error.UnknownEnumType;
         const owner_ctx = try self.moduleContext(ref.module_id);
         const enum_item = owner_ctx.file.item(ref.item_id).Enum;
-        const repr = try self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 32, .signed = false, .spelling = "u32" } }, &.{});
+        const repr_type = if (enum_item.base_type) |base_type|
+            try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, base_type)
+        else
+            defaultEnumReprType();
+        const repr = try self.resolveSemaType(owner_ctx, repr_type, &.{});
         var variants = try self.allocator.alloc(AbiEnumVariant, enum_item.variants.len);
         errdefer self.allocator.free(variants);
         for (enum_item.variants, 0..) |variant, index| {
@@ -1375,6 +1576,10 @@ const CompilerAbiGenerator = struct {
         return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
     }
 
+    fn defaultEnumReprType() compiler.sema.Type {
+        return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    }
+
     fn resolveNamedBitfieldType(
         self: *CompilerAbiGenerator,
         ctx: CompilerModuleContext,
@@ -1393,6 +1598,32 @@ const CompilerAbiGenerator = struct {
         const type_id = try self.ensureTypeNode(&node);
         const idx = self.type_lookup.get(type_id).?;
         return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+    }
+
+    fn resolveNamedErrorType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        name: []const u8,
+    ) anyerror!ResolvedType {
+        _ = ctx;
+        const ref = self.global_errors.get(name) orelse return error.UnsupportedAbiType;
+        const owner_ctx = try self.moduleContext(ref.module_id);
+        const error_item = owner_ctx.file.item(ref.item_id).ErrorDecl;
+
+        if (error_item.parameters.len == 0) {
+            return self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, &.{});
+        }
+
+        var elements = try self.allocator.alloc(compiler.sema.Type, error_item.parameters.len);
+        defer self.allocator.free(elements);
+        for (error_item.parameters, 0..) |parameter, index| {
+            elements[index] = owner_ctx.typecheck.pattern_types[parameter.pattern.index()].type;
+        }
+
+        if (elements.len == 1) {
+            return self.resolveSemaType(owner_ctx, elements[0], &.{});
+        }
+        return self.resolveTupleType(owner_ctx, elements);
     }
 
     fn resolveBitfieldBaseType(

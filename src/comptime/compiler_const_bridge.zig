@@ -140,8 +140,22 @@ pub fn constEquals(lhs: ConstValue, rhs: ConstValue) bool {
             .boolean => |b| a == b,
             else => false,
         },
+        .address => |a| switch (rhs) {
+            .address => |b| a == b,
+            else => false,
+        },
         .string => |a| switch (rhs) {
             .string => |b| std.mem.eql(u8, a, b),
+            else => false,
+        },
+        .tuple => |a| switch (rhs) {
+            .tuple => |b| blk: {
+                if (a.len != b.len) break :blk false;
+                for (a, b) |lhs_elem, rhs_elem| {
+                    if (!constEquals(lhs_elem, rhs_elem)) break :blk false;
+                }
+                break :blk true;
+            },
             else => false,
         },
     };
@@ -356,7 +370,9 @@ pub fn constToCtValue(value: ConstValue) !?CtValue {
             break :blk CtValue{ .integer = as_u256 };
         },
         .boolean => |boolean| CtValue{ .boolean = boolean },
+        .address => |address| CtValue{ .address = address },
         .string => null,
+        .tuple => null,
     };
 }
 
@@ -365,6 +381,7 @@ fn evalResultToConstValue(allocator: std.mem.Allocator, result: EvalResult) !?Co
         .value => |value| switch (value) {
             .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
             .boolean => |boolean| .{ .boolean = boolean },
+            .address => |address| .{ .address = address },
             else => null,
         },
         .runtime, .control => null,
@@ -376,11 +393,24 @@ fn zeroSpan() SourceSpan {
     return .{ .line = 0, .column = 0, .length = 0 };
 }
 
-pub fn ctValueToConstValue(allocator: std.mem.Allocator, heap: *const CtHeap, value: CtValue) !?ConstValue {
+pub fn ctValueToConstValue(allocator: std.mem.Allocator, heap: ?*const CtHeap, value: CtValue) !?ConstValue {
     return switch (value) {
         .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
         .boolean => |boolean| .{ .boolean = boolean },
-        .string_ref => |heap_id| .{ .string = try allocator.dupe(u8, heap.getString(heap_id)) },
+        .address => |address| .{ .address = address },
+        .string_ref => |heap_id| blk: {
+            const actual_heap = heap orelse break :blk null;
+            break :blk .{ .string = try allocator.dupe(u8, actual_heap.getString(heap_id)) };
+        },
+        .tuple_ref => |heap_id| blk: {
+            const actual_heap = heap orelse break :blk null;
+            const tuple = actual_heap.getTuple(heap_id);
+            const elems = try allocator.alloc(ConstValue, tuple.elems.len);
+            for (tuple.elems, 0..) |elem, index| {
+                elems[index] = (try ctValueToConstValue(allocator, actual_heap, elem)) orelse break :blk null;
+            }
+            break :blk .{ .tuple = elems };
+        },
         else => null,
     };
 }

@@ -1,0 +1,52 @@
+// ADT aggregate payload matching.
+//
+// Covers named struct payloads and named ADT payload variants through the full
+// source -> HIR -> SMT path.
+
+struct Receipt {
+    code: u256,
+    amount: u256,
+}
+
+enum AggregateEvent {
+    Empty,
+    Wrapped(Receipt),
+    Named { code: u256, amount: u256 },
+}
+
+contract AggregatePayloadMatch {
+    fn wrapped(amount: u256) -> AggregateEvent {
+        let receipt: Receipt = Receipt {
+            code: 10,
+            amount: amount,
+        };
+        return AggregateEvent.Wrapped(receipt);
+    }
+
+    fn named(amount: u256) -> AggregateEvent {
+        return AggregateEvent.Named {
+            amount: amount,
+            code: 20,
+        };
+    }
+
+    pub fn project_wrapped(amount: u256) -> u256
+        ensures(result == 10)
+    {
+        return match (wrapped(amount)) {
+            AggregateEvent.Empty => 0,
+            AggregateEvent.Wrapped(receipt) => receipt.code,
+            AggregateEvent.Named { amount: selected, .. } => selected,
+        };
+    }
+
+    pub fn project_named(amount: u256) -> u256
+        ensures(result == amount)
+    {
+        return match (named(amount)) {
+            AggregateEvent.Empty => 0,
+            AggregateEvent.Wrapped(receipt) => receipt.amount,
+            AggregateEvent.Named { amount: selected, .. } => selected,
+        };
+    }
+}

@@ -1,0 +1,25 @@
+error Failure(code: u256);
+
+pub contract ResultStatefulFlow {
+    storage var last_status: u256;
+    storage var last_value: u256;
+    storage var last_error: u256;
+    pub fn apply(value: Result<u256, Failure>) -> u256 {
+        match (value) {
+            Ok(inner) => {
+                last_status = 1;
+                last_value = inner;
+                last_error = 0;
+            },
+            Err(err) => {
+                last_status = 0;
+                last_value = 0;
+                last_error = err.code;
+            }
+        }
+        return match (value) {
+            Ok(inner) => inner,
+            Err(err) => err.code,
+        };
+    }
+}

@@ -117,14 +117,19 @@ pub const Formatter = struct {
     fn emitLeadingComments(self: *Formatter, token: lib.Token) FormatError!void {
         var i = token.leading_trivia_start;
         const end = token.leading_trivia_start + token.leading_trivia_len;
+        var newline_count: u32 = 0;
         while (i < end and i < self.trivia.len) : (i += 1) {
             const piece = self.trivia[i];
             switch (piece.kind) {
                 .LineComment, .DocLineComment, .BlockComment, .DocBlockComment => {
+                    newline_count = 0;
                     try self.emitComment(piece);
                 },
                 .Newline => {
+                    newline_count += 1;
                     if (self.writer.current_line_length > 0) {
+                        try self.writer.newline();
+                    } else if (newline_count == 2 and self.paren_depth == 0 and self.bracket_depth == 0) {
                         try self.writer.newline();
                     }
                 },

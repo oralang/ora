@@ -1,0 +1,25 @@
+// Comptime ADT payload matching.
+//
+// Covers compile-time construction and match folding for payload-carrying enums.
+
+enum ComptimeEvent {
+    Empty,
+    Value(u256),
+    Pair(u256, u256),
+}
+
+contract ComptimePayloadMatch {
+    pub fn folded() -> u256
+        ensures(result == 42)
+    {
+        return comptime {
+            let event = ComptimeEvent.Pair(20, 22);
+            let out = match (event) {
+                ComptimeEvent.Empty => 0,
+                ComptimeEvent.Value(value) => value,
+                ComptimeEvent.Pair(lhs, rhs) => lhs + rhs,
+            };
+            out;
+        };
+    }
+}

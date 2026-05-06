@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
@@ -9,12 +10,19 @@ const Frame = ora_evm.Frame(.{});
 const Debugger = ora_evm.Debugger(.{});
 const SourceMap = ora_evm.SourceMap;
 const DebugInfo = ora_evm.DebugInfo;
+const SessionHelpers = ora_evm.DebugSession(.{});
+const AbiDoc = ora_evm.debug_abi.AbiDoc;
+const writeAbiWord = ora_evm.debug_abi.writeAbiWord;
+const readU256BE = ora_evm.debug_abi.readU256BE;
+const writeU256BE = ora_evm.debug_abi.writeU256BE;
+const ParsedBreakpoint = ora_evm.debug_breakpoint.ParsedBreakpoint;
+const parseBreakpointArgsImpl = ora_evm.debug_breakpoint.parse;
 
 const Style = vaxis.Style;
 const Color = vaxis.Color;
 const Segment = vaxis.Segment;
 const Window = vaxis.Window;
-const ascii_border_glyphs: [6][]const u8 = .{ "+", "-", "+", "|", "+", "+" };
+const ascii_border_glyphs = @import("debug_tui_draw.zig").ascii_border_glyphs;
 
 const AppEvent = union(enum) {
     key_press: vaxis.Key,
@@ -24,24 +32,41 @@ const AppEvent = union(enum) {
     paste: []const u8,
 };
 
-const AppConfig = struct {
+/// Pairs an external contract address with the path to its
+/// `.abi.json`. Multiple `--abi <addr>=<path>` invocations on the
+/// command line each produce one of these. The TUI loads them into
+/// a hashmap so per-frame ABI lookup can decode external callees.
+const SecondaryAbiSpec = struct {
+    address: [20]u8,
+    path: []u8,
+
+    fn deinit(self: *SecondaryAbiSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
+pub const AppConfig = struct {
     bytecode_path: []u8,
     source_map_path: []u8,
     source_path: []u8,
     sir_path: ?[]u8 = null,
     debug_info_path: ?[]u8 = null,
     abi_path: ?[]u8 = null,
+    secondary_abi_specs: std.ArrayList(SecondaryAbiSpec) = .{},
     init_calldata: []u8 = &.{},
     init_calldata_fallback: []u8 = &.{},
     calldata: []u8 = &.{},
+    limits: ora_evm.DebugLimits = .{},
 
-    fn deinit(self: *AppConfig, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *AppConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode_path);
         allocator.free(self.source_map_path);
         allocator.free(self.source_path);
         if (self.sir_path) |path| allocator.free(path);
         if (self.debug_info_path) |path| allocator.free(path);
         if (self.abi_path) |path| allocator.free(path);
+        for (self.secondary_abi_specs.items) |*spec| spec.deinit(allocator);
+        self.secondary_abi_specs.deinit(allocator);
         allocator.free(self.init_calldata);
         allocator.free(self.init_calldata_fallback);
         allocator.free(self.calldata);
@@ -71,145 +96,15 @@ const BindingSnapshotEntry = struct {
     value: ?u256,
 };
 
-const EvmTabKind = enum { stack, memory, storage, tstore, calldata };
-const StepMode = enum { in, opcode, over, out, continue_ };
+pub const EvmTabKind = enum { stack, memory, storage, tstore, calldata };
+pub const StepMode = enum { in, opcode, over, out, continue_ };
 
-const SavedSession = struct {
-    const SavedCheckpoint = struct {
-        id: u32,
-        step_index: usize,
-        scroll_line: u32,
-        focus_line: ?u32 = null,
-        active_evm_tab: []const u8 = "stack",
-    };
+// SavedSession + writeSession/loadSession/exportTrace live in
+// debug_tui_session.zig; the methods on `Ui` below are 1-line
+// delegators. Keep imports tight: we don't need to surface
+// SavedSession at this scope.
 
-    version: u32 = 1,
-    bytecode_path: []const u8,
-    source_map_path: []const u8,
-    source_path: []const u8,
-    sir_path: ?[]const u8 = null,
-    debug_info_path: ?[]const u8 = null,
-    abi_path: ?[]const u8 = null,
-    calldata_hex: []const u8,
-    scroll_line: u32 = 1,
-    sir_scroll_line: u32 = 1,
-    sir_follow: bool = true,
-    focus_line: ?u32 = null,
-    active_evm_tab: []const u8 = "stack",
-    step_history: []const []const u8 = &.{},
-    breakpoints: []const u32 = &.{},
-    checkpoints: []const SavedCheckpoint = &.{},
-};
-
-const AbiDoc = struct {
-    allocator: std.mem.Allocator,
-    json_bytes: []u8,
-    parsed: std.json.Parsed(std.json.Value),
-
-    fn loadFromPath(allocator: std.mem.Allocator, path: []const u8) !AbiDoc {
-        const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
-        errdefer allocator.free(json_bytes);
-
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
-        errdefer parsed.deinit();
-
-        return .{
-            .allocator = allocator,
-            .json_bytes = json_bytes,
-            .parsed = parsed,
-        };
-    }
-
-    fn deinit(self: *AbiDoc) void {
-        self.parsed.deinit();
-        self.allocator.free(self.json_bytes);
-    }
-
-    fn findCallableBySelector(self: *const AbiDoc, selector: [4]u8) ?std.json.Value {
-        const callables = self.parsed.value.object.get("callables") orelse return null;
-        if (callables != .array) return null;
-
-        const selector_int = std.mem.readInt(u32, &selector, .big);
-        var selector_buf: [10]u8 = undefined;
-        const selector_text = std.fmt.bufPrint(&selector_buf, "0x{x:0>8}", .{selector_int}) catch return null;
-
-        for (callables.array.items) |callable| {
-            if (callable != .object) continue;
-            const kind = callable.object.get("kind") orelse continue;
-            if (kind != .string or !std.mem.eql(u8, kind.string, "function")) continue;
-
-            const wire = callable.object.get("wire") orelse continue;
-            if (wire != .object) continue;
-            const evm_default = wire.object.get("evm-default") orelse continue;
-            if (evm_default != .object) continue;
-            const selector_value = evm_default.object.get("selector") orelse continue;
-            if (selector_value != .string) continue;
-            if (std.mem.eql(u8, selector_value.string, selector_text)) return callable;
-        }
-
-        return null;
-    }
-
-    fn wireTypeForTypeId(self: *const AbiDoc, type_id: []const u8) ?[]const u8 {
-        const types = self.parsed.value.object.get("types") orelse return null;
-        if (types != .object) return null;
-        const type_value = types.object.get(type_id) orelse return null;
-        if (type_value != .object) return null;
-
-        if (type_value.object.get("wire")) |wire| {
-            if (wire == .object) {
-                if (wire.object.get("evm-default")) |evm_default| {
-                    if (evm_default == .object) {
-                        if (evm_default.object.get("type")) |wire_type| {
-                            if (wire_type == .string) return wire_type.string;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (type_value.object.get("name")) |name| {
-            if (name == .string) return name.string;
-        }
-
-        return null;
-    }
-
-    fn findInputWireType(self: *const AbiDoc, callable: std.json.Value, input_name: []const u8) ?[]const u8 {
-        if (callable != .object) return null;
-        const inputs = callable.object.get("inputs") orelse return null;
-        if (inputs != .array) return null;
-
-        for (inputs.array.items) |input| {
-            if (input != .object) continue;
-            const name = input.object.get("name") orelse continue;
-            if (name != .string or !std.mem.eql(u8, name.string, input_name)) continue;
-
-            const type_id = input.object.get("typeId") orelse return null;
-            if (type_id != .string) return null;
-            return self.wireTypeForTypeId(type_id.string);
-        }
-
-        return null;
-    }
-
-    fn findInputIndex(self: *const AbiDoc, callable: std.json.Value, input_name: []const u8) ?usize {
-        _ = self;
-        if (callable != .object) return null;
-        const inputs = callable.object.get("inputs") orelse return null;
-        if (inputs != .array) return null;
-
-        for (inputs.array.items, 0..) |input, i| {
-            if (input != .object) continue;
-            const name = input.object.get("name") orelse continue;
-            if (name == .string and std.mem.eql(u8, name.string, input_name)) return i;
-        }
-
-        return null;
-    }
-};
-
-const SessionSeed = struct {
+pub const SessionSeed = struct {
     runtime_bytecode: []u8,
     source_map: SourceMap,
     debug_info_json: ?[]u8 = null,
@@ -219,8 +114,9 @@ const SessionSeed = struct {
     calldata: []u8,
     caller: primitives.Address,
     contract: primitives.Address,
+    limits: ora_evm.DebugLimits = .{},
 
-    fn deinit(self: *SessionSeed, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SessionSeed, allocator: std.mem.Allocator) void {
         allocator.free(self.runtime_bytecode);
         self.source_map.deinit();
         if (self.debug_info_json) |bytes| allocator.free(bytes);
@@ -231,12 +127,12 @@ const SessionSeed = struct {
     }
 };
 
-const Session = struct {
+pub const Session = struct {
     evm: Evm,
     debugger: Debugger,
 
-    fn init(self: *Session, allocator: std.mem.Allocator, seed: *const SessionSeed) !void {
-        try self.evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+    pub fn init(self: *Session, allocator: std.mem.Allocator, seed: *const SessionSeed) !void {
+        try self.evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
         errdefer self.evm.deinit();
         try self.evm.initTransactionState(null);
         try self.evm.preWarmTransaction(seed.contract);
@@ -244,7 +140,7 @@ const Session = struct {
         try self.evm.frames.append(self.evm.arena.allocator(), try Frame.init(
             self.evm.arena.allocator(),
             seed.runtime_bytecode,
-            5_000_000,
+            seed.limits.gas_limit,
             seed.caller,
             seed.contract,
             0,
@@ -261,9 +157,10 @@ const Session = struct {
             try Debugger.initWithDebugInfo(allocator, &self.evm, source_map, try DebugInfo.loadFromJson(allocator, json), seed.source_text)
         else
             try Debugger.init(allocator, &self.evm, source_map, seed.source_text);
+        self.debugger.max_steps = seed.limits.max_steps;
     }
 
-    fn deinit(self: *Session) void {
+    pub fn deinit(self: *Session) void {
         self.debugger.deinit();
         self.evm.deinit();
     }
@@ -275,6 +172,23 @@ const Checkpoint = struct {
     scroll_line: u32,
     focus_line: ?u32 = null,
     active_evm_tab: EvmTabKind = .stack,
+};
+
+const OverlayMode = ora_evm.debug_overlay.OverlayMode;
+
+/// A user-set breakpoint. The debugger core only knows about lines (it
+/// halts on every hit); the TUI layers a side-effect-free predicate
+/// (`condition`) and an optional N-th-hit target on top, transparently
+/// resuming when neither gate is satisfied.
+pub const Breakpoint = struct {
+    line: u32,
+    condition: ?[]u8 = null,
+    hit_target: ?u32 = null,
+    hit_count: u32 = 0,
+
+    pub fn deinit(self: *Breakpoint, allocator: std.mem.Allocator) void {
+        if (self.condition) |c| allocator.free(c);
+    }
 };
 
 const MappingWindow = struct {
@@ -300,7 +214,14 @@ const WriteEffectKind = enum {
 
 const lock_prefix: u256 = (@as(u256, 1) << 255);
 
-const Ui = struct {
+/// Safety cap on the number of transparent resumes runStep will issue
+/// when a conditional / hit-count breakpoint keeps short-circuiting.
+/// This is only a guard against malformed user predicates (e.g.
+/// `when false`); under normal use the loop terminates within a
+/// handful of iterations.
+const kMaxConditionalBreakpointGatingIters: u32 = 1_000_000;
+
+pub const Ui = struct {
     allocator: std.mem.Allocator,
     config: AppConfig,
     abi_doc: ?AbiDoc = null,
@@ -325,10 +246,27 @@ const Ui = struct {
     render_scratch: std.ArrayList(u8) = .{},
     step_history: std.ArrayList(StepMode) = .{},
     previous_bindings: std.ArrayList(BindingSnapshotEntry) = .{},
-    breakpoints: std.ArrayList(u32) = .{},
+    breakpoints: std.ArrayList(Breakpoint) = .{},
     checkpoints: std.ArrayList(Checkpoint) = .{},
     next_checkpoint_id: u32 = 1,
     selected_frame_index: usize = 0,
+    overlay_mode: OverlayMode = .none,
+    /// External-contract ABIs keyed by 20-byte address. Populated
+    /// from `--abi <hex-address>=<path>` CLI args; consulted by
+    /// `abiDocForFrame` after the primary check fails. Empty when no
+    /// secondary ABIs were provided.
+    secondary_abi: std.AutoHashMap([20]u8, AbiDoc),
+    /// Front-end-agnostic controller layer. Routes the bulk of
+    /// eval / binding-resolve work through the same code path
+    /// the DAP server uses, so the two front-ends can't drift.
+    /// Initialised in `Ui.init` after `Session.init`.
+    controller: ora_evm.DebugController(.{}) = undefined,
+    /// Map source_line → proof_status_string from the FV
+    /// sidecar (`<stem>.proof.json`). Populated during init when
+    /// the sidecar is found next to the debug-info path. The `fv`
+    /// gutter overlay consults this map first; OpMeta.proof_status
+    /// is checked as a fallback for future MLIR-side population.
+    proof_lines: std.AutoHashMap(u32, []u8),
 
     fn init(
         allocator: std.mem.Allocator,
@@ -341,8 +279,54 @@ const Ui = struct {
             .abi_doc = if (config.abi_path) |path| try AbiDoc.loadFromPath(allocator, path) else null,
             .seed = seed,
             .session = undefined,
+            .secondary_abi = std.AutoHashMap([20]u8, AbiDoc).init(allocator),
+            .proof_lines = std.AutoHashMap(u32, []u8).init(allocator),
         };
+        errdefer self.secondary_abi.deinit();
+        errdefer if (self.abi_doc) |*doc| doc.deinit();
+        errdefer {
+            var it = self.proof_lines.valueIterator();
+            while (it.next()) |v| allocator.free(v.*);
+            self.proof_lines.deinit();
+        }
+
+        // Load FV proof sidecar (`<stem>.proof.json`) if present.
+        // The sidecar lives next to debug.json, with `.debug.json`
+        // replaced by `.proof.json`. Missing or unparseable files
+        // are non-fatal — the overlay just stays empty.
+        if (config.debug_info_path) |di_path| {
+            const proof_path = computeProofSidecarPath(allocator, di_path) catch null;
+            if (proof_path) |path| {
+                defer allocator.free(path);
+                self.loadProofSidecar(path) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => {
+                        // Non-fatal — log to stderr-equivalent via
+                        // command_status if/when status init runs.
+                    },
+                };
+            }
+        }
+
+        // Load secondary ABIs. A failure mid-loop frees what was
+        // already loaded so we don't leak.
+        for (config.secondary_abi_specs.items) |spec| {
+            const doc = AbiDoc.loadFromPath(allocator, spec.path) catch |err| {
+                var it = self.secondary_abi.valueIterator();
+                while (it.next()) |loaded| loaded.deinit();
+                return err;
+            };
+            // Last spec wins on duplicate addresses; free the prior
+            // one before overwriting.
+            if (self.secondary_abi.fetchRemove(spec.address)) |kv| {
+                var prev = kv.value;
+                prev.deinit();
+            }
+            try self.secondary_abi.put(spec.address, doc);
+        }
+
         try Session.init(&self.session, allocator, &self.seed);
+        self.controller = ora_evm.DebugController(.{}).init(allocator, &self.session.debugger);
         try self.source_buffer.update(allocator, .{ .bytes = self.seed.source_text });
         self.source_view.highlighted_style = .{
             .bg = Color.rgbFromUint(0x303A45),
@@ -371,6 +355,12 @@ const Ui = struct {
     fn deinit(self: *Ui) void {
         self.config.deinit(self.allocator);
         if (self.abi_doc) |*abi_doc| abi_doc.deinit();
+        var sec_it = self.secondary_abi.valueIterator();
+        while (sec_it.next()) |doc| doc.deinit();
+        self.secondary_abi.deinit();
+        var proof_it = self.proof_lines.valueIterator();
+        while (proof_it.next()) |v| self.allocator.free(v.*);
+        self.proof_lines.deinit();
         self.session.deinit();
         self.seed.deinit(self.allocator);
         self.source_buffer.deinit(self.allocator);
@@ -383,13 +373,119 @@ const Ui = struct {
         self.step_history.deinit(self.allocator);
         self.clearPreviousBindingsSnapshot();
         self.previous_bindings.deinit(self.allocator);
+        for (self.breakpoints.items) |*bp| bp.deinit(self.allocator);
         self.breakpoints.deinit(self.allocator);
         self.checkpoints.deinit(self.allocator);
     }
 
-    fn handleKey(self: *Ui, key: vaxis.Key) !bool {
-        if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) return true;
+    /// Action a key triggers. The exact key→action mapping lives in
+    /// `kKeymap` below (see KEYBINDINGS.md for the user-facing surface).
+    /// Adding a new binding is one new row in the table plus one switch
+    /// arm here.
+    const KeyAction = enum {
+        quit,
+        enter_command_mode,
+        step_in,
+        step_opcode,
+        step_over,
+        step_out,
+        step_continue,
+        step_back,
+        scroll_source_down,
+        scroll_source_up,
+        scroll_source_page_down,
+        scroll_source_page_up,
+        scroll_sir_down,
+        scroll_sir_up,
+        sir_follow,
+        evm_tab_prev,
+        evm_tab_next,
+        evm_tab_stack,
+        evm_tab_memory,
+        evm_tab_storage,
+        evm_tab_tstore,
+        evm_tab_calldata,
+        cycle_overlay,
+    };
 
+    const KeyBinding = struct {
+        key: vaxis.Key,
+        action: KeyAction,
+    };
+
+    fn keymap() [23]KeyBinding {
+        return .{
+            .{ .key = .{ .codepoint = 'q' }, .action = .quit },
+            .{ .key = .{ .codepoint = 'c', .mods = .{ .ctrl = true } }, .action = .quit },
+            .{ .key = .{ .codepoint = ':' }, .action = .enter_command_mode },
+            .{ .key = .{ .codepoint = 's' }, .action = .step_in },
+            .{ .key = .{ .codepoint = 'x' }, .action = .step_opcode },
+            .{ .key = .{ .codepoint = 'n' }, .action = .step_over },
+            .{ .key = .{ .codepoint = 'o' }, .action = .step_out },
+            .{ .key = .{ .codepoint = 'c' }, .action = .step_continue },
+            .{ .key = .{ .codepoint = 'p' }, .action = .step_back },
+            .{ .key = .{ .codepoint = 'j' }, .action = .scroll_source_down },
+            .{ .key = .{ .codepoint = 'k' }, .action = .scroll_source_up },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.down }, .action = .scroll_source_down },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.up }, .action = .scroll_source_up },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.page_down }, .action = .scroll_source_page_down },
+            .{ .key = vaxis.Key{ .codepoint = vaxis.Key.page_up }, .action = .scroll_source_page_up },
+            .{ .key = .{ .codepoint = 'J' }, .action = .scroll_sir_down },
+            .{ .key = .{ .codepoint = 'K' }, .action = .scroll_sir_up },
+            .{ .key = .{ .codepoint = '=' }, .action = .sir_follow },
+            .{ .key = .{ .codepoint = '[' }, .action = .evm_tab_prev },
+            .{ .key = .{ .codepoint = ']' }, .action = .evm_tab_next },
+            .{ .key = .{ .codepoint = '1' }, .action = .evm_tab_stack },
+            .{ .key = .{ .codepoint = '2' }, .action = .evm_tab_memory },
+            .{ .key = .{ .codepoint = 'O' }, .action = .cycle_overlay },
+        };
+    }
+
+    // The `handleKey` table fits in 22 rows. Numeric tab keys 3/4/5 are
+    // handled directly because keymap() returns a fixed-size array; if a
+    // future binding pushes us beyond that we'll grow the array literal.
+    fn dispatchKeyAction(self: *Ui, action: KeyAction) bool {
+        switch (action) {
+            .quit => return true,
+            .enter_command_mode => {
+                self.command_mode = true;
+                self.command_status = "command";
+                self.command_buffer.clearRetainingCapacity();
+            },
+            .step_in => self.runStep(.in, true),
+            .step_opcode => self.runStep(.opcode, true),
+            .step_over => self.runStep(.over, true),
+            .step_out => self.runStep(.out, true),
+            .step_continue => self.runStep(.continue_, true),
+            .step_back => self.stepBack(),
+            .scroll_source_down => self.scrollDown(),
+            .scroll_source_up => self.scrollUp(),
+            .scroll_source_page_down => self.scrollPage(8),
+            .scroll_source_page_up => self.scrollPage(-8),
+            .scroll_sir_down => self.scrollSirDown(),
+            .scroll_sir_up => self.scrollSirUp(),
+            .sir_follow => {
+                self.resyncSirView();
+                self.command_status = "sir follow";
+            },
+            .evm_tab_prev => self.prevEvmTab(),
+            .evm_tab_next => self.nextEvmTab(),
+            .evm_tab_stack => self.active_evm_tab = .stack,
+            .evm_tab_memory => self.active_evm_tab = .memory,
+            .evm_tab_storage => self.active_evm_tab = .storage,
+            .evm_tab_tstore => self.active_evm_tab = .tstore,
+            .evm_tab_calldata => self.active_evm_tab = .calldata,
+            .cycle_overlay => {
+                self.overlay_mode = self.overlay_mode.next();
+                self.setCommandStatusFmt("overlay = {s}", .{self.overlay_mode.name()}) catch {
+                    self.command_status = "overlay";
+                };
+            },
+        }
+        return false;
+    }
+
+    fn handleKey(self: *Ui, key: vaxis.Key) !bool {
         if (self.command_mode) {
             if (key.matches(vaxis.Key.escape, .{})) {
                 self.command_mode = false;
@@ -401,7 +497,12 @@ const Ui = struct {
                 const executed = try self.allocator.dupe(u8, self.command_buffer.items);
                 defer self.command_buffer.clearRetainingCapacity();
                 const should_quit = try self.executeCommand();
-                self.appendCommandLog(executed, self.command_status) catch {};
+                self.appendCommandLog(executed, self.command_status) catch {
+                    // Couldn't record the command in the rolling log; the
+                    // command itself ran fine. Surface so the user knows
+                    // history is incomplete.
+                    self.command_status = "warning: command log truncated (OOM)";
+                };
                 self.allocator.free(executed);
                 return should_quit;
             }
@@ -417,79 +518,536 @@ const Ui = struct {
             return false;
         }
 
-        if (key.matches('s', .{})) {
-            self.runStep(.in, true);
-            return false;
+        // Keymap dispatch — the canonical binding table. KEYBINDINGS.md is
+        // authored from this list; adding a new binding is one row in
+        // keymap() plus one switch arm in dispatchKeyAction.
+        for (keymap()) |binding| {
+            if (key.matches(binding.key.codepoint, binding.key.mods)) {
+                return self.dispatchKeyAction(binding.action);
+            }
         }
-        if (key.matches('x', .{})) {
-            self.runStep(.opcode, true);
-            return false;
-        }
-        if (key.matches('n', .{})) {
-            self.runStep(.over, true);
-            return false;
-        }
-        if (key.matches('o', .{})) {
-            self.runStep(.out, true);
-            return false;
-        }
-        if (key.matches('c', .{})) {
-            self.runStep(.continue_, true);
-            return false;
-        }
-        if (key.matches('p', .{})) {
-            self.stepBack();
-            return false;
-        }
-        if (key.matches(':', .{})) {
-            self.command_mode = true;
-            self.command_status = "command";
-            self.command_buffer.clearRetainingCapacity();
-            return false;
-        }
-        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-            self.scrollDown();
-            return false;
-        }
-        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-            self.scrollUp();
-            return false;
-        }
-        if (key.matches('J', .{})) {
-            self.scrollSirDown();
-            return false;
-        }
-        if (key.matches('K', .{})) {
-            self.scrollSirUp();
-            return false;
-        }
-        if (key.matches('=', .{})) {
-            self.resyncSirView();
-            self.command_status = "sir follow";
-            return false;
-        }
-        if (key.matches(vaxis.Key.page_down, .{})) {
-            self.scrollPage(8);
-            return false;
-        }
-        if (key.matches(vaxis.Key.page_up, .{})) {
-            self.scrollPage(-8);
-            return false;
-        }
-        if (key.matches('[', .{})) {
-            self.prevEvmTab();
-            return false;
-        }
-        if (key.matches(']', .{})) {
-            self.nextEvmTab();
-            return false;
-        }
-        if (key.matches('1', .{})) self.active_evm_tab = .stack;
-        if (key.matches('2', .{})) self.active_evm_tab = .memory;
+
+        // Tail bindings that don't fit the fixed-size keymap array.
         if (key.matches('3', .{})) self.active_evm_tab = .storage;
         if (key.matches('4', .{})) self.active_evm_tab = .tstore;
         if (key.matches('5', .{})) self.active_evm_tab = .calldata;
         return false;
+    }
+
+    /// Outcome of a single command dispatch.
+    const CommandOutcome = enum { ok, quit };
+
+    /// One command-table entry. `name` is the canonical token; `aliases`
+    /// are alternates that resolve to the same handler (the first-match
+    /// rule is `name | aliases[i]` checked in order).
+    /// - `match = .exact` requires `raw == name | aliases[i]`.
+    /// - `match = .prefix` matches `name ` or `name<space>` followed by an
+    ///   argument tail; `arg` receives the trimmed remainder. Aliases on
+    ///   prefix commands match the same way.
+    /// - `help` is a one-line summary used to render `:help`.
+    const CommandMatch = enum { exact, prefix };
+    const CommandHandler = *const fn (*Ui, arg: []const u8) anyerror!CommandOutcome;
+    const CommandSpec = struct {
+        name: []const u8,
+        aliases: []const []const u8 = &.{},
+        match: CommandMatch,
+        handler: CommandHandler,
+        help: []const u8,
+    };
+
+    fn cmdQuit(_: *Ui, _: []const u8) anyerror!CommandOutcome {
+        return .quit;
+    }
+    fn cmdHelp(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeHelp();
+        return .ok;
+    }
+    fn cmdContinue(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.continue_, true);
+        return .ok;
+    }
+    fn cmdRun(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.rerunToHistory(0);
+        try self.updateCommandStatusForCurrentStop("run");
+        return .ok;
+    }
+    fn cmdStepIn(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.in, true);
+        return .ok;
+    }
+    fn cmdStepOpcode(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.opcode, true);
+        return .ok;
+    }
+    fn cmdStepOver(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.over, true);
+        return .ok;
+    }
+    fn cmdStepOut(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.runStep(.out, true);
+        return .ok;
+    }
+    fn cmdStepBack(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.stepBack();
+        return .ok;
+    }
+    fn cmdLine(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid line";
+            return .ok;
+        };
+        self.focus_line = line;
+        self.centerOnCurrentLine();
+        self.command_status = "line";
+        return .ok;
+    }
+    fn cmdLineInfo(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid line";
+            return .ok;
+        };
+        try self.describeLineInfo(line);
+        return .ok;
+    }
+    fn cmdWhere(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeCurrentStop();
+        return .ok;
+    }
+    fn cmdOrigin(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const origin_line = self.currentOriginLine() orelse {
+            self.command_status = "no distinct origin line";
+            return .ok;
+        };
+        self.focus_line = origin_line;
+        self.centerOnCurrentLine();
+        try self.setCommandStatusFmt("origin line {d}", .{origin_line});
+        return .ok;
+    }
+    fn cmdSirLine(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const line = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid sir line";
+            return .ok;
+        };
+        self.sir_scroll_line = if (line > 0) line else 1;
+        self.sir_follow = false;
+        self.command_status = "sirline";
+        return .ok;
+    }
+    fn cmdSirFollow(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        self.resyncSirView();
+        self.command_status = "sir follow";
+        return .ok;
+    }
+    fn cmdCheckpoint(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.addCheckpoint();
+        return .ok;
+    }
+    fn cmdCheckpoints(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeCheckpoints();
+        return .ok;
+    }
+    fn cmdBacktrace(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeBacktrace();
+        return .ok;
+    }
+    fn cmdFrame(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const idx = std.fmt.parseUnsigned(usize, arg, 10) catch {
+            self.command_status = "invalid frame index";
+            return .ok;
+        };
+        try self.selectFrame(idx);
+        return .ok;
+    }
+    fn cmdRestart(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const id = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid checkpoint id";
+            return .ok;
+        };
+        try self.restartCheckpoint(id);
+        return .ok;
+    }
+    fn cmdBreakpointSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleBreakpointSet(arg);
+        return .ok;
+    }
+    fn cmdBreakpointDelete(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleBreakpointDelete(arg);
+        return .ok;
+    }
+    fn cmdInfoBreak(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        try self.describeBreakpoints();
+        return .ok;
+    }
+    fn cmdGasShow(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const gas_remaining = self.session.debugger.getGasRemaining();
+        const gas_spent_step = if (self.previous_snapshot.gas_remaining >= gas_remaining)
+            self.previous_snapshot.gas_remaining - gas_remaining
+        else
+            0;
+        const gas_spent_total = self.seed.limits.gas_limit - gas_remaining;
+        try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
+            gas_remaining, gas_spent_step, gas_spent_total,
+        });
+        return .ok;
+    }
+    fn cmdGasSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const gas = std.fmt.parseInt(i64, arg, 0) catch {
+            self.command_status = "invalid gas value";
+            return .ok;
+        };
+        const frame = self.session.evm.getCurrentFrame() orelse {
+            self.command_status = "no active frame";
+            return .ok;
+        };
+        if (gas < 0) {
+            self.command_status = "gas must be >= 0";
+            return .ok;
+        }
+        frame.gas_remaining = gas;
+        self.previous_snapshot = self.captureSnapshot();
+        try self.refreshPreviousBindingsSnapshot();
+        try self.setCommandStatusFmt("gas set to {d}", .{gas});
+        return .ok;
+    }
+    fn cmdPrint(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing print target";
+            return .ok;
+        }
+        try self.handlePrintCommand(arg);
+        return .ok;
+    }
+    fn cmdTraceExport(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (!std.mem.startsWith(u8, trimmed, "export ") and !std.mem.startsWith(u8, trimmed, "export\t")) {
+            self.command_status = "usage: :trace export <path>";
+            return .ok;
+        }
+        const path = std.mem.trim(u8, trimmed[7..], " \t");
+        if (path.len == 0) {
+            self.command_status = "missing trace path";
+            return .ok;
+        }
+        const wrote = self.exportTrace(path) catch |err| {
+            switch (err) {
+                error.OutOfMemory => self.command_status = "out of memory",
+                else => self.command_status = "failed to export trace",
+            }
+            return .ok;
+        };
+        try self.setCommandStatusFmt("trace exported: {d} steps -> {s}", .{ wrote, path });
+        return .ok;
+    }
+    fn cmdOverlay(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (trimmed.len == 0) {
+            try self.setCommandStatusFmt("overlay = {s} (modes: none, coverage, gas, folded, hoist)", .{self.overlay_mode.name()});
+            return .ok;
+        }
+        const mode = OverlayMode.parse(trimmed) orelse {
+            self.command_status = "unknown overlay (modes: none, coverage, gas, folded, hoist)";
+            return .ok;
+        };
+        self.overlay_mode = mode;
+        try self.setCommandStatusFmt("overlay = {s}", .{mode.name()});
+        return .ok;
+    }
+    fn cmdCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const trimmed = std.mem.trim(u8, arg, " \t");
+
+        // `:cov export lcov <path>` — write per-line hit counts as
+        // an LCOV record so coverage extensions (e.g. VS Code's
+        // Coverage Gutters) can render the same data alongside the
+        // source file outside the debugger.
+        if (std.mem.startsWith(u8, trimmed, "export ")) {
+            const rest = std.mem.trim(u8, trimmed["export ".len..], " \t");
+            if (!std.mem.startsWith(u8, rest, "lcov ") and !std.mem.eql(u8, rest, "lcov")) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            if (std.mem.eql(u8, rest, "lcov")) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            const path = std.mem.trim(u8, rest["lcov ".len..], " \t");
+            if (path.len == 0) {
+                self.command_status = "usage: :cov export lcov <path>";
+                return .ok;
+            }
+            const wrote = self.exportLcov(path) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => self.command_status = "out of memory",
+                    else => self.command_status = "failed to export lcov",
+                }
+                return .ok;
+            };
+            try self.setCommandStatusFmt("lcov exported: {d} lines -> {s}", .{ wrote, path });
+            return .ok;
+        }
+
+        const total = self.session.debugger.lineHitsCount();
+        if (total == 0) {
+            self.command_status = "no lines hit yet";
+            return .ok;
+        }
+        var n: usize = 10;
+        if (trimmed.len > 0) {
+            n = std.fmt.parseUnsigned(usize, trimmed, 10) catch {
+                self.command_status = "usage: :cov [N] | :cov export lcov <path>";
+                return .ok;
+            };
+            if (n == 0) n = 10;
+        }
+        const top = try self.session.debugger.getLineHitsTopN(self.allocator, n);
+        defer self.allocator.free(top);
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("cov: {d} lines hit; top {d}:", .{ total, top.len });
+        for (top) |hit| {
+            try writer.print(" L{d}={d}", .{ hit.line, hit.count });
+        }
+        self.command_status = self.command_status_storage.items;
+        return .ok;
+    }
+
+    /// Write an LCOV record covering the active source file with
+    /// the per-line hit counts the debugger has accumulated.
+    /// Returns the number of `DA:` records written. The LCOV format
+    /// is documented at
+    /// https://github.com/linux-test-project/lcov/blob/master/man/geninfo.1
+    /// — the minimal subset is `SF:<path>` followed by `DA:<line>,<count>`
+    /// rows and an `end_of_record` terminator.
+    fn exportLcov(self: *Ui, path: []const u8) !usize {
+        var entries: std.ArrayList(Debugger.LineHit) = .{};
+        defer entries.deinit(self.allocator);
+
+        // Reuse the existing top-N getter with a large N so we
+        // get every recorded line in one slice. Lines absent from
+        // line_hits aren't covered (count = 0); LCOV viewers
+        // distinguish "0 hits" from "not instrumented" via the
+        // presence of a DA record, so we only emit what we
+        // actually saw.
+        const top = try self.session.debugger.getLineHitsTopN(self.allocator, std.math.maxInt(usize));
+        defer self.allocator.free(top);
+
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(self.allocator);
+        var w = out.writer(self.allocator);
+
+        try w.print("TN:\nSF:{s}\n", .{self.seed.source_path});
+        for (top) |hit| {
+            try w.print("DA:{d},{d}\n", .{ hit.line, hit.count });
+        }
+        try w.print("LH:{d}\nLF:{d}\nend_of_record\n", .{ top.len, top.len });
+
+        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.items });
+        return top.len;
+    }
+    fn cmdGasCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        const total = self.session.debugger.lineGasCount();
+        if (total == 0) {
+            self.command_status = "no gas attributed yet";
+            return .ok;
+        }
+        var n: usize = 10;
+        const trimmed = std.mem.trim(u8, arg, " \t");
+        if (trimmed.len > 0) {
+            n = std.fmt.parseUnsigned(usize, trimmed, 10) catch {
+                self.command_status = "usage: :gascov [N]";
+                return .ok;
+            };
+            if (n == 0) n = 10;
+        }
+        const top = try self.session.debugger.getLineGasTopN(self.allocator, n);
+        defer self.allocator.free(top);
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("gas: {d} lines with gas; top {d}:", .{ total, top.len });
+        for (top) |entry| {
+            try writer.print(" L{d}={d}", .{ entry.line, entry.gas });
+        }
+        self.command_status = self.command_status_storage.items;
+        return .ok;
+    }
+    fn cmdEval(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing expression";
+            return .ok;
+        }
+        const value = self.evaluateExpr(arg) catch |err| {
+            switch (err) {
+                error.ParseError => self.command_status = "parse error",
+                error.UnknownIdentifier => self.command_status = "unknown identifier",
+                error.BindingUnavailable => self.command_status = "binding unavailable",
+                error.DivisionByZero => self.command_status = "division by zero",
+                error.Overflow => self.command_status = "literal overflow",
+                error.OutOfMemory => self.command_status = "out of memory",
+            }
+            return .ok;
+        };
+        switch (value) {
+            .num => |n| try self.setCommandStatusFmt("=> {d}", .{n}),
+            .bool_ => |b| try self.setCommandStatusFmt("=> {s}", .{if (b) "true" else "false"}),
+        }
+        return .ok;
+    }
+    fn cmdSet(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        try self.handleSetCommand(arg);
+        return .ok;
+    }
+    fn cmdWriteSession(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing session path";
+            return .ok;
+        }
+        self.writeSession(arg) catch {
+            self.command_status = "failed to write session";
+            return .ok;
+        };
+        self.command_status = "session saved";
+        return .ok;
+    }
+    fn cmdLoadSession(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "missing session path";
+            return .ok;
+        }
+        self.loadSession(arg) catch {
+            self.command_status = "failed to load session";
+            return .ok;
+        };
+        self.command_status = "session loaded";
+        return .ok;
+    }
+
+    fn cmdWatch(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "usage: :watch <binding-name | slot-hex>";
+            return .ok;
+        }
+        // Try slot first (decimal or hex), then fall back to binding name.
+        if (std.fmt.parseUnsigned(u256, arg, 0)) |slot| {
+            const id = self.session.debugger.addWatchpointBySlot(slot) catch {
+                self.command_status = "failed to add watchpoint";
+                return .ok;
+            };
+            try self.setCommandStatusFmt("watchpoint #{d} on slot {d}", .{ id, slot });
+            return .ok;
+        } else |_| {}
+        const id_opt = self.session.debugger.addWatchpointByBindingName(arg) catch {
+            self.command_status = "failed to add watchpoint";
+            return .ok;
+        };
+        if (id_opt) |id| {
+            try self.setCommandStatusFmt("watchpoint #{d} on {s}", .{ id, arg });
+        } else {
+            self.command_status = "binding not visible or not backed by a writable storage slot";
+        }
+        return .ok;
+    }
+
+    fn cmdUnwatch(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
+        if (arg.len == 0) {
+            self.command_status = "usage: :unwatch <id>";
+            return .ok;
+        }
+        const id = std.fmt.parseUnsigned(u32, arg, 10) catch {
+            self.command_status = "invalid watchpoint id";
+            return .ok;
+        };
+        if (self.session.debugger.removeWatchpoint(id)) {
+            try self.setCommandStatusFmt("watchpoint #{d} removed", .{id});
+        } else {
+            self.command_status = "no watchpoint with that id";
+        }
+        return .ok;
+    }
+
+    fn cmdInfoWatch(self: *Ui, _: []const u8) anyerror!CommandOutcome {
+        const wps = self.session.debugger.getWatchpoints();
+        if (wps.len == 0) {
+            self.command_status = "no watchpoints";
+            return .ok;
+        }
+        self.clearCommandLog();
+        for (wps) |wp| {
+            const line = self.scratchFmt(
+                "wp #{d}  slot={d}  last={d}  ({s})",
+                .{ wp.id, wp.slot, wp.last_seen, wp.name },
+            ) catch continue;
+            try self.appendLogLine(line);
+        }
+        self.command_status = "watchpoints listed";
+        return .ok;
+    }
+
+    /// The full command surface. Adding a new command is one row here
+    /// plus one handler. `:help` is generated from this table.
+    const kCommands = [_]CommandSpec{
+        .{ .name = "q", .aliases = &.{"quit"}, .match = .exact, .handler = cmdQuit, .help = "quit the debugger" },
+        .{ .name = "h", .aliases = &.{ "help", "legend", "marks" }, .match = .exact, .handler = cmdHelp, .help = "show help / mark legend" },
+        .{ .name = "c", .aliases = &.{"continue"}, .match = .exact, .handler = cmdContinue, .help = "continue until breakpoint or halt" },
+        .{ .name = "r", .aliases = &.{ "run", "rerun" }, .match = .exact, .handler = cmdRun, .help = "restart from seed, replay nothing" },
+        .{ .name = "s", .aliases = &.{ "step", "si", "in" }, .match = .exact, .handler = cmdStepIn, .help = "step in (next source statement)" },
+        .{ .name = "x", .aliases = &.{ "op", "opcode" }, .match = .exact, .handler = cmdStepOpcode, .help = "step exactly one EVM opcode" },
+        .{ .name = "n", .aliases = &.{ "next", "so" }, .match = .exact, .handler = cmdStepOver, .help = "step over (skip nested calls)" },
+        .{ .name = "o", .aliases = &.{ "out", "finish" }, .match = .exact, .handler = cmdStepOut, .help = "step out of current frame" },
+        .{ .name = "p", .aliases = &.{ "prev", "previous" }, .match = .exact, .handler = cmdStepBack, .help = "step back (replay history minus 1)" },
+        .{ .name = "where", .aliases = &.{"why-here"}, .match = .exact, .handler = cmdWhere, .help = "describe the current stop" },
+        .{ .name = "origin", .aliases = &.{"origin-line"}, .match = .exact, .handler = cmdOrigin, .help = "jump to origin source line" },
+        .{ .name = "sirfollow", .aliases = &.{"syncsir"}, .match = .exact, .handler = cmdSirFollow, .help = "resync SIR pane to current op" },
+        .{ .name = "checkpoint", .match = .exact, .handler = cmdCheckpoint, .help = "save a checkpoint at current step" },
+        .{ .name = "checkpoints", .match = .exact, .handler = cmdCheckpoints, .help = "list checkpoints" },
+        .{ .name = "bt", .aliases = &.{"backtrace"}, .match = .exact, .handler = cmdBacktrace, .help = "print call-frame stack" },
+        .{ .name = "info break", .match = .exact, .handler = cmdInfoBreak, .help = "list breakpoints" },
+        .{ .name = "info watch", .match = .exact, .handler = cmdInfoWatch, .help = "list watchpoints" },
+        .{ .name = "gas", .match = .exact, .handler = cmdGasShow, .help = "show gas (remaining/spent)" },
+        // Prefix commands. Order matters: longer prefixes that share a
+        // leading word with a shorter one must come first ("line-info "
+        // before "line ", "why-line " before plain words, etc.).
+        .{ .name = "line-info ", .aliases = &.{"why-line "}, .match = .prefix, .handler = cmdLineInfo, .help = "explain provenance for source line" },
+        .{ .name = "line ", .match = .prefix, .handler = cmdLine, .help = "focus source pane on line N" },
+        .{ .name = "sirline ", .match = .prefix, .handler = cmdSirLine, .help = "pin SIR pane to line N" },
+        .{ .name = "frame ", .match = .prefix, .handler = cmdFrame, .help = "select call-frame index" },
+        .{ .name = "restart ", .match = .prefix, .handler = cmdRestart, .help = "rewind to checkpoint id" },
+        .{ .name = "break ", .match = .prefix, .handler = cmdBreakpointSet, .help = "set breakpoint on line" },
+        .{ .name = "delete ", .match = .prefix, .handler = cmdBreakpointDelete, .help = "delete breakpoint on line" },
+        .{ .name = "watch ", .match = .prefix, .handler = cmdWatch, .help = "watch storage slot or binding (halt on change)" },
+        .{ .name = "unwatch ", .match = .prefix, .handler = cmdUnwatch, .help = "remove watchpoint by id" },
+        .{ .name = "gas ", .match = .prefix, .handler = cmdGasSet, .help = "override frame gas_remaining" },
+        .{ .name = "print ", .match = .prefix, .handler = cmdPrint, .help = "print binding/state target" },
+        .{ .name = "eval ", .match = .prefix, .handler = cmdEval, .help = "evaluate side-effect-free expression (numbers, bindings, +-*/%, == != < > <= >=, && ||, !)" },
+        .{ .name = "cov", .match = .exact, .handler = cmdCoverage, .help = "report top-10 hottest source lines (statement-boundary hits)" },
+        .{ .name = "cov ", .match = .prefix, .handler = cmdCoverage, .help = "report top-N hottest source lines (`:cov 20`)" },
+        .{ .name = "gascov", .match = .exact, .handler = cmdGasCoverage, .help = "report top-10 source lines by cumulative gas spent" },
+        .{ .name = "gascov ", .match = .prefix, .handler = cmdGasCoverage, .help = "report top-N source lines by cumulative gas spent" },
+        .{ .name = "overlay", .match = .exact, .handler = cmdOverlay, .help = "show current overlay mode" },
+        .{ .name = "overlay ", .match = .prefix, .handler = cmdOverlay, .help = "switch overlay mode (none, coverage, gas, folded, hoist)" },
+        .{ .name = "trace ", .match = .prefix, .handler = cmdTraceExport, .help = "export EIP-3155 trace (`:trace export <path>`)" },
+        .{ .name = "set ", .match = .prefix, .handler = cmdSet, .help = "write binding/state target" },
+        .{ .name = "write-session ", .aliases = &.{"ws "}, .match = .prefix, .handler = cmdWriteSession, .help = "save session to path" },
+        .{ .name = "load-session ", .aliases = &.{"ls "}, .match = .prefix, .handler = cmdLoadSession, .help = "load session from path" },
+    };
+
+    fn matchCommand(spec: CommandSpec, raw: []const u8) ?[]const u8 {
+        switch (spec.match) {
+            .exact => {
+                if (std.mem.eql(u8, raw, spec.name)) return raw[raw.len..];
+                for (spec.aliases) |alias| {
+                    if (std.mem.eql(u8, raw, alias)) return raw[raw.len..];
+                }
+                return null;
+            },
+            .prefix => {
+                if (std.mem.startsWith(u8, raw, spec.name)) return std.mem.trim(u8, raw[spec.name.len..], " \t");
+                for (spec.aliases) |alias| {
+                    if (std.mem.startsWith(u8, raw, alias)) return std.mem.trim(u8, raw[alias.len..], " \t");
+                }
+                return null;
+            },
+        }
     }
 
     fn executeCommand(self: *Ui) !bool {
@@ -499,245 +1057,11 @@ const Ui = struct {
             return false;
         }
 
-        if (std.mem.eql(u8, raw, "q") or std.mem.eql(u8, raw, "quit")) {
-            self.command_status = "quit";
-            return true;
-        }
-        if (std.mem.eql(u8, raw, "h") or std.mem.eql(u8, raw, "help") or std.mem.eql(u8, raw, "legend") or std.mem.eql(u8, raw, "marks")) {
-            try self.describeHelp();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "c") or std.mem.eql(u8, raw, "continue")) {
-            self.runStep(.continue_, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "r") or std.mem.eql(u8, raw, "run") or std.mem.eql(u8, raw, "rerun")) {
-            try self.rerunToHistory(0);
-            try self.updateCommandStatusForCurrentStop("run");
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "s") or std.mem.eql(u8, raw, "step") or std.mem.eql(u8, raw, "si") or std.mem.eql(u8, raw, "in")) {
-            self.runStep(.in, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "x") or std.mem.eql(u8, raw, "op") or std.mem.eql(u8, raw, "opcode")) {
-            self.runStep(.opcode, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "n") or std.mem.eql(u8, raw, "next") or std.mem.eql(u8, raw, "so")) {
-            self.runStep(.over, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "o") or std.mem.eql(u8, raw, "out") or std.mem.eql(u8, raw, "finish")) {
-            self.runStep(.out, true);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "p") or std.mem.eql(u8, raw, "prev") or std.mem.eql(u8, raw, "previous")) {
-            self.stepBack();
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "line ")) {
-            const rest = std.mem.trim(u8, raw["line ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            self.focus_line = line;
-            self.centerOnCurrentLine();
-            self.command_status = "line";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "line-info ")) {
-            const rest = std.mem.trim(u8, raw["line-info ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            try self.describeLineInfo(line);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "why-line ")) {
-            const rest = std.mem.trim(u8, raw["why-line ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid line";
-                return false;
-            };
-            try self.describeLineInfo(line);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "where") or std.mem.eql(u8, raw, "why-here")) {
-            try self.describeCurrentStop();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "origin") or std.mem.eql(u8, raw, "origin-line")) {
-            const origin_line = self.currentOriginLine() orelse {
-                self.command_status = "no distinct origin line";
-                return false;
-            };
-            self.focus_line = origin_line;
-            self.centerOnCurrentLine();
-            try self.setCommandStatusFmt("origin line {d}", .{origin_line});
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "sirline ")) {
-            const rest = std.mem.trim(u8, raw["sirline ".len..], " \t");
-            const line = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid sir line";
-                return false;
-            };
-            self.sir_scroll_line = if (line > 0) line else 1;
-            self.sir_follow = false;
-            self.command_status = "sirline";
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "sirfollow") or std.mem.eql(u8, raw, "syncsir")) {
-            self.resyncSirView();
-            self.command_status = "sir follow";
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "checkpoint")) {
-            try self.addCheckpoint();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "checkpoints")) {
-            try self.describeCheckpoints();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "bt") or std.mem.eql(u8, raw, "backtrace")) {
-            try self.describeBacktrace();
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "frame ")) {
-            const rest = std.mem.trim(u8, raw["frame ".len..], " \t");
-            const idx = std.fmt.parseUnsigned(usize, rest, 10) catch {
-                self.command_status = "invalid frame index";
-                return false;
-            };
-            try self.selectFrame(idx);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "restart ")) {
-            const rest = std.mem.trim(u8, raw["restart ".len..], " \t");
-            const id = std.fmt.parseUnsigned(u32, rest, 10) catch {
-                self.command_status = "invalid checkpoint id";
-                return false;
-            };
-            try self.restartCheckpoint(id);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "break ")) {
-            const rest = std.mem.trim(u8, raw["break ".len..], " \t");
-            try self.handleBreakpointSet(rest);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "delete ")) {
-            const rest = std.mem.trim(u8, raw["delete ".len..], " \t");
-            try self.handleBreakpointDelete(rest);
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "info break")) {
-            try self.describeBreakpoints();
-            return false;
-        }
-        if (std.mem.eql(u8, raw, "gas")) {
-            const gas_remaining = self.session.debugger.getGasRemaining();
-            const gas_spent_step = if (self.previous_snapshot.gas_remaining >= gas_remaining)
-                self.previous_snapshot.gas_remaining - gas_remaining
-            else
-                0;
-            const gas_spent_total = 5_000_000 - gas_remaining;
-            try self.setCommandStatusFmt("gas={d} step_spent={d} total_spent={d}", .{
-                gas_remaining,
-                gas_spent_step,
-                gas_spent_total,
-            });
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "gas ")) {
-            const rest = std.mem.trim(u8, raw["gas ".len..], " \t");
-            const gas = std.fmt.parseInt(i64, rest, 0) catch {
-                self.command_status = "invalid gas value";
-                return false;
-            };
-            const frame = self.session.evm.getCurrentFrame() orelse {
-                self.command_status = "no active frame";
-                return false;
-            };
-            if (gas < 0) {
-                self.command_status = "gas must be >= 0";
-                return false;
+        for (kCommands) |spec| {
+            if (matchCommand(spec, raw)) |arg| {
+                const outcome = try spec.handler(self, arg);
+                return outcome == .quit;
             }
-            frame.gas_remaining = gas;
-            self.previous_snapshot = self.captureSnapshot();
-            try self.refreshPreviousBindingsSnapshot();
-            try self.setCommandStatusFmt("gas set to {d}", .{gas});
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "print ")) {
-            const target = std.mem.trim(u8, raw["print ".len..], " \t");
-            if (target.len == 0) {
-                self.command_status = "missing print target";
-                return false;
-            }
-            try self.handlePrintCommand(target);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "set ")) {
-            const rest = std.mem.trim(u8, raw["set ".len..], " \t");
-            try self.handleSetCommand(rest);
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "write-session ")) {
-            const path = std.mem.trim(u8, raw["write-session ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.writeSession(path) catch {
-                self.command_status = "failed to write session";
-                return false;
-            };
-            self.command_status = "session saved";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "ws ")) {
-            const path = std.mem.trim(u8, raw["ws ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.writeSession(path) catch {
-                self.command_status = "failed to write session";
-                return false;
-            };
-            self.command_status = "session saved";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "load-session ")) {
-            const path = std.mem.trim(u8, raw["load-session ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.loadSession(path) catch {
-                self.command_status = "failed to load session";
-                return false;
-            };
-            self.command_status = "session loaded";
-            return false;
-        }
-        if (std.mem.startsWith(u8, raw, "ls ")) {
-            const path = std.mem.trim(u8, raw["ls ".len..], " \t");
-            if (path.len == 0) {
-                self.command_status = "missing session path";
-                return false;
-            }
-            self.loadSession(path) catch {
-                self.command_status = "failed to load session";
-                return false;
-            };
-            self.command_status = "session loaded";
-            return false;
         }
 
         self.command_status = "unknown command";
@@ -746,19 +1070,20 @@ const Ui = struct {
 
     fn describeHelp(self: *Ui) !void {
         self.clearCommandLog();
-        try self.appendLogLine("help: exec   s step-in  x opcode  n next  o out  c continue  p previous");
-        try self.appendLogLine("help: print  :print <binding>  gas  stack[i]  mem <off> <words>");
-        try self.appendLogLine("help: print  :print slot <hex>  storage  tstore  calldata");
-        try self.appendLogLine("help: set    :set <binding> = <v>  gas = <v>  mem <off> = <v>");
-        try self.appendLogLine("help: set    :set slot <hex> = <v>");
-        try self.appendLogLine("help: break  :break <line>  :delete <line>  :info break");
-        try self.appendLogLine("help: lines  :line-info <line>  :why-line <line>  :where  :origin");
-        try self.appendLogLine("help: replay :checkpoint  :checkpoints  :restart <id>  :run");
-        try self.appendLogLine("help: sess   :write-session <path>  :load-session <path>");
-        try self.appendLogLine("help: nav    j/k Ora  J/K SIR  = sync  :sirline <n>  :sirfollow");
-        try self.appendLogLine("help: tabs   1..5 tabs  [/] cycle  q quit");
-        try self.appendLogLine("legend: . direct runtime  ~ synthetic-only  + mixed runtime");
-        try self.appendLogLine("legend: ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
+        // Auto-generated from kCommands so the docs and the dispatcher
+        // can't drift. Layout: ":<name>  <help>", with prefix commands
+        // showing the trailing space as a hint that an argument follows.
+        for (kCommands) |spec| {
+            const name_buf = self.scratchFmt("{s}{s}{s}  -  {s}", .{
+                ":",
+                spec.name,
+                if (spec.aliases.len > 0) "" else "",
+                spec.help,
+            }) catch continue;
+            try self.appendLogLine(name_buf);
+        }
+        try self.appendLogLine("keys: see KEYBINDINGS.md (or `man 1 ora-evm-debug-tui`)");
+        try self.appendLogLine("legend: . direct  ~ synthetic  + mixed  = folded  s smt-only  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
         self.command_status = "help";
     }
 
@@ -779,6 +1104,10 @@ const Ui = struct {
         }
         if (std.mem.eql(u8, target, "tstore")) {
             try self.handlePrintStorageCommand(true);
+            return;
+        }
+        if (std.mem.eql(u8, target, "logs")) {
+            try self.handlePrintLogsCommand();
             return;
         }
         if (std.mem.startsWith(u8, target, "mem ")) {
@@ -871,6 +1200,29 @@ const Ui = struct {
             }
             try writer.print(" 0x{X:0>4}={s}", .{ word_offset, self.scratchShortU256(value) });
             if (word_index + 1 < words) try writer.writeAll(" |");
+        }
+        self.command_status = self.command_status_storage.items;
+    }
+
+    fn handlePrintLogsCommand(self: *Ui) !void {
+        const logs = self.session.evm.logs.items;
+        if (logs.len == 0) {
+            self.command_status = "no logs emitted";
+            return;
+        }
+
+        self.command_status_storage.clearRetainingCapacity();
+        var writer = self.command_status_storage.writer(self.allocator);
+        try writer.print("logs ({d}):", .{logs.len});
+        for (logs, 0..) |log_entry, i| {
+            self.render_scratch.clearRetainingCapacity();
+            if (self.formatDecodedLog(log_entry)) |decoded| {
+                try writer.print(" #{d}={s}", .{ i, decoded });
+            } else {
+                try writer.print(" #{d}=<{d} topics, {d} data bytes>", .{
+                    i, log_entry.topics.len, log_entry.data.len,
+                });
+            }
         }
         self.command_status = self.command_status_storage.items;
     }
@@ -1071,9 +1423,13 @@ const Ui = struct {
     }
 
     fn handleBreakpointSet(self: *Ui, rest: []const u8) !void {
-        const line = try self.parseBreakpointLine(rest);
+        const parsed = self.parseBreakpointArgs(rest) catch {
+            self.command_status = "usage: :break <line> [when <expr>] [hit <n>]";
+            return;
+        };
+        const line = parsed.line;
         for (self.breakpoints.items) |existing| {
-            if (existing == line) {
+            if (existing.line == line) {
                 self.command_status = "breakpoint already set";
                 return;
             }
@@ -1082,8 +1438,41 @@ const Ui = struct {
             self.command_status = self.breakpointFailureMessage(line);
             return;
         }
-        try self.breakpoints.append(self.allocator, line);
-        if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line)) |prov| {
+        const condition_dup: ?[]u8 = if (parsed.condition) |c| try self.allocator.dupe(u8, c) else null;
+        errdefer if (condition_dup) |c| self.allocator.free(c);
+        try self.breakpoints.append(self.allocator, .{
+            .line = line,
+            .condition = condition_dup,
+            .hit_target = parsed.hit_target,
+        });
+        const prov_label_opt = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
+        const prov_str = if (prov_label_opt) |p| p.label() else "";
+        if (parsed.condition != null and parsed.hit_target != null) {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} when '{s}' hit {d}", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                parsed.condition.?,
+                parsed.hit_target.?,
+            });
+        } else if (parsed.condition) |cond| {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} when '{s}'", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                cond,
+            });
+        } else if (parsed.hit_target) |target| {
+            try self.setCommandStatusFmt("breakpoint set on line {d}{s}{s}{s} hit {d}", .{
+                line,
+                if (prov_label_opt != null) " [" else "",
+                prov_str,
+                if (prov_label_opt != null) "]" else "",
+                target,
+            });
+        } else if (prov_label_opt) |prov| {
             try self.setCommandStatusFmt("breakpoint set on line {d} [{s}]", .{ line, prov.label() });
         } else {
             try self.setCommandStatusFmt("breakpoint set on line {d}", .{line});
@@ -1095,7 +1484,8 @@ const Ui = struct {
         var found = false;
         var i: usize = 0;
         while (i < self.breakpoints.items.len) : (i += 1) {
-            if (self.breakpoints.items[i] == line) {
+            if (self.breakpoints.items[i].line == line) {
+                self.breakpoints.items[i].deinit(self.allocator);
                 _ = self.breakpoints.swapRemove(i);
                 found = true;
                 break;
@@ -1119,6 +1509,11 @@ const Ui = struct {
         return std.fmt.parseUnsigned(u32, trimmed, 10);
     }
 
+    fn parseBreakpointArgs(self: *Ui, rest: []const u8) !ParsedBreakpoint {
+        _ = self;
+        return parseBreakpointArgsImpl(rest);
+    }
+
     fn breakpointFailureMessage(self: *Ui, line: u32) []const u8 {
         const src_map = &self.session.debugger.src_map;
         const file = self.seed.source_path;
@@ -1130,10 +1525,24 @@ const Ui = struct {
     fn describeLineInfo(self: *Ui, line: u32) !void {
         const src_map = &self.session.debugger.src_map;
         const file = self.seed.source_path;
+        if (self.isFoldedSourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: folded source line; {s}", .{
+                line,
+                self.foldedLineExplanation(line),
+            });
+            return;
+        }
         if (self.isRemovedSourceLine(line)) {
             try self.setCommandStatusFmt("line {d}: removed source line; {s}", .{
                 line,
                 self.removedLineExplanation(line),
+            });
+            return;
+        }
+        if (self.isProofOnlySourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: SMT-only source line; {s}", .{
+                line,
+                self.proofOnlyLineExplanation(line),
             });
             return;
         }
@@ -1201,7 +1610,7 @@ const Ui = struct {
     }
 
     fn describeCurrentStop(self: *Ui) !void {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const entry = self.session.debugger.currentEntry() orelse {
             self.command_status = "no active stop";
             return;
@@ -1209,15 +1618,21 @@ const Ui = struct {
         const prov = self.currentProvenanceLabel();
         const kind = self.statementKindExplanation(self.statementKindForLine(current_line));
         const origin_line = self.currentOriginLine();
+        const synthetic_path = self.currentSyntheticPath();
 
         if (origin_line) |origin|
             if (origin != current_line)
                 if (entry.statement_id) |stmt|
                     if (entry.execution_region_id) |region|
                         if (entry.statement_run_index) |run|
-                            try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}", .{
-                                prov, kind, stmt, current_line, origin, region, run,
-                            })
+                            if (synthetic_path) |path|
+                                try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}; copies={s}", .{
+                                    prov, kind, stmt, current_line, origin, region, run, self.scratchSyntheticPathSummary(path),
+                                })
+                            else
+                                try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}.{d}", .{
+                                    prov, kind, stmt, current_line, origin, region, run,
+                                })
                         else
                             try self.setCommandStatusFmt("here: {s}; {s}; stmt={d}; line={d}; origin={d}; region={d}", .{
                                 prov, kind, stmt, current_line, origin, region,
@@ -1238,6 +1653,23 @@ const Ui = struct {
                 try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line })
         else
             try self.setCommandStatusFmt("here: {s}; {s}; line={d}", .{ prov, kind, current_line });
+
+        // Append the inlined-from chain when present. Today this is
+        // always empty (no MLIR-level inliner yet); the render path
+        // is here so future compiler-side work that populates the
+        // chain immediately surfaces in the TUI without further
+        // plumbing.
+        //
+        // `setCommandStatusFmt` left `command_status` pointing into
+        // `command_status_storage.items`, so we just extend the
+        // buffer in place and re-slice — no clear, no copy.
+        if (self.currentInlinedFromChain()) |chain| {
+            if (chain.len > 0) {
+                const writer = self.command_status_storage.writer(self.allocator);
+                try appendInlinedChain(writer, chain);
+                self.command_status = self.command_status_storage.items;
+            }
+        }
     }
 
     fn describeBreakpoints(self: *Ui) !void {
@@ -1248,19 +1680,15 @@ const Ui = struct {
         self.command_status_storage.clearRetainingCapacity();
         var writer = self.command_status_storage.writer(self.allocator);
         try writer.writeAll("breakpoints:");
-        for (self.breakpoints.items, 0..) |line, i| {
-            const prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
-            if (i == 0) {
-                if (prov) |p|
-                    try writer.print(" {d}[{s}]", .{ line, p.label() })
-                else
-                    try writer.print(" {d}", .{line});
-            } else {
-                if (prov) |p|
-                    try writer.print(", {d}[{s}]", .{ line, p.label() })
-                else
-                    try writer.print(", {d}", .{line});
-            }
+        for (self.breakpoints.items, 0..) |bp, i| {
+            const prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, bp.line);
+            const sep: []const u8 = if (i == 0) " " else ", ";
+            if (prov) |p|
+                try writer.print("{s}{d}[{s}]", .{ sep, bp.line, p.label() })
+            else
+                try writer.print("{s}{d}", .{ sep, bp.line });
+            if (bp.condition) |cond| try writer.print(" when '{s}'", .{cond});
+            if (bp.hit_target) |target| try writer.print(" hit {d}/{d}", .{ bp.hit_count, target });
         }
         self.command_status = self.command_status_storage.items;
     }
@@ -1310,10 +1738,25 @@ const Ui = struct {
         while (i > 0) {
             i -= 1;
             const frame = frames[i];
-            if (logical == 0) {
-                try writer.print(" #{d} pc={d} gas={d}", .{ logical, frame.pc, frame.gas_remaining });
-            } else {
-                try writer.print(", #{d} pc={d} gas={d}", .{ logical, frame.pc, frame.gas_remaining });
+            const sep: []const u8 = if (logical == 0) " " else ", ";
+            try writer.print("{s}#{d} {x} pc={d} gas={d}", .{ sep, logical, frame.address, frame.pc, frame.gas_remaining });
+            if (frame.is_static) try writer.writeAll(" static");
+            if (frame.calldata.len >= 4) {
+                var selector_buf: [4]u8 = undefined;
+                @memcpy(&selector_buf, frame.calldata[0..4]);
+                if (self.abiDocForFrame(&frame)) |abi_doc| {
+                    if (abi_doc.findCallableBySelector(selector_buf)) |callable| {
+                        if (callable.object.get("name")) |n| {
+                            if (n == .string) {
+                                try writer.print(" -> {s}", .{n.string});
+                                logical += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                const sel_int = std.mem.readInt(u32, &selector_buf, .big);
+                try writer.print(" sel=0x{x:0>8}", .{sel_int});
             }
             logical += 1;
         }
@@ -1348,10 +1791,17 @@ const Ui = struct {
 
         self.session.deinit();
         try Session.init(&self.session, self.allocator, &self.seed);
+        // Rebind the controller — the new debugger is a different
+        // address from the prior one's.
+        self.controller = ora_evm.DebugController(.{}).init(self.allocator, &self.session.debugger);
         self.command_mode = false;
         self.command_buffer.clearRetainingCapacity();
         self.selected_frame_index = 0;
         self.step_history.clearRetainingCapacity();
+        // Reset hit counters before replay — the replay re-traverses the
+        // same opcodes so re-counting from zero keeps the count
+        // consistent with what the user just saw.
+        self.resetBreakpointHitCounts();
         try self.primeInitialStop();
         try self.applyBreakpoints();
         for (replay_items) |mode| {
@@ -1362,11 +1812,30 @@ const Ui = struct {
         try self.refreshPreviousBindingsSnapshot();
     }
 
-    fn applyBreakpoints(self: *Ui) !void {
-        for (self.breakpoints.items) |line| {
-            if (!self.session.debugger.setBreakpoint(self.seed.source_path, line)) {
-                return error.InvalidArguments;
+    /// Clear every breakpoint's hit_count back to 0. Called before any
+    /// session rebuild that will replay history, so a `:break <line>
+    /// hit <n>` predicate doesn't get "stuck" past N.
+    pub fn resetBreakpointHitCounts(self: *Ui) void {
+        for (self.breakpoints.items) |*bp| bp.hit_count = 0;
+    }
+
+    pub fn applyBreakpoints(self: *Ui) !void {
+        // Continue past per-line failures so a single stale breakpoint
+        // (e.g. after a session reload onto recompiled bytecode) doesn't
+        // disable the rest. Surface the count via the status line.
+        var failed: usize = 0;
+        var first_failed_line: u32 = 0;
+        for (self.breakpoints.items) |bp| {
+            if (!self.session.debugger.setBreakpoint(self.seed.source_path, bp.line)) {
+                if (failed == 0) first_failed_line = bp.line;
+                failed += 1;
             }
+        }
+        if (failed != 0) {
+            try self.setCommandStatusFmt(
+                "{d} breakpoint(s) skipped (e.g. line {d} has no statement entry)",
+                .{ failed, first_failed_line },
+            );
         }
     }
 
@@ -1376,7 +1845,17 @@ const Ui = struct {
         self.command_status = self.command_status_storage.items;
     }
 
-    fn runStep(self: *Ui, mode: StepMode, record_history: bool) void {
+    fn runDebuggerCommand(self: *Ui, mode: StepMode) anyerror!void {
+        return switch (mode) {
+            .in => self.session.debugger.stepIn(),
+            .opcode => self.session.debugger.stepOpcode(),
+            .over => self.session.debugger.stepOver(),
+            .out => self.session.debugger.stepOut(),
+            .continue_ => self.session.debugger.continue_(),
+        };
+    }
+
+    pub fn runStep(self: *Ui, mode: StepMode, record_history: bool) void {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
             self.syncFocusFromDebugger();
@@ -1385,48 +1864,73 @@ const Ui = struct {
         }
         self.previous_snapshot = self.captureSnapshot();
         self.refreshPreviousBindingsSnapshot() catch {};
-        switch (mode) {
-            .in => self.session.debugger.stepIn() catch {
+        self.runDebuggerCommand(mode) catch {
+            self.status = self.session.debugger.lastErrorName() orelse "execution_error";
+            self.updateExecutionErrorStatus(stepModeName(mode)) catch {
+                self.command_status = self.status;
+            };
+            return;
+        };
+        // Apply conditional / hit-count gating: if the breakpoint we
+        // halted at has predicates that aren't satisfied, transparently
+        // resume. Capped to avoid spinning on a malformed predicate that
+        // always falses out — caller can disable the breakpoint manually.
+        var gating_iters: u32 = 0;
+        while (self.shouldSkipCurrentBreakpoint()) : (gating_iters += 1) {
+            if (gating_iters >= kMaxConditionalBreakpointGatingIters) break;
+            self.runDebuggerCommand(.continue_) catch {
                 self.status = self.session.debugger.lastErrorName() orelse "execution_error";
                 self.updateExecutionErrorStatus(stepModeName(mode)) catch {
                     self.command_status = self.status;
                 };
                 return;
-            },
-            .opcode => self.session.debugger.stepOpcode() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .over => self.session.debugger.stepOver() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .out => self.session.debugger.stepOut() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
-            .continue_ => self.session.debugger.continue_() catch {
-                self.status = self.session.debugger.lastErrorName() orelse "execution_error";
-                self.updateExecutionErrorStatus(stepModeName(mode)) catch {
-                    self.command_status = self.status;
-                };
-                return;
-            },
+            };
+            if (self.session.debugger.isHalted()) break;
         }
-        if (record_history) self.step_history.append(self.allocator, mode) catch {};
+        if (record_history) self.step_history.append(self.allocator, mode) catch {
+            // Out of memory recording history. Step result is still valid;
+            // step-back / replay will be incomplete past this point.
+            self.command_status = "warning: step history truncated (OOM)";
+        };
         self.status = @tagName(self.session.debugger.stop_reason);
         if (!self.shouldPreserveFocusOnTerminalStop()) self.syncFocusFromDebugger();
         self.centerOnCurrentLine();
         self.updateCommandStatusForCurrentStop(stepModeName(mode)) catch {};
+    }
+
+    /// Check whether the current breakpoint hit should be skipped because
+    /// its `when <expr>` predicate evaluated to false or its `hit <n>`
+    /// target hasn't been reached yet. Bumps the matching `Breakpoint`'s
+    /// `hit_count` as a side effect when we hit one.
+    fn shouldSkipCurrentBreakpoint(self: *Ui) bool {
+        if (self.session.debugger.stop_reason != .breakpoint_hit) return false;
+        const current_line = self.session.debugger.currentSourceLine() orelse return false;
+        var bp_ptr: ?*Breakpoint = null;
+        for (self.breakpoints.items) |*bp| {
+            if (bp.line == current_line) {
+                bp_ptr = bp;
+                break;
+            }
+        }
+        const bp = bp_ptr orelse return false;
+        bp.hit_count +%= 1;
+
+        var skip = false;
+        if (bp.hit_target) |target| {
+            if (bp.hit_count != target) skip = true;
+        }
+        if (!skip) {
+            if (bp.condition) |cond| {
+                const value = self.evaluateExpr(cond) catch {
+                    // Predicate failed to evaluate — fail open (halt) so
+                    // the user can fix the predicate; don't silently
+                    // skip.
+                    return false;
+                };
+                if (!value.asBool()) skip = true;
+            }
+        }
+        return skip;
     }
 
     fn stepBack(self: *Ui) void {
@@ -1441,6 +1945,13 @@ const Ui = struct {
             self.command_status = "failed to rebuild session";
             return;
         };
+        // Rebind the controller against the freshly-initialised
+        // debugger.
+        self.controller = ora_evm.DebugController(.{}).init(self.allocator, &self.session.debugger);
+        // Same reasoning as in rerunToHistory: replay re-traverses the
+        // same opcodes, so re-counting hit_count from zero keeps the
+        // breakpoint state consistent with the user's view.
+        self.resetBreakpointHitCounts();
         self.primeInitialStop() catch {
             self.status = "execution_error";
             self.command_status = "failed to prime session";
@@ -1458,7 +1969,7 @@ const Ui = struct {
         self.command_status = "previous stop";
     }
 
-    fn primeInitialStop(self: *Ui) !void {
+    pub fn primeInitialStop(self: *Ui) !void {
         if (self.session.debugger.isHalted()) {
             self.status = "halted";
             return;
@@ -1499,7 +2010,10 @@ const Ui = struct {
             if (!std.mem.eql(u8, entry_function, function_name)) return true;
         }
 
-        if (!entry.is_synthetic and !entry.is_hoisted) return true;
+        // Hoisting changes backend order, not user visibility. A direct source
+        // statement is still the right initial stop even if lowering moved it
+        // before later body statements.
+        if (!entry.is_synthetic) return true;
         return !self.hasPreferredInitialStatementLater(function_name, entry.pc);
     }
 
@@ -1509,13 +2023,13 @@ const Ui = struct {
             if (entry.pc <= after_pc) continue;
             const entry_function = entry.function orelse continue;
             if (!std.mem.eql(u8, entry_function, function_name)) continue;
-            if (entry.is_synthetic or entry.is_hoisted) continue;
+            if (entry.is_synthetic) continue;
             return true;
         }
         return false;
     }
 
-    fn syncFocusFromDebugger(self: *Ui) void {
+    pub fn syncFocusFromDebugger(self: *Ui) void {
         if (self.session.debugger.lastStatementLine()) |line| {
             self.focus_line = line;
             return;
@@ -1526,7 +2040,6 @@ const Ui = struct {
                 return;
             }
         }
-        if (self.focus_line == null) self.focus_line = self.session.debugger.currentSourceLine();
     }
 
     fn syncInitialFocusFromDebugger(self: *Ui) void {
@@ -1581,6 +2094,54 @@ const Ui = struct {
         return null;
     }
 
+    /// Look up the innermost visible function-scope's
+    /// `inlined_from` chain, if any. The chain is empty for scopes
+    /// that the compiler lowered from their lexical site (the common
+    /// case today). Once the MLIR-level inliner lands and populates
+    /// the chain, this becomes the source of "you're inside an
+    /// inlined callee" hints surfaced by `describeCurrentStop` and
+    /// related status renders.
+    ///
+    /// Returns `null` when no debug info is loaded or no function
+    /// scope is visible at the current PC.
+    fn currentInlinedFromChain(self: *Ui) ?[]const DebugInfo.InlinedFrame {
+        const entry = self.session.debugger.currentEntry() orelse return null;
+        const function_name = entry.function orelse return null;
+        const scopes = self.session.debugger.getVisibleScopes(self.allocator) catch return null;
+        defer if (scopes.len > 0) self.allocator.free(scopes);
+
+        for (scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            if (!std.mem.eql(u8, scope.function, function_name)) continue;
+            return scope.inlined_from;
+        }
+        return null;
+    }
+
+    /// Append the inlined-from chain to `writer` as a human-readable
+    /// suffix, e.g. ` (inlined from bar() at app.ora:42 <- baz() at
+    /// app.ora:99)`. No-op when the chain is empty. Outermost entry
+    /// renders first (matches `InlinedFrame` doc on outermost-first
+    /// ordering).
+    fn appendInlinedChain(writer: anytype, chain: []const DebugInfo.InlinedFrame) !void {
+        if (chain.len == 0) return;
+        try writer.writeAll(" (inlined from ");
+        for (chain, 0..) |frame, i| {
+            if (i != 0) try writer.writeAll(" <- ");
+            try writer.print("{s}()", .{frame.function});
+            if (frame.call_site) |range| {
+                // Render the file basename, not the full path, to keep
+                // the status line readable.
+                const file = std.fs.path.basename(frame.file);
+                try writer.print(" at {s}:{d}", .{ file, range.start.line });
+            } else {
+                const file = std.fs.path.basename(frame.file);
+                try writer.print(" at {s}", .{file});
+            }
+        }
+        try writer.writeAll(")");
+    }
+
     fn currentSirLine(self: *const Ui) ?u32 {
         if (self.session.debugger.currentEntry()) |entry| {
             if (entry.sir_line) |sir_line| return sir_line;
@@ -1588,9 +2149,18 @@ const Ui = struct {
         return self.session.debugger.lastStatementSirLine();
     }
 
+    fn currentDisplayLine(self: *const Ui) ?u32 {
+        if (self.focus_line) |line| return line;
+        if (self.session.debugger.lastStatementLine()) |line| return line;
+        if (self.session.debugger.currentEntry()) |entry| {
+            if (entry.is_statement) return entry.line;
+        }
+        return null;
+    }
+
     fn currentMappingWindow(self: *const Ui) ?MappingWindow {
         const file = self.seed.source_path;
-        const ora_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse return null;
+        const ora_line = self.currentDisplayLine() orelse return null;
         const entry = self.session.debugger.currentEntry() orelse return null;
         const statement_id = entry.statement_id orelse self.session.debugger.lastStatementId();
         const execution_region_id = entry.execution_region_id;
@@ -1730,7 +2300,7 @@ const Ui = struct {
         };
     }
 
-    fn captureSnapshot(self: *Ui) Snapshot {
+    pub fn captureSnapshot(self: *Ui) Snapshot {
         var snapshot = Snapshot{};
         snapshot.gas_remaining = self.session.debugger.getGasRemaining();
         const stack = self.session.debugger.getStack();
@@ -1794,14 +2364,14 @@ const Ui = struct {
         return count;
     }
 
-    fn clearPreviousBindingsSnapshot(self: *Ui) void {
+    pub fn clearPreviousBindingsSnapshot(self: *Ui) void {
         for (self.previous_bindings.items) |entry| {
             self.allocator.free(entry.name);
         }
         self.previous_bindings.clearRetainingCapacity();
     }
 
-    fn refreshPreviousBindingsSnapshot(self: *Ui) !void {
+    pub fn refreshPreviousBindingsSnapshot(self: *Ui) !void {
         self.clearPreviousBindingsSnapshot();
         const bindings = try self.session.debugger.getVisibleBindings(self.allocator);
         defer if (bindings.len > 0) self.allocator.free(bindings);
@@ -1846,7 +2416,7 @@ const Ui = struct {
 
         const top_h: u16 = @max(8, @as(u16, @intCast((@as(u32, content_h) * 52) / 100)));
         const bottom_h: u16 = content_h - top_h;
-        const current_source_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_source_line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const current_sir_line = if (mapping) |m| m.sir_start else self.currentSirLine() orelse 0;
         const current_idx = if (mapping) |m| m.idx_start else if (self.session.debugger.currentEntry()) |entry| entry.idx else null;
@@ -1887,17 +2457,16 @@ const Ui = struct {
                             self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, stmt_id }) catch " SIR Text "
                     else
                         self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.? }) catch " SIR Text "
-                else
-                    if (m.statement_id) |stmt_id|
-                        if (m.execution_region_id) |region_id|
-                            if (m.statement_run_index) |run_index|
-                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id, run_index }) catch " SIR Text "
-                            else
-                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id }) catch " SIR Text "
+                else if (m.statement_id) |stmt_id|
+                    if (m.execution_region_id) |region_id|
+                        if (m.statement_run_index) |run_index|
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id, run_index }) catch " SIR Text "
                         else
-                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, stmt_id }) catch " SIR Text "
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id }) catch " SIR Text "
                     else
-                        self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
+                        self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, stmt_id }) catch " SIR Text "
+                else
+                    self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
             else if (current_idx) |idx|
                 self.scratchFmt(" SIR Text  line {d}  idx {d} ", .{ current_sir_line, idx }) catch " SIR Text "
             else
@@ -1963,7 +2532,7 @@ const Ui = struct {
 
     fn drawHeader(self: *Ui, win: Window) void {
         const source_name = std.fs.path.basename(self.seed.source_path);
-        const line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const sir_line = if (mapping) |m| m.sir_start else self.currentSirLine() orelse 0;
         const origin_line = self.currentOriginLine();
@@ -1976,9 +2545,9 @@ const Ui = struct {
         else
             0;
         const gas_spent_total: i64 = if (frame != null)
-            5_000_000 - gas_remaining
+            self.seed.limits.gas_limit - gas_remaining
         else if (self.session.debugger.isSuccess())
-            5_000_000
+            self.seed.limits.gas_limit
         else
             0;
 
@@ -2062,16 +2631,15 @@ const Ui = struct {
                     self.session.debugger.getCallDepth(),
                     gas_remaining,
                 }) catch "status";
-            } else
-                self.scratchFmt(" error {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}", .{
-                    err_name,
-                    line,
-                    sir_line,
-                    self.session.debugger.getPC(),
-                    opcode,
-                    self.session.debugger.getCallDepth(),
-                    gas_remaining,
-                }) catch "status"
+            } else self.scratchFmt(" error {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}", .{
+                err_name,
+                line,
+                sir_line,
+                self.session.debugger.getPC(),
+                opcode,
+                self.session.debugger.getCallDepth(),
+                gas_remaining,
+            }) catch "status"
         else if (entry) |e| blk: {
             if (e.idx) |idx| {
                 if (mapping) |m| {
@@ -2115,18 +2683,17 @@ const Ui = struct {
                 gas_spent_step,
                 gas_spent_total,
             }) catch "status";
-        } else
-            self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
-                self.status,
-                line,
-                sir_line,
-                self.session.debugger.getPC(),
-                opcode,
-                self.session.debugger.getCallDepth(),
-                gas_remaining,
-                gas_spent_step,
-                gas_spent_total,
-            }) catch "status";
+        } else self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
+            self.status,
+            line,
+            sir_line,
+            self.session.debugger.getPC(),
+            opcode,
+            self.session.debugger.getCallDepth(),
+            gas_remaining,
+            gas_spent_step,
+            gas_spent_total,
+        }) catch "status";
         drawSegments(meta, 0, 0, &.{seg(status_text, style_header_meta())});
 
         const current_source = if (line != 0) blk: {
@@ -2162,26 +2729,25 @@ const Ui = struct {
                         m.pc_end,
                         current_source,
                     }) catch "map"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                    stmt_id,
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    current_source,
+                }) catch "map"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                        stmt_id,
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        current_source,
-                    }) catch "map"
-                else
-                    self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        current_source,
-                    }) catch "map"
+                self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    current_source,
+                }) catch "map"
         else if (entry) |e|
             if (e.idx) |idx|
                 self.scratchFmt(" map  |  ora {d}  ->  sir {d}  ->  idx {d}  ->  pc {d}  |  {s}", .{
@@ -2219,7 +2785,7 @@ const Ui = struct {
 
         const help = win.child(.{ .y_off = @intCast(win.height - 1), .height = 1 });
         help.fill(.{ .char = .{ .grapheme = " " }, .style = style_header_title() });
-        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
+        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  = folded  s smt-only  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
     }
 
     fn clearCommandLog(self: *Ui) void {
@@ -2270,7 +2836,7 @@ const Ui = struct {
     }
 
     fn drawSourcePane(self: *Ui, win: Window) void {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const origin_line = self.currentOriginLine();
         const summary = if (mapping) |m|
@@ -2322,30 +2888,29 @@ const Ui = struct {
                         m.pc_start,
                         m.pc_end,
                     }) catch "runtime mapping"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                    self.statementKindLabel(current_line),
+                    self.lineProvenanceLabel(current_line),
+                    stmt_id,
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                }) catch "runtime mapping"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
-                        self.statementKindLabel(current_line),
-                        self.lineProvenanceLabel(current_line),
-                        stmt_id,
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                    }) catch "runtime mapping"
-                else
-                    self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
-                        self.statementKindLabel(current_line),
-                        self.lineProvenanceLabel(current_line),
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                    }) catch "runtime mapping"
+                self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                    self.statementKindLabel(current_line),
+                    self.lineProvenanceLabel(current_line),
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                }) catch "runtime mapping"
         else
             self.scratchFmt(" runtime {s}/{s} | {s} | ora {d}", .{
                 self.statementKindLabel(current_line),
@@ -2377,7 +2942,11 @@ const Ui = struct {
             const text = std.mem.trimRight(u8, line_text, "\r");
             const style = if (line == current_line)
                 Style{ .bg = Color.rgbFromUint(0x303A45), .fg = Color.rgbFromUint(0xF5F7FA) }
+            else if (self.isFoldedSourceLine(line))
+                style_hint()
             else if (self.isRemovedSourceLine(line))
+                style_dead()
+            else if (self.isProofOnlySourceLine(line))
                 style_dead()
             else
                 style_text();
@@ -2441,28 +3010,27 @@ const Ui = struct {
                         m.pc_end,
                         self.writeEffectLabel(effect),
                     }) catch "lowered region"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                    stmt_id,
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    self.writeEffectLabel(effect),
+                }) catch "lowered region"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
-                        stmt_id,
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        self.writeEffectLabel(effect),
-                    }) catch "lowered region"
-                else
-                    self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        self.writeEffectLabel(effect),
-                    }) catch "lowered region"
+                self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    self.writeEffectLabel(effect),
+                }) catch "lowered region"
         else if (self.session.debugger.currentOpMeta()) |meta|
             self.scratchFmt(" lowered op | {s} [{s}:{s}] | effect {s}", .{
                 meta.op,
@@ -2490,7 +3058,9 @@ const Ui = struct {
     }
 
     fn statementKindLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
+        if (self.isProofOnlySourceLine(line)) return "smt-only";
         const kind = self.statementKindForLine(line) orelse return "none";
         return switch (kind) {
             .runtime => "stmt",
@@ -2507,8 +3077,10 @@ const Ui = struct {
     }
 
     fn lineProvenanceLabel(self: *Ui, line: u32) []const u8 {
+        if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
-        const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line) orelse return "none";
+        if (self.isProofOnlySourceLine(line)) return "smt-only";
+        const provenance = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line) orelse return "none";
         return provenance.label();
     }
 
@@ -2521,14 +3093,173 @@ const Ui = struct {
         };
     }
 
+    fn foldedLineExplanation(self: *Ui, line: u32) []const u8 {
+        _ = self;
+        _ = line;
+        return "folded at compile time: source declaration stays visible, but runtime uses the folded value directly";
+    }
+
     fn removedLineExplanation(self: *Ui, line: u32) []const u8 {
         _ = self;
         _ = line;
         return "removed from runtime: source declaration has no SIR or bytecode coverage";
     }
 
+    fn proofOnlyLineExplanation(self: *Ui, line: u32) []const u8 {
+        _ = self;
+        _ = line;
+        return "SMT-only source line: verified by the proof sidecar, but no runtime bytecode stop is emitted";
+    }
+
+    fn isFoldedSourceLine(self: *Ui, line: u32) bool {
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.seed.source_path, line)) return false;
+        const info = self.session.debugger.debug_info orelse return false;
+        if (!self.lineInAnyFunctionScope(info, line)) return false;
+
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line < range.start.line or line > range.end.line) continue;
+            for (scope.locals) |local| {
+                const decl = local.decl orelse continue;
+                if (decl.start.line != line) continue;
+                if (local.is_folded) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Return the folded value text for a folded source line, or null
+    /// if the line isn't folded or the local doesn't carry a literal
+    /// folded_value (e.g. only `is_folded` was set).
+    fn foldedValueForLine(self: *Ui, line: u32) ?[]const u8 {
+        const info = self.session.debugger.debug_info orelse return null;
+        for (info.parsed.value.source_scopes) |scope| {
+            if (!std.mem.eql(u8, scope.kind, "function")) continue;
+            const range = scope.range orelse continue;
+            if (line < range.start.line or line > range.end.line) continue;
+            for (scope.locals) |local| {
+                const decl = local.decl orelse continue;
+                if (decl.start.line != line) continue;
+                if (!local.is_folded) continue;
+                if (local.folded_value) |fv| return fv;
+            }
+        }
+        return null;
+    }
+
+    const ProofStatusSummary = enum { none, proved_safe, proved_unsafe, dynamic };
+
+    /// Aggregate the FV proof_status for a source line.
+    ///
+    /// Two information sources are consulted, in this order:
+    ///   1. The `<stem>.proof.json` sidecar (`proof_lines` map) —
+    ///      written by the verifier with positions of guards it
+    ///      proved. This catches guards that the MLIR-level
+    ///      `cleanupRefinementGuards` pass scrubs out before SIR
+    ///      emission, which is most of them.
+    ///   2. `OpMeta.proof_status` for ops still present in the
+    ///      debug.json — picks up any future verifier pass that
+    ///      attaches per-op attributes instead of pruning.
+    ///
+    /// Aggregation priority: any unsafe → unsafe; any dynamic →
+    /// dynamic; any safe → safe; else none.
+    fn lineProofStatusSummary(self: *Ui, line: u32) ProofStatusSummary {
+        var saw_unsafe = false;
+        var saw_dynamic = false;
+        var saw_safe = false;
+
+        if (self.proof_lines.get(line)) |status| {
+            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+        }
+
+        if (self.session.debugger.debug_info) |info| {
+            if (self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line)) |entry| {
+                if (entry.statement_id) |sid| {
+                    for (info.parsed.value.ops) |meta| {
+                        if (meta.statement_id != sid) continue;
+                        if (meta.proof_status) |status| {
+                            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (saw_unsafe) return .proved_unsafe;
+        if (saw_dynamic) return .dynamic;
+        if (saw_safe) return .proved_safe;
+        return .none;
+    }
+
+    fn isProofOnlySourceLine(self: *Ui, line: u32) bool {
+        if (self.lineProofStatusSummary(line) == .none) return false;
+        return self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line) == null;
+    }
+
+    /// Parse `<stem>.proof.json` and populate `proof_lines`. The
+    /// file is a flat array of objects with `file`, `line`,
+    /// `column`, `status`. Entries whose `file` doesn't match the
+    /// session's source path are ignored.
+    fn loadProofSidecar(self: *Ui, path: []const u8) !void {
+        const bytes = try ora_evm.loadDebuggerArtifact(self.allocator, path);
+        defer self.allocator.free(bytes);
+
+        const ProofEntry = struct {
+            file: []const u8,
+            line: u32,
+            column: ?u32 = null,
+            status: []const u8,
+        };
+        const parsed = try std.json.parseFromSlice([]const ProofEntry, self.allocator, bytes, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+
+        for (parsed.value) |entry| {
+            // Compare against seed.source_path so the overlay
+            // doesn't pick up entries for imported files we
+            // aren't rendering.
+            if (!std.mem.eql(u8, entry.file, self.seed.source_path)) continue;
+            // Last entry wins on duplicate lines (rare).
+            if (self.proof_lines.fetchRemove(entry.line)) |kv| {
+                self.allocator.free(kv.value);
+            }
+            const status_dup = try self.allocator.dupe(u8, entry.status);
+            errdefer self.allocator.free(status_dup);
+            try self.proof_lines.put(entry.line, status_dup);
+        }
+    }
+
+    /// Return the origin_statement_id of the first source-map entry
+    /// on `line` that's marked hoisted (either at the source-map entry
+    /// level or via its op_meta). null when nothing on the line is
+    /// hoisted.
+    ///
+    /// Limitation: only the first statement boundary on the line is
+    /// inspected. If a line carries multiple statements with different
+    /// hoist statuses (rare in practice), the second statement's hoist
+    /// won't surface in the overlay. SourceMap doesn't expose an
+    /// all-entries-for-line iterator, and adding one for an overlay
+    /// hint isn't justified yet.
+    fn hoistOriginForLine(self: *Ui, line: u32) ?u32 {
+        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line) orelse return null;
+        if (entry.is_hoisted) {
+            if (entry.origin_statement_id) |o| return o;
+        }
+        const info = self.session.debugger.debug_info orelse return null;
+        const idx = entry.idx orelse return null;
+        if (info.getOpMetaForIdx(idx)) |meta| {
+            if (meta.is_hoisted) {
+                if (entry.origin_statement_id) |o| return o;
+                if (meta.origin_statement_id) |o| return o;
+            }
+        }
+        return null;
+    }
+
     fn isRemovedSourceLine(self: *Ui, line: u32) bool {
-        if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.seed.source_path, line)) return false;
         const info = self.session.debugger.debug_info orelse return false;
         if (!self.lineInAnyFunctionScope(info, line)) return false;
         if (!self.isMeaningfulRemovedSourceText(line)) return false;
@@ -2540,7 +3271,6 @@ const Ui = struct {
             for (scope.locals) |local| {
                 const decl = local.decl orelse continue;
                 if (decl.start.line != line) continue;
-                if (local.folded_value != null) return true;
                 if (std.mem.eql(u8, local.runtime.kind, "ssa")) return true;
             }
         }
@@ -2586,7 +3316,7 @@ const Ui = struct {
 
     fn currentWriteEffectKind(self: *Ui) WriteEffectKind {
         const meta = self.session.debugger.currentOpMeta() orelse return .none;
-        const current_line = (self.focus_line orelse self.session.debugger.currentSourceLine()) orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const source_text = if (current_line != 0)
             if (self.session.debugger.getSourceLineText(current_line)) |line_text|
                 std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t")
@@ -2619,8 +3349,8 @@ const Ui = struct {
     }
 
     fn currentProvenanceLabel(self: *Ui) []const u8 {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
-        const line_prov = self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line);
+        const current_line = self.currentDisplayLine() orelse 0;
+        const line_prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, current_line);
         if (self.session.debugger.currentOpMeta()) |meta| {
             switch (line_prov orelse .direct) {
                 .direct => return "direct",
@@ -2665,17 +3395,76 @@ const Ui = struct {
     fn currentOriginLine(self: *Ui) ?u32 {
         const entry = self.session.debugger.currentEntry() orelse return null;
         const origin_stmt_id = entry.origin_statement_id orelse return null;
-        return self.session.debugger.src_map.getFirstLineForStatementId(self.config.source_path, origin_stmt_id) orelse
-            self.session.debugger.src_map.getFirstLineForOriginStatementId(self.config.source_path, origin_stmt_id);
+        return self.session.debugger.src_map.getFirstLineForStatementId(self.seed.source_path, origin_stmt_id) orelse
+            self.session.debugger.src_map.getFirstLineForOriginStatementId(self.seed.source_path, origin_stmt_id);
+    }
+
+    fn currentSyntheticPath(self: *Ui) ?[]const u8 {
+        if (self.session.debugger.currentOpMeta()) |meta| {
+            if (meta.synthetic_path) |path| return path;
+        }
+        if (self.session.debugger.currentEntry()) |entry| {
+            return entry.synthetic_path;
+        }
+        return null;
+    }
+
+    fn scratchSyntheticPathSummary(self: *Ui, path: []const u8) []const u8 {
+        const start = self.render_scratch.items.len;
+        const writer = self.render_scratch.writer(self.allocator);
+        writer.writeAll("copies ") catch return path;
+
+        var it = std.mem.splitScalar(u8, path, '/');
+        var wrote_any = false;
+        while (it.next()) |segment| {
+            const dot = std.mem.indexOfScalar(u8, segment, '.') orelse {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            const idx = std.fmt.parseInt(u32, segment[0..dot], 10) catch {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            const count = std.fmt.parseInt(u32, segment[dot + 1 ..], 10) catch {
+                writer.print("{s}", .{path}) catch return path;
+                return self.render_scratch.items[start..];
+            };
+            if (wrote_any) writer.writeAll(" -> ") catch return path;
+            writer.print("{d}/{d}", .{ idx + 1, count }) catch return path;
+            wrote_any = true;
+        }
+
+        return self.render_scratch.items[start..];
     }
 
     fn updateCommandStatusForCurrentStop(self: *Ui, action: []const u8) !void {
+        defer self.appendDegradedSuffix();
         const entry = self.session.debugger.currentEntry();
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const origin_line = self.currentOriginLine();
 
         if (self.session.debugger.lastErrorName()) |err_name| {
             try self.setCommandStatusFmt("{s} => error {s}", .{ action, err_name });
+            return;
+        }
+        if (self.session.debugger.stop_reason == .watchpoint_hit) {
+            if (self.session.debugger.lastWatchpointId()) |wp_id| {
+                try self.setCommandStatusFmt("{s} => watchpoint #{d} hit at line {d}", .{ action, wp_id, current_line });
+                return;
+            }
+        }
+        if (self.session.debugger.stop_reason == .execution_reverted) {
+            const frames = self.session.evm.frames.items;
+            if (frames.len > 0) {
+                const top = &frames[frames.len - 1];
+                if (top.output.len > 0) {
+                    if (self.formatDecodedRevert(top.output)) |decoded| {
+                        try self.setCommandStatusFmt("{s} => reverted: {s}", .{ action, decoded });
+                        return;
+                    }
+                }
+            }
+            try self.setCommandStatusFmt("{s} => reverted (no decoded payload)", .{action});
             return;
         }
 
@@ -2765,9 +3554,23 @@ const Ui = struct {
         try self.setCommandStatusFmt("{s} => line {d}", .{ action, current_line });
     }
 
+    /// Best-effort: append `[degraded: <reason>]` to the status
+    /// line whenever the debugger flagged an instrumentation
+    /// failure (gas accounting / watchpoint poll). Called as a
+    /// `defer` from status writers — if the append itself fails
+    /// (OOM), we silently skip; the worst case is the user
+    /// doesn't see the warning, not a crashed status line.
+    fn appendDegradedSuffix(self: *Ui) void {
+        if (!self.session.debugger.instrumentationDegraded()) return;
+        const reason = self.session.debugger.instrumentationDegradedReason() orelse "unknown";
+        const writer = self.command_status_storage.writer(self.allocator);
+        writer.print(" [degraded: {s}]", .{reason}) catch return;
+        self.command_status = self.command_status_storage.items;
+    }
+
     fn updateExecutionErrorStatus(self: *Ui, action: []const u8) !void {
         const err_name = self.session.debugger.lastErrorName() orelse "execution_error";
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const source_text = if (current_line != 0) self.session.debugger.getSourceLineText(current_line) else null;
         const opcode_name = self.session.debugger.getCurrentOpcodeName();
 
@@ -2921,15 +3724,21 @@ const Ui = struct {
         row += 1;
         const current_entry = self.session.debugger.currentEntry();
         const mapping = self.currentMappingWindow();
+        const synthetic_path = self.currentSyntheticPath();
         const provenance_line = if (current_entry) |entry|
             if (mapping) |m|
                 if (entry.statement_id) |stmt_id|
                     if (entry.origin_statement_id) |origin_stmt_id|
                         if (m.execution_region_id) |region_id|
                             if (m.statement_run_index) |run_index|
-                                self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}", .{
-                                    self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index,
-                                }) catch "prov"
+                                if (synthetic_path) |path|
+                                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}  copies={s}", .{
+                                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index, self.scratchSyntheticPathSummary(path),
+                                    }) catch "prov"
+                                else
+                                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}.{d}", .{
+                                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id, run_index,
+                                    }) catch "prov"
                             else
                                 self.scratchFmt("provenance={s}  stmt={d}  origin={d}  region={d}", .{
                                     self.currentProvenanceLabel(), stmt_id, origin_stmt_id, region_id,
@@ -2950,24 +3759,23 @@ const Ui = struct {
                     self.scratchFmt("provenance={s}", .{
                         self.currentProvenanceLabel(),
                     }) catch "prov"
-            else
-                if (entry.statement_id) |stmt_id|
-                    if (entry.origin_statement_id) |origin_stmt_id|
-                        self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
-                            self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
-                        }) catch "prov"
-                    else
-                        self.scratchFmt("provenance={s}  stmt={d}", .{
-                            self.currentProvenanceLabel(), stmt_id,
-                        }) catch "prov"
-                else if (entry.origin_statement_id) |origin_stmt_id|
-                    self.scratchFmt("provenance={s}  origin={d}", .{
-                        self.currentProvenanceLabel(), origin_stmt_id,
+            else if (entry.statement_id) |stmt_id|
+                if (entry.origin_statement_id) |origin_stmt_id|
+                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
+                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
                     }) catch "prov"
                 else
-                    self.scratchFmt("provenance={s}", .{
-                        self.currentProvenanceLabel(),
+                    self.scratchFmt("provenance={s}  stmt={d}", .{
+                        self.currentProvenanceLabel(), stmt_id,
                     }) catch "prov"
+            else if (entry.origin_statement_id) |origin_stmt_id|
+                self.scratchFmt("provenance={s}  origin={d}", .{
+                    self.currentProvenanceLabel(), origin_stmt_id,
+                }) catch "prov"
+            else
+                self.scratchFmt("provenance={s}", .{
+                    self.currentProvenanceLabel(),
+                }) catch "prov"
         else
             self.scratchFmt("provenance={s}", .{
                 self.currentProvenanceLabel(),
@@ -3032,7 +3840,7 @@ const Ui = struct {
 
     fn drawTracePane(self: *Ui, root: Window) void {
         var row: u16 = 0;
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const origin_line = self.currentOriginLine();
         const entry = self.session.debugger.currentEntry();
         const prov = self.currentProvenanceLabel();
@@ -3075,13 +3883,19 @@ const Ui = struct {
             row += 1;
 
             if (row < root.height) {
+                const synthetic_path = self.currentSyntheticPath();
                 const meta_line = if (stmt_id) |stmt|
                     if (origin_stmt_id) |origin_stmt|
                         if (region_id) |region|
                             if (run_index) |run|
-                                self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  kind={s}/{s}", .{
-                                    stmt, origin_stmt, region, run, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
-                                }) catch "meta"
+                                if (synthetic_path) |path|
+                                    self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  copies={s}  kind={s}/{s}", .{
+                                        stmt, origin_stmt, region, run, self.scratchSyntheticPathSummary(path), self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                    }) catch "meta"
+                                else
+                                    self.scratchFmt("stmt={d}  origin={d}  region={d}.{d}  kind={s}/{s}", .{
+                                        stmt, origin_stmt, region, run, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                                    }) catch "meta"
                             else
                                 self.scratchFmt("stmt={d}  origin={d}  region={d}  kind={s}/{s}", .{
                                     stmt, origin_stmt, region, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
@@ -3098,21 +3912,25 @@ const Ui = struct {
                     self.scratchFmt("origin={d}  kind={s}/{s}", .{
                         origin_stmt, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
                     }) catch "meta"
-                    else
-                        self.scratchFmt("kind={s}/{s}", .{
-                            self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
-                        }) catch "meta";
+                else
+                    self.scratchFmt("kind={s}/{s}", .{
+                        self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                    }) catch "meta";
                 drawSegments(root, 1, row, &.{seg(meta_line, style_muted())});
                 row += 1;
             }
 
             if (row < root.height) {
-                const explain_line = if (self.isRemovedSourceLine(current_line))
+                const explain_line = if (self.isFoldedSourceLine(current_line))
+                    self.foldedLineExplanation(current_line)
+                else if (self.isRemovedSourceLine(current_line))
                     self.removedLineExplanation(current_line)
+                else if (self.isProofOnlySourceLine(current_line))
+                    self.proofOnlyLineExplanation(current_line)
                 else
                     self.scratchFmt("{s}; {s}", .{
                         self.statementKindExplanation(self.statementKindForLine(current_line)),
-                        self.lineProvenanceExplanation(self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line)),
+                        self.lineProvenanceExplanation(self.session.debugger.src_map.getLineProvenance(self.seed.source_path, current_line)),
                     }) catch "explain";
                 drawSegments(root, 1, row, &.{seg(explain_line, style_footer_note())});
                 row += 2;
@@ -3315,8 +4133,8 @@ const Ui = struct {
     fn scratchShortAddressBytes(self: *Ui, bytes: [20]u8) []const u8 {
         var raw: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&raw, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
-            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+            bytes[0],  bytes[1],  bytes[2],  bytes[3],  bytes[4],
+            bytes[5],  bytes[6],  bytes[7],  bytes[8],  bytes[9],
             bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
             bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
         }) catch return "????????";
@@ -3470,6 +4288,80 @@ const Ui = struct {
         return try self.session.debugger.getVisibleBindingValueByName(self.allocator, binding.name);
     }
 
+    /// Return the AbiDoc that applies to a given frame.
+    ///
+    /// Resolution order:
+    ///   1. Primary contract — when `frame.address == seed.contract`,
+    ///      return the ABI loaded via `--abi <path>`.
+    ///   2. Secondary registry — `--abi <hex-address>=<path>` entries
+    ///      keyed by 20-byte address. Useful when the user is
+    ///      stepping into an external callee whose ABI is known.
+    ///   3. Otherwise null — `:bt` falls back to a raw selector hex.
+    fn abiDocForFrame(self: *Ui, frame: *const Frame) ?*const AbiDoc {
+        if (std.mem.eql(u8, &frame.address.bytes, &self.seed.contract.bytes)) {
+            if (self.abi_doc) |*doc| return doc;
+        }
+        if (self.secondary_abi.getPtr(frame.address.bytes)) |doc| return doc;
+        return null;
+    }
+
+    /// Resolver shared by the TUI's `:eval`. Delegates the
+    /// folded-literal + storage/memory/tstore numeric path to the
+    /// front-end-agnostic controller so DAP and TUI agree on
+    /// what's resolvable. Falls back to the TUI-specific
+    /// `resolveAbiParamValue` (SSA function args read from
+    /// calldata via the loaded ABI) and `resolveIntrinsicLocalValue`,
+    /// which currently depend on Ui state and aren't on the
+    /// controller yet.
+    fn evalResolveBinding(ctx: *anyopaque, name: []const u8) ora_evm.debug_eval.EvalError!?ora_evm.debug_eval.Value {
+        const self: *Ui = @ptrCast(@alignCast(ctx));
+
+        // 1. Controller path — folded value + storage/memory/tstore root.
+        if (self.controller.resolveBindingNumeric(name)) |numeric| {
+            if (numeric) |n| return ora_evm.debug_eval.Value{ .num = n };
+            // Controller saw "no binding by that name" — name truly
+            // isn't visible at this stop.
+            return null;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BindingUnavailable => {
+                // The binding is visible but the controller can't
+                // read it via the basic numeric path. Fall through
+                // to the TUI-specific fallbacks below.
+            },
+            else => return err,
+        }
+
+        // 2. TUI-specific fallbacks. Need the binding handle for
+        //    the ABI-param / intrinsic resolvers.
+        const binding_opt = self.session.debugger.findVisibleBindingByName(self.allocator, name) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const binding = binding_opt orelse return null;
+
+        if (self.resolveAbiParamValue(&binding)) |resolved| {
+            return switch (resolved) {
+                .numeric => |n| ora_evm.debug_eval.Value{ .num = n },
+                .text => error.BindingUnavailable,
+            };
+        }
+        if (self.resolveIntrinsicLocalValue(&binding)) |resolved| {
+            return switch (resolved) {
+                .numeric => |n| ora_evm.debug_eval.Value{ .num = n },
+                .text => error.BindingUnavailable,
+            };
+        }
+        return error.BindingUnavailable;
+    }
+
+    fn evaluateExpr(self: *Ui, expr: []const u8) ora_evm.debug_eval.EvalError!ora_evm.debug_eval.Value {
+        const resolver = ora_evm.debug_eval.Resolver{
+            .ctx = @ptrCast(self),
+            .resolveFn = evalResolveBinding,
+        };
+        return ora_evm.debug_eval.evaluate(expr, resolver);
+    }
+
     fn resolvedBindingValue(self: *Ui, binding: *const DebugInfo.VisibleBinding) !?ResolvedBindingValue {
         if (try self.numericBindingValue(binding)) |value| {
             return .{ .numeric = value };
@@ -3485,7 +4377,7 @@ const Ui = struct {
     ) BindingAvailability {
         if (self.bindingBeforeDeclaration(binding)) return .not_initialized;
         if (self.bindingPastLiveRange(binding)) return .out_of_scope;
-        if (binding.folded_value != null) return .derived;
+        if (binding.is_folded or binding.folded_value != null) return .derived;
         if (std.mem.eql(u8, binding.runtime_kind, "optimized_out")) return .optimized_away;
         if (resolved_value != null) {
             if (std.mem.eql(u8, binding.runtime_kind, "ssa")) return .derived;
@@ -3589,6 +4481,148 @@ const Ui = struct {
         return .{ .numeric = value };
     }
 
+    /// Try to decode a revert payload (as left in `frame.output` after a
+    /// REVERT) against the loaded ABI. Returns `null` when the payload
+    /// doesn't match a known custom error or string-revert; the caller
+    /// should fall back to plain "execution_reverted" status. The returned
+    /// slice is valid until `render_scratch` is reset.
+    fn formatDecodedRevert(self: *Ui, payload: []const u8) ?[]const u8 {
+        if (payload.len == 0) return null;
+        const start = self.render_scratch.items.len;
+        var writer = self.render_scratch.writer(self.allocator);
+
+        if (payload.len >= 4 + 32 and std.mem.eql(u8, payload[0..4], &.{ 0x08, 0xc3, 0x79, 0xa0 })) {
+            // Solidity-style Error(string) revert.
+            const args = payload[4..];
+            const offset = readU256BE(args[0..32]);
+            if (offset == 32 and args.len >= 64) {
+                const length: usize = @intCast(readU256BE(args[32..64]) & std.math.maxInt(u32));
+                const bytes_start: usize = 64;
+                const end = bytes_start + length;
+                if (end <= args.len) {
+                    writer.print("Error(\"{s}\")", .{args[bytes_start..end]}) catch return null;
+                    return self.render_scratch.items[start..];
+                }
+            }
+        }
+
+        if (payload.len < 4) return null;
+        const abi_doc = self.abi_doc orelse return null;
+        var selector_buf: [4]u8 = undefined;
+        @memcpy(&selector_buf, payload[0..4]);
+        const error_callable = abi_doc.findErrorBySelector(selector_buf) orelse return null;
+
+        const name = blk: {
+            const n = error_callable.object.get("name") orelse break :blk @as([]const u8, "<error>");
+            if (n != .string) break :blk @as([]const u8, "<error>");
+            break :blk n.string;
+        };
+        writer.print("{s}(", .{name}) catch return null;
+
+        const args = payload[4..];
+        const inputs_value = error_callable.object.get("inputs");
+        const inputs_array: []const std.json.Value = blk: {
+            if (inputs_value) |iv| {
+                if (iv == .array) break :blk iv.array.items;
+            }
+            break :blk &.{};
+        };
+
+        var i: usize = 0;
+        while (i < inputs_array.len) : (i += 1) {
+            if (i > 0) writer.writeAll(", ") catch return null;
+            const input = inputs_array[i];
+            const arg_name: []const u8 = blk: {
+                if (input == .object) {
+                    if (input.object.get("name")) |n| {
+                        if (n == .string) break :blk n.string;
+                    }
+                }
+                break :blk "_";
+            };
+            writer.print("{s}=", .{arg_name}) catch return null;
+            const word_start = i * 32;
+            const word_end = word_start + 32;
+            if (word_end > args.len) {
+                writer.writeAll("?") catch return null;
+                continue;
+            }
+            const wire_type = abi_doc.formatInputType(input) orelse "uint256";
+            writeAbiWord(writer, wire_type, args[word_start..word_end]) catch return null;
+        }
+
+        writer.writeAll(")") catch return null;
+        return self.render_scratch.items[start..];
+    }
+
+    /// Decode a single emitted log against the loaded ABI. Returns a
+    /// short human-readable string like `Transfer(from=0x..., to=0x...,
+    /// amount=42)`. Returns `null` when no event in the ABI matches
+    /// `topic[0]`. The returned slice is valid until `render_scratch`
+    /// is reset.
+    fn formatDecodedLog(self: *Ui, log_entry: ora_evm.Log) ?[]const u8 {
+        if (log_entry.topics.len == 0) return null;
+        const abi_doc = self.abi_doc orelse return null;
+        const event = abi_doc.findEventByTopic0(log_entry.topics[0]) orelse return null;
+
+        const name = blk: {
+            const n = event.object.get("name") orelse break :blk @as([]const u8, "<event>");
+            if (n != .string) break :blk @as([]const u8, "<event>");
+            break :blk n.string;
+        };
+
+        const start = self.render_scratch.items.len;
+        var writer = self.render_scratch.writer(self.allocator);
+        writer.print("{s}(", .{name}) catch return null;
+
+        const inputs_value = event.object.get("inputs");
+        const inputs_array: []const std.json.Value = blk: {
+            if (inputs_value) |iv| {
+                if (iv == .array) break :blk iv.array.items;
+            }
+            break :blk &.{};
+        };
+
+        var topic_idx: usize = 1; // topic[0] is the selector
+        var data_idx: usize = 0;
+        var first = true;
+        for (inputs_array) |input| {
+            if (!first) writer.writeAll(", ") catch return null;
+            first = false;
+
+            const arg_name: []const u8 = blk: {
+                if (input == .object) {
+                    if (input.object.get("name")) |n| {
+                        if (n == .string) break :blk n.string;
+                    }
+                }
+                break :blk "_";
+            };
+            writer.print("{s}=", .{arg_name}) catch return null;
+            const wire_type = abi_doc.formatInputType(input) orelse "uint256";
+
+            if (AbiDoc.isInputIndexed(input)) {
+                if (topic_idx >= log_entry.topics.len) {
+                    writer.writeAll("?") catch return null;
+                    continue;
+                }
+                var word: [32]u8 = undefined;
+                writeU256BE(&word, log_entry.topics[topic_idx]);
+                topic_idx += 1;
+                writeAbiWord(writer, wire_type, &word) catch return null;
+            } else {
+                if (data_idx + 32 > log_entry.data.len) {
+                    writer.writeAll("?") catch return null;
+                    continue;
+                }
+                writeAbiWord(writer, wire_type, log_entry.data[data_idx .. data_idx + 32]) catch return null;
+                data_idx += 32;
+            }
+        }
+        writer.writeAll(")") catch return null;
+        return self.render_scratch.items[start..];
+    }
+
     fn selectedFrame(self: *Ui) ?*Frame {
         const frames = self.session.evm.frames.items;
         if (frames.len == 0) return null;
@@ -3641,10 +4675,13 @@ const Ui = struct {
         const tail = @min(self.breakpoints.items.len, 4);
         var i = self.breakpoints.items.len - tail;
         while (i < self.breakpoints.items.len) : (i += 1) {
-            if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, self.breakpoints.items[i])) |prov|
-                try self.render_scratch.writer(self.allocator).print("  L{d}[{s}]", .{ self.breakpoints.items[i], prov.label() })
+            const bp = self.breakpoints.items[i];
+            if (self.session.debugger.src_map.getLineProvenance(self.seed.source_path, bp.line)) |prov|
+                try self.render_scratch.writer(self.allocator).print("  L{d}[{s}]", .{ bp.line, prov.label() })
             else
-                try self.render_scratch.writer(self.allocator).print("  L{d}", .{self.breakpoints.items[i]});
+                try self.render_scratch.writer(self.allocator).print("  L{d}", .{bp.line});
+            if (bp.condition != null) try self.render_scratch.writer(self.allocator).writeAll("?");
+            if (bp.hit_target != null) try self.render_scratch.writer(self.allocator).print("@{d}/{d}", .{ bp.hit_count, bp.hit_target.? });
         }
         return self.render_scratch.items[start..];
     }
@@ -3659,14 +4696,20 @@ const Ui = struct {
             const is_current = line == current_line;
             const is_origin = if (origin_line) |origin| origin == line and origin != current_line else false;
             const kind = self.statementKindForLine(line);
-            const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line);
+            const provenance = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
+            const folded = self.isFoldedSourceLine(line);
             const removed = self.isRemovedSourceLine(line);
+            const proof_only = self.isProofOnlySourceLine(line);
             const marker = if (has_break and is_current)
                 ">"
             else if (has_break)
                 "*"
             else if (is_origin)
                 "^"
+            else if (folded)
+                "="
+            else if (proof_only)
+                "s"
             else if (removed)
                 "-"
             else if (provenance == .mixed)
@@ -3683,6 +4726,10 @@ const Ui = struct {
                 style_changed()
             else if (is_origin)
                 style_emphasis()
+            else if (folded)
+                style_hint()
+            else if (proof_only)
+                style_dead()
             else if (removed)
                 style_dead()
             else if (provenance == .mixed)
@@ -3695,7 +4742,51 @@ const Ui = struct {
                 style_muted()
             else
                 style_muted();
-            const line_cell = self.scratchFmt("{s}{d:>6} |", .{ marker, line }) catch marker;
+            const line_cell = switch (self.overlay_mode) {
+                .none => self.scratchFmt("{s}{d:>6} |", .{ marker, line }) catch marker,
+                .coverage => blk: {
+                    const hit = self.session.debugger.getLineHits(line);
+                    if (hit) |h| {
+                        break :blk self.scratchFmt("{s}{d:>6} {d:>4}|", .{ marker, line, h }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}    .|", .{ marker, line }) catch marker;
+                },
+                .gas => blk: {
+                    const gas = self.session.debugger.getLineGas(line);
+                    if (gas) |g| {
+                        break :blk self.scratchFmt("{s}{d:>6} {d:>7}|", .{ marker, line, g }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}       .|", .{ marker, line }) catch marker;
+                },
+                .folded => blk: {
+                    if (self.foldedValueForLine(line)) |fv| {
+                        break :blk self.scratchFmt("{s}{d:>6} ={s}|", .{ marker, line, fv }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}  |", .{ marker, line }) catch marker;
+                },
+                .hoist => blk: {
+                    if (self.hoistOriginForLine(line)) |origin| {
+                        break :blk self.scratchFmt("{s}{d:>6} <-{d}|", .{ marker, line, origin }) catch marker;
+                    }
+                    break :blk self.scratchFmt("{s}{d:>6}    |", .{ marker, line }) catch marker;
+                },
+                .fv => blk: {
+                    // FV-dead-branch: render a single-character
+                    // proof status next to each line that has a
+                    // verified guard. Aggregated across all ops on
+                    // the line: if any op is proved-safe AND no op
+                    // is unsafe/dynamic, show `✓`. If any op is
+                    // proved-unsafe show `✗`. Otherwise blank.
+                    const status = self.lineProofStatusSummary(line);
+                    const mark_text: []const u8 = switch (status) {
+                        .proved_safe => " S",
+                        .proved_unsafe => " X",
+                        .dynamic => " ?",
+                        .none => "  ",
+                    };
+                    break :blk self.scratchFmt("{s}{d:>6}{s}|", .{ marker, line, mark_text }) catch marker;
+                },
+            };
             drawSegments(win, 0, visible_row, &.{seg(line_cell, style)});
         }
     }
@@ -3724,12 +4815,12 @@ const Ui = struct {
     }
 
     fn statementKindForLine(self: *Ui, line: u32) ?ora_evm.SourceMap.StatementKind {
-        return self.session.debugger.src_map.getStatementKindForLine(self.config.source_path, line);
+        return self.session.debugger.src_map.getStatementKindForLine(self.seed.source_path, line);
     }
 
     fn hasBreakpointLine(self: *Ui, line: u32) bool {
         for (self.breakpoints.items) |bp| {
-            if (bp == line) return true;
+            if (bp.line == line) return true;
         }
         return false;
     }
@@ -3746,212 +4837,42 @@ const Ui = struct {
         return next;
     }
 
+    fn exportTrace(self: *Ui, path: []const u8) !usize {
+        return @import("debug_tui_session.zig").exportTrace(self, path);
+    }
+
     fn writeSession(self: *Ui, path: []const u8) !void {
-        var step_names = try self.allocator.alloc([]const u8, self.step_history.items.len);
-        defer self.allocator.free(step_names);
-        for (self.step_history.items, 0..) |mode, i| {
-            step_names[i] = stepModeName(mode);
-        }
-        const breakpoints = try self.allocator.dupe(u32, self.breakpoints.items);
-        defer self.allocator.free(breakpoints);
-        var saved_checkpoints = try self.allocator.alloc(SavedSession.SavedCheckpoint, self.checkpoints.items.len);
-        defer self.allocator.free(saved_checkpoints);
-        for (self.checkpoints.items, 0..) |cp, i| {
-            saved_checkpoints[i] = .{
-                .id = cp.id,
-                .step_index = cp.step_index,
-                .scroll_line = cp.scroll_line,
-                .focus_line = cp.focus_line,
-                .active_evm_tab = tabName(cp.active_evm_tab),
-            };
-        }
-
-        const calldata_hex = try std.fmt.allocPrint(self.allocator, "{x}", .{self.seed.calldata});
-        defer self.allocator.free(calldata_hex);
-
-        const session = SavedSession{
-            .bytecode_path = self.config.bytecode_path,
-            .source_map_path = self.config.source_map_path,
-            .source_path = self.config.source_path,
-            .sir_path = self.config.sir_path,
-            .debug_info_path = self.config.debug_info_path,
-            .abi_path = self.config.abi_path,
-            .calldata_hex = calldata_hex,
-            .scroll_line = self.scroll_line,
-            .sir_scroll_line = self.sir_scroll_line,
-            .sir_follow = self.sir_follow,
-            .focus_line = self.focus_line,
-            .active_evm_tab = tabName(self.active_evm_tab),
-            .step_history = step_names,
-            .breakpoints = breakpoints,
-            .checkpoints = saved_checkpoints,
-        };
-
-        var json_buf: std.ArrayList(u8) = .{};
-        defer json_buf.deinit(self.allocator);
-        var writer = json_buf.writer(self.allocator);
-        var adapter_buf: [256]u8 = undefined;
-        var adapter = writer.adaptToNewApi(&adapter_buf);
-        var jw: std.json.Stringify = .{
-            .writer = &adapter.new_interface,
-            .options = .{ .whitespace = .indent_2 },
-        };
-        try jw.write(session);
-        if (adapter.err) |err| return err;
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json_buf.items });
+        return @import("debug_tui_session.zig").writeSession(self, path);
     }
 
     fn loadSession(self: *Ui, path: []const u8) !void {
-        const json_bytes = try std.fs.cwd().readFileAlloc(self.allocator, path, 16 * 1024 * 1024);
-        defer self.allocator.free(json_bytes);
-
-        const parsed = try std.json.parseFromSlice(SavedSession, self.allocator, json_bytes, .{
-            .ignore_unknown_fields = true,
-        });
-        defer parsed.deinit();
-
-        var new_config = AppConfig{
-            .bytecode_path = try self.allocator.dupe(u8, parsed.value.bytecode_path),
-            .source_map_path = try self.allocator.dupe(u8, parsed.value.source_map_path),
-            .source_path = try self.allocator.dupe(u8, parsed.value.source_path),
-            .sir_path = if (parsed.value.sir_path) |p| try self.allocator.dupe(u8, p) else null,
-            .debug_info_path = if (parsed.value.debug_info_path) |p| try self.allocator.dupe(u8, p) else null,
-            .abi_path = if (parsed.value.abi_path) |p| try self.allocator.dupe(u8, p) else null,
-            .init_calldata = try self.allocator.dupe(u8, &.{}),
-            .init_calldata_fallback = try self.allocator.dupe(u8, &.{}),
-            .calldata = try decodeHexAlloc(self.allocator, parsed.value.calldata_hex),
-        };
-        errdefer new_config.deinit(self.allocator);
-
-        var new_seed = try loadSeedFromConfig(self.allocator, &new_config);
-        errdefer new_seed.deinit(self.allocator);
-
-        self.config.deinit(self.allocator);
-        self.session.deinit();
-        self.seed.deinit(self.allocator);
-        self.clearPreviousBindingsSnapshot();
-        self.step_history.clearRetainingCapacity();
-
-        self.config = new_config;
-        self.seed = new_seed;
-        try Session.init(&self.session, self.allocator, &self.seed);
-
-        self.command_mode = false;
-        self.command_buffer.clearRetainingCapacity();
-        self.active_evm_tab = parseTabName(parsed.value.active_evm_tab) orelse .stack;
-        self.breakpoints.clearRetainingCapacity();
-        for (parsed.value.breakpoints) |line| {
-            try self.breakpoints.append(self.allocator, line);
-        }
-        self.checkpoints.clearRetainingCapacity();
-        self.next_checkpoint_id = 1;
-        for (parsed.value.checkpoints) |cp| {
-            try self.checkpoints.append(self.allocator, .{
-                .id = cp.id,
-                .step_index = cp.step_index,
-                .scroll_line = cp.scroll_line,
-                .focus_line = cp.focus_line,
-                .active_evm_tab = parseTabName(cp.active_evm_tab) orelse .stack,
-            });
-            if (cp.id >= self.next_checkpoint_id) self.next_checkpoint_id = cp.id + 1;
-        }
-
-        self.source_buffer.deinit(self.allocator);
-        self.source_buffer = .{};
-        try self.source_buffer.update(self.allocator, .{ .bytes = self.seed.source_text });
-
-        try self.primeInitialStop();
-        try self.applyBreakpoints();
-        for (parsed.value.step_history) |name| {
-            const mode = parseStepMode(name) orelse continue;
-            self.runStep(mode, true);
-            if (std.mem.eql(u8, self.status, "execution_error")) break;
-        }
-        self.scroll_line = parsed.value.scroll_line;
-        self.sir_scroll_line = parsed.value.sir_scroll_line;
-        self.sir_follow = parsed.value.sir_follow;
-        self.focus_line = parsed.value.focus_line;
-        self.previous_snapshot = self.captureSnapshot();
-        try self.refreshPreviousBindingsSnapshot();
-        if (self.focus_line == null) self.syncFocusFromDebugger();
+        return @import("debug_tui_session.zig").loadSession(self, path);
     }
 };
 
-fn seg(text: []const u8, style: Style) Segment {
-    return .{ .text = text, .style = style };
-}
-
-fn drawSegments(win: Window, col: u16, row: u16, segments: []const Segment) void {
-    _ = win.print(segments, .{ .col_offset = col, .row_offset = row, .wrap = .none });
-}
-
-fn style_header_title() Style {
-    return .{ .fg = Color.rgbFromUint(0x191F24), .bg = Color.rgbFromUint(0xE8EFF6), .bold = true };
-}
-
-fn style_header_meta() Style {
-    return .{ .fg = Color.rgbFromUint(0xD3DBE3), .bg = Color.rgbFromUint(0x1A1D21) };
-}
-
-fn style_footer_note() Style {
-    return .{ .fg = Color.rgbFromUint(0xA8B0B8), .bg = Color.rgbFromUint(0x1A1D21) };
-}
-
-fn style_border() Style {
-    return .{ .fg = Color.rgbFromUint(0x78838E) };
-}
-
-fn style_title() Style {
-    return .{ .fg = Color.rgbFromUint(0xDEE4EB), .bold = true };
-}
-
-fn style_text() Style {
-    return .{ .fg = Color.rgbFromUint(0xD6DCE2) };
-}
-
-fn style_emphasis() Style {
-    return .{ .fg = Color.rgbFromUint(0xF5F7FA), .bold = true };
-}
-
-fn style_changed() Style {
-    return .{ .fg = Color.rgbFromUint(0xFFD666), .bold = true };
-}
-
-fn style_guard() Style {
-    return .{ .fg = Color.rgbFromUint(0xFFAD66), .bold = true };
-}
-
-fn style_hint() Style {
-    return .{ .fg = Color.rgbFromUint(0x969EA6), .italic = true };
-}
-
-fn style_muted() Style {
-    return .{ .fg = Color.rgbFromUint(0xC0C7CF), .dim = true };
-}
-
-fn style_dead() Style {
-    return .{ .fg = Color.rgbFromUint(0x8B929A), .dim = true, .italic = true };
-}
-
-fn style_tab_active() Style {
-    return .{ .fg = Color.rgbFromUint(0xEEF2F8), .bold = true, .ul_style = .single };
-}
-
-fn style_tab_inactive() Style {
-    return .{ .fg = Color.rgbFromUint(0xA0AAB4) };
-}
-
-fn style_error() Style {
-    return .{ .fg = Color.rgbFromUint(0xFF6B6B), .bold = true };
-}
-
-fn style_command_bg() Style {
-    return .{ .fg = Color.rgbFromUint(0xDDE5ED), .bg = Color.rgbFromUint(0x111417) };
-}
-
-fn style_command() Style {
-    return .{ .fg = Color.rgbFromUint(0xE7EDF4), .bg = Color.rgbFromUint(0x111417), .bold = true };
-}
+// seg, drawSegments, style_*, ascii_border_glyphs live in
+// debug_tui_draw.zig; bring them back into the file's namespace
+// via simple aliases so existing call sites read unchanged.
+const draw = @import("debug_tui_draw.zig");
+const seg = draw.seg;
+const drawSegments = draw.drawSegments;
+const style_header_title = draw.style_header_title;
+const style_header_meta = draw.style_header_meta;
+const style_footer_note = draw.style_footer_note;
+const style_border = draw.style_border;
+const style_title = draw.style_title;
+const style_text = draw.style_text;
+const style_emphasis = draw.style_emphasis;
+const style_changed = draw.style_changed;
+const style_guard = draw.style_guard;
+const style_hint = draw.style_hint;
+const style_muted = draw.style_muted;
+const style_dead = draw.style_dead;
+const style_tab_active = draw.style_tab_active;
+const style_tab_inactive = draw.style_tab_inactive;
+const style_error = draw.style_error;
+const style_command_bg = draw.style_command_bg;
+const style_command = draw.style_command;
 
 fn tabLabel(tab: EvmTabKind) []const u8 {
     return switch (tab) {
@@ -3963,7 +4884,7 @@ fn tabLabel(tab: EvmTabKind) []const u8 {
     };
 }
 
-fn tabName(tab: EvmTabKind) []const u8 {
+pub fn tabName(tab: EvmTabKind) []const u8 {
     return switch (tab) {
         .stack => "stack",
         .memory => "memory",
@@ -3973,7 +4894,7 @@ fn tabName(tab: EvmTabKind) []const u8 {
     };
 }
 
-fn parseTabName(name: []const u8) ?EvmTabKind {
+pub fn parseTabName(name: []const u8) ?EvmTabKind {
     if (std.mem.eql(u8, name, "stack")) return .stack;
     if (std.mem.eql(u8, name, "memory")) return .memory;
     if (std.mem.eql(u8, name, "storage")) return .storage;
@@ -3982,7 +4903,7 @@ fn parseTabName(name: []const u8) ?EvmTabKind {
     return null;
 }
 
-fn stepModeName(mode: StepMode) []const u8 {
+pub fn stepModeName(mode: StepMode) []const u8 {
     return switch (mode) {
         .in => "in",
         .opcode => "opcode",
@@ -3992,7 +4913,7 @@ fn stepModeName(mode: StepMode) []const u8 {
     };
 }
 
-fn parseStepMode(name: []const u8) ?StepMode {
+pub fn parseStepMode(name: []const u8) ?StepMode {
     if (std.mem.eql(u8, name, "in")) return .in;
     if (std.mem.eql(u8, name, "opcode")) return .opcode;
     if (std.mem.eql(u8, name, "over")) return .over;
@@ -4033,6 +4954,7 @@ fn runMain() !void {
 
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(&tty_buf);
+    try configureTtyReadTimeout(&tty);
     defer tty.deinit();
 
     var vx = try vaxis.init(allocator, .{});
@@ -4047,6 +4969,7 @@ fn runMain() !void {
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
     const initial_winsize = try vaxis.Tty.getWinsize(tty.fd);
     try vx.resize(allocator, tty.writer(), initial_winsize);
+    ui.updateCommandStatusForCurrentStop("start") catch {};
     ui.render(&vx);
     try vx.render(tty.writer());
 
@@ -4060,7 +4983,11 @@ fn runMain() !void {
                 try vx.render(tty.writer());
             },
             .key_press => |key| {
-                running = !(try ui.handleKey(key));
+                const should_quit = try ui.handleKey(key);
+                if (should_quit) {
+                    running = false;
+                    break;
+                }
                 ui.render(&vx);
                 try vx.render(tty.writer());
             },
@@ -4070,55 +4997,88 @@ fn runMain() !void {
     }
 }
 
-fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
-    const bytecode_hex = try std.fs.cwd().readFileAlloc(allocator, config.bytecode_path, 16 * 1024 * 1024);
+fn configureTtyReadTimeout(tty: *vaxis.Tty) !void {
+    if (builtin.os.tag == .windows) return;
+
+    var termios = try std.posix.tcgetattr(tty.fd);
+    // Vaxis stops its input thread by setting a flag and waking the read with
+    // a terminal status query. Some terminals/PTYs do not answer that query;
+    // a short read timeout lets the thread observe the flag without relying on
+    // terminal-specific DSR behavior.
+    termios.cc[@intFromEnum(std.posix.V.MIN)] = 0;
+    termios.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+    try std.posix.tcsetattr(tty.fd, .NOW, termios);
+}
+
+pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !SessionSeed {
+    const limits = config.limits;
+
+    const bytecode_hex = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.bytecode_path, limits.artifact_max_bytes);
     defer allocator.free(bytecode_hex);
     const bytecode = try decodeHexAlloc(allocator, bytecode_hex);
     defer allocator.free(bytecode);
 
-    const source_map_json = try std.fs.cwd().readFileAlloc(allocator, config.source_map_path, 16 * 1024 * 1024);
+    const source_map_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_map_path, limits.artifact_max_bytes);
     defer allocator.free(source_map_json);
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
     errdefer source_map.deinit();
 
-    const source_text = try std.fs.cwd().readFileAlloc(allocator, config.source_path, 16 * 1024 * 1024);
+    const source_text = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_path, limits.artifact_max_bytes);
     errdefer allocator.free(source_text);
+    const canonical_source_path = try canonicalizeSourcePath(allocator, config.source_path);
+    errdefer allocator.free(canonical_source_path);
 
     var debug_info_json: ?[]u8 = null;
     errdefer if (debug_info_json) |bytes| allocator.free(bytes);
     if (config.debug_info_path) |path| {
-        debug_info_json = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+        debug_info_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, path, limits.artifact_max_bytes);
     }
 
     var sir_text: ?[]u8 = null;
     errdefer if (sir_text) |bytes| allocator.free(bytes);
     if (config.sir_path) |path| {
-        sir_text = std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024) catch null;
+        sir_text = ora_evm.loadDebuggerArtifactWithCap(allocator, path, limits.artifact_max_bytes) catch null;
     }
 
     const caller = primitives.Address.fromU256(0x100);
     const contract = primitives.Address.fromU256(0x200);
 
     var evm: Evm = undefined;
-    try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+    try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
     defer evm.deinit();
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(contract);
 
-    const runtime_bytecode = deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode, config.init_calldata) catch |err| blk: {
+    const runtime_bytecode = SessionHelpers.deployRuntimeBytecode(allocator, &evm, .{
+        .caller = caller,
+        .contract = contract,
+        .deployment_bytecode = bytecode,
+        .init_calldata = config.init_calldata,
+        .gas_limit = limits.gas_limit,
+        .step_cap = limits.deploy_step_cap,
+        .strict = true,
+    }) catch |err| blk: {
         if (err != error.DeploymentRevertedWithNoRuntime or config.init_calldata_fallback.len == 0) {
             return err;
         }
         evm.deinit();
-        try evm.init(allocator, null, null, null, primitives.ZERO_ADDRESS, 0, null);
+        try evm.init(allocator, null, null, ora_evm.deterministicBlockContext(), primitives.ZERO_ADDRESS, 0, null);
         try evm.initTransactionState(null);
         try evm.preWarmTransaction(contract);
-        break :blk try deployRuntimeBytecode(allocator, &evm, caller, contract, bytecode, config.init_calldata_fallback);
+        break :blk try SessionHelpers.deployRuntimeBytecode(allocator, &evm, .{
+            .caller = caller,
+            .contract = contract,
+            .deployment_bytecode = bytecode,
+            .init_calldata = config.init_calldata_fallback,
+            .gas_limit = limits.gas_limit,
+            .step_cap = limits.deploy_step_cap,
+            .strict = true,
+        });
     };
     errdefer allocator.free(runtime_bytecode);
 
     if (source_map.runtime_start_pc) |_| {
-        const runtime_source_map = try rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
+        const runtime_source_map = try SessionHelpers.rebaseSourceMapForRuntime(allocator, &source_map, runtime_bytecode);
         source_map.deinit();
         source_map = runtime_source_map;
     }
@@ -4128,121 +5088,20 @@ fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig) !S
         .source_map = source_map,
         .debug_info_json = debug_info_json,
         .source_text = source_text,
-        .source_path = try allocator.dupe(u8, config.source_path),
+        .source_path = canonical_source_path,
         .sir_text = sir_text,
         .calldata = try allocator.dupe(u8, config.calldata),
         .caller = caller,
         .contract = contract,
+        .limits = limits,
     };
 }
 
-fn deployRuntimeBytecode(
-    allocator: std.mem.Allocator,
-    evm: *Evm,
-    caller: primitives.Address,
-    contract: primitives.Address,
-    deployment_bytecode: []const u8,
-    init_calldata: []const u8,
-) ![]u8 {
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
-    try evm.frames.append(evm.arena.allocator(), try Frame.init(
-        evm.arena.allocator(),
-        deployment_bytecode,
-        5_000_000,
-        caller,
-        contract,
-        0,
-        init_calldata,
-        @as(*anyopaque, @ptrCast(evm)),
-        evm.hardfork,
-        false,
-    ));
-
-    var steps: usize = 0;
-    while (evm.getCurrentFrame()) |frame| {
-        if (frame.stopped or frame.reverted) break;
-        if (steps >= 200_000) {
-            try stderr.print("debug-tui: deployment did not halt after {d} steps (pc={d})\n", .{
-                steps,
-                frame.pc,
-            });
-            try stderr.flush();
-            return error.DeploymentDidNotHalt;
-        }
-        try evm.step();
-        steps += 1;
-    }
-
-    const frame = evm.getCurrentFrame() orelse return try allocator.dupe(u8, deployment_bytecode);
-    defer {
-        for (evm.frames.items) |*live_frame| {
-            live_frame.deinit();
-        }
-        evm.frames.clearRetainingCapacity();
-    }
-
-    if (frame.reverted or frame.output.len == 0) {
-        try stderr.print("debug-tui: deployment completed without runtime output (reverted={any}, output_len={d}, steps={d})\n", .{
-            frame.reverted,
-            frame.output.len,
-            steps,
-        });
-        try stderr.flush();
-        return error.DeploymentRevertedWithNoRuntime;
-    }
-    try stderr.print("debug-tui: deployment completed in {d} steps, runtime_len={d}\n", .{ steps, frame.output.len });
-    try stderr.flush();
-    return try allocator.dupe(u8, frame.output);
-}
-
-fn rebaseSourceMapForRuntime(
-    allocator: std.mem.Allocator,
-    creation_source_map: *const SourceMap,
-    runtime_bytecode: []const u8,
-) !SourceMap {
-    const runtime_start_pc = creation_source_map.runtime_start_pc orelse {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
+fn canonicalizeSourcePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound, error.NameTooLong, error.AccessDenied, error.NotDir => try allocator.dupe(u8, path),
+        else => return err,
     };
-    if (runtime_bytecode.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-
-    var rebased: std.ArrayList(SourceMap.Entry) = .{};
-    defer rebased.deinit(allocator);
-
-    for (creation_source_map.entries) |entry| {
-        if (entry.pc < runtime_start_pc) continue;
-        const rebased_pc = entry.pc - runtime_start_pc;
-        if (rebased_pc >= runtime_bytecode.len) continue;
-        try rebased.append(allocator, .{
-            .idx = entry.idx,
-            .pc = @intCast(rebased_pc),
-            .file = entry.file,
-            .line = entry.line,
-            .col = entry.col,
-            .statement_id = entry.statement_id,
-            .origin_statement_id = entry.origin_statement_id,
-            .execution_region_id = entry.execution_region_id,
-            .statement_run_index = entry.statement_run_index,
-            .sir_line = entry.sir_line,
-            .is_synthetic = entry.is_synthetic,
-            .synthetic_index = entry.synthetic_index,
-            .synthetic_count = entry.synthetic_count,
-            .is_hoisted = entry.is_hoisted,
-            .is_duplicated = entry.is_duplicated,
-            .is_statement = entry.is_statement,
-            .kind = entry.kind,
-        });
-    }
-
-    if (rebased.items.len == 0) {
-        return try SourceMap.fromEntries(allocator, creation_source_map.entries);
-    }
-    var runtime_map = try SourceMap.fromEntries(allocator, rebased.items);
-    runtime_map.runtime_start_pc = 0;
-    return runtime_map;
 }
 
 fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
@@ -4304,8 +5163,17 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
         } else if (std.mem.eql(u8, arg, "--abi")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
-            if (config.abi_path) |path| allocator.free(path);
-            config.abi_path = try allocator.dupe(u8, args[i]);
+            // Two forms accepted:
+            //   --abi <abi.json>                     → primary contract
+            //   --abi <hex-address>=<abi.json>       → external callee
+            if (parseSecondaryAbiSpec(allocator, args[i])) |spec_opt| {
+                if (spec_opt) |spec| {
+                    try config.secondary_abi_specs.append(allocator, spec);
+                } else {
+                    if (config.abi_path) |path| allocator.free(path);
+                    config.abi_path = try allocator.dupe(u8, args[i]);
+                }
+            } else |err| return err;
         } else if (std.mem.eql(u8, arg, "--signature")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
@@ -4320,6 +5188,22 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
             if (i >= args.len) return error.InvalidArguments;
             allocator.free(config.calldata);
             config.calldata = try decodeHexAlloc(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--gas-limit")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.gas_limit = try std.fmt.parseInt(i64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--max-steps")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.max_steps = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.deploy_step_cap = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            config.limits.artifact_max_bytes = try std.fmt.parseInt(usize, args[i], 10);
         } else {
             try printUsage();
             return error.InvalidArguments;
@@ -4330,7 +5214,7 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
         allocator.free(config.init_calldata);
         allocator.free(config.init_calldata_fallback);
         if (config.abi_path) |abi_path| {
-            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            const abi_bytes = try ora_evm.loadDebuggerArtifact(allocator, abi_path);
             defer allocator.free(abi_bytes);
             config.init_calldata = try encodeConstructorArgsAlloc(allocator, abi_bytes, sig, init_raw_args.items);
         } else {
@@ -4342,7 +5226,7 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
     if (signature) |sig| {
         allocator.free(config.calldata);
         if (config.abi_path) |abi_path| {
-            const abi_bytes = try std.fs.cwd().readFileAlloc(allocator, abi_path, 16 * 1024 * 1024);
+            const abi_bytes = try ora_evm.loadDebuggerArtifact(allocator, abi_path);
             defer allocator.free(abi_bytes);
             config.calldata = try encodeAbiCallDataAlloc(allocator, abi_bytes, sig, raw_args.items);
         } else {
@@ -4369,7 +5253,22 @@ fn printUsage() !void {
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:
-        \\  ora-evm-debug-tui <bytecode.hex> <source-map.json> <source.ora> [--debug-info <debug.json>] [--abi <abi.json>] [--init-signature <sig> [--init-arg <value>]...] [--init-calldata-hex <hex>] [--signature <sig> [--arg <value>]...] [--calldata-hex <hex>]
+        \\  ora-evm-debug-tui <bytecode.hex> <source-map.json> <source.ora> [options]
+        \\
+        \\options:
+        \\  --debug-info <debug.json>    Load source-scope debug info
+        \\  --abi <abi.json>             Load primary contract's ABI (signature-driven calldata + decoded reverts/events)
+        \\  --abi <0x..>=<abi.json>      Bind another ABI to an external callee address (repeatable; used by `:bt` decoded names)
+        \\  --init-signature <sig>       Constructor signature, e.g. init(u256)
+        \\  --init-arg <value>           Constructor argument (repeatable, in order)
+        \\  --init-calldata-hex <hex>    Raw constructor calldata as hex
+        \\  --signature <sig>            Function signature, e.g. add(u256,u256)
+        \\  --arg <value>                Function argument (repeatable, in order)
+        \\  --calldata-hex <hex>         Raw runtime calldata as hex
+        \\  --gas-limit <i64>            Frame gas budget (default 5000000)
+        \\  --max-steps <u64>            Per-command opcode safety cap (default 10000000)
+        \\  --deploy-step-cap <usize>    Deployment opcode cap (default 200000)
+        \\  --artifact-max-bytes <usize> Per-file artifact load cap (default 16777216)
         \\
         \\example:
         \\  zig build install
@@ -4382,6 +5281,38 @@ fn printUsage() !void {
 fn pathExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+/// Derive `<stem>.proof.json` from the path to `<stem>.debug.json`.
+/// Returns an allocator-owned path the caller must free. Errors
+/// when the input doesn't end in `.debug.json` (the canonical
+/// sidecar suffix the compiler emits).
+fn computeProofSidecarPath(allocator: std.mem.Allocator, debug_info_path: []const u8) ![]u8 {
+    const suffix = ".debug.json";
+    if (!std.mem.endsWith(u8, debug_info_path, suffix)) return error.InvalidArguments;
+    const stem = debug_info_path[0 .. debug_info_path.len - suffix.len];
+    return try std.fmt.allocPrint(allocator, "{s}.proof.json", .{stem});
+}
+
+/// Try to parse an `--abi` argument as a secondary spec
+/// (`<hex-address>=<path>`). Returns:
+///   - `null` if `arg` has no `=`, meaning the caller should treat it
+///     as the primary `--abi <path>`.
+///   - A `SecondaryAbiSpec` when a `=` is present and the LHS parses
+///     as a 20-byte hex address; the returned `path` is owned by
+///     `allocator` and must be freed by the caller.
+fn parseSecondaryAbiSpec(allocator: std.mem.Allocator, arg: []const u8) !?SecondaryAbiSpec {
+    const eq_idx = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
+    const addr_text = arg[0..eq_idx];
+    const path_text = arg[eq_idx + 1 ..];
+    if (path_text.len == 0) return error.InvalidArguments;
+    const address_full = try primitives.Address.fromHex(addr_text);
+    const path_dup = try allocator.dupe(u8, path_text);
+    errdefer allocator.free(path_dup);
+    return SecondaryAbiSpec{
+        .address = address_full.bytes,
+        .path = path_dup,
+    };
 }
 
 fn inferSirPath(allocator: std.mem.Allocator, source_map_path: []const u8) ![]u8 {
@@ -4606,7 +5537,7 @@ fn encodeAbiWord(type_name: []const u8, value_text: []const u8, out_word: []u8) 
     }
 }
 
-fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+pub fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     const hex = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
     if (hex.len % 2 != 0) return error.InvalidHex;

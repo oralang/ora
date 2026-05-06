@@ -137,6 +137,15 @@ const Parser = struct {
         if (self.at(.Comptime) and self.peekKind(1) == .Const) {
             return self.parseConstOrImportItem();
         }
+        if (self.at(.Comptime) and self.peekKind(1) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Contract) {
+            return self.parseContractItem();
+        }
         if (self.startsTypeAliasItem()) {
             return self.parseTypeAliasItem();
         }
@@ -178,6 +187,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         try children.append(self.allocator, .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
             try children.append(self.allocator, try self.parseElement(null));
@@ -215,6 +227,10 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         if (self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (self.at(.Comptime)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
 
@@ -622,7 +638,7 @@ const Parser = struct {
         }
         if (self.at(.Const)) {
             try children.append(self.allocator, .{ .token = self.bump() });
-            if (self.at(.Identifier)) {
+            if (tokenIsIdentifierLike(self.current().kind)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected import alias");
@@ -913,7 +929,53 @@ const Parser = struct {
     }
 
     fn parseEnumItem(self: *Parser) anyerror!green.GreenNodeId {
-        return self.parseMemberItem(SyntaxKind.EnumItem, SyntaxKind.EnumVariant, "expected enum variant");
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
+            if (self.at(.Colon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+        }
+
+        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
+            if (self.at(.Colon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                continue;
+            }
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+
+        if (!self.at(.LeftBrace)) {
+            try self.reportHere("expected braced body");
+            return self.finishNode(SyntaxKind.EnumItem, children.items);
+        }
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma) or self.at(.Semicolon)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseEnumVariantNode() });
+        }
+
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated braced item body", children.items);
+        }
+
+        return self.finishNode(SyntaxKind.EnumItem, children.items);
     }
 
     fn parseTypeAliasItem(self: *Parser) anyerror!green.GreenNodeId {
@@ -1009,6 +1071,63 @@ const Parser = struct {
         }
 
         return self.finishNode(kind, children.items);
+    }
+
+    fn parseEnumVariantNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        if (self.at(.Identifier)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected enum variant");
+            if (!self.at(.Eof) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+            return self.finishNode(SyntaxKind.EnumVariant, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (!self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                while (self.at(.Comma)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    if (self.at(.RightParen)) break;
+                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                }
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after enum variant payload");
+            }
+        } else if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightBrace)) {
+                if (self.at(.Comma) or self.at(.Semicolon)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    continue;
+                }
+                try children.append(self.allocator, .{ .node = try self.parseAnonymousStructFieldNode() });
+            }
+            if (self.at(.RightBrace)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected '}' after enum variant payload");
+            }
+        }
+
+        if (self.at(.Equal)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            if (self.at(.Eof) or self.at(.Comma) or self.at(.Semicolon) or self.at(.RightBrace)) {
+                try self.reportHere("expected enum variant value");
+            } else {
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .RightBrace }) });
+            }
+        }
+
+        return self.finishNode(SyntaxKind.EnumVariant, children.items);
     }
 
     fn parseStructFieldNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -1130,7 +1249,7 @@ const Parser = struct {
             .If => self.parseIfStmtNode(),
             .While => self.parseWhileStmtNode(),
             .For => self.parseForStmtNode(),
-            .Switch => self.parseSwitchStmtNode(),
+            .Switch, .Match => self.parseSwitchStmtNode(),
             .Try => if (self.peekKind(1) == .LeftBrace) self.parseTryStmtNode() else self.parseExprOrAssignStmtNode(),
             .Return => self.parseReturnStmtNode(),
             .Log => self.parseLogStmtNode(),
@@ -1350,7 +1469,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchStmt else .SwitchStmt;
+        const keyword = self.bump();
+        try children.append(self.allocator, .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
@@ -1359,7 +1480,7 @@ const Parser = struct {
 
         if (!self.at(.LeftBrace)) {
             try self.reportHere("expected '{' after switch condition");
-            return self.finishNode(SyntaxKind.SwitchStmt, children.items);
+            return self.finishNode(node_kind, children.items);
         }
 
         try children.append(self.allocator, .{ .token = self.bump() });
@@ -1375,7 +1496,7 @@ const Parser = struct {
             try self.reportUnterminated("unterminated switch body", children.items);
         }
 
-        return self.finishNode(SyntaxKind.SwitchStmt, children.items);
+        return self.finishNode(node_kind, children.items);
     }
 
     fn parseTryStmtNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -1638,7 +1759,20 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.DestructuringPattern, children.items);
         }
 
+        var has_rest = false;
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.DotDot)) {
+                if (has_rest) try self.reportHere("duplicate '..' in destructuring pattern");
+                has_rest = true;
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (!self.at(.Comma) and !self.at(.RightBrace)) {
+                    try self.reportHere("expected ',' or '}' after '..' in destructuring pattern");
+                }
+                if (self.at(.Comma)) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                }
+                continue;
+            }
             try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
             if (self.at(.Comma)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
@@ -1870,7 +2004,7 @@ const Parser = struct {
             .Old => self.parseOldExprNode(),
             .Forall, .Exists => self.parseQuantifiedExprNode(),
             .At => self.parseBuiltinExprNode(),
-            .Switch => self.parseSwitchExprNode(),
+            .Switch, .Match => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
     }
@@ -2153,6 +2287,10 @@ const Parser = struct {
         defer children.deinit(self.allocator);
 
         try children.append(self.allocator, .{ .token = self.bump() });
+        while (self.at(.Dot) and isIdentifierLike(self.peekKind(1))) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         if (self.at(.Less)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.typeAtGreaterToken()) {
@@ -2384,7 +2522,9 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchExpr else .SwitchExpr;
+        const keyword = self.bump();
+        try children.append(self.allocator, .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
@@ -2393,7 +2533,7 @@ const Parser = struct {
 
         if (!self.at(.LeftBrace)) {
             try self.reportHere("expected '{' after switch condition");
-            return self.finishNode(SyntaxKind.SwitchExpr, children.items);
+            return self.finishNode(node_kind, children.items);
         }
 
         try children.append(self.allocator, .{ .token = self.bump() });
@@ -2408,7 +2548,7 @@ const Parser = struct {
         } else {
             try self.reportUnterminated("unterminated switch expression", children.items);
         }
-        return self.finishNode(SyntaxKind.SwitchExpr, children.items);
+        return self.finishNode(node_kind, children.items);
     }
 
     fn parseSwitchExprArmNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -2434,7 +2574,10 @@ const Parser = struct {
             };
             return self.finishNode(SyntaxKind.ErrorExpr, &children);
         }
-        const start_expr = try self.parseExpressionNode(&.{ .Arrow, .DotDot, .DotDotDot, .RightBrace });
+        const start_expr = try self.parseExpressionNode(&.{ .Arrow, .DotDot, .DotDotDot, .LeftBrace, .RightBrace });
+        if (self.at(.LeftBrace)) {
+            return try self.parseSwitchStructPatternNode(start_expr);
+        }
         if (self.at(.DotDot) or self.at(.DotDotDot)) {
             const children = [_]ChildRef{
                 .{ .node = start_expr },
@@ -2444,6 +2587,37 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.RangeExpr, &children);
         }
         return start_expr;
+    }
+
+    fn parseSwitchStructPatternNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .node = base });
+        try children.append(self.allocator, .{ .token = self.bump() });
+        var has_rest = false;
+        while (!self.at(.Eof) and !self.at(.RightBrace)) {
+            if (self.at(.Comma)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            if (self.at(.DotDot)) {
+                if (has_rest) try self.reportHere("duplicate '..' in switch pattern");
+                has_rest = true;
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (!self.at(.Comma) and !self.at(.RightBrace)) {
+                    try self.reportHere("expected ',' or '}' after '..' in switch pattern");
+                }
+                continue;
+            }
+            try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
+        }
+        if (self.at(.RightBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportUnterminated("unterminated switch pattern", children.items);
+        }
+        return self.finishNode(SyntaxKind.StructLiteral, children.items);
     }
 
     fn parseCallExprNode(self: *Parser, callee: green.GreenNodeId, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
@@ -2484,7 +2658,7 @@ const Parser = struct {
             try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Literal, &literal) });
             return try self.finishNode(SyntaxKind.IndexExpr, children.items);
         }
-        if (self.at(.Identifier) or self.at(.Error) or self.at(.From) or self.at(.To)) {
+        if (tokenIsIdentifierLike(self.current().kind)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name after '.'");
@@ -2595,7 +2769,7 @@ const Parser = struct {
         const kind = self.current().kind;
         return switch (kind) {
             .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
-            .Comptime => self.peekKind(1) == .Const,
+            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn,
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
@@ -2664,7 +2838,7 @@ const Parser = struct {
 
     fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
             else => false,
         };
     }
@@ -2787,6 +2961,24 @@ const Parser = struct {
                     }
                 }
                 break :blk false;
+            },
+            .FieldExpr => blk: {
+                const node = self.nodes.items[node_id.index()];
+                var saw_base = false;
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| {
+                            if (!saw_base) {
+                                saw_base = self.nodeCouldStartStructLiteral(child_id);
+                                continue;
+                            }
+                        },
+                    }
+                }
+                break :blk saw_base;
             },
             else => false,
         };
@@ -2985,6 +3177,13 @@ fn binaryOpPrecedence(kind: green.TokenKind) ?u8 {
 fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
     return switch (kind) {
         .StarStar, .StarStarPercent => true,
+        else => false,
+    };
+}
+
+fn isIdentifierLike(kind: green.TokenKind) bool {
+    return switch (kind) {
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

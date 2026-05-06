@@ -1,0 +1,15 @@
+pub contract NestedUnrollProbe {
+    pub fn simulate() -> u256 {
+        let total: u256 = 0;
+
+        for (2) |outer| {
+            let i: u256 = 0;
+            while (i < 2) {
+                total = total + outer + i;
+                i = i + 1;
+            }
+        }
+
+        return total;
+    }
+}

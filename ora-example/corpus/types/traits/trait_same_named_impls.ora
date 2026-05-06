@@ -1,0 +1,30 @@
+// Same-named trait methods on one concrete type.
+// The impls are kept distinct by trait identity, not by method name alone.
+
+trait PausableView {
+    fn active() -> bool;
+}
+
+trait FrozenView {
+    fn active() -> bool;
+}
+
+struct VaultState {}
+
+impl PausableView for VaultState {
+    fn active() -> bool {
+        return true;
+    }
+}
+
+impl FrozenView for VaultState {
+    fn active() -> bool {
+        return false;
+    }
+}
+
+contract TraitSameNamedImpls {
+    pub fn ok() -> bool {
+        return true;
+    }
+}

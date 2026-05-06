@@ -26,6 +26,9 @@ pub const CliOptions = struct {
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
     verify_stats: bool = false,
+    explain_cores: bool = false,
+    z3_proofs: bool = false,
+    minimize_cores: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -144,6 +147,15 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--verify-stats")) {
             opts.verify_stats = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--explain")) {
+            opts.explain_cores = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--z3-proofs")) {
+            opts.z3_proofs = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--minimize-cores")) {
+            opts.minimize_cores = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--emit-smt-report")) {
             opts.emit_smt_report = true;
@@ -266,6 +278,9 @@ test "parse verify mode and toggles" {
         "--verify-calls",
         "--no-verify-state",
         "--verify-stats",
+        "--explain",
+        "--z3-proofs",
+        "--minimize-cores",
         "input.ora",
     };
     const parsed = try parseArgs(args[0..]);
@@ -275,6 +290,9 @@ test "parse verify mode and toggles" {
     try std.testing.expect(parsed.verify_calls != null and parsed.verify_calls.?);
     try std.testing.expect(parsed.verify_state != null and !parsed.verify_state.?);
     try std.testing.expect(parsed.verify_stats);
+    try std.testing.expect(parsed.explain_cores);
+    try std.testing.expect(parsed.z3_proofs);
+    try std.testing.expect(parsed.minimize_cores);
 }
 
 test "parse invalid verify mode fails" {

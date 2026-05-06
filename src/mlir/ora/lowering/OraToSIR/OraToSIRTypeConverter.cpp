@@ -1,4 +1,6 @@
 #include "OraToSIRTypeConverter.h"
+#include "OraMaterializationKinds.h"
+#include "patterns/AdtCarrierHelpers.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -19,6 +21,28 @@ using namespace sir;
 
 namespace
 {
+    static Value createTaggedCast(OpBuilder &builder,
+                                  Location loc,
+                                  Type type,
+                                  Value input,
+                                  StringRef kind)
+    {
+        auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
+        cast->setAttr(kOraMaterializationKindAttr, builder.getStringAttr(kind));
+        return cast.getResult(0);
+    }
+
+    static Value createTaggedCast(OpBuilder &builder,
+                                  Location loc,
+                                  Type type,
+                                  ValueRange inputs,
+                                  StringRef kind)
+    {
+        auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{type}, inputs);
+        cast->setAttr(kOraMaterializationKindAttr, builder.getStringAttr(kind));
+        return cast.getResult(0);
+    }
+
     static std::optional<unsigned> getOraBitWidth(Type type)
     {
         if (!type)
@@ -49,7 +73,7 @@ namespace
         if (auto exactType = llvm::dyn_cast<ora::ExactType>(type))
             return getOraBitWidth(exactType.getBaseType());
 
-        if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::MapType>(type))
+        if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::AnonymousStructType, ora::MapType>(type))
             return 256u;
 
         return std::nullopt;
@@ -67,9 +91,45 @@ namespace
     {
         if (!ctx)
             return Type();
-        if (llvm::isa<ora::TupleType>(successType))
+        if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                      mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
             return sir::PtrType::get(ctx, /*addrSpace*/ 1);
         return sir::U256Type::get(ctx);
+    }
+
+    static Type getAdtPayloadCarrierType(MLIRContext *ctx)
+    {
+        if (!ctx)
+            return Type();
+        return sir::U256Type::get(ctx);
+    }
+
+    static bool isPayloadlessErrorStruct(Type type, Operation *contextOp)
+    {
+        auto structType = llvm::dyn_cast<ora::StructType>(type);
+        if (!structType || !contextOp)
+            return false;
+        auto module = contextOp->getParentOfType<mlir::ModuleOp>();
+        if (!module)
+            return false;
+
+        bool matched = false;
+        module.walk([&](Operation *op) {
+            if (matched)
+                return;
+            auto sym = op->getAttrOfType<mlir::StringAttr>("sym_name");
+            if (!sym || sym.getValue() != structType.getName())
+                return;
+            if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
+                return;
+            auto params = op->getAttrOfType<mlir::ArrayAttr>("ora.param_types");
+            if (!params || params.empty())
+            {
+                matched = true;
+                return;
+            }
+        });
+        return matched;
     }
 }
 
@@ -97,6 +157,277 @@ namespace mlir
 {
     namespace ora
     {
+        mlir::UnrealizedConversionCastOp createMaterializationCastOp(
+            OpBuilder &builder,
+            Location loc,
+            TypeRange resultTypes,
+            ValueRange inputs,
+            StringRef kind)
+        {
+            auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, resultTypes, inputs);
+            cast->setAttr(kOraMaterializationKindAttr, builder.getStringAttr(kind));
+            return cast;
+        }
+
+        Value createMaterializationCast(
+            OpBuilder &builder,
+            Location loc,
+            Type type,
+            Value input,
+            StringRef kind)
+        {
+            return createTaggedCast(builder, loc, type, input, kind);
+        }
+
+        Value createMaterializationCast(
+            OpBuilder &builder,
+            Location loc,
+            Type type,
+            ValueRange inputs,
+            StringRef kind)
+        {
+            return createTaggedCast(builder, loc, type, inputs, kind);
+        }
+
+        bool hasMaterializationKind(
+            mlir::UnrealizedConversionCastOp castOp,
+            StringRef kind)
+        {
+            if (!castOp)
+                return false;
+            auto attr = castOp->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            return attr && attr.getValue() == kind;
+        }
+
+        std::optional<Value> materializePtrCarrierFromOraValue(
+            OpBuilder &builder,
+            Location loc,
+            Type ptrType,
+            Value input)
+        {
+            if (!llvm::isa<sir::PtrType>(ptrType))
+                return std::nullopt;
+
+            if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+            {
+                return builder.create<sir::BitcastOp>(loc, ptrType, input).getResult();
+            }
+
+            if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                          mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+            {
+                if (auto bitcast = input.getDefiningOp<sir::BitcastOp>())
+                {
+                    if (llvm::isa<sir::PtrType>(bitcast.getOperand().getType()))
+                        return bitcast.getOperand();
+                }
+            }
+
+            if (auto tupleType = llvm::dyn_cast<ora::TupleType>(input.getType()))
+            {
+                if (auto castOp = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (castOp.getNumOperands() == 1 && llvm::isa<sir::PtrType>(castOp.getOperand(0).getType()))
+                        return castOp.getOperand(0);
+                }
+
+                if (auto getError = input.getDefiningOp<ora::ErrorGetErrorOp>())
+                {
+                    if (auto errCast = getError.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                    {
+                        if (errCast.getNumOperands() == 2)
+                        {
+                            if (llvm::isa<sir::PtrType>(errCast.getOperand(1).getType()))
+                                return errCast.getOperand(1);
+                            if (llvm::isa<sir::U256Type>(errCast.getOperand(1).getType()) &&
+                                tupleType.getElementTypes().size() == 1)
+                            {
+                                auto u256Type = sir::U256Type::get(builder.getContext());
+                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                Value size = builder.create<sir::ConstOp>(
+                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                                builder.create<sir::StoreOp>(loc, ptr, errCast.getOperand(1));
+                                return ptr;
+                            }
+                        }
+                    }
+                }
+
+                if (auto tupleCreate = input.getDefiningOp<ora::TupleCreateOp>())
+                {
+                    auto u256Type = sir::U256Type::get(builder.getContext());
+                    auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                    Value size = builder.create<sir::ConstOp>(
+                        loc,
+                        u256Type,
+                        mlir::IntegerAttr::get(
+                            ui64Type,
+                            static_cast<uint64_t>(tupleCreate.getNumOperands()) * 32ULL));
+                    Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                    for (auto [index, element] : llvm::enumerate(tupleCreate.getOperands()))
+                    {
+                        Value slotPtr = ptr;
+                        if (index != 0)
+                        {
+                            Value offset = builder.create<sir::ConstOp>(
+                                loc,
+                                u256Type,
+                                mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                            slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
+                        }
+                        Value stored = element;
+                        if (!llvm::isa<sir::U256Type>(stored.getType()))
+                            stored = builder.create<sir::BitcastOp>(loc, u256Type, stored);
+                        builder.create<sir::StoreOp>(loc, slotPtr, stored);
+                    }
+                    return ptr;
+                }
+
+                if (tupleType.getElementTypes().size() == 1)
+                {
+                    Type elemType = tupleType.getElementTypes().front();
+                    if (llvm::isa<mlir::IntegerType, ora::IntegerType, ora::BoolType,
+                                  ora::AddressType, ora::NonZeroAddressType>(elemType))
+                    {
+                        if (auto tupleCreate = input.getDefiningOp<ora::TupleCreateOp>())
+                        {
+                            if (tupleCreate.getNumOperands() == 1)
+                            {
+                                auto u256Type = sir::U256Type::get(builder.getContext());
+                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                Value size = builder.create<sir::ConstOp>(
+                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                                Value element = tupleCreate.getOperand(0);
+                                if (!llvm::isa<sir::U256Type>(element.getType()))
+                                    element = builder.create<sir::BitcastOp>(loc, u256Type, element);
+                                builder.create<sir::StoreOp>(loc, ptr, element);
+                                return ptr;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (auto getErrorOp = input.getDefiningOp<ora::ErrorGetErrorOp>())
+            {
+                if (auto errCast = getErrorOp.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (errCast.getNumOperands() == 2)
+                    {
+                        Value payload = errCast.getOperand(1);
+                        if (llvm::isa<sir::PtrType>(payload.getType()))
+                            return payload;
+                        if (llvm::isa<sir::U256Type>(payload.getType()) &&
+                            llvm::isa<ora::AnonymousStructType>(input.getType()))
+                        {
+                            auto anonType = llvm::cast<ora::AnonymousStructType>(input.getType());
+                            if (anonType.getFieldTypes().size() == 1)
+                            {
+                                auto u256Type = sir::U256Type::get(builder.getContext());
+                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                Value size = builder.create<sir::ConstOp>(
+                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                                builder.create<sir::StoreOp>(loc, ptr, payload);
+                                return ptr;
+                            }
+                        }
+                        if (llvm::isa<sir::U256Type>(payload.getType()) &&
+                            llvm::isa<ora::TupleType>(input.getType()))
+                        {
+                            auto tupleType = llvm::cast<ora::TupleType>(input.getType());
+                            if (tupleType.getElementTypes().size() == 1)
+                            {
+                                auto u256Type = sir::U256Type::get(builder.getContext());
+                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                                Value size = builder.create<sir::ConstOp>(
+                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                                builder.create<sir::StoreOp>(loc, ptr, payload);
+                                return ptr;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (auto unwrapOp = input.getDefiningOp<ora::ErrorUnwrapOp>())
+            {
+                if (auto errCast = unwrapOp.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                {
+                    if (errCast.getNumOperands() == 2)
+                    {
+                        Value payload = errCast.getOperand(1);
+                        if (llvm::isa<sir::PtrType>(payload.getType()))
+                            return payload;
+                    }
+                }
+            }
+
+            if (auto structInit = input.getDefiningOp<ora::StructInitOp>())
+            {
+                auto u256Type = sir::U256Type::get(builder.getContext());
+                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                Value size = builder.create<sir::ConstOp>(
+                    loc,
+                    u256Type,
+                    mlir::IntegerAttr::get(
+                        ui64Type,
+                        static_cast<uint64_t>(structInit.getFieldValues().size()) * 32ULL));
+                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                for (auto [index, element] : llvm::enumerate(structInit.getFieldValues()))
+                {
+                    Value slotPtr = ptr;
+                    if (index != 0)
+                    {
+                        Value offset = builder.create<sir::ConstOp>(
+                            loc,
+                            u256Type,
+                            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                        slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
+                    }
+                    Value stored = element;
+                    if (!llvm::isa<sir::U256Type>(stored.getType()))
+                        stored = builder.create<sir::BitcastOp>(loc, u256Type, stored);
+                    builder.create<sir::StoreOp>(loc, slotPtr, stored);
+                }
+                return ptr;
+            }
+
+            if (auto structInstantiate = input.getDefiningOp<ora::StructInstantiateOp>())
+            {
+                auto u256Type = sir::U256Type::get(builder.getContext());
+                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
+                Value size = builder.create<sir::ConstOp>(
+                    loc,
+                    u256Type,
+                    mlir::IntegerAttr::get(
+                        ui64Type,
+                        static_cast<uint64_t>(structInstantiate.getFieldValues().size()) * 32ULL));
+                Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
+                for (auto [index, element] : llvm::enumerate(structInstantiate.getFieldValues()))
+                {
+                    Value slotPtr = ptr;
+                    if (index != 0)
+                    {
+                        Value offset = builder.create<sir::ConstOp>(
+                            loc,
+                            u256Type,
+                            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                        slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
+                    }
+                    Value stored = element;
+                    if (!llvm::isa<sir::U256Type>(stored.getType()))
+                        stored = builder.create<sir::BitcastOp>(loc, u256Type, stored);
+                    builder.create<sir::StoreOp>(loc, slotPtr, stored);
+                }
+                return ptr;
+            }
+
+            return std::nullopt;
+        }
 
         OraToSIRTypeConverter::OraToSIRTypeConverter()
         {
@@ -137,6 +468,30 @@ namespace mlir
                 }
                 return sir::U256Type::get(ctx); });
 
+            // ADTs use a two-word compiler-runtime carrier at the conversion
+            // boundary: (tag_word: sir.u256, payload_word: sir.u256).
+            //
+            // The payload word is exact, not best-effort:
+            // - scalar payload variants store their payload bits inline
+            // - aggregate payload variants store a compiler-managed handle
+            //   (ptr-backed tuple/struct/string/bytes/memref value) bitcast to
+            //   sir.u256 at the ADT boundary
+            //
+            // Concrete construct/payload rewrites still fail closed for shapes
+            // that do not lower into one of those two cases exactly.
+            addConversion([](ora::AdtType type, SmallVectorImpl<Type> &results) -> LogicalResult
+                          {
+                auto *ctx = type.getDialect().getContext();
+                if (!ctx)
+                    return failure();
+                results.push_back(sir::U256Type::get(ctx));
+                results.push_back(getAdtPayloadCarrierType(ctx));
+                return success(); });
+            addConversion([](ora::AdtType type) -> Type
+                          {
+                (void)type;
+                return Type(); });
+
             // ora.error_union<T> → sir.u256 or (sir.u256, carrier(T)) depending on payload width
             addConversion([](ora::ErrorUnionType type, SmallVectorImpl<Type> &results) -> LogicalResult
                           {
@@ -169,6 +524,8 @@ namespace mlir
                     return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1);
                 return type;
             });
+            addConversion([](ora::AnonymousStructType type) -> Type
+                          { return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1); });
             addConversion([](ora::TupleType type) -> Type
                           { return sir::PtrType::get(type.getContext(), /*addrSpace*/ 1); });
 
@@ -302,11 +659,11 @@ namespace mlir
                                             if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(input.getType()))
                                             {
                                                 (void)tensorType;
-                                                return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                             if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(input.getType()))
                                             {
-                                                return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                         }
 
@@ -314,8 +671,10 @@ namespace mlir
                                          {
                                              if (llvm::isa<ora::StringType, ora::BytesType>(input.getType()))
                                              {
-                                                 return builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input).getResult(0);
+                                                 return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                              }
+                                             if (auto materialized = materializePtrCarrierFromOraValue(builder, loc, type, input))
+                                                 return *materialized;
                                          }
 
                                          auto makeMask = [&](unsigned width) -> Value {
@@ -586,9 +945,16 @@ namespace mlir
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
                                          if (!errType)
                                              return Value();
-                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
-                                         cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
-                                         return cast.getResult(0);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedErrorUnion);
+                                     });
+            addSourceMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto adtType = dyn_cast<ora::AdtType>(type);
+                                         if (!adtType)
+                                             return Value();
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedAdt);
                                      });
             addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
@@ -597,9 +963,16 @@ namespace mlir
                                          auto errType = dyn_cast<ora::ErrorUnionType>(type);
                                          if (!errType)
                                              return Value();
-                                         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, inputs);
-                                         cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
-                                         return cast.getResult(0);
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedErrorUnion);
+                                     });
+            addTargetMaterialization([](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
+                                     {
+                                         if (inputs.size() != 2)
+                                             return Value();
+                                         auto adtType = dyn_cast<ora::AdtType>(type);
+                                         if (!adtType)
+                                             return Value();
+                                         return createTaggedCast(builder, loc, type, inputs, mat_kind::kNormalizedAdt);
                                      });
 
             // Wide error union 1:N splitting: ora.error_union → (sir.u256, carrier(T)).
@@ -632,6 +1005,31 @@ namespace mlir
                                          Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, bitcast, off);
                                          Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
                                          return SmallVector<Value>{tag, payload};
+                                     });
+            addTargetMaterialization([](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs, Location loc) -> SmallVector<Value>
+                                     {
+                                         (void)builder;
+                                         if (resultTypes.size() != 2 || inputs.size() != 1)
+                                             return {};
+                                         Value input = inputs[0];
+                                         auto adtType = dyn_cast<ora::AdtType>(input.getType());
+                                         if (!adtType)
+                                             return {};
+                                         if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                                         {
+                                             auto kind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+                                             if (kind && kind.getValue() == mat_kind::kNormalizedAdt && cast.getNumOperands() == 2)
+                                                 return SmallVector<Value>{cast.getOperand(0), cast.getOperand(1)};
+                                             if (kind && kind.getValue() == mat_kind::kAdtHandleView && cast.getNumOperands() == 1)
+                                             {
+                                                 Value handle = cast.getOperand(0);
+                                                 if (!llvm::isa<sir::PtrType, sir::U256Type>(handle.getType()))
+                                                     return {};
+                                                 auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(builder, loc, handle);
+                                                 return SmallVector<Value>{tag, payload};
+                                             }
+                                         }
+                                         return {};
                                      });
 
             // Allow memref -> sir.ptr materialization during memref lowering.
@@ -701,6 +1099,12 @@ namespace mlir
                                             }
                                         }
 
+                                        if (llvm::isa<mlir::NoneType>(type) &&
+                                            llvm::isa<sir::U256Type>(input.getType()))
+                                        {
+                                            return createTaggedCast(builder, loc, type, input, "none_forward");
+                                        }
+
                                         if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
                                         {
                                             if (isNarrowErrorUnion(errType))
@@ -717,25 +1121,29 @@ namespace mlir
                                                         return Value();
                                                     }
                                                 }
-                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, packed);
-                                                cast->setAttr("ora.normalized_error_union", builder.getUnitAttr());
-                                                return cast.getResult(0);
+                                                return createTaggedCast(builder, loc, type, packed, mat_kind::kNormalizedErrorUnion);
                                             }
                                         }
 
-                                        if (enableStructLowering && llvm::isa<ora::StructType>(type))
+                                        if (llvm::isa<ora::StructType, ora::AnonymousStructType>(type))
                                         {
+                                            if (llvm::isa<sir::U256Type>(input.getType()))
+                                            {
+                                                return input;
+                                            }
+                                            if (!enableStructLowering)
+                                            {
+                                                return Value();
+                                            }
                                             if (llvm::isa<sir::PtrType>(input.getType()))
                                             {
-                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
-                                                return cast.getResult(0);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                             }
                                         }
 
                                         if (llvm::isa<ora::TupleType>(type) && llvm::isa<sir::PtrType>(input.getType()))
                                         {
-                                            auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
-                                            return cast.getResult(0);
+                                            return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                         }
 
                                         // ptr -> memref: memrefs are ptrs in SIR, forward via bitcast.
@@ -750,15 +1158,13 @@ namespace mlir
                                         {
                                             if (llvm::isa<sir::U256Type>(input.getType()))
                                             {
-                                                auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
-                                                return cast.getResult(0);
+                                                return createTaggedCast(builder, loc, type, input, mat_kind::kAddressForward);
                                             }
                                         }
 
                                         if (llvm::isa<ora::StringType, ora::BytesType>(type))
                                         {
-                                            auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, type, input);
-                                            return cast.getResult(0);
+                                            return createTaggedCast(builder, loc, type, input, mat_kind::kPtrView);
                                         }
 
                                         // Refinement types erase to their base representation;

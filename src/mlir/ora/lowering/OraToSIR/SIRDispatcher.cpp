@@ -418,6 +418,8 @@ namespace mlir
                 bool returnsErrorUnion = false;
                 SmallVector<AbiType, 8> abiParams;
                 SmallVector<std::string, 8> abiParamLayouts;
+                SmallVector<std::string, 8> resultInputModes;
+                SmallVector<int64_t, 8> resultInputErrorIds;
                 AbiType abiReturn;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
@@ -672,6 +674,34 @@ namespace mlir
                                 info.abiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
+                        if (auto resultInputModesAttr = func->getAttrOfType<ArrayAttr>("ora.result_input_modes"))
+                        {
+                            for (Attribute a : resultInputModesAttr)
+                            {
+                                auto sattr = dyn_cast<StringAttr>(a);
+                                if (!sattr)
+                                {
+                                    func.emitError("ora.result_input_modes contains non-string attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.resultInputModes.push_back(sattr.getValue().str());
+                            }
+                        }
+                        if (auto resultInputErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.result_input_error_ids"))
+                        {
+                            for (Attribute a : resultInputErrorIdsAttr)
+                            {
+                                auto iattr = dyn_cast<IntegerAttr>(a);
+                                if (!iattr)
+                                {
+                                    func.emitError("ora.result_input_error_ids contains non-integer attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.resultInputErrorIds.push_back(iattr.getInt());
+                            }
+                        }
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
@@ -692,16 +722,43 @@ namespace mlir
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
-
-                        if (!info.abiParams.empty() && info.abiParams.size() != info.argCount)
+                        if (!info.abiParams.empty() && info.resultInputModes.size() != info.abiParams.size())
                         {
-                            func.emitError("ora.abi_params length does not match function argument count");
+                            func.emitError("ora.result_input_modes length does not match ora.abi_params");
+                            signalPassFailure();
+                            return;
+                        }
+                        if (!info.abiParams.empty() && info.resultInputErrorIds.size() != info.abiParams.size())
+                        {
+                            func.emitError("ora.result_input_error_ids length does not match ora.abi_params");
+                            signalPassFailure();
+                            return;
+                        }
+
+                        auto loweredArgCountForSourceParam = [&](size_t idx) -> unsigned {
+                            if (idx < info.resultInputModes.size() &&
+                                (info.resultInputModes[idx] == "wide_payloadless" || info.resultInputModes[idx] == "wide_single_error"))
+                                return 2;
+                            return 1;
+                        };
+
+                        unsigned expectedArgCount = info.abiParams.empty() ? info.argCount : 0;
+                        if (!info.abiParams.empty())
+                        {
+                            for (size_t i = 0; i < info.abiParams.size(); ++i)
+                                expectedArgCount += loweredArgCountForSourceParam(i);
+                        }
+
+                        if (!info.abiParams.empty() && expectedArgCount != info.argCount)
+                        {
+                            func.emitError("public ABI param metadata does not match lowered function argument count");
                             signalPassFailure();
                             return;
                         }
 
                         int64_t headSlots = 0;
-                        for (size_t i = 0; i < info.argCount; ++i)
+                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        for (size_t i = 0; i < sourceParamCount; ++i)
                         {
                             AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
                             if (info.abiParams.empty())
@@ -1180,7 +1237,8 @@ namespace mlir
                         SmallVector<Value, 8> args;
                         SmallVector<int64_t, 8> headOffsets;
                         int64_t headSlot = 0;
-                        for (unsigned i = 0; i < info.argCount; ++i)
+                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        for (size_t i = 0; i < sourceParamCount; ++i)
                         {
                             headOffsets.push_back(4 + 32 * headSlot);
                             AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
@@ -1194,7 +1252,8 @@ namespace mlir
                             headSlot += slots;
                         }
 
-                        for (unsigned idx = 0; idx < info.argCount; ++idx)
+                        unsigned loweredArgIndex = 0;
+                        for (unsigned idx = 0; idx < sourceParamCount; ++idx)
                         {
                             int64_t offs = headOffsets[idx];
                             StringRef offName = offs == 4  ? StringRef("selector_offset")
@@ -1210,8 +1269,217 @@ namespace mlir
 
                             AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[idx];
                             Value argVal = head;
+                            bool appendWideResultInput = false;
+                            Value wideTag;
+                            Value widePayload;
+                            auto resultInputCarrierExpectsPtr = [&]() -> bool {
+                                return loweredArgIndex + 1 < info.inputTypes.size() &&
+                                       isa<sir::PtrType>(info.inputTypes[loweredArgIndex + 1]);
+                            };
+                            auto materializeDynamicAbiValue = [&](const AbiLayout &fieldLayout, Value absOff, bool expectsPtr) -> FailureOr<Value> {
+                                if (fieldLayout.isTupleLike())
+                                    return failure();
+                                if (!expectsPtr)
+                                    return failure();
+                                if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String || fieldLayout.abi.supportsDynamicArray()))
+                                    return failure();
 
-                            if (!info.abiParams.empty() && abi.isArray() && abi.supportsStaticArray())
+                                Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
+                                Value total = nullptr;
+                                if (fieldLayout.abi.baseIsDynamic())
+                                {
+                                    Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
+                                    Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
+                                    Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, len, c31);
+                                    Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
+                                    Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
+                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                }
+                                else
+                                {
+                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                }
+                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
+                                return builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult();
+                            };
+                            auto materializeResultCarrier = [&](const AbiLayout &fieldLayout, Value tupleBaseOff, int64_t fieldHeadByteOffset) -> FailureOr<Value> {
+                                bool expectsPtr = resultInputCarrierExpectsPtr();
+                                Value fieldHeadOff = builder.create<sir::AddOp>(
+                                    caseDecodeLoc,
+                                    u256Type,
+                                    tupleBaseOff,
+                                    getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldHeadByteOffset, constCache, caseBody)
+                                );
+
+                                if (fieldLayout.isDynamic())
+                                {
+                                    Value relOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, relOff);
+                                    return materializeDynamicAbiValue(fieldLayout, absOff, expectsPtr);
+                                }
+
+                                int64_t words = fieldLayout.headSlots();
+                                if (words <= 0)
+                                    return failure();
+                                if (!expectsPtr && words != 1)
+                                    return failure();
+                                if (!expectsPtr)
+                                    return builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff).getResult();
+
+                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, fieldHeadOff, totalVal);
+                                return builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult();
+                            };
+
+                            if (!info.abiParams.empty() &&
+                                idx < info.resultInputModes.size() &&
+                                info.resultInputModes[idx] == "narrow_payloadless")
+                            {
+                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                {
+                                    info.func.emitError("public Result input requires tuple ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                {
+                                    info.func.emitError("invalid Result input ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                if (layout.isDynamic() || layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
+                                    layout.fields[0].headSlots() != 1 || layout.fields[1].isDynamic() || layout.fields[1].headSlots() != 1)
+                                {
+                                    info.func.emitError("public Result input currently requires static layout (bool,payload)");
+                                    signalPassFailure();
+                                    return;
+                                }
+
+                                Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, head, one);
+                                Value payloadOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                Value payload = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, payloadOff);
+                                Value packedOk = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, payload);
+                                Value errId = getConst(builder, caseDecodeLoc, u256Type, i64Type, info.resultInputErrorIds[idx], constCache, caseBody);
+                                Value packedErrPayload = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, errId);
+                                Value packedErr = builder.create<sir::OrOp>(caseDecodeLoc, u256Type, packedErrPayload, one);
+                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                argVal = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, packedErr, packedOk);
+                            }
+                            else if (!info.abiParams.empty() &&
+                                     idx < info.resultInputModes.size() &&
+                                     info.resultInputModes[idx] == "wide_payloadless")
+                            {
+                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                {
+                                    info.func.emitError("public wide Result input requires tuple ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                {
+                                    info.func.emitError("invalid wide Result input ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                if (layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
+                                    layout.fields[0].headSlots() != 1)
+                                {
+                                    info.func.emitError("public Result input currently requires layout (bool,payload)");
+                                    signalPassFailure();
+                                    return;
+                                }
+
+                                if (loweredArgIndex + 1 >= info.inputTypes.size())
+                                {
+                                    info.func.emitError("wide Result input metadata does not match lowered argument types");
+                                    signalPassFailure();
+                                    return;
+                                }
+
+                                Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                Value tupleBaseOff = offc;
+                                Value tagWord = head;
+                                if (layout.isDynamic())
+                                {
+                                    tupleBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, head);
+                                    tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
+                                }
+                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
+                                FailureOr<Value> okCarrier = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32);
+                                if (failed(okCarrier))
+                                {
+                                    info.func.emitError("public Result input currently requires a carrier-compatible payload layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value zeroCarrier = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, caseBody, "zero");
+                                wideTag = tag;
+                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, zeroCarrier, *okCarrier);
+                                appendWideResultInput = true;
+                            }
+                            else if (!info.abiParams.empty() &&
+                                     idx < info.resultInputModes.size() &&
+                                     info.resultInputModes[idx] == "wide_single_error")
+                            {
+                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                {
+                                    info.func.emitError("public wide Result input requires tuple ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                AbiLayout layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                {
+                                    info.func.emitError("invalid wide Result input ABI layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                if (layout.fields.size() != 3 || layout.fields[0].abi.base != AbiBase::Bool ||
+                                    layout.fields[0].headSlots() != 1)
+                                {
+                                    info.func.emitError("public Result input currently requires layout (bool,ok_payload,err_payload)");
+                                    signalPassFailure();
+                                    return;
+                                }
+
+                                if (loweredArgIndex + 1 >= info.inputTypes.size())
+                                {
+                                    info.func.emitError("wide Result input metadata does not match lowered argument types");
+                                    signalPassFailure();
+                                    return;
+                                }
+
+                                Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                Value tupleBaseOff = offc;
+                                Value tagWord = head;
+                                if (layout.isDynamic())
+                                {
+                                    tupleBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, head);
+                                    tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
+                                }
+                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
+                                int64_t errFieldOffset = 32 + (layout.fields[1].isDynamic() ? 32 : layout.fields[1].headSlots() * 32);
+                                FailureOr<Value> okPayload = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32);
+                                FailureOr<Value> errPayload = materializeResultCarrier(layout.fields[2], tupleBaseOff, errFieldOffset);
+                                if (failed(okPayload) || failed(errPayload))
+                                {
+                                    info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                wideTag = tag;
+                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, *errPayload, *okPayload);
+                                appendWideResultInput = true;
+                            }
+                            else if (!info.abiParams.empty() && abi.isArray() && abi.supportsStaticArray())
                             {
                                 int64_t elemCount = abi.dims.front();
                                 int64_t totalBytes = elemCount * 32;
@@ -1293,9 +1561,17 @@ namespace mlir
                                 }
                             }
 
-                            if (idx < info.inputTypes.size())
+                            if (appendWideResultInput)
                             {
-                                if (auto ptrTy = dyn_cast<sir::PtrType>(info.inputTypes[idx]))
+                                args.push_back(wideTag);
+                                args.push_back(widePayload);
+                                loweredArgIndex += 2;
+                                continue;
+                            }
+
+                            if (loweredArgIndex < info.inputTypes.size())
+                            {
+                                if (auto ptrTy = dyn_cast<sir::PtrType>(info.inputTypes[loweredArgIndex]))
                                 {
                                     if (!isa<sir::PtrType>(argVal.getType()))
                                     {
@@ -1308,6 +1584,7 @@ namespace mlir
                             if (isa<sir::PtrType>(argVal.getType()))
                                 argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
                             args.push_back(argVal);
+                            loweredArgIndex += 1;
                         }
 
                         SmallVector<Type, 4> resultTypes;
@@ -1325,12 +1602,6 @@ namespace mlir
                             if (info.retCount != 2)
                             {
                                 info.func.emitError("public error-union function must return dispatcher ptr/len pair");
-                                signalPassFailure();
-                                return;
-                            }
-                            if (!info.hasAbiReturn)
-                            {
-                                info.func.emitError("public error-union dispatcher missing ABI return metadata");
                                 signalPassFailure();
                                 return;
                             }
@@ -1354,7 +1625,12 @@ namespace mlir
                             builder.setInsertionPointToEnd(successBlock);
                             Value retPtr = nullptr;
                             Value size = nullptr;
-                            if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            if (!info.hasAbiReturn)
+                            {
+                                size = getConst(builder, caseReturnLoc, u256Type, i64Type, 0, constCache, successBlock, "zero");
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, size);
+                            }
+                            else if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
                                 retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);

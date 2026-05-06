@@ -1,5 +1,7 @@
 #include "patterns/Storage.h"
+#include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -64,6 +66,25 @@ namespace {
     };
 
     static llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
+
+    static ora::StructDeclOp findStructDeclForName(Operation *op, StringRef structName)
+    {
+        ModuleOp module = op->getParentOfType<ModuleOp>();
+        if (!module)
+            return nullptr;
+
+        ora::StructDeclOp structDecl = nullptr;
+        module.walk([&](ora::StructDeclOp declOp)
+                    {
+            auto declNameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
+            if (declNameAttr && declNameAttr.getValue() == structName)
+            {
+                structDecl = declOp;
+                return WalkResult::interrupt();
+            }
+            return WalkResult::advance(); });
+        return structDecl;
+    }
 } // namespace
 
 void clearMapHashCache() { mapHashCache.clear(); }
@@ -153,7 +174,7 @@ static Value computeWordCount(Location loc, Value lengthU256, ConversionPatternR
     return rewriter.create<sir::DivOp>(loc, u256Type, sum, divisor);
 }
 
-static Value ensureU256Value(ConversionPatternRewriter &rewriter, Location loc, Value value)
+static Value ensureU256Value(PatternRewriter &rewriter, Location loc, Value value)
 {
     if (llvm::isa<sir::U256Type>(value.getType()))
         return value;
@@ -178,7 +199,7 @@ static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location lo
 // -----------------------------------------------------------------------------
 static Value findOrCreateSlotConstant(Operation *op, uint64_t slotIndex,
                                       StringRef globalName,
-                                      ConversionPatternRewriter &rewriter)
+                                      PatternRewriter &rewriter)
 {
     auto loc = op->getLoc();
     auto ctx = rewriter.getContext();
@@ -211,6 +232,132 @@ static Value findOrCreateSlotConstant(Operation *op, uint64_t slotIndex,
     auto slotConst = rewriter.create<sir::ConstOp>(loc, u256, slotAttr);
     slotConst->setAttr("sir.result_name_0", StringAttr::get(ctx, slotName));
     return slotConst.getResult();
+}
+
+static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
+                                              ArrayRef<Value> operands,
+                                              Value baseSlot,
+                                              PatternRewriter &rewriter)
+{
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    SmallVector<Value, 2> parts;
+    if (operands.size() == 2)
+    {
+        parts.push_back(ensureU256Value(rewriter, loc, operands[0]));
+        parts.push_back(ensureU256Value(rewriter, loc, operands[1]));
+    }
+    else
+    {
+        if (auto constructOp = op.getValue().getDefiningOp<ora::AdtConstructOp>())
+        {
+            auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
+            if (!adtType)
+                return rewriter.notifyMatchFailure(op, "expected !ora.adt construct for storage store");
+            auto variantIndex = ora::adt_helpers::getAdtVariantIndex(adtType, constructOp.getVariantName());
+            if (failed(variantIndex))
+                return rewriter.notifyMatchFailure(op, "unknown ADT variant for storage store");
+
+            Value tag = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(*variantIndex)));
+            Value payload = rewriter.create<sir::ConstOp>(
+                loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+
+            if (!constructOp.getPayloadValues().empty())
+            {
+                if (constructOp.getPayloadValues().size() != 1)
+                    return rewriter.notifyMatchFailure(op, "ADT storage store expects zero or one payload value");
+                Type payloadType = adtType.getPayloadTypes()[*variantIndex];
+                Value payloadValue = constructOp.getPayloadValues().front();
+                if (ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
+                {
+                    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                    if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
+                        payload = ensureU256Value(rewriter, loc, *ptr);
+                    else if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
+                        payload = ensureU256Value(rewriter, loc, payloadValue);
+                    else
+                        return rewriter.notifyMatchFailure(op, "aggregate ADT storage payload requires compiler-runtime handle");
+                }
+                else
+                {
+                    payload = ensureU256Value(rewriter, loc, payloadValue);
+                }
+            }
+
+            parts.push_back(tag);
+            parts.push_back(payload);
+        }
+        else
+        {
+            auto normalized = ora::adt_helpers::getNormalizedAdtPartsFromValue(rewriter, loc, op.getValue());
+            if (failed(normalized))
+                return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier for storage store");
+            parts.push_back(normalized->first);
+            parts.push_back(normalized->second);
+        }
+    }
+
+    Value one = rewriter.create<sir::ConstOp>(
+        loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+    Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, one);
+    rewriter.create<sir::SStoreOp>(loc, baseSlot, parts[0]);
+    rewriter.create<sir::SStoreOp>(loc, payloadSlot, parts[1]);
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult NormalizeAdtSLoadOp::matchAndRewrite(
+    ora::SLoadOp op,
+    PatternRewriter &rewriter) const
+{
+    Type resultType = op.getResult().getType();
+    if (!llvm::isa<ora::AdtType>(resultType))
+        return failure();
+
+    auto slotIndexOpt = computeGlobalSlot(op.getGlobalName(), op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for ADT sload");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value slot = findOrCreateSlotConstant(op.getOperation(), *slotIndexOpt, op.getGlobalName(), rewriter);
+    if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+        setResultName(slotOp, 0, ("slot_" + op.getGlobalName()).str());
+
+    Value one = rewriter.create<sir::ConstOp>(
+        loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+    Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, one);
+    Value tag = rewriter.create<sir::SLoadOp>(loc, u256Type, slot);
+    Value payload = rewriter.create<sir::SLoadOp>(loc, u256Type, payloadSlot);
+    Value normalized = ora::createMaterializationCast(
+        rewriter, loc, resultType, ValueRange{tag, payload}, ora::mat_kind::kNormalizedAdt);
+    rewriter.replaceOp(op, normalized);
+    return success();
+}
+
+LogicalResult NormalizeAdtSStoreOp::matchAndRewrite(
+    ora::SStoreOp op,
+    PatternRewriter &rewriter) const
+{
+    if (!llvm::isa<ora::AdtType>(op.getValue().getType()))
+        return failure();
+
+    auto slotIndexOpt = computeGlobalSlot(op.getGlobalName(), op.getOperation());
+    if (!slotIndexOpt)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for ADT sstore");
+
+    Value slot = findOrCreateSlotConstant(op.getOperation(), *slotIndexOpt, op.getGlobalName(), rewriter);
+    if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+        setResultName(slotOp, 0, ("slot_" + op.getGlobalName()).str());
+
+    return storeAdtCarrierToStorage(op, ArrayRef<Value>{}, slot, rewriter);
 }
 
 // -----------------------------------------------------------------------------
@@ -306,6 +453,58 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
     auto u256 = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (llvm::isa<ora::AdtType>(resultType))
+    {
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        Value one = rewriter.create<sir::ConstOp>(
+            loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
+        Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256, slotConst, one);
+        Value tag = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
+        Value payload = rewriter.create<sir::SLoadOp>(loc, u256, payloadSlot);
+        rewriter.replaceOp(op, ValueRange{tag, payload});
+        return success();
+    }
+
+    if (auto structType = llvm::dyn_cast<ora::StructType>(resultType))
+    {
+        auto structDecl = findStructDeclForName(op.getOperation(), structType.getName());
+        if (!structDecl)
+            return rewriter.notifyMatchFailure(op, "could not find struct declaration for storage sload");
+
+        auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+            return rewriter.notifyMatchFailure(op, "invalid struct field attributes for storage sload");
+
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        SmallVector<Value> fieldValues;
+        fieldValues.reserve(fieldNamesAttr.size());
+        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+        {
+            Value fieldSlot = slotConst;
+            if (i > 0)
+            {
+                Value fieldIndex = rewriter.create<sir::ConstOp>(
+                    loc, u256, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i)));
+                fieldSlot = rewriter.create<sir::AddOp>(loc, u256, slotConst, fieldIndex);
+            }
+
+            Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
+            Type convertedFieldType = this->getTypeConverter()->convertType(fieldType);
+            if (!convertedFieldType)
+                convertedFieldType = u256;
+
+            Value fieldValue = rewriter.create<sir::SLoadOp>(loc, u256, fieldSlot);
+            if (convertedFieldType != u256)
+                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
+            fieldValues.push_back(fieldValue);
+        }
+
+        auto structInitOp = rewriter.create<ora::StructInitOp>(loc, resultType, fieldValues);
+        rewriter.replaceOp(op, structInitOp.getResult());
+        return success();
+    }
 
     // Precompute converted type so we can treat pointer results as dynamic bytes.
     Type convertedResultType = this->getTypeConverter()->convertType(resultType);
@@ -438,6 +637,74 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
 
     Type u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (llvm::isa<ora::AdtType>(op.getValue().getType()))
+    {
+        SmallVector<Value, 4> operands(adaptor.getOperands().begin(), adaptor.getOperands().end());
+        return storeAdtCarrierToStorage(op, operands, slot, rewriter);
+    }
+
+    if (auto structType = llvm::dyn_cast<ora::StructType>(op.getValue().getType()))
+    {
+        auto structDecl = findStructDeclForName(op.getOperation(), structType.getName());
+        if (!structDecl)
+            return rewriter.notifyMatchFailure(op, "could not find struct declaration for storage sstore");
+
+        auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+            return rewriter.notifyMatchFailure(op, "invalid struct field attributes for storage sstore");
+
+        SmallVector<Value> fieldValues;
+        if (auto structInit = value.getDefiningOp<ora::StructInitOp>())
+        {
+            fieldValues.append(structInit.getFieldValues().begin(), structInit.getFieldValues().end());
+        }
+        else if (auto structInstantiate = value.getDefiningOp<ora::StructInstantiateOp>())
+        {
+            fieldValues.append(structInstantiate.getFieldValues().begin(), structInstantiate.getFieldValues().end());
+        }
+        else
+        {
+            fieldValues.reserve(fieldNamesAttr.size());
+            for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+            {
+                auto fieldName = cast<StringAttr>(fieldNamesAttr[i]).getValue();
+                Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
+                fieldValues.push_back(rewriter.create<ora::StructFieldExtractOp>(loc, fieldType, value, fieldName));
+            }
+        }
+
+        if (fieldValues.size() != fieldNamesAttr.size())
+            return rewriter.notifyMatchFailure(op, "mismatched struct field count for storage sstore");
+
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        for (size_t i = 0; i < fieldValues.size(); ++i)
+        {
+            Value fieldSlot = slot;
+            if (i > 0)
+            {
+                Value fieldIndex = rewriter.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i)));
+                fieldSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, fieldIndex);
+            }
+
+            Value stored = fieldValues[i];
+            if (!llvm::isa<sir::U256Type>(stored.getType()))
+            {
+                Type convertedFieldType = this->getTypeConverter()->convertType(stored.getType());
+                if (convertedFieldType != stored.getType() && llvm::isa<sir::U256Type>(convertedFieldType))
+                    stored = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, stored);
+                else
+                    stored = rewriter.create<sir::BitcastOp>(loc, u256Type, stored);
+            }
+
+            rewriter.create<sir::SStoreOp>(loc, fieldSlot, stored);
+        }
+
+        rewriter.eraseOp(op);
+        return success();
+    }
 
     if (isDynamicBytes)
     {

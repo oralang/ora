@@ -1,5 +1,10 @@
 comptime const std = @import("std");
 
+comptime fn factorial(n: u256) -> u256 {
+    if (n == 0) { return 1; }
+    return n * factorial(n - 1);
+}
+
 contract ComptimeEdgeCases {
     // ================================================================
     // 1. Transitive pure calls — fn calling fn calling fn
@@ -20,20 +25,8 @@ contract ComptimeEdgeCases {
     // ================================================================
     // 2. Recursive comptime function
     // ================================================================
-    fn factorial(n: u256) -> u256 {
-        var acc: u256 = 1;
-        var i: u256 = 1;
-        while (i <= n) {
-            acc = acc * i;
-            i = i + 1;
-        }
-        return acc;
-    }
-
     pub fn test_recursive() -> u256 {
-        // Recursive comptime folding is still a compiler limitation on this branch.
-        // Keep the observable result stable for verification.
-        const fact5: u256 = 120;
+        const fact5: u256 = factorial(5);
         return fact5;
     }
 
@@ -47,10 +40,10 @@ contract ComptimeEdgeCases {
     }
 
     pub fn test_clamp() -> u256 {
-        const a: u256 = 100;
-        const b: u256 = 50;
-        const c: u256 = 10;
-        return 160;
+        const a: u256 = clamp(100, 10, 50);
+        const b: u256 = clamp(5, 10, 50);
+        const c: u256 = clamp(25, 10, 50);
+        return a + b + c;
     }
 
     // ================================================================
@@ -67,9 +60,7 @@ contract ComptimeEdgeCases {
     }
 
     pub fn test_power() -> u256 {
-        // Loop-based comptime folding is still a compiler limitation on this branch.
-        // Keep the observable result stable for verification.
-        const val: u256 = 1024;
+        const val: u256 = power(2, 10);
         return val;
     }
 
@@ -127,7 +118,7 @@ contract ComptimeEdgeCases {
 
     pub fn test_deep_nesting() -> u256 {
         // inc(inc(inc(inc(inc(0))))) = 5
-        const val: u256 = 5;
+        const val: u256 = inc(inc(inc(inc(inc(0)))));
         return val;
     }
 

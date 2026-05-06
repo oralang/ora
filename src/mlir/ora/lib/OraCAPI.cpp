@@ -174,6 +174,23 @@ extern "C"
         return MlirLocation{loc.getAsOpaquePointer()};
     }
 
+    MlirLocation oraLocationSyntheticTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t syntheticIndex,
+        uint32_t syntheticCount)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::Location childLoc = unwrap(child);
+        if (childLoc == nullptr)
+        {
+            childLoc = mlir::UnknownLoc::get(context);
+        }
+        std::string tag = "ora.synthetic." + std::to_string(syntheticIndex) + "." + std::to_string(syntheticCount);
+        mlir::Location loc = mlir::NameLoc::get(mlir::StringAttr::get(context, tag), childLoc);
+        return MlirLocation{loc.getAsOpaquePointer()};
+    }
+
     bool oraLocationIsNull(MlirLocation loc)
     {
         return loc.ptr == nullptr;
@@ -616,6 +633,115 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
             elements.push_back(unwrap(elementTypes[i]));
         }
         return wrap(mlir::ora::TupleType::get(unwrap(ctx), elements));
+    }
+
+    size_t oraTupleTypeGetNumElements(MlirType tupleType)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::TupleType>(unwrap(tupleType));
+            if (!type)
+                return 0;
+            return type.getElementTypes().size();
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    MlirType oraTupleTypeGetElementType(MlirType tupleType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::TupleType>(unwrap(tupleType));
+            if (!type)
+                return {nullptr};
+            auto elements = type.getElementTypes();
+            if (index >= elements.size())
+                return {nullptr};
+            return wrap(elements[index]);
+        }
+        catch (...)
+        {
+            return {nullptr};
+        }
+    }
+
+    MlirType oraAnonymousStructTypeGet(
+        MlirContext ctx,
+        size_t numFields,
+        const MlirStringRef *fieldNames,
+        const MlirType *fieldTypes)
+    {
+        llvm::SmallVector<llvm::StringRef, 8> names;
+        llvm::SmallVector<mlir::Type, 8> types;
+        names.reserve(numFields);
+        types.reserve(numFields);
+        for (size_t i = 0; i < numFields; ++i)
+        {
+            names.push_back(unwrap(fieldNames[i]));
+            types.push_back(unwrap(fieldTypes[i]));
+        }
+        return wrap(mlir::ora::AnonymousStructType::get(unwrap(ctx), names, types));
+    }
+
+    size_t oraAnonymousStructTypeGetFieldCount(MlirType structType)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return 0;
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size())
+                return 0;
+            return fieldNames.size();
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    MlirStringRef oraAnonymousStructTypeGetFieldName(MlirType structType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return oraStringRefCreate(nullptr, 0);
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size() || index >= fieldNames.size())
+                return oraStringRefCreate(nullptr, 0);
+            auto value = fieldNames[index];
+            return oraStringRefCreate(value.data(), value.size());
+        }
+        catch (...)
+        {
+            return oraStringRefCreate(nullptr, 0);
+        }
+    }
+
+    MlirType oraAnonymousStructTypeGetFieldType(MlirType structType, size_t index)
+    {
+        try
+        {
+            auto type = llvm::dyn_cast<mlir::ora::AnonymousStructType>(unwrap(structType));
+            if (!type)
+                return {nullptr};
+            auto fieldNames = type.getFieldNames();
+            auto fieldTypes = type.getFieldTypes();
+            if (fieldNames.size() != fieldTypes.size() || index >= fieldTypes.size())
+                return {nullptr};
+            return wrap(fieldTypes[index]);
+        }
+        catch (...)
+        {
+            return {nullptr};
+        }
     }
 
     MlirStringRef oraOperationPrintToString(MlirOperation op)
@@ -1722,6 +1848,136 @@ MlirType oraStructTypeGet(MlirContext ctx, MlirStringRef structName)
     }
 }
 
+MlirStringRef oraStructTypeGetName(MlirType structType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::StructType>(unwrap(structType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = type.getName();
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirType oraAdtTypeGet(
+    MlirContext ctx,
+    MlirStringRef adtName,
+    size_t numVariants,
+    const MlirStringRef *variantNames,
+    const MlirType *payloadTypes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        StringRef nameRef = unwrap(adtName);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        if ((numVariants > 0) && (!variantNames || !payloadTypes))
+        {
+            return {nullptr};
+        }
+
+        Builder builder(context);
+        auto adtNameAttr = builder.getStringAttr(nameRef);
+        SmallVector<StringRef> variantNameRefs;
+        SmallVector<Type> payloadTypeRefs;
+        variantNameRefs.reserve(numVariants);
+        payloadTypeRefs.reserve(numVariants);
+        for (size_t i = 0; i < numVariants; ++i)
+        {
+            Type payloadType = unwrap(payloadTypes[i]);
+            if (!payloadType)
+                return {nullptr};
+            variantNameRefs.push_back(builder.getStringAttr(unwrap(variantNames[i])).getValue());
+            payloadTypeRefs.push_back(payloadType);
+        }
+
+        auto adtType = ora::AdtType::get(context, adtNameAttr.getValue(), variantNameRefs, payloadTypeRefs);
+        return wrap(adtType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirStringRef oraAdtTypeGetName(MlirType adtType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = type.getName();
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
+size_t oraAdtTypeGetNumVariants(MlirType adtType)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return 0;
+        return type.getVariantNames().size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirStringRef oraAdtTypeGetVariantName(MlirType adtType, size_t index)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return mlirStringRefCreate(nullptr, 0);
+        auto names = type.getVariantNames();
+        if (index >= names.size())
+            return mlirStringRefCreate(nullptr, 0);
+        auto name = names[index];
+        return mlirStringRefCreate(name.data(), name.size());
+    }
+    catch (...)
+    {
+        return mlirStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirType oraAdtTypeGetVariantPayloadType(MlirType adtType, size_t index)
+{
+    try
+    {
+        auto type = llvm::dyn_cast<ora::AdtType>(unwrap(adtType));
+        if (!type)
+            return {nullptr};
+        auto payloadTypes = type.getPayloadTypes();
+        if (index >= payloadTypes.size())
+            return {nullptr};
+        return wrap(payloadTypes[index]);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 size_t oraStructTypeGetFieldCountInScope(MlirOperation anchorOp, MlirType structType)
 {
     try
@@ -1831,7 +2087,33 @@ MlirType oraErrorUnionTypeGet(MlirContext ctx, MlirType successType)
             return {nullptr};
         }
 
-        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef);
+        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef, llvm::ArrayRef<Type>{});
+        return wrap(errorUnionType);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirType oraErrorUnionTypeGetWithErrors(MlirContext ctx, MlirType successType, size_t numErrorTypes, const MlirType *errorTypes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Type successTypeRef = unwrap(successType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        llvm::SmallVector<Type> errorTypeRefs;
+        errorTypeRefs.reserve(numErrorTypes);
+        for (size_t i = 0; i < numErrorTypes; ++i)
+            errorTypeRefs.push_back(unwrap(errorTypes[i]));
+
+        auto errorUnionType = ora::ErrorUnionType::get(context, successTypeRef, errorTypeRefs);
         return wrap(errorUnionType);
     }
     catch (...)
@@ -1848,6 +2130,40 @@ MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType)
         if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
         {
             return wrap(errorUnion.getSuccessType());
+        }
+        return {nullptr};
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+size_t oraErrorUnionTypeGetNumErrorTypes(MlirType errorUnionType)
+{
+    try
+    {
+        Type mlirType = unwrap(errorUnionType);
+        if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
+            return errorUnion.getErrorTypes().size();
+        return 0;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirType oraErrorUnionTypeGetErrorType(MlirType errorUnionType, size_t index)
+{
+    try
+    {
+        Type mlirType = unwrap(errorUnionType);
+        if (auto errorUnion = dyn_cast<ora::ErrorUnionType>(mlirType))
+        {
+            auto errorTypes = errorUnion.getErrorTypes();
+            if (index < errorTypes.size())
+                return wrap(errorTypes[index]);
         }
         return {nullptr};
     }
@@ -4549,6 +4865,87 @@ MlirOperation oraEnumConstantOpCreate(MlirContext ctx, MlirLocation loc, MlirStr
     }
 }
 
+MlirOperation oraAdtConstructOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef variantName,
+    const MlirValue *payloadValues,
+    size_t numPayloadValues,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        SmallVector<Value> payloadRefs;
+        payloadRefs.reserve(numPayloadValues);
+        for (size_t i = 0; i < numPayloadValues; ++i)
+            payloadRefs.push_back(unwrap(payloadValues[i]));
+
+        OpBuilder builder(context);
+        auto variantNameAttr = StringAttr::get(context, unwrap(variantName));
+        auto op = builder.create<ora::AdtConstructOp>(location, resultTy, variantNameAttr, payloadRefs);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAdtTagOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue value,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+        Value input = unwrap(value);
+
+        OpBuilder builder(context);
+        auto op = builder.create<ora::AdtTagOp>(location, resultTy, input);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAdtPayloadOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue value,
+    MlirStringRef variantName,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Value input = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OpBuilder builder(context);
+        auto variantNameAttr = StringAttr::get(context, unwrap(variantName));
+        auto op = builder.create<ora::AdtPayloadOp>(location, resultTy, input, variantNameAttr);
+
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraStructDeclOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef name)
 {
     try
@@ -5499,6 +5896,19 @@ bool oraTypeIsAEnum(MlirType type)
     }
 }
 
+bool oraTypeIsAAdt(MlirType type)
+{
+    try
+    {
+        Type ty = unwrap(type);
+        return ty && llvm::isa<ora::AdtType>(ty);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 MlirType oraEnumTypeGetReprType(MlirType enumType)
 {
     try
@@ -5672,6 +6082,29 @@ MlirOperation oraLengthOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 
         OperationState state(location, "ora.length");
         state.addOperands(val);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraByteAtOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue index, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Value idx = unwrap(index);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.byte_at");
+        state.addOperands(val);
+        state.addOperands(idx);
         state.addTypes(resultTy);
 
         Operation *op = Operation::create(state);
@@ -6690,25 +7123,11 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
-        const bool enable_pre_sir_passes = false;
-        if (enable_pre_sir_passes)
-        {
-            // 1. Constant deduplication and constant folding (fallback)
-            pm.addPass(mlir::ora::createOraOptimizationPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora optimization pass");
-
-            // 2. Canonicalization on Ora MLIR functions
-            pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Simple Ora optimization pass (canonicalize)");
-
-            // 3. Cleanup unused Ora operations
-            pm.addPass(mlir::ora::createOraCleanupPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora cleanup pass");
-
-            // 4. Inline functions marked with ora.inline attribute
-            pm.addPass(mlir::ora::createOraInliningPass());
-            ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
-        }
+        // Inline only as an optimization. Correctness must not depend on this
+        // pass; non-inlined private/imported helper calls are handled by the
+        // normal OraToSIR lowering path.
+        pm.addPass(mlir::ora::createOraInliningPass());
+        ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
 
         // Add the Ora to SIR conversion pass
         // Use addPass instead of addNestedPass since this is a ModuleOp pass

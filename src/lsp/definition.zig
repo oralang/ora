@@ -260,14 +260,7 @@ const Resolver = struct {
             .Switch => |switch_stmt| {
                 if (try self.visitExpr(switch_stmt.condition)) return true;
                 for (switch_stmt.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |expr_id| if (try self.visitExpr(expr_id)) return true,
-                        .Range => |range_pattern| {
-                            if (try self.visitExpr(range_pattern.start)) return true;
-                            if (try self.visitExpr(range_pattern.end)) return true;
-                        },
-                        .Else => {},
-                    }
+                    if (try self.visitSwitchPattern(arm.pattern)) return true;
                     if (try self.visitBody(arm.body)) return true;
                 }
                 if (switch_stmt.else_body) |else_body| {
@@ -363,14 +356,7 @@ const Resolver = struct {
             .Switch => |switch_expr| {
                 if (try self.visitExpr(switch_expr.condition)) return true;
                 for (switch_expr.arms) |arm| {
-                    switch (arm.pattern) {
-                        .Expr => |pattern_expr| if (try self.visitExpr(pattern_expr)) return true,
-                        .Range => |range_pattern| {
-                            if (try self.visitExpr(range_pattern.start)) return true;
-                            if (try self.visitExpr(range_pattern.end)) return true;
-                        },
-                        .Else => {},
-                    }
+                    if (try self.visitSwitchPattern(arm.pattern)) return true;
                     if (try self.visitExpr(arm.value)) return true;
                 }
                 if (switch_expr.else_expr) |else_expr| {
@@ -416,6 +402,30 @@ const Resolver = struct {
                 if (try self.visitExpr(quantified.body)) return true;
             },
             else => {},
+        }
+        return false;
+    }
+
+    fn visitSwitchPattern(self: *Resolver, pattern: compiler.ast.SwitchPattern) anyerror!bool {
+        switch (pattern) {
+            .Expr => |expr_id| if (try self.visitExpr(expr_id)) return true,
+            .Range => |range_pattern| {
+                if (try self.visitExpr(range_pattern.start)) return true;
+                if (try self.visitExpr(range_pattern.end)) return true;
+            },
+            .NamedError => |named_error| {
+                if (try self.visitExpr(named_error.callee)) return true;
+                for (named_error.bindings) |pattern_id| {
+                    if (self.matchPatternDeclaration(pattern_id)) return true;
+                }
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    if (try self.visitSwitchPattern(alternative)) return true;
+                }
+            },
+            .Ok, .Err => |pattern_id| if (self.matchPatternDeclaration(pattern_id)) return true,
+            .Else => {},
         }
         return false;
     }

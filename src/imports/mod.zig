@@ -10,13 +10,21 @@
 // - Deterministic dependency-first module order
 //
 // Notes:
-// - Builtin imports like "std" are ignored in graph output.
+// - Reserved embedded imports like "std" resolve from the compiler's embedded stdlib bundle.
 // - Resolver options provide workspace/include roots for package imports.
 //
 // ============================================================================
 
 const std = @import("std");
 const lexer = @import("ora_lexer");
+const std_logical_path = "std";
+const std_bytes_logical_path = "std/bytes";
+const std_constants_logical_path = "std/constants";
+const std_result_logical_path = "std/result";
+const std_resolved_path = "embedded://std/std.ora";
+const std_bytes_resolved_path = "embedded://std/bytes.ora";
+const std_constants_resolved_path = "embedded://std/constants.ora";
+const std_result_resolved_path = "embedded://std/result.ora";
 
 pub const ImportValidationError = error{
     ImportTargetNotFound,
@@ -334,6 +342,28 @@ const Resolver = struct {
     }
 
     fn scanModuleImports(self: *Resolver, module: *ModuleRecord) ImportValidationError!void {
+        if (std.mem.eql(u8, module.resolved_path, std_resolved_path)) {
+            const bytes_descriptor = (try self.resolveImportSpecifier(module, std_bytes_logical_path)) orelse return;
+            const bytes_record = try self.ensureModule(bytes_descriptor);
+            try module.addImport(self.allocator, "bytes", std_bytes_logical_path, bytes_record.canonical_id);
+            try module.addDependency(self.allocator, bytes_record.canonical_id);
+            try self.visitRecord(bytes_record);
+            const dependency_descriptor = (try self.resolveImportSpecifier(module, std_constants_logical_path)) orelse return;
+            const dependency_record = try self.ensureModule(dependency_descriptor);
+            try module.addImport(self.allocator, "constants", std_constants_logical_path, dependency_record.canonical_id);
+            try module.addDependency(self.allocator, dependency_record.canonical_id);
+            try self.visitRecord(dependency_record);
+            const result_descriptor = (try self.resolveImportSpecifier(module, std_result_logical_path)) orelse return;
+            const result_record = try self.ensureModule(result_descriptor);
+            try module.addImport(self.allocator, "result", std_result_logical_path, result_record.canonical_id);
+            try module.addDependency(self.allocator, result_record.canonical_id);
+            try self.visitRecord(result_record);
+            return;
+        }
+        if (std.mem.eql(u8, module.resolved_path, std_bytes_resolved_path) or
+            std.mem.eql(u8, module.resolved_path, std_constants_resolved_path) or
+            std.mem.eql(u8, module.resolved_path, std_result_resolved_path)) return;
+
         const source = std.fs.cwd().readFileAlloc(self.allocator, module.resolved_path, 1024 * 1024) catch |err| {
             std.log.warn("Failed to read module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
@@ -411,8 +441,32 @@ const Resolver = struct {
     }
 
     fn resolveImportSpecifier(self: *Resolver, importer: *const ModuleRecord, specifier: []const u8) ImportValidationError!?ModuleDescriptor {
-        if (std.mem.eql(u8, specifier, "std")) {
-            return null;
+        if (std.mem.eql(u8, specifier, std_logical_path) or
+            std.mem.eql(u8, specifier, std_bytes_logical_path) or
+            std.mem.eql(u8, specifier, std_constants_logical_path) or
+            std.mem.eql(u8, specifier, std_result_logical_path))
+        {
+            return .{
+                .kind = .package,
+                .canonical_id = std.fmt.allocPrint(self.allocator, "pkg:embedded/{s}", .{specifier}) catch return ImportValidationError.OutOfMemory,
+                .resolved_path = self.allocator.dupe(u8, if (std.mem.eql(u8, specifier, std_logical_path))
+                    std_resolved_path
+                else if (std.mem.eql(u8, specifier, std_bytes_logical_path))
+                    std_bytes_resolved_path
+                else if (std.mem.eql(u8, specifier, std_constants_logical_path))
+                    std_constants_resolved_path
+                else
+                    std_result_resolved_path) catch return ImportValidationError.OutOfMemory,
+                .package_name = self.allocator.dupe(u8, "std") catch return ImportValidationError.OutOfMemory,
+                .package_module_path = if (std.mem.eql(u8, specifier, std_logical_path))
+                    self.allocator.dupe(u8, "std.ora") catch return ImportValidationError.OutOfMemory
+                else if (std.mem.eql(u8, specifier, std_bytes_logical_path))
+                    self.allocator.dupe(u8, "bytes.ora") catch return ImportValidationError.OutOfMemory
+                else if (std.mem.eql(u8, specifier, std_constants_logical_path))
+                    self.allocator.dupe(u8, "constants.ora") catch return ImportValidationError.OutOfMemory
+                else
+                    self.allocator.dupe(u8, "result.ora") catch return ImportValidationError.OutOfMemory,
+            };
         }
 
         if (isRelativeSpecifier(specifier)) {

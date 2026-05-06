@@ -1,11 +1,8 @@
 // SMT Summary Test: Generic Call Path Conditions
-// Regression test for: generic function call summaries don't inherit caller path conditions.
-// The generic add(u256, a, b) inside a guarded path should see that recipient_before + amount
-// cannot overflow because the guard already checked it.
-//
-// KNOWN BUG: This test currently FAILS because the inlined generic body doesn't
-// carry the caller's path condition (the if-guard). Direct arithmetic passes;
-// generic wrapper does not.
+// Regression test for generic function call summaries inheriting caller path
+// conditions. The generic add(u256, a, b) inside a guarded path should see
+// that recipient_before + amount cannot overflow because the guard already
+// checked it.
 
 comptime const std = @import("std");
 contract GenericCallPathConditions {

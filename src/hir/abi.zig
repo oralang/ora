@@ -8,7 +8,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
         .address => allocator.dupe(u8, "address"),
         .string => allocator.dupe(u8, "string"),
         .bytes => allocator.dupe(u8, "bytes"),
-        .enum_ => allocator.dupe(u8, "uint32"),
+        .enum_ => error.UnsupportedAbiType,
         .bitfield => allocator.dupe(u8, "uint256"),
         .integer => |integer| blk: {
             const spelling = integer.spelling orelse "u256";
@@ -43,14 +43,58 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
             defer allocator.free(element);
             break :blk std.fmt.allocPrint(allocator, "{s}[]", .{element});
         },
+        .error_union => |error_union| blk: {
+            if (error_union.error_types.len != 1) break :blk error.UnsupportedAbiType;
+            const payload = try canonicalAbiType(allocator, error_union.payload_type.*);
+            defer allocator.free(payload);
+            if (!errorTypeHasPayload(error_union.error_types[0])) {
+                break :blk std.fmt.allocPrint(allocator, "(bool,{s})", .{payload});
+            }
+            if (!resultCarrierShapeSupported(error_union.error_types[0])) break :blk error.UnsupportedAbiType;
+            if (staticAbiWordCount(error_union.payload_type.*) == 1) {
+                const err_words = staticAbiWordCount(error_union.error_types[0]) orelse break :blk error.UnsupportedAbiType;
+                if (err_words > 1) break :blk error.UnsupportedAbiType;
+            }
+            const err_payload = try canonicalAbiType(allocator, error_union.error_types[0]);
+            defer allocator.free(err_payload);
+            break :blk std.fmt.allocPrint(allocator, "(bool,{s},{s})", .{ payload, err_payload });
+        },
         else => error.UnsupportedAbiType,
+    };
+}
+
+fn errorTypeHasPayload(ty: sema.Type) bool {
+    return switch (ty) {
+        .named, .anonymous_struct, .tuple, .bytes, .string, .slice, .array, .struct_, .contract => true,
+        .bool, .address, .integer, .enum_, .bitfield => true,
+        .refinement => |refinement| errorTypeHasPayload(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn resultDynamicArrayElementSupported(ty: sema.Type) bool {
+    return switch (ty) {
+        .bool, .address, .integer, .enum_, .bitfield => true,
+        .refinement => |refinement| resultDynamicArrayElementSupported(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn resultCarrierShapeSupported(ty: sema.Type) bool {
+    if (staticAbiWordCount(ty) != null) return true;
+    return switch (ty) {
+        .bytes, .string => true,
+        .slice => |slice| resultDynamicArrayElementSupported(slice.element_type.*),
+        .array => |array| array.len == null and resultDynamicArrayElementSupported(array.element_type.*),
+        .refinement => |refinement| resultCarrierShapeSupported(refinement.base_type.*),
+        else => false,
     };
 }
 
 pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
     return switch (ty) {
         .tuple => allocator.dupe(u8, "tuple"),
-        .anonymous_struct => allocator.dupe(u8, "tuple"),
+        .anonymous_struct => allocator.dupe(u8, "struct"),
         .bitfield => allocator.dupe(u8, "uint256"),
         .struct_, .contract => allocator.dupe(u8, "tuple"),
         else => canonicalAbiType(allocator, ty),
@@ -104,15 +148,34 @@ pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_se
     return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
 }
 
-pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
-    var hash: [32]u8 = undefined;
-    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
-    const selector = hash[0..4];
+pub fn signatureForAbiTypes(allocator: std.mem.Allocator, name: []const u8, abi_types: []const []const u8) ![]const u8 {
+    const joined = try std.mem.join(allocator, ",", abi_types);
+    defer allocator.free(joined);
+    return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
+}
 
+pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
+    const value = keccakSelectorValue(signature);
     var hex: [8]u8 = undefined;
-    for (selector, 0..) |byte, index| {
+    const bytes = [_]u8{
+        @intCast((value >> 24) & 0xff),
+        @intCast((value >> 16) & 0xff),
+        @intCast((value >> 8) & 0xff),
+        @intCast(value & 0xff),
+    };
+    for (bytes, 0..) |byte, index| {
         hex[index * 2] = std.fmt.hex_charset[byte >> 4];
         hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
     }
     return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
+}
+
+pub fn keccakSelectorValue(signature: []const u8) u32 {
+    var hash: [32]u8 = undefined;
+    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
+    const selector = hash[0..4];
+    return (@as(u32, selector[0]) << 24) |
+        (@as(u32, selector[1]) << 16) |
+        (@as(u32, selector[2]) << 8) |
+        @as(u32, selector[3]);
 }

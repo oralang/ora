@@ -1,0 +1,11 @@
+contract SimpleCounter {
+    storage var count: u256 = 0;
+
+    pub fn increment() {
+        count = count + 1;
+    }
+
+    pub fn get() -> u256 {
+        return count;
+    }
+}

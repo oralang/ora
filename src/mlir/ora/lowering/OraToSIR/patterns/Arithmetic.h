@@ -72,6 +72,30 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertLengthOp : public ConversionPattern
+        {
+        public:
+            ConvertLengthOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertByteAtOp : public ConversionPattern
+        {
+        public:
+            ConvertByteAtOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertAddrToI160Op : public OpConversionPattern<ora::AddrToI160Op>
         {
         public:

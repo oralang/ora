@@ -29,6 +29,18 @@ pub const Solver = struct {
         };
     }
 
+    pub fn initForLogic(context: *Context, allocator: std.mem.Allocator, logic: [:0]const u8) !Solver {
+        const logic_symbol = c.Z3_mk_string_symbol(context.ctx, logic.ptr);
+        const solver = c.Z3_mk_solver_for_logic(context.ctx, logic_symbol) orelse return error.SolverInitFailed;
+        c.Z3_solver_inc_ref(context.ctx, solver);
+
+        return Solver{
+            .context = context,
+            .solver = solver,
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *Solver) void {
         c.Z3_solver_dec_ref(self.context.ctx, self.solver);
     }
@@ -54,6 +66,27 @@ pub const Solver = struct {
         return status;
     }
 
+    pub fn checkAssumptions(self: *Solver, assumptions: []const c.Z3_ast) c.Z3_lbool {
+        return c.Z3_solver_check_assumptions(
+            self.context.ctx,
+            self.solver,
+            @intCast(assumptions.len),
+            if (assumptions.len == 0) null else assumptions.ptr,
+        );
+    }
+
+    pub fn checkAssumptionsChecked(self: *Solver, assumptions: []const c.Z3_ast) !c.Z3_lbool {
+        self.context.clearLastError();
+        const status = c.Z3_solver_check_assumptions(
+            self.context.ctx,
+            self.solver,
+            @intCast(assumptions.len),
+            if (assumptions.len == 0) null else assumptions.ptr,
+        );
+        try self.context.checkNoError();
+        return status;
+    }
+
     pub fn getModel(self: *Solver) ?c.Z3_model {
         return c.Z3_solver_get_model(self.context.ctx, self.solver);
     }
@@ -63,6 +96,50 @@ pub const Solver = struct {
         const model = c.Z3_solver_get_model(self.context.ctx, self.solver);
         try self.context.checkNoError();
         return model;
+    }
+
+    pub fn getProof(self: *Solver) ?c.Z3_ast {
+        return c.Z3_solver_get_proof(self.context.ctx, self.solver);
+    }
+
+    pub fn getProofChecked(self: *Solver) !?c.Z3_ast {
+        self.context.clearLastError();
+        const proof = c.Z3_solver_get_proof(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return proof;
+    }
+
+    pub fn getProofStringOwned(self: *Solver) !?[]u8 {
+        const proof = try self.getProofChecked() orelse return null;
+        const raw = c.Z3_ast_to_string(self.context.ctx, proof);
+        if (raw == null) return null;
+        return try self.allocator.dupe(u8, std.mem.span(raw));
+    }
+
+    pub fn getUnsatCore(self: *Solver) c.Z3_ast_vector {
+        return c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
+    }
+
+    pub fn getUnsatCoreChecked(self: *Solver) !c.Z3_ast_vector {
+        self.context.clearLastError();
+        const core = c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
+        try self.context.checkNoError();
+        return core;
+    }
+
+    pub fn getUnsatCoreOwned(self: *Solver) ![]c.Z3_ast {
+        const core = try self.getUnsatCoreChecked();
+        c.Z3_ast_vector_inc_ref(self.context.ctx, core);
+        defer c.Z3_ast_vector_dec_ref(self.context.ctx, core);
+
+        const len: usize = @intCast(c.Z3_ast_vector_size(self.context.ctx, core));
+        var result = try self.allocator.alloc(c.Z3_ast, len);
+        errdefer self.allocator.free(result);
+
+        for (0..len) |i| {
+            result[i] = c.Z3_ast_vector_get(self.context.ctx, core, @intCast(i));
+        }
+        return result;
     }
 
     pub fn reset(self: *Solver) void {
@@ -75,10 +152,31 @@ pub const Solver = struct {
         try self.context.checkNoError();
     }
 
-    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8) !void {
+    pub fn loadFromSmtlib(self: *Solver, smtlib: [:0]const u8, decl_symbols: []const c.Z3_symbol, decls: []const c.Z3_func_decl) !void {
         self.context.clearLastError();
-        c.Z3_solver_from_string(self.context.ctx, self.solver, smtlib.ptr);
+        const parsed = c.Z3_parse_smtlib2_string(
+            self.context.ctx,
+            smtlib.ptr,
+            0,
+            null,
+            null,
+            @intCast(decl_symbols.len),
+            if (decl_symbols.len == 0) null else decl_symbols.ptr,
+            if (decls.len == 0) null else decls.ptr,
+        ) orelse return error.Z3ApiError;
+        c.Z3_ast_vector_inc_ref(self.context.ctx, parsed);
+        defer c.Z3_ast_vector_dec_ref(self.context.ctx, parsed);
+        const count = c.Z3_ast_vector_size(self.context.ctx, parsed);
+        if (count == 0 and std.mem.indexOf(u8, smtlib, "(check-sat)") == null) {
+            return error.Z3ApiError;
+        }
         try self.context.checkNoError();
+        var idx: u32 = 0;
+        while (idx < count) : (idx += 1) {
+            const formula = c.Z3_ast_vector_get(self.context.ctx, parsed, idx);
+            c.Z3_solver_assert(self.context.ctx, self.solver, formula);
+            try self.context.checkNoError();
+        }
     }
 
     pub fn push(self: *Solver) void {
@@ -124,6 +222,14 @@ pub const Solver = struct {
         c.Z3_solver_set_params(self.context.ctx, self.solver, params);
         try self.context.checkNoError();
     }
+
+    pub fn mkFreshBoolProxy(self: *Solver, prefix: [:0]const u8) !c.Z3_ast {
+        self.context.clearLastError();
+        const bool_sort = c.Z3_mk_bool_sort(self.context.ctx);
+        const proxy = c.Z3_mk_fresh_const(self.context.ctx, prefix.ptr, bool_sort) orelse return error.SolverInitFailed;
+        try self.context.checkNoError();
+        return proxy;
+    }
 };
 
 const testing = std.testing;
@@ -135,7 +241,7 @@ test "loadFromSmtlib rejects malformed smtlib" {
     var solver = try Solver.init(&context, testing.allocator);
     defer solver.deinit();
 
-    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert (= x))"));
+    try testing.expectError(error.Z3ApiError, solver.loadFromSmtlib("(assert", &.{}, &.{}));
 }
 
 test "setTimeoutMs configures solver without Z3 error" {
@@ -160,6 +266,21 @@ test "setRandomSeed configures solver without Z3 error" {
     try testing.expectEqual(@as(c.Z3_error_code, c.Z3_OK), context.lastErrorCode());
 }
 
+test "initForLogic creates a usable logic-specific solver" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.initForLogic(&context, testing.allocator, "QF_AUFBV");
+    defer solver.deinit();
+
+    const bool_sort = c.Z3_mk_bool_sort(context.ctx);
+    const p = c.Z3_mk_const(context.ctx, c.Z3_mk_string_symbol(context.ctx, "logic_p"), bool_sort);
+
+    try solver.assertChecked(p);
+    try solver.assertChecked(c.Z3_mk_not(context.ctx, p));
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkChecked());
+}
+
 test "checked solver operations succeed on simple SAT query" {
     var context = try Context.init(testing.allocator);
     defer context.deinit();
@@ -177,4 +298,50 @@ test "checked solver operations succeed on simple SAT query" {
     try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_TRUE), try solver.checkChecked());
     try testing.expect(try solver.getModelChecked() != null);
     try solver.popChecked();
+}
+
+test "checkAssumptions and unsat core wrappers work on simple contradiction" {
+    var context = try Context.init(testing.allocator);
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    const p = try solver.mkFreshBoolProxy("core_p");
+    const q = try solver.mkFreshBoolProxy("core_q");
+    const not_q = c.Z3_mk_not(context.ctx, q);
+
+    try solver.assertChecked(c.Z3_mk_implies(context.ctx, p, q));
+    try solver.assertChecked(c.Z3_mk_implies(context.ctx, p, not_q));
+
+    const assumptions = [_]c.Z3_ast{p};
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkAssumptionsChecked(&assumptions));
+
+    const core = try solver.getUnsatCoreOwned();
+    defer testing.allocator.free(core);
+    try testing.expectEqual(@as(usize, 1), core.len);
+    try testing.expect(core[0] == p);
+}
+
+test "proof wrappers expose a proof on simple contradiction when enabled" {
+    var context = try Context.initWithOptions(testing.allocator, .{ .proofs_enabled = true });
+    defer context.deinit();
+
+    var solver = try Solver.init(&context, testing.allocator);
+    defer solver.deinit();
+
+    const bool_sort = c.Z3_mk_bool_sort(context.ctx);
+    const sym = c.Z3_mk_string_symbol(context.ctx, "proof_p");
+    const p = c.Z3_mk_const(context.ctx, sym, bool_sort);
+    const not_p = c.Z3_mk_not(context.ctx, p);
+
+    try solver.assertChecked(p);
+    try solver.assertChecked(not_p);
+    try testing.expectEqual(@as(c.Z3_lbool, c.Z3_L_FALSE), try solver.checkChecked());
+
+    const proof = try solver.getProofStringOwned();
+    defer if (proof) |raw| testing.allocator.free(raw);
+
+    try testing.expect(proof != null);
+    try testing.expect(proof.?.len > 0);
 }

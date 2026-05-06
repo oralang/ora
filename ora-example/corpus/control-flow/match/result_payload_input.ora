@@ -1,0 +1,10 @@
+error Failure(code: u256);
+
+pub contract ResultPayloadInput {
+    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        return match (value) {
+            Ok(inner) => inner,
+            Err(err) => err.code,
+        };
+    }
+}

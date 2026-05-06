@@ -44,6 +44,11 @@ extern "C"
         MlirContext ctx,
         MlirLocation child,
         uint32_t stmtId);
+    MLIR_CAPI_EXPORTED MlirLocation oraLocationSyntheticTaggedGet(
+        MlirContext ctx,
+        MlirLocation child,
+        uint32_t syntheticIndex,
+        uint32_t syntheticCount);
     MLIR_CAPI_EXPORTED bool oraLocationIsNull(MlirLocation loc);
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraLocationPrintToString(MlirLocation loc);
@@ -126,6 +131,22 @@ extern "C"
         MlirContext ctx,
         size_t numElements,
         const MlirType *elementTypes);
+
+    MLIR_CAPI_EXPORTED size_t oraTupleTypeGetNumElements(MlirType tupleType);
+
+    MLIR_CAPI_EXPORTED MlirType oraTupleTypeGetElementType(MlirType tupleType, size_t index);
+
+    MLIR_CAPI_EXPORTED MlirType oraAnonymousStructTypeGet(
+        MlirContext ctx,
+        size_t numFields,
+        const MlirStringRef *fieldNames,
+        const MlirType *fieldTypes);
+
+    MLIR_CAPI_EXPORTED size_t oraAnonymousStructTypeGetFieldCount(MlirType structType);
+
+    MLIR_CAPI_EXPORTED MlirStringRef oraAnonymousStructTypeGetFieldName(MlirType structType, size_t index);
+
+    MLIR_CAPI_EXPORTED MlirType oraAnonymousStructTypeGetFieldType(MlirType structType, size_t index);
 
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraOperationPrintToString(MlirOperation op);
@@ -313,6 +334,31 @@ extern "C"
         MlirContext ctx,
         MlirStringRef structName);
 
+    /// Return the symbolic name for an Ora struct type.
+    /// Returns a null/empty string ref if the type is not !ora.struct<...>.
+    MLIR_CAPI_EXPORTED MlirStringRef oraStructTypeGetName(MlirType structType);
+
+    /// Create an Ora ADT type !ora.adt<"adt_name", ("Variant", payload_type), ...>
+    MLIR_CAPI_EXPORTED MlirType oraAdtTypeGet(
+        MlirContext ctx,
+        MlirStringRef adtName,
+        size_t numVariants,
+        const MlirStringRef *variantNames,
+        const MlirType *payloadTypes);
+
+    /// Return the symbolic name for an Ora ADT type.
+    /// Returns a null/empty string ref if the type is not !ora.adt<...>.
+    MLIR_CAPI_EXPORTED MlirStringRef oraAdtTypeGetName(MlirType adtType);
+
+    /// Return the number of variants in an Ora ADT type.
+    MLIR_CAPI_EXPORTED size_t oraAdtTypeGetNumVariants(MlirType adtType);
+
+    /// Return the variant name at `index`, or a null/empty ref if invalid.
+    MLIR_CAPI_EXPORTED MlirStringRef oraAdtTypeGetVariantName(MlirType adtType, size_t index);
+
+    /// Return the variant payload type at `index`, or null if invalid.
+    MLIR_CAPI_EXPORTED MlirType oraAdtTypeGetVariantPayloadType(MlirType adtType, size_t index);
+
     /// Look up the number of fields for an Ora struct type using the nearest
     /// in-scope ora.struct.decl visible from `anchorOp`.
     /// Returns 0 if the type is not an Ora struct or no declaration is found.
@@ -336,14 +382,28 @@ extern "C"
         MlirType structType,
         size_t index);
 
-    /// Create an Ora error union type !ora.error_union<successType>
+    /// Create an Ora error union type !ora.error_union<successType>.
+    /// This legacy constructor leaves the declared error set empty.
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
         MlirContext ctx,
         MlirType successType);
 
+    /// Create an Ora error union type !ora.error_union<successType, errorTypes...>
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetWithErrors(
+        MlirContext ctx,
+        MlirType successType,
+        size_t numErrorTypes,
+        const MlirType *errorTypes);
+
     /// Extract the success type from an Ora error union type
     /// Returns null type if the input is not an error union type
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetSuccessType(MlirType errorUnionType);
+
+    /// Return the number of declared error types in an Ora error union type.
+    MLIR_CAPI_EXPORTED size_t oraErrorUnionTypeGetNumErrorTypes(MlirType errorUnionType);
+
+    /// Return the declared error type at `index`, or null on failure.
+    MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGetErrorType(MlirType errorUnionType, size_t index);
 
     /// Extract the value type from an Ora map type !ora.map<keyType, valueType>
     /// Returns null type if the input is not a map type
@@ -1089,6 +1149,30 @@ extern "C"
         MlirStringRef variantName,
         MlirType resultType);
 
+    /// Create an ora.adt.construct operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtConstructOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef variantName,
+        const MlirValue *payloadValues,
+        size_t numPayloadValues,
+        MlirType resultType);
+
+    /// Create an ora.adt.tag operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtTagOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.adt.payload operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAdtPayloadOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirStringRef variantName,
+        MlirType resultType);
+
     /// Create an ora.struct.decl operation
     MLIR_CAPI_EXPORTED MlirOperation oraStructDeclOpCreate(
         MlirContext ctx,
@@ -1401,6 +1485,9 @@ extern "C"
     /// Query: is enum type
     MLIR_CAPI_EXPORTED bool oraTypeIsAEnum(MlirType type);
 
+    /// Query: is ADT type
+    MLIR_CAPI_EXPORTED bool oraTypeIsAAdt(MlirType type);
+
     /// Get representation type from enum type
     MLIR_CAPI_EXPORTED MlirType oraEnumTypeGetReprType(MlirType enumType);
 
@@ -1454,6 +1541,14 @@ extern "C"
         MlirContext ctx,
         MlirLocation loc,
         MlirValue value,
+        MlirType resultType);
+
+    /// Create an ora.byte_at operation
+    MLIR_CAPI_EXPORTED MlirOperation oraByteAtOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirValue index,
         MlirType resultType);
 
     /// Create an ora.expression_capture operation

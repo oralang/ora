@@ -90,3 +90,45 @@ test "lsp semantic index: builds nested document symbols" {
     try testing.expectEqual(@as(usize, 1), doc_symbols[0].children[0].children.len);
     try testing.expectEqualStrings("amount", doc_symbols[0].children[0].children[0].name);
 }
+
+test "lsp semantic index: collects traits impls aliases and ADT variant details" {
+    const source =
+        \\error InsufficientBalance;
+        \\type Amount = u256;
+        \\enum Event: u8 {
+        \\    Value(u256) = 1,
+        \\    Pair { left: u256, right: u256 } = 2,
+        \\}
+        \\struct Vault {}
+        \\extern trait Token {
+        \\    call fn transfer(self, to: address, amount: Amount) -> bool errors(InsufficientBalance);
+        \\}
+        \\impl Token for Vault {
+        \\    fn transfer(self, to: address, amount: Amount) -> bool { return true; }
+        \\}
+    ;
+
+    var index = try semantic_index.indexDocument(testing.allocator, source);
+    defer index.deinit(testing.allocator);
+
+    try testing.expect(index.parse_succeeded);
+
+    const amount_idx = findSymbolIndex(index.symbols, "Amount", .type_alias) orelse return error.TestExpectedEqual;
+    const event_idx = findSymbolIndex(index.symbols, "Event", .enum_decl) orelse return error.TestExpectedEqual;
+    const value_idx = findSymbolIndex(index.symbols, "Value", .enum_member) orelse return error.TestExpectedEqual;
+    const pair_idx = findSymbolIndex(index.symbols, "Pair", .enum_member) orelse return error.TestExpectedEqual;
+    const token_idx = findSymbolIndex(index.symbols, "Token", .trait_decl) orelse return error.TestExpectedEqual;
+    const impl_idx = findSymbolIndex(index.symbols, "impl Token for Vault", .impl_decl) orelse return error.TestExpectedEqual;
+    const trait_transfer_idx = findSymbolIndex(index.symbols, "transfer", .method) orelse return error.TestExpectedEqual;
+
+    try testing.expectEqualStrings("u256", index.symbols[amount_idx].detail.?);
+    try testing.expectEqualStrings(": u8", index.symbols[event_idx].detail.?);
+    try testing.expectEqualStrings("(u256) = 1", index.symbols[value_idx].detail.?);
+    try testing.expectEqualStrings("{ left: u256, right: u256 } = 2", index.symbols[pair_idx].detail.?);
+    try testing.expectEqual(@as(?usize, event_idx), index.symbols[value_idx].parent);
+    try testing.expectEqual(@as(?usize, event_idx), index.symbols[pair_idx].parent);
+    try testing.expectEqual(@as(?usize, null), index.symbols[token_idx].parent);
+    try testing.expectEqual(@as(?usize, null), index.symbols[impl_idx].parent);
+    try testing.expectEqual(@as(?usize, token_idx), index.symbols[trait_transfer_idx].parent);
+    try testing.expect(std.mem.indexOf(u8, index.symbols[trait_transfer_idx].detail.?, "errors(InsufficientBalance)") != null);
+}

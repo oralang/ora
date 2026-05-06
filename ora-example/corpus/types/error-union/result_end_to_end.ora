@@ -1,0 +1,30 @@
+// End-to-end Result<T, E> contract.
+// Covers construction, matching, Result-returning helper calls, and payload errors.
+
+error Failure(code: u256);
+
+pub contract ResultEndToEnd {
+    fn checked_value(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure(7));
+    }
+
+    pub fn classify(flag: bool, value: u256) -> u256 {
+        let maybe = checked_value(flag, value);
+        let out = match (maybe) {
+            Ok(inner) => inner,
+            Failure(code) => code,
+        };
+        return out;
+    }
+
+    pub fn pass_through(flag: bool, value: u256) -> Result<u256, Failure> {
+        let maybe = checked_value(flag, value);
+        return match (maybe) {
+            Ok(inner) => Ok(inner),
+            Failure(code) => Err(Failure(code)),
+        };
+    }
+}

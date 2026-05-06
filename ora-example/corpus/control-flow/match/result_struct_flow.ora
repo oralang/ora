@@ -1,0 +1,22 @@
+struct Pair {
+    left: u256,
+    right: u256,
+}
+
+error Failure(code: u256, owner: address);
+
+pub contract ResultStructFlow {
+    pub fn inspect(value: Result<Pair, Failure>, flag: bool) -> u256 {
+        match (value) {
+            Ok(inner) => {
+                if (flag) {
+                    return inner.left;
+                }
+                return inner.right;
+            },
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+}

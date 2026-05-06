@@ -11,7 +11,29 @@ mkdir -p "$OUT_ROOT"
 
 contracts=(
   "ora-example/debugger/comptime_debug_probe.ora"
+  "ora-example/debugger/partial_eval_probe.ora"
+  "ora-example/debugger/nested_unroll_probe.ora"
+  "ora-example/debugger/match_probe.ora"
+  "ora-example/debugger/match_discard_probe.ora"
   "ora-example/debugger/constructor_value.ora"
+  "ora-example/corpus/control-flow/match/error_union_match.ora"
+  "ora-example/corpus/control-flow/match/result_roundtrip.ora"
+  "ora-example/corpus/control-flow/match/result_named_error_match.ora"
+  "ora-example/corpus/control-flow/match/result_named_error_payload_match.ora"
+  "ora-example/corpus/control-flow/match/result_discard_patterns.ora"
+  "ora-example/corpus/control-flow/match/result_err_discard.ora"
+  "ora-example/corpus/control-flow/match/result_stateful_flow.ora"
+  "ora-example/corpus/control-flow/match/result_bytes_flow.ora"
+  "ora-example/corpus/control-flow/match/result_struct_flow.ora"
+  "ora-example/corpus/control-flow/match/result_dynamic_bytes_input.ora"
+  "ora-example/corpus/control-flow/match/result_dynamic_slice_input.ora"
+  "ora-example/corpus/control-flow/match/result_helpers.ora"
+  "ora-example/corpus/control-flow/match/result_payload_input.ora"
+  "ora-example/corpus/control-flow/match/result_struct_input.ora"
+  "ora-example/corpus/types/error-union/result_constructors.ora"
+  "ora-example/corpus/types/tuple/division_builtins.ora"
+  "ora-example/corpus/types/dynamic/bytes_string_len_index.ora"
+  "ora-example/corpus/types/dynamic/std_bytes_helpers.ora"
   "ora-example/corpus/patterns/multi_asset.ora"
   "ora-example/vault/05_locks.ora"
   "ora-example/refinements/guards_showcase.ora"
@@ -32,7 +54,17 @@ for contract in "${contracts[@]}"; do
   mkdir -p "$out_dir"
 
   echo "==> $contract"
-  ./zig-out/bin/ora emit --emit-bytecode --emit-sir-text --debug-info -o "$out_dir" "$contract" >/tmp/"$stem".release-smoke.log 2>&1 || {
+  emit_args=(--emit-bytecode --emit-sir-text --debug-info -o "$out_dir")
+  case "$contract" in
+    ora-example/corpus/control-flow/match/*)
+      emit_args=(--no-verify "${emit_args[@]}")
+      ;;
+    ora-example/corpus/types/dynamic/std_bytes_helpers.ora)
+      emit_args=(--no-verify "${emit_args[@]}")
+      ;;
+  esac
+
+  ./zig-out/bin/ora emit "${emit_args[@]}" "$contract" >/tmp/"$stem".release-smoke.log 2>&1 || {
     cat /tmp/"$stem".release-smoke.log >&2
     exit 1
   }

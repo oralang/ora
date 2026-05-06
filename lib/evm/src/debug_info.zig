@@ -2,6 +2,12 @@ const std = @import("std");
 
 pub const DebugInfo = struct {
     parsed: std.json.Parsed(JsonDebugInfo),
+    /// Lookups built once at loadFromJson time. The pointers reference into
+    /// the parsed JSON arena and stay valid for as long as `parsed` does.
+    op_meta_by_idx: std.AutoHashMap(u32, *const OpMeta),
+    op_visibility_by_idx: std.AutoHashMap(u32, *const OpVisibility),
+    scope_by_id: std.AutoHashMap(u32, *const SourceScope),
+    local_by_id: std.AutoHashMap(u32, *const Local),
 
     pub const Position = struct {
         line: u32,
@@ -35,8 +41,25 @@ pub const DebugInfo = struct {
         storage_class: ?[]const u8 = null,
         runtime: Runtime,
         folded_value: ?[]const u8 = null,
+        is_folded: bool = false,
         decl: ?Range = null,
         live: ?Range = null,
+    };
+
+    /// One link in a scope's inlined-from chain. When the compiler
+    /// inlines a callee, this records the call site that brought the
+    /// scope here — so the TUI can show "inlined from `bar()` at
+    /// `app.ora:42`" instead of dropping the user inside a function
+    /// they didn't write.
+    ///
+    /// The chain on `SourceScope.inlined_from` is outermost-first:
+    /// the lexically outermost caller is index 0, the immediate
+    /// caller is the last entry. Empty slice means "not inlined".
+    pub const InlinedFrame = struct {
+        function: []const u8,
+        file: []const u8,
+        contract: ?[]const u8 = null,
+        call_site: ?Range = null,
     };
 
     pub const SourceScope = struct {
@@ -49,6 +72,14 @@ pub const DebugInfo = struct {
         label: ?[]const u8 = null,
         range: ?Range = null,
         locals: []const Local = &.{},
+        /// Outermost-first chain of call sites that produced this
+        /// scope via compiler inlining. Empty = scope was lowered
+        /// from its lexical site (the common case today). Reserved
+        /// for the inliner work tracked in `compiler-status.md` /
+        /// the debugger plan's B2 item; the TUI doesn't render this
+        /// yet but the schema slot exists so artifacts written
+        /// after the inliner lands are forward-compatible.
+        inlined_from: []const InlinedFrame = &.{},
     };
 
     pub const OpVisibility = struct {
@@ -70,6 +101,7 @@ pub const DebugInfo = struct {
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -77,6 +109,22 @@ pub const DebugInfo = struct {
         kind: ?[]const u8 = null,
         is_hoisted: bool = false,
         is_duplicated: bool = false,
+        /// Formal-verification proof status for guards / runtime
+        /// safety checks at this op. One of:
+        ///   - "proved_safe"   — verifier proved the guard's
+        ///     failure condition UNSAT, so the runtime check is
+        ///     dead code. The TUI's `fv` overlay dims these lines.
+        ///   - "proved_unsafe" — verifier proved the failure
+        ///     condition SAT (a counterexample exists). Surfaces
+        ///     as a compile error today, but the artifact still
+        ///     records it in case the user is debugging a
+        ///     known-bad fixture.
+        ///   - "dynamic"       — verifier returned UNDEF (solver
+        ///     timeout, undecidable). The check stays in runtime
+        ///     code and the overlay leaves it untouched.
+        ///   - null            — non-guard op, no verification
+        ///     attempted, or proof_status not yet emitted.
+        proof_status: ?[]const u8 = null,
     };
 
     pub const VisibleLocal = struct {
@@ -97,6 +145,7 @@ pub const DebugInfo = struct {
         runtime_location_slot: ?u64 = null,
         editable: bool,
         folded_value: ?[]const u8 = null,
+        is_folded: bool = false,
         scope_id: ?u32 = null,
         scope_kind: ?[]const u8 = null,
         function: ?[]const u8 = null,
@@ -110,10 +159,42 @@ pub const DebugInfo = struct {
         const parsed = try std.json.parseFromSlice(JsonDebugInfo, allocator, json_bytes, .{
             .ignore_unknown_fields = true,
         });
-        return .{ .parsed = parsed };
+        var info = DebugInfo{
+            .parsed = parsed,
+            .op_meta_by_idx = std.AutoHashMap(u32, *const OpMeta).init(allocator),
+            .op_visibility_by_idx = std.AutoHashMap(u32, *const OpVisibility).init(allocator),
+            .scope_by_id = std.AutoHashMap(u32, *const SourceScope).init(allocator),
+            .local_by_id = std.AutoHashMap(u32, *const Local).init(allocator),
+        };
+        errdefer {
+            info.op_meta_by_idx.deinit();
+            info.op_visibility_by_idx.deinit();
+            info.scope_by_id.deinit();
+            info.local_by_id.deinit();
+            info.parsed.deinit();
+        }
+
+        for (info.parsed.value.ops) |*op| {
+            try info.op_meta_by_idx.put(op.idx, op);
+        }
+        for (info.parsed.value.op_visibility) |*op| {
+            try info.op_visibility_by_idx.put(op.idx, op);
+        }
+        for (info.parsed.value.source_scopes) |*scope| {
+            try info.scope_by_id.put(scope.id, scope);
+            for (scope.locals) |*local| {
+                try info.local_by_id.put(local.id, local);
+            }
+        }
+
+        return info;
     }
 
     pub fn deinit(self: *DebugInfo) void {
+        self.op_meta_by_idx.deinit();
+        self.op_visibility_by_idx.deinit();
+        self.scope_by_id.deinit();
+        self.local_by_id.deinit();
         self.parsed.deinit();
     }
 
@@ -122,33 +203,19 @@ pub const DebugInfo = struct {
     }
 
     pub fn getVisibilityForIdx(self: *const DebugInfo, idx: u32) ?*const OpVisibility {
-        for (self.parsed.value.op_visibility) |*op| {
-            if (op.idx == idx) return op;
-        }
-        return null;
+        return self.op_visibility_by_idx.get(idx);
     }
 
     pub fn getOpMetaForIdx(self: *const DebugInfo, idx: u32) ?*const OpMeta {
-        for (self.parsed.value.ops) |*op| {
-            if (op.idx == idx) return op;
-        }
-        return null;
+        return self.op_meta_by_idx.get(idx);
     }
 
     pub fn getScopeById(self: *const DebugInfo, id: u32) ?*const SourceScope {
-        for (self.parsed.value.source_scopes) |*scope| {
-            if (scope.id == id) return scope;
-        }
-        return null;
+        return self.scope_by_id.get(id);
     }
 
     pub fn getLocalById(self: *const DebugInfo, id: u32) ?*const Local {
-        for (self.parsed.value.source_scopes) |*scope| {
-            for (scope.locals) |*local| {
-                if (local.id == id) return local;
-            }
-        }
-        return null;
+        return self.local_by_id.get(id);
     }
 
     pub fn collectVisibleLocals(self: *const DebugInfo, allocator: std.mem.Allocator, idx: u32) ![]VisibleLocal {
@@ -210,6 +277,7 @@ pub const DebugInfo = struct {
                 .runtime_location_slot = if (visible.local.runtime.location) |location| location.slot else null,
                 .editable = visible.local.runtime.editable,
                 .folded_value = visible.local.folded_value,
+                .is_folded = visible.local.is_folded,
                 .scope_id = if (scope) |s| s.id else null,
                 .scope_kind = if (scope) |s| s.kind else null,
                 .function = if (scope) |s| s.function else null,
@@ -236,6 +304,20 @@ test "DebugInfo parses scope and visibility metadata" {
     const json =
         \\{
         \\  "version": 2,
+        \\  "ops": [
+        \\    {
+        \\      "idx": 7,
+        \\      "op": "add",
+        \\      "function": "foo",
+        \\      "block": "bb0",
+        \\      "is_synthetic": true,
+        \\      "synthetic_index": 1,
+        \\      "synthetic_count": 3,
+        \\      "synthetic_path": "0.2/1.3",
+        \\      "statement_id": 9,
+        \\      "origin_statement_id": 9
+        \\    }
+        \\  ],
         \\  "source_scopes": [
         \\    {
         \\      "id": 1,
@@ -271,6 +353,11 @@ test "DebugInfo parses scope and visibility metadata" {
     defer info.deinit();
 
     try std.testing.expectEqual(@as(u32, 2), info.version());
+    const op = info.getOpMetaForIdx(7).?;
+    try std.testing.expect(op.is_synthetic);
+    try std.testing.expectEqual(@as(?u32, 1), op.synthetic_index);
+    try std.testing.expectEqual(@as(?u32, 3), op.synthetic_count);
+    try std.testing.expectEqualStrings("0.2/1.3", op.synthetic_path.?);
     const visibility = info.getVisibilityForIdx(7).?;
     try std.testing.expectEqual(@as(usize, 1), visibility.visible_local_ids.len);
     const local = info.getLocalById(10).?;
@@ -318,7 +405,8 @@ test "DebugInfo parses concrete memory and transient root payloads" {
         \\          "binding_kind": null,
         \\          "storage_class": "memory",
         \\          "runtime": {"kind":"memory_field","name":"scratch","location":{"kind":"memory_root","root":"scratch","slot":0},"editable":true},
-        \\          "folded_value": "30"
+        \\          "folded_value": "30",
+        \\          "is_folded": true
         \\        },
         \\        {
         \\          "id": 11,
@@ -327,7 +415,8 @@ test "DebugInfo parses concrete memory and transient root payloads" {
         \\          "binding_kind": null,
         \\          "storage_class": "tstore",
         \\          "runtime": {"kind":"tstore_field","name":"temp_counter","location":{"kind":"tstore_root","root":"temp_counter","slot":1},"editable":true},
-        \\          "folded_value": null
+        \\          "folded_value": null,
+        \\          "is_folded": false
         \\        }
         \\      ]
         \\    }
@@ -353,6 +442,7 @@ test "DebugInfo parses concrete memory and transient root payloads" {
     try std.testing.expectEqual(@as(?u64, 0), bindings[0].runtime_location_slot);
     try std.testing.expect(bindings[0].editable);
     try std.testing.expectEqualStrings("30", bindings[0].folded_value.?);
+    try std.testing.expect(bindings[0].is_folded);
 
     try std.testing.expectEqualStrings("temp_counter", bindings[1].name);
     try std.testing.expectEqualStrings("tstore_field", bindings[1].runtime_kind);
@@ -360,4 +450,5 @@ test "DebugInfo parses concrete memory and transient root payloads" {
     try std.testing.expectEqualStrings("temp_counter", bindings[1].runtime_location_root.?);
     try std.testing.expectEqual(@as(?u64, 1), bindings[1].runtime_location_slot);
     try std.testing.expect(bindings[1].editable);
+    try std.testing.expect(!bindings[1].is_folded);
 }

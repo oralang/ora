@@ -1,0 +1,46 @@
+error OutOfBounds;
+error InvalidLength;
+/// Returns true when the byte slice has length zero.
+fn isEmpty(data: bytes) -> bool {
+    return data.len == 0;
+}
+/// Returns the byte at `index`.
+///
+/// Errors:
+/// - OutOfBounds when `index >= len(data)`
+fn at(data: bytes, index: u256) -> !u8|OutOfBounds {
+    if (index >= data.len) {
+        return OutOfBounds;
+    }
+    return data[index];
+}
+/// Compares two byte slices for byte-for-byte equality.
+fn eq(a: bytes, b: bytes) -> bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    var i: u256 = 0;
+    while (i<a.len) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+/// Decodes a 32-byte big-endian slice into a `u256`.
+///
+/// Errors:
+/// - InvalidLength when `len(data) != 32`
+fn decodeU256BE(data: bytes) -> !u256|InvalidLength {
+    if (data.len != 32) {
+        return InvalidLength;
+    }
+    var acc: u256 = 0;
+    var i: u256 = 0;
+    while (i<32) {
+        acc =(acc<<8)|@cast(u256, data[i]);
+        i += 1;
+    }
+    return acc;
+}

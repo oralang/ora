@@ -139,7 +139,14 @@ const Validator = struct {
                 }
                 try self.validateBitfieldFields(bitfield.fields);
             },
-            .Enum => |enum_item| try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'"),
+            .Enum => |enum_item| {
+                try self.validateNames(EnumVariantAdapter.init(enum_item.variants), "duplicate enum variant name '{s}'");
+                for (enum_item.variants) |variant| {
+                    if (variant.value) |value| {
+                        _ = try self.expectExpr(value, variant.range, "enum variant references invalid value expression id");
+                    }
+                }
+            },
             .Trait => |trait_item| {
                 var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
                 defer seen.deinit();
@@ -487,6 +494,18 @@ const Validator = struct {
             .Range => |range_pattern| {
                 _ = try self.expectExpr(range_pattern.start, range_pattern.range, "switch range pattern references invalid start expression id");
                 _ = try self.expectExpr(range_pattern.end, range_pattern.range, "switch range pattern references invalid end expression id");
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| {
+                    try self.validateSwitchPattern(alternative, or_pattern.range);
+                }
+            },
+            .Ok, .Err => |pattern_id| _ = try self.expectPattern(pattern_id, owner_range, "switch match pattern references invalid binding pattern id"),
+            .NamedError => |named_error| {
+                _ = try self.expectExpr(named_error.callee, owner_range, "switch named error pattern references invalid callee expression id");
+                for (named_error.bindings) |pattern_id| {
+                    _ = try self.expectPattern(pattern_id, owner_range, "switch named error pattern references invalid binding pattern id");
+                }
             },
             .Else => {},
         }

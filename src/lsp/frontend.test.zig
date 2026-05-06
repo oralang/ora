@@ -57,3 +57,26 @@ test "lsp frontend: parser error produces parser diagnostic" {
 
     try testing.expect(found_parser);
 }
+
+test "lsp frontend: reports resolution diagnostics for invalid result pseudo variable use" {
+    const source =
+        \\pub fn bad(value: u256) -> u256
+        \\    requires(result >= value)
+        \\{
+        \\    return value;
+        \\}
+    ;
+
+    var analysis = try frontend.analyzeDocument(testing.allocator, source);
+    defer analysis.deinit(testing.allocator);
+
+    var found_resolution = false;
+    for (analysis.diagnostics) |diagnostic| {
+        if (diagnostic.source == .sema and std.mem.indexOf(u8, diagnostic.message, "undefined name 'result'") != null) {
+            found_resolution = true;
+            break;
+        }
+    }
+
+    try testing.expect(found_resolution);
+}

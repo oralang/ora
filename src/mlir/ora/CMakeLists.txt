@@ -165,7 +165,8 @@ add_mlir_dialect_library(MLIROraDialectC
   lowering/OraToSIR/patterns/EVM.cpp
   lowering/OraToSIR/patterns/Logs.cpp
   lowering/OraToSIR/patterns/MissingOps.cpp
-  
+  lowering/OraToSIR/patterns/AdtCarrierHelpers.cpp
+
   PARTIAL_SOURCES_INTENDED
   
   ADDITIONAL_HEADER_DIRS

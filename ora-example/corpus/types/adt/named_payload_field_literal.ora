@@ -1,0 +1,32 @@
+// ADT named payload field literals.
+//
+// Covers out-of-declaration-order construction, structural matching by field
+// name, and rest-pattern destructuring.
+
+enum TransferEvent {
+    None,
+    Move {
+        from_account: u256,
+        to_account: u256,
+        amount: u256,
+    },
+}
+
+contract NamedPayloadFieldLiteral {
+    fn build(from_account: u256, to_account: u256, amount: u256) -> TransferEvent {
+        return TransferEvent.Move {
+            amount: amount,
+            to_account: to_account,
+            from_account: from_account,
+        };
+    }
+
+    pub fn amount(from_account: u256, to_account: u256, value: u256) -> u256
+        ensures(result == value)
+    {
+        return match (build(from_account, to_account, value)) {
+            TransferEvent.None => 0,
+            TransferEvent.Move { amount: selected, .. } => selected,
+        };
+    }
+}

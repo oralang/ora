@@ -1,7 +1,7 @@
 // SMT Summary Test: Private Helper Inlining
-// A private helper with its own requires/ensures should be inlined into
-// the caller's verification context. The caller should benefit from the
-// callee's ensures without re-proving it.
+// A private helper with its own requires/ensures should be inlined into the
+// caller's verification context. The caller should benefit from the callee's
+// effect without re-proving it.
 
 comptime const std = @import("std");
 contract PrivateHelperInline {

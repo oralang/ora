@@ -1,0 +1,37 @@
+// Trait receiver methods.
+// Covers `self` methods, intra-impl receiver calls, and ordinary value dispatch.
+
+trait Priced {
+    fn raw(self) -> u256;
+    fn with_fee(self, fee: u256) -> u256;
+}
+
+struct Quote {
+    amount: u256,
+}
+
+impl Priced for Quote {
+    fn raw(self) -> u256 {
+        return self.amount;
+    }
+
+    fn with_fee(self, fee: u256) -> u256 {
+        return self.raw() + fee;
+    }
+}
+
+fn quote(amount: u256) -> u256 {
+    let q: Quote = Quote { amount: amount };
+    return q.raw();
+}
+
+fn quote_with_fee(amount: u256, fee: u256) -> u256 {
+    let q: Quote = Quote { amount: amount };
+    return q.with_fee(fee);
+}
+
+contract TraitReceiverMethods {
+    pub fn ok() -> bool {
+        return true;
+    }
+}

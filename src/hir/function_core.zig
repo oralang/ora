@@ -22,6 +22,7 @@ const cmpPredicate = support.cmpPredicate;
 const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
+const parseIntLiteral = support.parseIntLiteral;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
@@ -30,6 +31,10 @@ const LocalIdSet = hir_locals.LocalIdSet;
 const BlockContext = support.BlockContext;
 const LoopContext = support.LoopContext;
 const SwitchContext = support.SwitchContext;
+const UnrolledLoopContext = support.UnrolledLoopContext;
+const UnrolledLoopSignal = support.UnrolledLoopSignal;
+const runtime_loop_unroll_limit = support.runtime_loop_unroll_limit;
+const runtime_total_unroll_budget = support.runtime_total_unroll_budget;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
@@ -59,6 +64,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .in_ghost_context = function.is_ghost,
                 .current_scf_carried_locals = null,
                 .block_context = null,
+                .unrolled_loop_context = null,
+                .unroll_multiplier = 1,
             };
 
             var runtime_index: usize = 0;
@@ -101,6 +108,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .in_ghost_context = false,
                 .current_scf_carried_locals = null,
                 .block_context = null,
+                .unrolled_loop_context = null,
+                .unroll_multiplier = 1,
             };
         }
 
@@ -117,9 +126,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try @This().emitGuardClauses(self, function, &self.locals);
                 for (self.extra_verification_clauses) |clause| {
                     if (clause.kind != .requires) continue;
-                    const condition = try self.lowerExpr(clause.expr, &self.locals);
+                    const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, &self.locals);
                     const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    if (clause.verification_context) |context| {
+                        mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                    }
                     appendOp(self.block, op);
                 }
                 try @This().emitExtraGuardClauses(self, &self.locals);
@@ -165,9 +177,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .ensures) continue;
-                const condition = try self.lowerExpr(clause.expr, locals);
+                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                if (clause.verification_context) |context| {
+                    mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                }
                 appendOp(self.block, ensure);
             }
         }
@@ -183,12 +198,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn emitExtraGuardClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .guard) continue;
+                var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
                 try @This().emitRuntimeGuard(self, .{
                     .range = clause.range,
                     .kind = .guard,
                     .expr = clause.expr,
-                }, locals);
+                }, &clause_locals);
             }
+        }
+
+        fn lowerExtraVerificationClauseCondition(self: *FunctionLowerer, clause: FunctionLowerer.ExtraVerificationClause, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
+            return self.lowerExpr(clause.expr, &clause_locals);
+        }
+
+        fn localsWithExtraVerificationAliases(self: *FunctionLowerer, locals: *LocalEnv, clause: FunctionLowerer.ExtraVerificationClause) anyerror!LocalEnv {
+            var clause_locals = try self.cloneLocals(locals);
+            for (clause.pattern_aliases) |alias| {
+                try clause_locals.aliasPattern(self.parent.file, alias.source, alias.target);
+            }
+            return clause_locals;
         }
 
         fn emitRuntimeGuard(self: *FunctionLowerer, clause: ast.SpecClause, locals: *LocalEnv) anyerror!void {
@@ -319,7 +348,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const start: usize = @intCast(range.start);
             const end: usize = @intCast(range.end);
             const expr_text = if (end <= source_text.len and start <= end) source_text[start..end] else "guard";
-            return std.fmt.allocPrint(self.parent.allocator, "guard failed: {s}", .{expr_text});
+            return std.fmt.allocPrint(self.parent.allocator, "guard violation path: {s}", .{expr_text});
         }
 
         fn insertParameterRefinementGuards(self: *FunctionLowerer, function: ast.FunctionItem) anyerror!void {
@@ -527,6 +556,37 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn wrapErrorValueForReturn(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const return_type = self.return_type orelse return value;
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+            if (mlir.oraTypeIsNull(success_type)) {
+                return @This().convertValueForFlow(self, value, return_type, range);
+            }
+            if (mlir.oraTypeEqual(mlir.oraValueGetType(value), return_type)) return value;
+
+            const op = mlir.oraErrorErrOpCreate(self.parent.context, self.parent.location(range), value, return_type);
+            if (mlir.oraOperationIsNull(op)) return value;
+            return appendValueOp(self.block, op);
+        }
+
+        fn returnExprIsErrorShaped(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .ErrorReturn => true,
+                .Call => |call| blk: {
+                    const callee_name = switch (self.parent.file.expression(call.callee).*) {
+                        .Name => |name| name.name,
+                        else => null,
+                    } orelse break :blk false;
+                    if (std.mem.eql(u8, callee_name, "Err")) break :blk true;
+                    if (self.parent.item_index.lookup(callee_name)) |item_id| {
+                        break :blk self.parent.file.item(item_id).* == .ErrorDecl;
+                    }
+                    break :blk false;
+                },
+                else => false,
+            };
+        }
+
         pub fn ensureDeferredReturnSlots(self: *FunctionLowerer, range: source.TextRange) anyerror!void {
             if (self.deferred_return_flag != null) return;
 
@@ -617,10 +677,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         seen_loop_control = true;
                     }
                 } else {
-                    if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
+                    if (self.block_context != null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
+                        return try @This().lowerBodySuffixGuardedOnBlockExit(self, statements[index..], locals);
+                    } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
                         if (try @This().lowerStmtGuardedOnDeferredReturn(self, statement_id, locals)) return true;
                     } else {
                         if (try self.lowerStmt(statement_id, locals)) return true;
+                    }
+                    if (analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
+                        seen_loop_control = true;
                     }
                 }
                 if (statementMayReturn(self.parent.file, statement_id)) {
@@ -628,6 +693,77 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return false;
+        }
+
+        fn lowerBodySuffixGuardedOnBlockExit(
+            self: *FunctionLowerer,
+            statements: []const ast.StmtId,
+            locals: *LocalEnv,
+        ) anyerror!bool {
+            const block_context = self.block_context orelse return @This().lowerBodyStatements(self, statements, locals);
+            const first_statement = statements[0];
+            const range = support.stmtRange(self.parent.file, first_statement);
+            const loc = self.parent.location(range);
+            const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
+            var current_block_ctx: ?*const BlockContext = block_context;
+            var should_run_value: ?mlir.MlirValue = null;
+            while (current_block_ctx) |ctx| : (current_block_ctx = ctx.parent) {
+                const exit_value = appendValueOp(self.block, blk: {
+                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, ctx.exit_flag, null, 0, boolType(self.parent.context));
+                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                    break :blk load;
+                });
+                const exit_clear = self.createCompareOp(loc, "eq", exit_value, false_value);
+                if (mlir.oraOperationIsNull(exit_clear)) return error.MlirOperationCreationFailed;
+                should_run_value = if (should_run_value) |acc|
+                    appendValueOp(self.block, blk: {
+                        const and_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, acc, appendValueOp(self.block, exit_clear));
+                        if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+                        break :blk and_op;
+                    })
+                else
+                    appendValueOp(self.block, exit_clear);
+            }
+            const should_run = should_run_value orelse return @This().lowerBodyStatements(self, statements, locals);
+
+            const result_types = if (block_context.carried_locals.len == 0)
+                null
+            else
+                (try self.buildCarriedResultTypes(locals, block_context.carried_locals)) orelse return error.MlirOperationCreationFailed;
+
+            const if_op = mlir.oraScfIfOpCreate(
+                self.parent.context,
+                loc,
+                should_run,
+                if (result_types) |types| types.items.ptr else null,
+                if (result_types) |types| types.items.len else 0,
+                true,
+            );
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            var then_lowerer = self.*;
+            then_lowerer.block = then_block;
+            then_lowerer.current_scf_carried_locals = block_context.carried_locals;
+            var then_locals = try self.cloneLocals(locals);
+            const terminated = try @This().lowerBodyStatements(&then_lowerer, statements, &then_locals);
+            if (!support.blockEndsWithTerminator(then_block)) {
+                try then_lowerer.appendScfYieldFromLocals(then_block, range, &then_locals, block_context.carried_locals);
+            }
+
+            var else_locals = try self.cloneLocals(locals);
+            if (!support.blockEndsWithTerminator(else_block)) {
+                try self.appendScfYieldFromLocals(else_block, range, &else_locals, block_context.carried_locals);
+            }
+            try FunctionLowerer.writeBackCarriedLocals(locals, block_context.carried_locals, if_op);
+            @This().annotateCarriedLocalResults(self, block_context.carried_locals, if_op);
+            return terminated;
         }
 
         fn lowerBodySuffixGuardedOnLoopContinue(
@@ -826,6 +962,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk try self.defaultValue(lowered_type, decl.range);
                     } else try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
                     try self.bindPatternValue(decl.pattern, value, locals);
+                    if (decl.value) |expr_id| {
+                        if (@This().evalKnownIntExpr(self, expr_id, locals)) |known_int| {
+                            try locals.setPatternKnownInt(self.parent.file, decl.pattern, known_int);
+                        } else if (@This().evalKnownBoolExpr(self, expr_id, locals)) |known_bool| {
+                            try locals.setPatternKnownBool(self.parent.file, decl.pattern, known_bool);
+                        } else {
+                            try locals.setPatternKnownInt(self.parent.file, decl.pattern, null);
+                            try locals.setPatternKnownBool(self.parent.file, decl.pattern, null);
+                        }
+                    }
                     return false;
                 },
                 .Return => |ret| {
@@ -834,7 +980,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (self.deferred_return_kind == .none) {
                             if (ret.value) |expr_id| {
                                 const raw_value = try self.lowerExpr(expr_id, locals);
-                                const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                                const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                                    try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                                else
+                                    try @This().wrapValueForReturn(self, raw_value, ret.range);
                                 self.current_return_value = value;
                                 defer self.current_return_value = null;
                                 if (self.function) |function| {
@@ -848,9 +997,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 }
                                 for (self.extra_verification_clauses) |clause| {
                                     if (clause.kind != .ensures) continue;
-                                    const condition = try self.lowerExpr(clause.expr, locals);
+                                    const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                                     const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                    if (clause.verification_context) |context| {
+                                        mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                                    }
                                     appendOp(self.block, ensure);
                                 }
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
@@ -877,7 +1029,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         if (ret.value) |expr_id| {
                             const raw_value = try self.lowerExpr(expr_id, locals);
-                            const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                            const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                                try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                            else
+                                try @This().wrapValueForReturn(self, raw_value, ret.range);
                             self.current_return_value = value;
                             defer self.current_return_value = null;
                             if (self.function) |function| {
@@ -891,9 +1046,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                             for (self.extra_verification_clauses) |clause| {
                                 if (clause.kind != .ensures) continue;
-                                const condition = try self.lowerExpr(clause.expr, locals);
+                                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                                if (clause.verification_context) |context| {
+                                    mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                                }
                                 appendOp(self.block, ensure);
                             }
                             if (self.deferred_return_value_slot) |slot| {
@@ -913,7 +1071,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                     if (ret.value) |expr_id| {
                         const raw_value = try self.lowerExpr(expr_id, locals);
-                        const value = try @This().wrapValueForReturn(self, raw_value, ret.range);
+                        const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                            try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
+                        else
+                            try @This().wrapValueForReturn(self, raw_value, ret.range);
                         self.current_return_value = value;
                         defer self.current_return_value = null;
                         if (self.function) |function| {
@@ -927,9 +1088,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         for (self.extra_verification_clauses) |clause| {
                             if (clause.kind != .ensures) continue;
-                            const condition = try self.lowerExpr(clause.expr, locals);
+                            const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
                             const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                             if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                            if (clause.verification_context) |context| {
+                                mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
+                            }
                             appendOp(self.block, ensure);
                         }
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
@@ -955,6 +1119,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return true;
                 },
                 .Assign => |assign| {
+                    const target_local_id = locals.resolvePatternTarget(self.parent.file, assign.target);
+                    const known_int = switch (assign.op) {
+                        .assign => @This().evalKnownIntExpr(self, assign.value, locals),
+                        .add_assign => blk: {
+                            const local_id = target_local_id orelse break :blk null;
+                            const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                            const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                            break :blk std.math.add(i64, lhs, rhs) catch null;
+                        },
+                        .sub_assign => blk: {
+                            const local_id = target_local_id orelse break :blk null;
+                            const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                            const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                            break :blk std.math.sub(i64, lhs, rhs) catch null;
+                        },
+                        else => null,
+                    };
+                    const known_bool = if (assign.op == .assign) @This().evalKnownBoolExpr(self, assign.value, locals) else null;
                     const value = switch (assign.op) {
                         .assign => try self.lowerExpr(assign.value, locals),
                         .add_assign => blk: {
@@ -1070,6 +1252,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         },
                     };
                     try self.storePattern(assign.target, value, locals);
+                    if (target_local_id) |local_id| {
+                        if (known_int) |integer| {
+                            try locals.setKnownInt(local_id, integer);
+                        } else if (known_bool) |boolean| {
+                            try locals.setKnownBool(local_id, boolean);
+                        } else {
+                            try locals.setKnownInt(local_id, null);
+                            try locals.setKnownBool(local_id, null);
+                        }
+                    }
                     return false;
                 },
                 .Expr => |expr_stmt| {
@@ -1171,6 +1363,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, false_value, block_context.continue_flag, null, 0);
                             if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, set_continue);
+                            const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                            const set_exit = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, block_context.exit_flag, null, 0);
+                            if (mlir.oraOperationIsNull(set_exit)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_exit);
                             const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                                 current_region_locals
                             else
@@ -1212,6 +1408,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         else
                             loop_context.carried_locals;
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
+                        return true;
+                    }
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label)) |unrolled_loop_context| {
+                        unrolled_loop_context.signal = .break_loop;
                         return true;
                     }
                     const op = mlir.oraBreakOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef(), null, 0);
@@ -1260,6 +1460,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, block_context.continue_flag, null, 0);
                             if (mlir.oraOperationIsNull(set_continue)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, set_continue);
+                            const set_exit = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, block_context.exit_flag, null, 0);
+                            if (mlir.oraOperationIsNull(set_exit)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, set_exit);
                             const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                                 current_region_locals
                             else
@@ -1324,6 +1527,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label)) |unrolled_loop_context| {
+                        unrolled_loop_context.signal = .continue_loop;
+                        return true;
+                    }
                     const op = mlir.oraContinueOpCreate(self.parent.context, self.parent.location(jump.range), nullStringRef());
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, op);
@@ -1356,6 +1563,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                 } else {
                     return loop_context;
+                }
+            }
+            return null;
+        }
+
+        fn findTargetUnrolledLoopContext(self: *FunctionLowerer, label: ?[]const u8) ?*UnrolledLoopContext {
+            var current = self.unrolled_loop_context;
+            while (current) |unrolled_loop_context| : (current = unrolled_loop_context.parent) {
+                if (label) |target| {
+                    if (unrolled_loop_context.label) |current_label| {
+                        if (std.mem.eql(u8, current_label, target)) return unrolled_loop_context;
+                    }
+                } else {
+                    return unrolled_loop_context;
                 }
             }
             return null;
@@ -1475,6 +1696,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, self.createCompareOp(loc, "ne", value, zero));
             }
 
+            const tuple_to_anon = try @This().convertTupleToAnonymousStruct(self, value, value_type, target_type, range);
+            if (tuple_to_anon) |converted| {
+                return converted;
+            }
+
+            const anon_to_tuple = try @This().convertAnonymousStructToTuple(self, value, value_type, target_type, range);
+            if (anon_to_tuple) |converted| {
+                return converted;
+            }
+
             if (!(value_is_int and target_is_int)) return value;
 
             const value_width = mlir.oraIntegerTypeGetWidth(value_type);
@@ -1497,6 +1728,108 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
+        }
+
+        pub fn convertValueForSemaFlow(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerSemaType(target_sema_type, range);
+            const value_type = mlir.oraValueGetType(value);
+            const converted = try @This().convertValueForFlow(self, value, target_type, range);
+            if (target_sema_type.kind() == .refinement and !mlir.oraTypeEqual(value_type, target_type)) {
+                try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate");
+            }
+            return converted;
+        }
+
+        fn convertTupleToAnonymousStruct(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            value_type: mlir.MlirType,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            const tuple_count = mlir.oraTupleTypeGetNumElements(value_type);
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(target_type);
+            if (tuple_count == 0 or field_count == 0 or tuple_count != field_count) return null;
+
+            const loc = self.parent.location(range);
+            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            defer fields.deinit(self.parent.allocator);
+
+            var index: usize = 0;
+            while (index < field_count) : (index += 1) {
+                const field_type = mlir.oraAnonymousStructTypeGetFieldType(target_type, index);
+                if (mlir.oraTypeIsNull(field_type)) return null;
+                const extract = mlir.oraTupleExtractOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    @intCast(index),
+                    field_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return null;
+                const extracted = appendValueOp(self.block, extract);
+                const converted = try @This().convertValueForFlow(self, extracted, field_type, range);
+                try fields.append(self.parent.allocator, converted);
+            }
+
+            const struct_init = mlir.oraStructInitOpCreate(
+                self.parent.context,
+                loc,
+                if (fields.items.len == 0) null else fields.items.ptr,
+                fields.items.len,
+                target_type,
+            );
+            if (mlir.oraOperationIsNull(struct_init)) return null;
+            return appendValueOp(self.block, struct_init);
+        }
+
+        fn convertAnonymousStructToTuple(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            value_type: mlir.MlirType,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            const field_count = mlir.oraAnonymousStructTypeGetFieldCount(value_type);
+            const tuple_count = mlir.oraTupleTypeGetNumElements(target_type);
+            if (field_count == 0 or tuple_count == 0 or field_count != tuple_count) return null;
+
+            const loc = self.parent.location(range);
+            var elements: std.ArrayList(mlir.MlirValue) = .{};
+            defer elements.deinit(self.parent.allocator);
+
+            var index: usize = 0;
+            while (index < field_count) : (index += 1) {
+                const field_name = mlir.oraAnonymousStructTypeGetFieldName(value_type, index);
+                const target_element_type = mlir.oraTupleTypeGetElementType(target_type, index);
+                if (field_name.data == null or mlir.oraTypeIsNull(target_element_type)) return null;
+                const extract = mlir.oraStructFieldExtractOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    field_name,
+                    target_element_type,
+                );
+                if (mlir.oraOperationIsNull(extract)) return null;
+                const extracted = appendValueOp(self.block, extract);
+                const converted = try @This().convertValueForFlow(self, extracted, target_element_type, range);
+                try elements.append(self.parent.allocator, converted);
+            }
+
+            const tuple = mlir.oraTupleCreateOpCreate(
+                self.parent.context,
+                loc,
+                if (elements.items.len == 0) null else elements.items.ptr,
+                elements.items.len,
+                target_type,
+            );
+            if (mlir.oraOperationIsNull(tuple)) return null;
+            return appendValueOp(self.block, tuple);
         }
 
         pub fn lowerPowerWithOverflow(
@@ -2224,6 +2557,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
+            if (try @This().lowerUnrolledFiniteForStmt(self, for_stmt, locals)) |terminated| {
+                return terminated;
+            }
+
             const loc = self.parent.location(for_stmt.range);
             const is_range_iterable = for_stmt.range_end != null;
             const iterable = try self.lowerExpr(for_stmt.iterable, locals);
@@ -2488,15 +2825,300 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return false;
         }
 
+        fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
+            if (for_stmt.invariants.len != 0) return null;
+
+            const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
+            if (finite_range.trip_count > runtime_loop_unroll_limit) return null;
+            if (self.unroll_multiplier > runtime_total_unroll_budget / finite_range.trip_count) return null;
+
+            var unrolled_loop_context = UnrolledLoopContext{
+                .parent = self.unrolled_loop_context,
+                .label = for_stmt.label,
+            };
+            const prev_unrolled_loop_context = self.unrolled_loop_context;
+            self.unrolled_loop_context = &unrolled_loop_context;
+            defer self.unrolled_loop_context = prev_unrolled_loop_context;
+            const prev_unroll_multiplier = self.unroll_multiplier;
+            self.unroll_multiplier *= finite_range.trip_count;
+            defer self.unroll_multiplier = prev_unroll_multiplier;
+
+            var iteration: u64 = 0;
+            var current = finite_range.start;
+            while (iteration < finite_range.trip_count) : (iteration += 1) {
+                self.parent.pushSyntheticFrame(@intCast(iteration), @intCast(finite_range.trip_count));
+                defer self.parent.popSyntheticFrame();
+
+                const loc = self.parent.location(for_stmt.range);
+                const item_value = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), current),
+                );
+                try self.bindPatternValue(for_stmt.item_pattern, item_value, locals);
+                try locals.setPatternKnownInt(self.parent.file, for_stmt.item_pattern, current);
+                if (for_stmt.index_pattern) |index_pattern| {
+                    const index_value = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), @intCast(iteration)),
+                    );
+                    try self.bindPatternValue(index_pattern, index_value, locals);
+                    try locals.setPatternKnownInt(self.parent.file, index_pattern, @intCast(iteration));
+                }
+
+                const body_terminated = try self.lowerBody(for_stmt.body, locals);
+                switch (unrolled_loop_context.signal) {
+                    .none => if (body_terminated) return true,
+                    .continue_loop => {
+                        unrolled_loop_context.signal = .none;
+                        current += 1;
+                        continue;
+                    },
+                    .break_loop => {
+                        unrolled_loop_context.signal = .none;
+                        break;
+                    },
+                }
+                current += 1;
+            }
+
+            return false;
+        }
+
+        const FiniteForRange = struct {
+            start: i64,
+            trip_count: u64,
+        };
+
+        fn finiteForRange(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *const LocalEnv) ?FiniteForRange {
+            if (for_stmt.range_end) |range_end| {
+                const start = @This().evalKnownIntExpr(self, for_stmt.iterable, locals) orelse
+                    @This().constEvalI64(self, for_stmt.iterable) orelse
+                    return null;
+                const finish = @This().evalKnownIntExpr(self, range_end, locals) orelse
+                    @This().constEvalI64(self, range_end) orelse
+                    return null;
+                if (for_stmt.range_inclusive) {
+                    if (start > finish) return .{ .start = start, .trip_count = 0 };
+                    return .{ .start = start, .trip_count = @intCast(finish - start + 1) };
+                }
+                if (start >= finish) return .{ .start = start, .trip_count = 0 };
+                return .{ .start = start, .trip_count = @intCast(finish - start) };
+            }
+
+            const trip_count = if (@This().evalKnownIntExpr(self, for_stmt.iterable, locals)) |known_trip_count|
+                std.math.cast(u64, known_trip_count) orelse return null
+            else
+                @This().constEvalU64(self, for_stmt.iterable) orelse return null;
+            return .{ .start = 0, .trip_count = trip_count };
+        }
+
+        fn constEvalI64(self: *FunctionLowerer, expr_id: ast.ExprId) ?i64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(i64) catch null,
+                else => null,
+            };
+        }
+
+        fn constEvalU64(self: *FunctionLowerer, expr_id: ast.ExprId) ?u64 {
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .integer => |integer| integer.toInt(u64) catch null,
+                else => null,
+            };
+        }
+
+        pub const KnownExprValue = union(enum) {
+            integer: i64,
+            boolean: bool,
+        };
+
+        pub fn evalKnownIntExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?i64 {
+            return switch (@This().evalKnownExprValue(self, expr_id, locals) orelse return null) {
+                .integer => |integer| integer,
+                else => null,
+            };
+        }
+
+        pub fn evalKnownBoolExpr(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?bool {
+            return switch (@This().evalKnownExprValue(self, expr_id, locals) orelse return null) {
+                .boolean => |boolean| boolean,
+                else => null,
+            };
+        }
+
+        pub fn evalKnownExprValue(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?KnownExprValue {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| .{ .integer = parseIntLiteral(literal.text) orelse return null },
+                .BoolLiteral => |literal| .{ .boolean = literal.value },
+                .Group => |group| @This().evalKnownExprValue(self, group.expr, locals),
+                .Name => |name| blk: {
+                    const local_id = locals.lookupName(name.name) orelse break :blk null;
+                    if (locals.getKnownInt(local_id)) |integer| {
+                        break :blk .{ .integer = integer };
+                    }
+                    if (locals.getKnownBool(local_id)) |boolean| {
+                        break :blk .{ .boolean = boolean };
+                    }
+                    break :blk null;
+                },
+                .Unary => |unary| blk: {
+                    const operand = @This().evalKnownExprValue(self, unary.operand, locals) orelse break :blk null;
+                    switch (unary.op) {
+                        .neg => switch (operand) {
+                            .integer => |integer| break :blk .{ .integer = std.math.negate(integer) catch return null },
+                            else => break :blk null,
+                        },
+                        .not_ => switch (operand) {
+                            .boolean => |boolean| break :blk .{ .boolean = !boolean },
+                            .integer => |integer| break :blk .{ .boolean = integer == 0 },
+                        },
+                        else => break :blk null,
+                    }
+                },
+                .Binary => |binary| blk: {
+                    const lhs = @This().evalKnownExprValue(self, binary.lhs, locals) orelse break :blk null;
+                    const rhs = @This().evalKnownExprValue(self, binary.rhs, locals) orelse break :blk null;
+                    switch (binary.op) {
+                        .add => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.add(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .sub => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.sub(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .mul => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .integer = std.math.mul(i64, lhs_int, rhs_int) catch return null },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .div => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| {
+                                    if (rhs_int == 0) break :blk null;
+                                    break :blk .{ .integer = @divTrunc(lhs_int, rhs_int) };
+                                },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .mod => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| {
+                                    if (rhs_int == 0) break :blk null;
+                                    break :blk .{ .integer = @mod(lhs_int, rhs_int) };
+                                },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .eq => break :blk switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| .{ .boolean = lhs_int == rhs_int },
+                                else => return null,
+                            },
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| .{ .boolean = lhs_bool == rhs_bool },
+                                else => return null,
+                            },
+                        },
+                        .ne => break :blk switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| .{ .boolean = lhs_int != rhs_int },
+                                else => return null,
+                            },
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| .{ .boolean = lhs_bool != rhs_bool },
+                                else => return null,
+                            },
+                        },
+                        .lt => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int < rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .le => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int <= rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .gt => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int > rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .ge => switch (lhs) {
+                            .integer => |lhs_int| switch (rhs) {
+                                .integer => |rhs_int| break :blk .{ .boolean = lhs_int >= rhs_int },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .and_and => switch (lhs) {
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| break :blk .{ .boolean = lhs_bool and rhs_bool },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        .or_or => switch (lhs) {
+                            .boolean => |lhs_bool| switch (rhs) {
+                                .boolean => |rhs_bool| break :blk .{ .boolean = lhs_bool or rhs_bool },
+                                else => break :blk null,
+                            },
+                            else => break :blk null,
+                        },
+                        else => break :blk null,
+                    }
+                },
+                else => null,
+            };
+        }
+
         fn lowerLoopInvariants(self: *FunctionLowerer, invariants: []const ast.ExprId, locals: *LocalEnv) anyerror!void {
             for (invariants) |expr_id| {
-                const value = try self.lowerExpr(expr_id, locals);
+                const InvariantInfo = struct {
+                    expr_id: ast.ExprId,
+                    label: ?[]const u8,
+                };
+                const invariant_info: InvariantInfo = switch (self.parent.file.expression(expr_id).*) {
+                    .Call => |call| blk: {
+                        if (call.args.len == 1) {
+                            const label = switch (self.parent.file.expression(call.callee).*) {
+                                .Name => |name| name.name,
+                                else => null,
+                            };
+                            break :blk .{ .expr_id = call.args[0], .label = label };
+                        }
+                        break :blk .{ .expr_id = expr_id, .label = null };
+                    },
+                    else => .{ .expr_id = expr_id, .label = null },
+                };
+                const value = try self.lowerExpr(invariant_info.expr_id, locals);
                 const op = mlir.oraInvariantOpCreate(
                     self.parent.context,
                     self.parent.location(support.exprRange(self.parent.file, expr_id)),
                     value,
                 );
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                if (invariant_info.label) |label| {
+                    mlir.oraOperationSetAttributeByName(op, strRef("ora.label"), namedStringAttr(self.parent.context, "ora.label", label).attribute);
+                }
                 appendOp(self.block, op);
             }
         }
@@ -2661,11 +3283,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn annotatePatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue) void {
             const name = patternName(self.parent.file, pattern_id) orelse return;
+            if (std.mem.eql(u8, name, "_")) return;
             @This().annotateValueName(self, name, value);
         }
 
         fn annotateLocalValue(self: *FunctionLowerer, local_id: LocalId, value: mlir.MlirValue) void {
             const name = patternName(self.parent.file, local_id) orelse return;
+            if (std.mem.eql(u8, name, "_")) return;
             @This().annotateValueName(self, name, value);
         }
 

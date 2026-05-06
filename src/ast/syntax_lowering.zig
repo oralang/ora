@@ -274,6 +274,7 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
+            const base_type = firstDirectTypeChild(node);
             var variants: std.ArrayList(EnumVariant) = .{};
 
             var it = node.children();
@@ -289,6 +290,8 @@ pub fn mixin(Builder: type) type {
                         try variants.append(self.allocator, .{
                             .range = variant_node.range(),
                             .name = if (token) |name_token| tokenText(name_token) else "",
+                            .payload = try Lowering.lowerEnumVariantPayloadNode(self, variant_node),
+                            .value = try Lowering.lowerEnumVariantValueExpr(self, variant_node),
                         });
                     },
                 }
@@ -299,8 +302,66 @@ pub fn mixin(Builder: type) type {
                 .name = name,
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
+                .base_type = if (base_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
                 .variants = try variants.toOwnedSlice(self.allocator),
             } });
+        }
+
+        fn lowerEnumVariantPayloadNode(self: *Builder, node: SyntaxNode) !nodes.EnumVariantPayload {
+            var named_fields: std.ArrayList(nodes.EnumVariantPayloadField) = .{};
+            var positional_types: std.ArrayList(TypeExprId) = .{};
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |child_node| {
+                        if (child_node.kind() == .AnonymousStructField) {
+                            const field_name_token = nthDirectIdentifierLikeToken(child_node, 0) orelse {
+                                _ = try Lowering.malformedType(self, child_node, "missing enum variant payload field name");
+                                continue;
+                            };
+                            const field_type = firstDirectTypeChild(child_node) orelse {
+                                _ = try Lowering.malformedType(self, child_node, "missing enum variant payload field type");
+                                continue;
+                            };
+                            try named_fields.append(self.allocator, .{
+                                .range = child_node.range(),
+                                .name = tokenText(field_name_token),
+                                .type_expr = try Lowering.lowerTypeNode(self, field_type),
+                            });
+                        } else if (isTypeKind(child_node.kind())) {
+                            try positional_types.append(self.allocator, try Lowering.lowerTypeNode(self, child_node));
+                        }
+                    },
+                }
+            }
+
+            if (named_fields.items.len != 0) {
+                return .{ .named = try named_fields.toOwnedSlice(self.allocator) };
+            }
+            if (positional_types.items.len != 0) {
+                return .{ .positional = try positional_types.toOwnedSlice(self.allocator) };
+            }
+            return .none;
+        }
+
+        fn lowerEnumVariantValueExpr(self: *Builder, node: SyntaxNode) !?nodes.EnumVariantValue {
+            var saw_equal = false;
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .node => |child_node| {
+                        if (saw_equal and isExprKind(child_node.kind())) return try Lowering.lowerExpressionNode(self, child_node);
+                    },
+                    .token => |token| {
+                        if (token.kind() == .Equal) {
+                            saw_equal = true;
+                        }
+                    },
+                }
+            }
+            return null;
         }
 
         fn lowerTraitItemNode(self: *Builder, node: SyntaxNode) !ItemId {
@@ -615,6 +676,7 @@ pub fn mixin(Builder: type) type {
                 .WhileStmt => Lowering.lowerWhileStmtNode(self, node),
                 .ForStmt => Lowering.lowerForStmtNode(self, node),
                 .SwitchStmt => Lowering.lowerSwitchStmtNode(self, node),
+                .MatchStmt => Lowering.lowerSwitchStmtNode(self, node),
                 .TryStmt => Lowering.lowerTryStmtNode(self, node),
                 .LogStmt => Lowering.lowerLogStmtNode(self, node),
                 .LockStmt => Lowering.lowerLockStmtNode(self, node),
@@ -738,11 +800,7 @@ pub fn mixin(Builder: type) type {
                     .token => {},
                     .node => |child_node| {
                         if (child_node.kind() != .InvariantClause) continue;
-                        if (firstDirectExprChild(child_node)) |expr_node| {
-                            try invariants.append(self.allocator, try Lowering.lowerExpressionNode(self, expr_node));
-                        } else {
-                            try invariants.append(self.allocator, try Lowering.malformedExpr(self, child_node, "missing invariant expression"));
-                        }
+                        try invariants.append(self.allocator, try Lowering.lowerInvariantExprNode(self, child_node));
                     },
                 }
             }
@@ -828,7 +886,14 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerSwitchPatternNode(self: *Builder, node: SyntaxNode) !SwitchPattern {
+            if (try Lowering.lowerOrSwitchPatternNode(self, node)) |pattern| return pattern;
+            if (try Lowering.lowerMatchConstructorPatternNode(self, node)) |pattern| return pattern;
             return switch (node.kind()) {
+                .NameExpr => blk: {
+                    const token = firstDirectTokenOfKind(node, .Identifier) orelse break :blk .{ .Expr = try Lowering.lowerExpressionNode(self, node) };
+                    if (!std.mem.eql(u8, tokenText(token), "_")) break :blk .{ .Expr = try Lowering.lowerExpressionNode(self, node) };
+                    break :blk .{ .Else = token.range() };
+                },
                 .RangeExpr => .{ .Range = try Lowering.lowerRangePatternNode(self, node) },
                 .ErrorExpr => blk: {
                     const token = firstToken(node) orelse break :blk .{ .Expr = try Lowering.malformedExpr(self, node, "missing switch else token") };
@@ -837,6 +902,110 @@ pub fn mixin(Builder: type) type {
                 },
                 else => .{ .Expr = try Lowering.lowerExpressionNode(self, node) },
             };
+        }
+
+        fn lowerOrSwitchPatternNode(self: *Builder, node: SyntaxNode) anyerror!?SwitchPattern {
+            if (node.kind() != .BinaryExpr) return null;
+            const op_token = firstDirectToken(node) orelse return null;
+            if (op_token.kind() != .Pipe) return null;
+            const lhs_node = nthDirectNode(node, 0) orelse return null;
+            const rhs_node = nthDirectNode(node, 1) orelse return null;
+
+            var alternatives: std.ArrayList(SwitchPattern) = .{};
+            defer alternatives.deinit(self.allocator);
+            try Lowering.appendOrSwitchPatternAlternative(self, lhs_node, &alternatives);
+            try Lowering.appendOrSwitchPatternAlternative(self, rhs_node, &alternatives);
+            return .{ .Or = .{
+                .range = node.range(),
+                .alternatives = try alternatives.toOwnedSlice(self.allocator),
+            } };
+        }
+
+        fn appendOrSwitchPatternAlternative(self: *Builder, node: SyntaxNode, alternatives: *std.ArrayList(SwitchPattern)) anyerror!void {
+            if (try Lowering.lowerOrSwitchPatternNode(self, node)) |pattern| {
+                try alternatives.appendSlice(self.allocator, pattern.Or.alternatives);
+                return;
+            }
+            try alternatives.append(self.allocator, try Lowering.lowerSwitchPatternNode(self, node));
+        }
+
+        fn lowerMatchConstructorPatternNode(self: *Builder, node: SyntaxNode) !?SwitchPattern {
+            if (node.kind() == .StructLiteral) {
+                return try Lowering.lowerStructMatchConstructorPatternNode(self, node);
+            }
+            if (node.kind() != .CallExpr) return null;
+
+            const callee_node = nthDirectNode(node, 0) orelse return null;
+            const callee_expr = try Lowering.lowerExpressionNode(self, callee_node);
+            const ctor_name = switch (Support.exprRef(self, callee_expr).*) {
+                .Name => |name| name.name,
+                .Field => null,
+                else => return null,
+            };
+
+            var bindings: std.ArrayList(PatternId) = .{};
+            defer bindings.deinit(self.allocator);
+
+            var arg_index: usize = 1;
+            while (nthDirectNode(node, arg_index)) |binding_node| : (arg_index += 1) {
+                if (binding_node.kind() != .NameExpr) return null;
+                const token = firstDirectToken(binding_node) orelse return null;
+                try bindings.append(self.allocator, try Support.pushPattern(self, .{ .Name = .{
+                    .range = binding_node.range(),
+                    .name = tokenText(token),
+                } }));
+            }
+
+            if (ctor_name != null and std.mem.eql(u8, ctor_name.?, "Ok")) {
+                if (bindings.items.len != 1) return null;
+                return .{ .Ok = bindings.items[0] };
+            }
+            if (ctor_name != null and std.mem.eql(u8, ctor_name.?, "Err")) {
+                if (bindings.items.len != 1) return null;
+                return .{ .Err = bindings.items[0] };
+            }
+            if (bindings.items.len == 0) return null;
+            return .{ .NamedError = .{
+                .range = node.range(),
+                .callee = callee_expr,
+                .bindings = try self.allocator.dupe(PatternId, bindings.items),
+            } };
+        }
+
+        fn lowerStructMatchConstructorPatternNode(self: *Builder, node: SyntaxNode) !?SwitchPattern {
+            const callee_node = nthDirectNode(node, 0) orelse return null;
+            const callee_expr = try Lowering.lowerExpressionNode(self, callee_node);
+            switch (Support.exprRef(self, callee_expr).*) {
+                .Field => {},
+                else => return null,
+            }
+
+            var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            defer fields.deinit(self.allocator);
+            var has_rest = false;
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => |token| {
+                        if (token.kind() == .DotDot) has_rest = true;
+                    },
+                    .node => |field_node| {
+                        if (field_node.kind() != .DestructuringField) continue;
+                        try fields.append(self.allocator, try Lowering.lowerDestructuringFieldNode(self, field_node));
+                    },
+                }
+            }
+            const destructure = try Support.pushPattern(self, .{ .StructDestructure = .{
+                .range = node.range(),
+                .fields = try fields.toOwnedSlice(self.allocator),
+                .has_rest = has_rest,
+            } });
+            return .{ .NamedError = .{
+                .range = node.range(),
+                .callee = callee_expr,
+                .bindings = try self.allocator.dupe(PatternId, &[_]PatternId{destructure}),
+            } };
         }
 
         fn lowerRangePatternNode(self: *Builder, node: SyntaxNode) !nodes.RangeSwitchPattern {
@@ -1012,10 +1181,13 @@ pub fn mixin(Builder: type) type {
 
         fn lowerDestructuringPatternNode(self: *Builder, node: SyntaxNode) !PatternId {
             var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            var has_rest = false;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
-                    .token => {},
+                    .token => |token| {
+                        if (token.kind() == .DotDot) has_rest = true;
+                    },
                     .node => |field_node| {
                         if (field_node.kind() != .DestructuringField) continue;
                         try fields.append(self.allocator, try Lowering.lowerDestructuringFieldNode(self, field_node));
@@ -1025,6 +1197,7 @@ pub fn mixin(Builder: type) type {
             return Support.pushPattern(self, .{ .StructDestructure = .{
                 .range = node.range(),
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .has_rest = has_rest,
             } });
         }
 
@@ -1103,6 +1276,9 @@ pub fn mixin(Builder: type) type {
             if (firstDirectChildOfKind(node, .SwitchStmt)) |switch_node| {
                 return Lowering.lowerSwitchStmtNodeWithLabel(self, switch_node, tokenText(label_token));
             }
+            if (firstDirectChildOfKind(node, .MatchStmt)) |match_node| {
+                return Lowering.lowerSwitchStmtNodeWithLabel(self, match_node, tokenText(label_token));
+            }
             const body_node = firstDirectChildOfKind(node, .Body) orelse return Lowering.malformedStmt(self, node, "missing labeled block body");
             return Support.pushStmt(self, .{ .LabeledBlock = .{
                 .range = node.range(),
@@ -1126,6 +1302,7 @@ pub fn mixin(Builder: type) type {
                 .ArrayLiteral => Lowering.lowerArrayLiteralExprNode(self, node),
                 .StructLiteral => Lowering.lowerStructLiteralExprNode(self, node),
                 .SwitchExpr => Lowering.lowerSwitchExprNode(self, node),
+                .MatchExpr => Lowering.lowerSwitchExprNode(self, node),
                 .ExternalProxyExpr => Lowering.lowerExternalProxyExprNode(self, node),
                 .QuantifiedExpr => Lowering.lowerQuantifiedExprNode(self, node),
                 .OldExpr => Lowering.lowerOldExprNode(self, node),
@@ -1349,6 +1526,10 @@ pub fn mixin(Builder: type) type {
                 .Name => |name| name.name,
                 .TypeValue => |type_value| Lowering.typeValueBaseName(self, type_value.type_expr),
                 .Group => |group| Lowering.structLiteralTypeName(self, group.expr),
+                .Field => |field| blk: {
+                    const base = Lowering.structLiteralTypeName(self, field.base) orelse break :blk null;
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ base, field.name }) catch null;
+                },
                 .Call => |call| blk: {
                     const generic_type = Lowering.callStyleGenericTypeExpr(self, call) catch break :blk null;
                     if (generic_type) |type_expr| break :blk Lowering.typeValueBaseName(self, type_expr);
@@ -1594,15 +1775,15 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerPathTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            const token = firstToken(node) orelse return Lowering.malformedType(self, node, "missing type name");
+            const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing type name");
             return Support.pushTypeExpr(self, .{ .Path = .{
                 .range = node.range(),
-                .name = tokenText(token),
+                .name = name,
             } });
         }
 
         fn lowerGenericTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            const name_token = firstToken(node) orelse return Lowering.malformedType(self, node, "missing generic type name");
+            const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing generic type name");
             var args: std.ArrayList(TypeArg) = .{};
             var it = node.children();
             while (it.next()) |child| {
@@ -1621,7 +1802,7 @@ pub fn mixin(Builder: type) type {
             }
             return Support.pushTypeExpr(self, .{ .Generic = .{
                 .range = node.range(),
-                .name = tokenText(name_token),
+                .name = name,
                 .args = try args.toOwnedSlice(self.allocator),
             } });
         }
@@ -1793,16 +1974,28 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerContractInvariantNode(self: *Builder, node: SyntaxNode) !ExprId {
-            const expr_node = firstDirectExprChild(node) orelse return Lowering.malformedExpr(self, node, "missing contract invariant expression");
-            if (expr_node.kind() == .CallExpr) {
-                const callee_node = nthDirectNode(expr_node, 0);
-                const arg0 = nthDirectNode(expr_node, 1);
-                const arg1 = nthDirectNode(expr_node, 2);
+            return Lowering.lowerInvariantExprNode(self, node);
+        }
+
+        fn lowerInvariantExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            const expr0 = nthDirectExprChild(node, 0) orelse return Lowering.malformedExpr(self, node, "missing invariant expression");
+            const expr1 = nthDirectExprChild(node, 1);
+            const expr2 = nthDirectExprChild(node, 2);
+
+            if (expr0.kind() == .CallExpr) {
+                const callee_node = nthDirectNode(expr0, 0);
+                const arg0 = nthDirectNode(expr0, 1);
+                const arg1 = nthDirectNode(expr0, 2);
                 if (callee_node != null and callee_node.?.kind() == .NameExpr and arg0 != null and arg1 == null) {
                     return Lowering.lowerExpressionNode(self, arg0.?);
                 }
             }
-            return Lowering.lowerExpressionNode(self, expr_node);
+
+            if (expr0.kind() == .NameExpr and expr1 != null and expr2 == null) {
+                return Lowering.lowerExpressionNode(self, expr1.?);
+            }
+
+            return Lowering.lowerExpressionNode(self, expr0);
         }
 
         fn lowerSpecClauseNode(self: *Builder, node: SyntaxNode) !nodes.SpecClause {
@@ -1922,6 +2115,7 @@ fn isExprKind(kind: SyntaxKind) bool {
         .ArrayLiteral,
         .StructLiteral,
         .SwitchExpr,
+        .MatchExpr,
         .ExternalProxyExpr,
         .QuantifiedExpr,
         .OldExpr,
@@ -2239,9 +2433,31 @@ fn tokenText(token: SyntaxToken) []const u8 {
     return token.text();
 }
 
+fn qualifiedTypeName(self: anytype, node: SyntaxNode) ?[]const u8 {
+    var parts: std.ArrayList([]const u8) = .{};
+    defer parts.deinit(self.allocator);
+
+    var it = node.children();
+    while (it.next()) |child| {
+        switch (child) {
+            .node => break,
+            .token => |token| switch (token.kind()) {
+                .Dot => {},
+                .Less, .LeftParen => break,
+                else => if (isIdentifierLike(token.kind())) {
+                    parts.append(self.allocator, tokenText(token)) catch return null;
+                },
+            },
+        }
+    }
+
+    if (parts.items.len == 0) return null;
+    return std.mem.join(self.allocator, ".", parts.items) catch null;
+}
+
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

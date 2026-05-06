@@ -1,0 +1,37 @@
+// Trait implementation conformance.
+// Shows a concrete type implementing multiple receiver methods.
+
+trait LedgerView {
+    fn total(self) -> u256;
+    fn empty(self) -> bool;
+}
+
+struct Ledger {
+    supply: u256,
+}
+
+impl LedgerView for Ledger {
+    fn total(self) -> u256 {
+        return self.supply;
+    }
+
+    fn empty(self) -> bool {
+        return self.total() == 0;
+    }
+}
+
+fn read_total(supply: u256) -> u256 {
+    let ledger: Ledger = Ledger { supply: supply };
+    return ledger.total();
+}
+
+fn is_empty(supply: u256) -> bool {
+    let ledger: Ledger = Ledger { supply: supply };
+    return ledger.empty();
+}
+
+contract TraitImplConformance {
+    pub fn ok() -> bool {
+        return true;
+    }
+}

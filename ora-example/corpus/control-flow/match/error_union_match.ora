@@ -1,0 +1,30 @@
+comptime const std = @import("std");
+error Failure;
+pub contract MatchExample {
+    pub fn make(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+    pub fn probe(flag: bool, value: u256) -> u256
+    requires(value<std.constants.U256_MAX)
+    {
+        return match(make(flag, value)) {
+            Ok(inner) -> inner,
+            Err(err) -> 0,
+        };
+    }
+    pub fn fallback(flag: bool, value: u256) -> u256 {
+        return match(make(flag, value)) {
+            Ok(inner) -> inner,
+            Err(err) -> 0,
+        };
+    }
+    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        return match(value) {
+            Ok(inner) -> inner,
+            Err(err) -> 0,
+        };
+    }
+}

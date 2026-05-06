@@ -11,12 +11,16 @@ pub const LocalEnv = struct {
     allocator: std.mem.Allocator,
     visible_names: std.StringHashMap(LocalId),
     values: std.AutoHashMap(LocalId, mlir.MlirValue),
+    known_ints: std.AutoHashMap(LocalId, i64),
+    known_bools: std.AutoHashMap(LocalId, bool),
 
     pub fn init(allocator: std.mem.Allocator) LocalEnv {
         return .{
             .allocator = allocator,
             .visible_names = std.StringHashMap(LocalId).init(allocator),
             .values = std.AutoHashMap(LocalId, mlir.MlirValue).init(allocator),
+            .known_ints = std.AutoHashMap(LocalId, i64).init(allocator),
+            .known_bools = std.AutoHashMap(LocalId, bool).init(allocator),
         };
     }
 
@@ -33,6 +37,16 @@ pub const LocalEnv = struct {
             try env_clone.values.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        var known_it = self.known_ints.iterator();
+        while (known_it.next()) |entry| {
+            try env_clone.known_ints.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var known_bool_it = self.known_bools.iterator();
+        while (known_bool_it.next()) |entry| {
+            try env_clone.known_bools.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
         return env_clone;
     }
 
@@ -47,6 +61,8 @@ pub const LocalEnv = struct {
                 const binding = bindingRefFromPattern(file, pattern_id) orelse return;
                 try self.visible_names.put(binding.name, binding.id);
                 try self.values.put(binding.id, value);
+                _ = self.known_ints.remove(binding.id);
+                _ = self.known_bools.remove(binding.id);
             },
         }
     }
@@ -65,6 +81,25 @@ pub const LocalEnv = struct {
         }
     }
 
+    pub fn aliasPattern(self: *LocalEnv, file: *const ast.AstFile, source_pattern: ast.PatternId, target_pattern: ast.PatternId) !void {
+        const source = bindingRefFromPattern(file, source_pattern) orelse return;
+        const target = bindingRefFromPattern(file, target_pattern) orelse return;
+        try self.visible_names.put(source.name, source.id);
+        if (self.values.get(target.id)) |value| {
+            try self.values.put(source.id, value);
+        }
+        if (self.known_ints.get(target.id)) |known_int| {
+            try self.known_ints.put(source.id, known_int);
+        } else {
+            _ = self.known_ints.remove(source.id);
+        }
+        if (self.known_bools.get(target.id)) |known_bool| {
+            try self.known_bools.put(source.id, known_bool);
+        } else {
+            _ = self.known_bools.remove(source.id);
+        }
+    }
+
     pub fn lookupName(self: *const LocalEnv, name: []const u8) ?LocalId {
         return self.visible_names.get(name);
     }
@@ -77,9 +112,65 @@ pub const LocalEnv = struct {
         return self.values.get(local_id);
     }
 
+    pub fn getKnownInt(self: *const LocalEnv, local_id: LocalId) ?i64 {
+        return self.known_ints.get(local_id);
+    }
+
+    pub fn getKnownBool(self: *const LocalEnv, local_id: LocalId) ?bool {
+        return self.known_bools.get(local_id);
+    }
+
+    pub fn setKnownInt(self: *LocalEnv, local_id: LocalId, known_int: ?i64) !void {
+        if (known_int) |integer| {
+            try self.known_ints.put(local_id, integer);
+            _ = self.known_bools.remove(local_id);
+        } else {
+            _ = self.known_ints.remove(local_id);
+        }
+    }
+
+    pub fn setKnownBool(self: *LocalEnv, local_id: LocalId, known_bool: ?bool) !void {
+        if (known_bool) |boolean| {
+            try self.known_bools.put(local_id, boolean);
+            _ = self.known_ints.remove(local_id);
+        } else {
+            _ = self.known_bools.remove(local_id);
+        }
+    }
+
     pub fn setValue(self: *LocalEnv, local_id: LocalId, value: mlir.MlirValue) !void {
         if (!self.values.contains(local_id)) return error.UnknownLocalId;
         try self.values.put(local_id, value);
+        _ = self.known_ints.remove(local_id);
+        _ = self.known_bools.remove(local_id);
+    }
+
+    pub fn setPatternKnownInt(self: *LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId, known_int: ?i64) !void {
+        switch (file.pattern(pattern_id).*) {
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.setPatternKnownInt(file, field.binding, null);
+                }
+            },
+            else => {
+                const binding = bindingRefFromPattern(file, pattern_id) orelse return;
+                try self.setKnownInt(binding.id, known_int);
+            },
+        }
+    }
+
+    pub fn setPatternKnownBool(self: *LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId, known_bool: ?bool) !void {
+        switch (file.pattern(pattern_id).*) {
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.setPatternKnownBool(file, field.binding, null);
+                }
+            },
+            else => {
+                const binding = bindingRefFromPattern(file, pattern_id) orelse return;
+                try self.setKnownBool(binding.id, known_bool);
+            },
+        }
     }
 
     pub fn resolvePatternTarget(self: *const LocalEnv, file: *const ast.AstFile, pattern_id: ast.PatternId) ?LocalId {
@@ -99,7 +190,7 @@ pub const LocalEnv = struct {
 
     fn bindingRefFromPattern(file: *const ast.AstFile, pattern_id: ast.PatternId) ?BindingRef {
         return switch (file.pattern(pattern_id).*) {
-            .Name => |name| .{ .id = pattern_id, .name = name.name },
+            .Name => |name| if (std.mem.eql(u8, name.name, "_")) null else .{ .id = pattern_id, .name = name.name },
             else => null,
         };
     }

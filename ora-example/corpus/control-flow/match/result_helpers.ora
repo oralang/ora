@@ -1,0 +1,34 @@
+comptime const std = @import("std");
+
+error Failure();
+pub contract ResultHelpers {
+    fn choose_u256(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+
+    fn choose_bytes(flag: bool, value: bytes) -> Result<bytes, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+
+    pub fn describe(flag: bool, value: u256) -> u256 {
+        let maybe = choose_u256(flag, value);
+        let ok = std.result.is_ok(maybe);
+        let err = std.result.is_err(maybe);
+        let base = std.result.unwrap_or(maybe, 11);
+        if (ok and !err) {
+            return base;
+        }
+        return 0;
+    }
+
+    pub fn bytes_or_self(flag: bool, value: bytes) -> bytes {
+        let maybe = choose_bytes(flag, value);
+        return std.result.unwrap_or(maybe, value);
+    }
+}

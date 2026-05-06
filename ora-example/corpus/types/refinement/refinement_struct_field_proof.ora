@@ -1,0 +1,15 @@
+// Refinement facts attached to struct fields should remain usable after
+// construction and field extraction.
+
+struct Box {
+    value: MinValue<u256, 10>,
+}
+
+contract RefinementStructFieldProof {
+    pub fn build(raw: MinValue<u256, 10>) -> u256
+        ensures(result >= 10)
+    {
+        let box = Box { value: raw };
+        return box.value;
+    }
+}

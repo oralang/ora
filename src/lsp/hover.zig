@@ -66,8 +66,23 @@ fn formatSignatureAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]
             std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
         .struct_decl => std.fmt.allocPrint(allocator, "struct {s}", .{symbol.name}),
         .bitfield_decl => std.fmt.allocPrint(allocator, "bitfield {s}", .{symbol.name}),
-        .enum_decl => std.fmt.allocPrint(allocator, "enum {s}", .{symbol.name}),
-        .enum_member => std.fmt.allocPrint(allocator, "enum member {s}", .{symbol.name}),
+        .enum_decl => if (symbol.detail) |detail|
+            std.fmt.allocPrint(allocator, "enum {s}{s}", .{ symbol.name, detail })
+        else
+            std.fmt.allocPrint(allocator, "enum {s}", .{symbol.name}),
+        .enum_member => if (symbol.detail) |detail|
+            std.fmt.allocPrint(allocator, "enum member {s}{s}", .{ symbol.name, detail })
+        else
+            std.fmt.allocPrint(allocator, "enum member {s}", .{symbol.name}),
+        .trait_decl => std.fmt.allocPrint(allocator, "trait {s}", .{symbol.name}),
+        .impl_decl => if (symbol.detail) |detail|
+            std.fmt.allocPrint(allocator, "{s} {s}", .{ symbol.name, detail })
+        else
+            std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
+        .type_alias => if (symbol.detail) |detail|
+            std.fmt.allocPrint(allocator, "type {s} = {s}", .{ symbol.name, detail })
+        else
+            std.fmt.allocPrint(allocator, "type {s}", .{symbol.name}),
         .event => if (symbol.detail) |detail|
             std.fmt.allocPrint(allocator, "log {s}{s}", .{ symbol.name, detail })
         else
@@ -127,13 +142,14 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "struct", "Declares a named struct type." },
     .{ "enum", "Declares an enumeration type." },
     .{ "bitfield", "Declares a packed bitfield type for efficient storage." },
+    .{ "type", "Declares a type alias." },
     .{ "fn", "Declares a function." },
     .{ "pub", "Makes a declaration publicly visible." },
     .{ "let", "Declares an immutable local binding." },
     .{ "var", "Declares a mutable variable." },
     .{ "const", "Declares a compile-time constant." },
     .{ "storage", "Storage qualifier — persists on-chain between calls." },
-    .{ "transient", "Transient storage qualifier — cleared after each transaction." },
+    .{ "tstore", "Transient storage qualifier — cleared after each transaction." },
     .{ "memory", "Memory qualifier — temporary data within a call." },
     .{ "import", "Imports declarations from another module." },
     .{ "log", "Declares an event (emits an EVM log)." },
@@ -146,6 +162,7 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "while", "Loop that repeats while a condition holds." },
     .{ "for", "Iterates over a range or collection." },
     .{ "switch", "Multi-way branch on a value." },
+    .{ "match", "Pattern match over values, enums, and Result/error unions." },
     .{ "return", "Returns a value from the current function." },
     .{ "break", "Exits the innermost loop." },
     .{ "continue", "Skips to the next iteration of the innermost loop." },
@@ -161,6 +178,9 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "havoc", "Assigns an arbitrary value for verification." },
     .{ "old", "Refers to the pre-state value of an expression in postconditions." },
     .{ "result", "Refers to the return value in postconditions." },
+    .{ "modifies", "Declares state locations a function may modify." },
+    .{ "decreases", "Declares a decreasing termination measure." },
+    .{ "increases", "Declares an increasing termination measure." },
     .{ "forall", "Universal quantifier — for all values satisfying a predicate." },
     .{ "exists", "Existential quantifier — there exists a value satisfying a predicate." },
     .{ "where", "Type constraint or refinement clause." },
@@ -168,6 +188,9 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "true", "Boolean literal `true`." },
     .{ "false", "Boolean literal `false`." },
     .{ "self", "Refers to the current contract instance." },
+    .{ "call", "Declares or invokes a state-changing external call." },
+    .{ "staticcall", "Declares or invokes a read-only external call." },
+    .{ "errors", "Declares the closed error set an extern trait method may return." },
 });
 
 fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {

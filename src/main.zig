@@ -40,6 +40,9 @@ const MlirOptions = struct {
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
     verify_stats: bool = false,
+    explain_cores: bool = false,
+    z3_proofs: bool = false,
+    minimize_cores: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -52,6 +55,7 @@ const MlirOptions = struct {
     cpp_lowering_stub: bool = false,
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
+    suppress_artifact_logs: bool = false,
     metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -101,6 +105,22 @@ const DebugCliOptions = struct {
     arg_values: std.ArrayList([]const u8),
     calldata_hex: ?[]const u8 = null,
     verify_requested: bool = false,
+    /// Headless mode: emit debug artifacts but skip launching the TUI.
+    /// Used by debug-artifact regression tests and for offline artifact
+    /// generation that ships traces to another engineer.
+    no_tui: bool = false,
+    /// Launch the DAP server (`ora-evm-debug-dap`) instead of the
+    /// TUI. The server reads Content-Length-framed JSON-RPC over
+    /// stdio; suitable for piping to a DAP-aware editor (VS Code
+    /// launch.json, etc.). Mutually exclusive with --no-tui.
+    dap: bool = false,
+    /// Limit overrides forwarded verbatim to ora-evm-debug-tui. Stored as
+    /// the raw text so we can re-emit them onto the spawned argv without
+    /// any (re)formatting drift.
+    gas_limit: ?[]const u8 = null,
+    max_steps: ?[]const u8 = null,
+    deploy_step_cap: ?[]const u8 = null,
+    artifact_max_bytes: ?[]const u8 = null,
 
     fn init() DebugCliOptions {
         return .{
@@ -219,9 +239,46 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
             opts.verify_requested = true;
         }
 
+        if (std.mem.eql(u8, arg, "--no-tui")) {
+            opts.no_tui = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dap")) {
+            opts.dap = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--gas-limit")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.gas_limit = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--max-steps")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.max_steps = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.deploy_step_cap = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.artifact_max_bytes = args[i + 1];
+            i += 2;
+            continue;
+        }
+
         try opts.filtered_args.append(allocator, arg);
         i += 1;
     }
+
+    if (opts.dap and opts.no_tui) return error.InvalidDebugOptions;
 
     return opts;
 }
@@ -378,6 +435,9 @@ pub fn main() !void {
     const verify_calls: ?bool = parsed.verify_calls;
     const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
+    const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
+    const z3_proofs: bool = parsed.z3_proofs;
+    const minimize_cores: bool = parsed.minimize_cores;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -481,6 +541,9 @@ pub fn main() !void {
         .verify_calls = verify_calls,
         .verify_state = verify_state,
         .verify_stats = verify_stats,
+        .explain_cores = explain_cores,
+        .z3_proofs = z3_proofs,
+        .minimize_cores = minimize_cores,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -515,6 +578,23 @@ pub fn main() !void {
             debug_mlir_options.emit_smt_report = false;
         }
 
+        // --dap skips the artifact pipeline so that nothing
+        // unframed lands on stdout — the DAP server's stdio is
+        // a JSON-RPC channel, and a stray "Bytecode saved to ..."
+        // line ahead of the first Content-Length header would
+        // corrupt the stream. The expected flow:
+        //
+        //     ora debug --no-tui foo.ora -o artifacts/foo
+        //     # then in your DAP client (VS Code launch.json,
+        //     # etc.), spawn `ora-evm-debug-dap` and send a
+        //     # `launch` request with the artifact paths.
+        //
+        // `ora debug --dap` itself just spawns the server.
+        if (debug_options.dap) {
+            try launchDebuggerDap(allocator);
+            return;
+        }
+
         const artifact_root = try runDebugArtifacts(
             allocator,
             file_path,
@@ -524,17 +604,25 @@ pub fn main() !void {
         );
         defer allocator.free(artifact_root);
 
-        try launchDebuggerTui(
-            allocator,
-            file_path,
-            artifact_root,
-            debug_options.init_signature,
-            debug_options.init_arg_values.items,
-            debug_options.init_calldata_hex,
-            debug_options.signature,
-            debug_options.arg_values.items,
-            debug_options.calldata_hex,
-        );
+        if (debug_options.no_tui) return;
+
+        {
+            try launchDebuggerTui(
+                allocator,
+                file_path,
+                artifact_root,
+                debug_options.init_signature,
+                debug_options.init_arg_values.items,
+                debug_options.init_calldata_hex,
+                debug_options.signature,
+                debug_options.arg_values.items,
+                debug_options.calldata_hex,
+                debug_options.gas_limit,
+                debug_options.max_steps,
+                debug_options.deploy_step_cap,
+                debug_options.artifact_max_bytes,
+            );
+        }
         return;
     }
 
@@ -823,6 +911,7 @@ fn runBuildArtifacts(
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
+    build_mlir_options.suppress_artifact_logs = true;
     var verification_failed = false;
     const build_emit_result = runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options, build_mlir_options.debug_enabled);
     build_emit_result catch |err| switch (err) {
@@ -846,9 +935,6 @@ fn runBuildArtifacts(
     defer allocator.free(ora_mlir_file);
     try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
 
-    try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
-    try stdout.flush();
-
     // Reorganize generated outputs under stable subfolders only after a successful
     // verification/build run. Verification failures intentionally stop before
     // OraToSIR and bytecode emission, so these artifacts do not exist yet.
@@ -860,10 +946,60 @@ fn runBuildArtifacts(
     defer allocator.free(hex_file);
     try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
 
+    const source_map_file = try std.fmt.allocPrint(allocator, "{s}.sourcemap.json", .{stem});
+    defer allocator.free(source_map_file);
+    try moveArtifactFileIfExists(allocator, artifact_root, source_map_file, bin_dir);
+
     const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
     defer allocator.free(sir_mlir_file);
     try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+
+    try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
+    try stdout.flush();
     build_succeeded = true;
+}
+
+fn printBuildArtifactSummary(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    artifact_root: []const u8,
+    stem: []const u8,
+    bin_dir: []const u8,
+    sir_dir: []const u8,
+    verify_dir: []const u8,
+    mlir_dir: []const u8,
+) !void {
+    const bytecode_path = try pathJoinWithStem(allocator, bin_dir, stem, ".hex");
+    defer allocator.free(bytecode_path);
+
+    const source_map_path = try pathJoinWithStem(allocator, bin_dir, stem, ".sourcemap.json");
+    defer allocator.free(source_map_path);
+
+    const sir_path = try pathJoinWithStem(allocator, sir_dir, stem, ".sir");
+    defer allocator.free(sir_path);
+    const ora_mlir_path = try pathJoinWithStem(allocator, mlir_dir, stem, ".ora.mlir");
+    defer allocator.free(ora_mlir_path);
+    const sir_mlir_path = try pathJoinWithStem(allocator, mlir_dir, stem, ".sir.mlir");
+    defer allocator.free(sir_mlir_path);
+    const smt_md_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.md");
+    defer allocator.free(smt_md_path);
+    const smt_json_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.json");
+    defer allocator.free(smt_json_path);
+
+    try stdout.print("Bytecode saved to {s}\n", .{bytecode_path});
+    try stdout.print("Source map saved to {s}\n", .{source_map_path});
+    try stdout.print("SIR saved to {s}\n", .{sir_path});
+    try stdout.print("Ora MLIR saved to {s}\n", .{ora_mlir_path});
+    try stdout.print("SIR MLIR saved to {s}\n", .{sir_mlir_path});
+    try stdout.print("SMT report saved to {s}\n", .{smt_md_path});
+    try stdout.print("SMT report JSON saved to {s}\n", .{smt_json_path});
+    try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
+}
+
+fn pathJoinWithStem(allocator: std.mem.Allocator, dir: []const u8, stem: []const u8, suffix: []const u8) ![]u8 {
+    const filename = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stem, suffix });
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &.{ dir, filename });
 }
 
 fn runDebugArtifacts(
@@ -938,6 +1074,53 @@ fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
     return error.OraRepoRootNotFound;
 }
 
+/// Spawn the DAP server with stdio inherited from the parent.
+/// `ora debug --dap` is the supported entry point; editors that
+/// speak DAP pipe through stdin/stdout directly. Artifact paths
+/// are passed via the DAP `launch` request, not as CLI args, so
+/// this function just spawns the binary.
+fn launchDebuggerDap(allocator: std.mem.Allocator) !void {
+    const repo_root = try findOraRepoRoot(allocator);
+    defer allocator.free(repo_root);
+
+    const evm_dir = try std.fs.path.join(allocator, &[_][]const u8{ repo_root, "lib", "evm" });
+    defer allocator.free(evm_dir);
+
+    const dap_bin = try std.fs.path.join(allocator, &[_][]const u8{ evm_dir, "zig-out", "bin", "ora-evm-debug-dap" });
+    defer allocator.free(dap_bin);
+
+    if (!pathExists(dap_bin)) {
+        // Same auto-build pattern launchDebuggerTui uses — keeps
+        // `ora debug --dap` working from a fresh checkout without
+        // requiring a separate `zig build install` step.
+        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
+        build_child.cwd = evm_dir;
+        // stdin/stdout are the DAP JSON-RPC channel. The build step
+        // must neither consume client input nor emit unframed output
+        // before the first Content-Length frame.
+        build_child.stdin_behavior = .Ignore;
+        build_child.stdout_behavior = .Ignore;
+        build_child.stderr_behavior = .Inherit;
+        try build_child.spawn();
+        const term = try build_child.wait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.DapBuildFailed,
+            else => return error.DapBuildFailed,
+        }
+    }
+
+    var child = std.process.Child.init(&.{dap_bin}, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.DapExited,
+        else => return error.DapExited,
+    }
+}
+
 fn launchDebuggerTui(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -948,6 +1131,10 @@ fn launchDebuggerTui(
     signature: ?[]const u8,
     arg_values: []const []const u8,
     calldata_hex: ?[]const u8,
+    gas_limit: ?[]const u8,
+    max_steps: ?[]const u8,
+    deploy_step_cap: ?[]const u8,
+    artifact_max_bytes: ?[]const u8,
 ) !void {
     const repo_root = try findOraRepoRoot(allocator);
     defer allocator.free(repo_root);
@@ -1020,6 +1207,11 @@ fn launchDebuggerTui(
     } else if (calldata_hex) |hex| {
         try argv.appendSlice(allocator, &.{ "--calldata-hex", hex });
     }
+
+    if (gas_limit) |v| try argv.appendSlice(allocator, &.{ "--gas-limit", v });
+    if (max_steps) |v| try argv.appendSlice(allocator, &.{ "--max-steps", v });
+    if (deploy_step_cap) |v| try argv.appendSlice(allocator, &.{ "--deploy-step-cap", v });
+    if (artifact_max_bytes) |v| try argv.appendSlice(allocator, &.{ "--artifact-max-bytes", v });
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdin_behavior = .Inherit;
@@ -1584,6 +1776,9 @@ fn printUsage() !void {
     try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
+    try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
+    try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
+    try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -1595,6 +1790,12 @@ fn printUsage() !void {
     try stdout.print("  --init-signature <sig> - Constructor/init signature, e.g. 'init(u256)'\n", .{});
     try stdout.print("  --init-arg <value>     - Repeated constructor/init arguments\n", .{});
     try stdout.print("  --init-calldata-hex <hex> - Raw constructor/init calldata\n", .{});
+    try stdout.print("  --no-tui               - Emit debug artifacts and exit (no TUI launch)\n", .{});
+    try stdout.print("  --dap                  - Launch the DAP server (Content-Length-framed JSON-RPC over stdio) instead of the TUI\n", .{});
+    try stdout.print("  --gas-limit <i64>      - Frame gas budget (default 5000000)\n", .{});
+    try stdout.print("  --max-steps <u64>      - Per-command opcode safety cap (default 10000000)\n", .{});
+    try stdout.print("  --deploy-step-cap <usize> - Deployment opcode cap (default 200000)\n", .{});
+    try stdout.print("  --artifact-max-bytes <usize> - Per-file artifact load cap (default 16777216)\n", .{});
     try stdout.flush();
 }
 
@@ -2024,6 +2225,7 @@ const DebugLocalInfo = struct {
     runtime_location_slot: ?u64,
     editable: bool,
     folded_value: ?[]const u8,
+    is_folded: bool,
 };
 
 const DebugScopeInfo = struct {
@@ -2083,13 +2285,34 @@ const ExtraScopeBinding = struct {
     runtime_location_slot: ?u64 = null,
     editable: bool = false,
     folded_value: ?[]const u8 = null,
+    is_folded: bool = false,
 };
 
 fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
     return switch (value) {
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
+        .address => |address| try std.fmt.allocPrint(allocator, "0x{x:0>40}", .{address}),
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+        .tuple => |elements| blk: {
+            var parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (parts.items) |part| allocator.free(part);
+                parts.deinit(allocator);
+            }
+            for (elements) |element| {
+                try parts.append(allocator, try formatConstDebugValue(allocator, element));
+            }
+            var out = std.ArrayList(u8){};
+            errdefer out.deinit(allocator);
+            try out.append(allocator, '(');
+            for (parts.items, 0..) |part, index| {
+                if (index != 0) try out.appendSlice(allocator, ", ");
+                try out.appendSlice(allocator, part);
+            }
+            try out.append(allocator, ')');
+            break :blk try out.toOwnedSlice(allocator);
+        },
     };
 }
 
@@ -2194,6 +2417,7 @@ fn appendPatternDebugLocals(
     runtime_location_slot: ?u64,
     editable: bool,
     folded_value: ?[]const u8,
+    is_folded: bool,
     next_local_id: *u32,
     locals: *std.ArrayList(DebugLocalInfo),
 ) !void {
@@ -2216,6 +2440,7 @@ fn appendPatternDebugLocals(
                 .runtime_location_slot = runtime_location_slot,
                 .editable = editable,
                 .folded_value = folded_value,
+                .is_folded = is_folded,
             });
             next_local_id.* += 1;
         },
@@ -2239,6 +2464,7 @@ fn appendPatternDebugLocals(
                     runtime_location_slot,
                     editable,
                     folded_value,
+                    is_folded,
                     next_local_id,
                     locals,
                 );
@@ -2262,6 +2488,7 @@ fn appendPatternDebugLocals(
             runtime_location_slot,
             editable,
             folded_value,
+            is_folded,
             next_local_id,
             locals,
         ),
@@ -2283,10 +2510,183 @@ fn appendPatternDebugLocals(
             runtime_location_slot,
             editable,
             folded_value,
+            is_folded,
             next_local_id,
             locals,
         ),
         .Error => {},
+    }
+}
+
+/// Compute the narrowed live-range end for a binding declared at
+/// `decl_idx` within `body.statements`. Returns null when the
+/// binding's range cannot be safely narrowed and the caller should
+/// fall back to `body.range.end` (the conservative coarse end).
+///
+/// Today's narrowing is intentionally conservative: it only fires
+/// when every statement after the decl in the same block is
+/// expression-only (no nested If/While/For/Switch/Try/Block). With
+/// any nested control flow we'd need a stmt walker to verify the
+/// binding isn't used inside, which doesn't exist yet — so we
+/// preserve the old end. This still narrows ~all top-level
+/// `let x = ... ; <flat statements>` patterns, including the
+/// `liveness_dead_after_use` regression fixture's expected case.
+fn computeNarrowedLiveEnd(
+    ast_file: *const compiler.ast.AstFile,
+    body: *const compiler.ast.Body,
+    decl_idx: usize,
+    binding_names: []const []const u8,
+) ?u32 {
+    if (binding_names.len == 0) return null;
+
+    var last_use_idx: ?usize = null;
+    var j: usize = decl_idx + 1;
+    while (j < body.statements.len) : (j += 1) {
+        const stmt = ast_file.statement(body.statements[j]).*;
+        // Statements that bring sub-bodies abort the narrowing.
+        switch (stmt) {
+            .If, .While, .For, .Switch, .Try, .Block, .LabeledBlock => return null,
+            else => {},
+        }
+        if (statementUsesAnyName(ast_file, body.statements[j], binding_names)) {
+            last_use_idx = j;
+        }
+    }
+
+    if (last_use_idx) |idx| {
+        return stmtRange(ast_file.statement(body.statements[idx]).*).end;
+    }
+    // No reference after the decl. Live ends at the decl itself.
+    return stmtRange(ast_file.statement(body.statements[decl_idx]).*).end;
+}
+
+/// Pull the source range out of any Stmt arm. The arms each have
+/// their own `range` field but the union itself doesn't expose
+/// one — this helper does the switch in one place.
+fn stmtRange(stmt: compiler.ast.Stmt) compiler.source.TextRange {
+    return switch (stmt) {
+        .VariableDecl => |s| s.range,
+        .Return => |s| s.range,
+        .If => |s| s.range,
+        .While => |s| s.range,
+        .For => |s| s.range,
+        .Switch => |s| s.range,
+        .Try => |s| s.range,
+        .Log => |s| s.range,
+        .Lock => |s| s.range,
+        .Unlock => |s| s.range,
+        .Assert => |s| s.range,
+        .Assume => |s| s.range,
+        .Havoc => |s| s.range,
+        .Break => |s| s.range,
+        .Continue => |s| s.range,
+        .Assign => |s| s.range,
+        .Expr => |s| s.range,
+        .Block => |s| s.range,
+        .LabeledBlock => |s| s.range,
+        .Error => |s| s.range,
+    };
+}
+
+/// Does any expression in `statement_id` reference any of the
+/// names in `targets`? Conservative — every expression sub-tree is
+/// walked, including LHS of assignments (a naive overcount; treats
+/// `x = foo` as a use of `x`, which is fine for liveness since
+/// over-counting only delays narrowing, never removes a real use).
+fn statementUsesAnyName(
+    ast_file: *const compiler.ast.AstFile,
+    statement_id: compiler.ast.StmtId,
+    targets: []const []const u8,
+) bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var names: std.ArrayList([]const u8) = .{};
+    defer names.deinit(arena_allocator);
+
+    const stmt = ast_file.statement(statement_id).*;
+    switch (stmt) {
+        .VariableDecl => |d| if (d.value) |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e, &names) catch return true,
+        .Return => |r| if (r.value) |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e, &names) catch return true,
+        .Log => |l| {
+            for (l.args) |arg| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, arg, &names) catch return true;
+        },
+        .Lock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .Unlock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .Assert => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
+        .Assume => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
+        .Havoc => {},
+        .Break, .Continue => {},
+        .Assign => |a| {
+            // target is a PatternId — pattern arms can carry an
+            // ExprId (IndexPattern.index). Walk both sides for any
+            // names that might be uses of `targets`.
+            collectNamesInPattern(arena_allocator, ast_file, a.target, &names) catch return true;
+            compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.value, &names) catch return true;
+        },
+        .Expr => |e| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, e.expr, &names) catch return true,
+        // Body-bearing statements never reach here (the caller
+        // bailed out in computeNarrowedLiveEnd).
+        .If, .While, .For, .Switch, .Try, .Block, .LabeledBlock => return true,
+        .Error => {},
+    }
+
+    for (names.items) |name| {
+        for (targets) |target| {
+            if (std.mem.eql(u8, name, target)) return true;
+        }
+    }
+    return false;
+}
+
+/// Collect all `Name` references within a pattern's expression
+/// subtrees (not the pattern's own binding names — those are
+/// definitions, not uses). Today only `IndexPattern.index` is an
+/// ExprId; other arms recurse into sub-patterns. Used by the
+/// liveness pass to count `x[i] = ...` as a use of `i`.
+fn collectNamesInPattern(
+    allocator: std.mem.Allocator,
+    ast_file: *const compiler.ast.AstFile,
+    pattern_id: compiler.ast.PatternId,
+    out: *std.ArrayList([]const u8),
+) !void {
+    switch (ast_file.pattern(pattern_id).*) {
+        .Name => {},
+        .Field => |field| try collectNamesInPattern(allocator, ast_file, field.base, out),
+        .Index => |index| {
+            try collectNamesInPattern(allocator, ast_file, index.base, out);
+            try compiler.ast.collectNamesInExpr(allocator, ast_file, index.index, out);
+        },
+        .StructDestructure => |destructure| {
+            for (destructure.fields) |field| {
+                try collectNamesInPattern(allocator, ast_file, field.binding, out);
+            }
+        },
+        .Error => {},
+    }
+}
+
+/// Extract the leaf binding name(s) from a pattern. Supports
+/// `Name`, `StructDestructure` (recursive), `Field`, and `Index`
+/// — same shapes the local-emitter walks. Returns the list in
+/// declaration order.
+fn collectPatternBindingNames(
+    allocator: std.mem.Allocator,
+    ast_file: *const compiler.ast.AstFile,
+    pattern_id: compiler.ast.PatternId,
+    out: *std.ArrayList([]const u8),
+) !void {
+    switch (ast_file.pattern(pattern_id).*) {
+        .Name => |name| try out.append(allocator, name.name),
+        .StructDestructure => |destructure| {
+            for (destructure.fields) |field| {
+                try collectPatternBindingNames(allocator, ast_file, field.binding, out);
+            }
+        },
+        .Field => |field| try collectPatternBindingNames(allocator, ast_file, field.base, out),
+        .Index => |index| try collectPatternBindingNames(allocator, ast_file, index.base, out),
+        else => {},
     }
 }
 
@@ -2333,6 +2733,7 @@ fn collectBodyScopeDebugInfo(
                 binding.runtime_location_slot,
                 binding.editable,
                 binding.folded_value,
+                binding.is_folded,
                 &state.next_local_id,
                 locals,
             );
@@ -2354,12 +2755,13 @@ fn collectBodyScopeDebugInfo(
                 .runtime_location_slot = binding.runtime_location_slot,
                 .editable = binding.editable,
                 .folded_value = binding.folded_value,
+                .is_folded = binding.is_folded,
             });
             state.next_local_id += 1;
         }
     }
 
-    for (body.statements) |statement_id| {
+    for (body.statements, 0..) |statement_id, stmt_idx| {
         switch (ast_file.statement(statement_id).*) {
             .VariableDecl => |decl| {
                 const folded_value = if (decl.value) |expr_id|
@@ -2369,6 +2771,18 @@ fn collectBodyScopeDebugInfo(
                         null
                 else
                     null;
+                // B3 (statement-level liveness): try to narrow the
+                // live range to the position after the binding's
+                // last same-block use. Falls back to body.range.end
+                // when any later statement is body-bearing
+                // (If/While/For/Switch/Try/Block/LabeledBlock) —
+                // walking into nested bodies needs a stmt walker
+                // that doesn't exist yet; staying conservative
+                // there avoids false dead-binding signals.
+                var binding_names: std.ArrayList([]const u8) = .{};
+                defer binding_names.deinit(allocator);
+                try collectPatternBindingNames(allocator, ast_file, decl.pattern, &binding_names);
+                const live_end = computeNarrowedLiveEnd(ast_file, &body, stmt_idx, binding_names.items) orelse body.range.end;
                 try appendPatternDebugLocals(
                     allocator,
                     ast_file,
@@ -2379,7 +2793,7 @@ fn collectBodyScopeDebugInfo(
                     decl.binding_kind,
                     decl.storage_class,
                     decl.range,
-                    .{ .start = decl.range.start, .end = body.range.end },
+                    .{ .start = decl.range.start, .end = live_end },
                     debugRuntimeKindForStorageClass(
                         decl.storage_class,
                         switch (ast_file.pattern(decl.pattern).*) {
@@ -2427,6 +2841,7 @@ fn collectBodyScopeDebugInfo(
                         },
                     ),
                     folded_value,
+                    folded_value != null,
                     &state.next_local_id,
                     locals,
                 );
@@ -2596,6 +3011,7 @@ fn collectItemDebugScopes(
                             .runtime_location_slot = global_slots.get(field.name),
                             .editable = debugBindingEditable(field.storage_class, global_slots.get(field.name)),
                             .folded_value = null,
+                            .is_folded = false,
                         });
                     }
                 }
@@ -3363,7 +3779,7 @@ fn runMlirEmitAdvanced(
     if (mlir_options.verify_z3) {
         m.begin("z3 verification");
         const z3_verification = @import("z3/verification.zig");
-        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
 
         if (mlir_options.verify_mode) |mode| {
@@ -3372,6 +3788,8 @@ fn runMlirEmitAdvanced(
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setVerifyStats(mlir_options.verify_stats);
+        verifier.setExplainCores(mlir_options.explain_cores);
+        verifier.setMinimizeCores(mlir_options.minimize_cores);
 
         const verification_result = try verifier.runVerificationPass(final_module);
 
@@ -3402,15 +3820,34 @@ fn runMlirEmitAdvanced(
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
         m.begin("smt report");
         const z3_verification = @import("z3/verification.zig");
-        var verifier = try z3_verification.VerificationPass.init(mlir_allocator);
+        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
         if (mlir_options.verify_mode) |mode| {
             if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        verifier.setExplainCores(mlir_options.explain_cores);
+        verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
         m.end();
+    }
+
+    // Write the FV proof sidecar before the canonicalize / cleanup
+    // passes scrub proven guards from the MLIR module. The TUI's
+    // `fv` overlay reads `<stem>.proof.json` to mark proved-safe
+    // source lines (lib/evm/src/debug_info.zig:OpMeta.proof_status
+    // documents the schema; the sidecar uses the same string
+    // values).
+    if (verification_result_opt) |*vr| {
+        if (vr.proven_guard_positions.items.len > 0) {
+            if (mlir_options.output_dir) |out_dir| {
+                const stem = std.fs.path.stem(file_path);
+                writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items) catch |err| {
+                    try stdout.print("Warning: could not write proof sidecar: {s}\n", .{@errorName(err)});
+                };
+            }
+        }
     }
 
     if (verification_failed) {
@@ -3667,13 +4104,13 @@ fn runMlirEmitAdvanced(
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
             m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
             m.end();
         }
     }
 
     if (pending_smt_report) |*report| {
-        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout);
+        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
         report.deinit(mlir_allocator);
         pending_smt_report = null;
     }
@@ -4019,6 +4456,7 @@ fn writeSmtReportArtifacts(
     output_dir: ?[]const u8,
     report: @import("z3/mod.zig").SmtReportArtifacts,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const base_name = std.fs.path.stem(file_path);
     const md_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{base_name});
@@ -4056,8 +4494,10 @@ fn writeSmtReportArtifacts(
     defer json_file.close();
     try json_file.writeAll(pretty_json);
 
-    try stdout.print("SMT report saved to {s}\n", .{md_path});
-    try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+    if (!suppress_log) {
+        try stdout.print("SMT report saved to {s}\n", .{md_path});
+        try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+    }
 }
 
 // ============================================================================
@@ -4090,6 +4530,7 @@ fn emitBytecodeFromSirText(
     sir_debug_info_json: ?[]const u8,
     source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const sir_path = try resolveSenseiSirPath(allocator);
     defer allocator.free(sir_path);
@@ -4213,7 +4654,7 @@ fn emitBytecodeFromSirText(
             defer out_file.close();
             try out_file.writeAll(bytecode);
             bytecode_output_path = try allocator.dupe(u8, out_dir);
-            try stdout.print("Bytecode saved to {s}\n", .{out_dir});
+            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_dir});
         } else {
             std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -4230,7 +4671,7 @@ fn emitBytecodeFromSirText(
             defer out_file.close();
             try out_file.writeAll(bytecode);
             bytecode_output_path = try allocator.dupe(u8, output_file);
-            try stdout.print("Bytecode saved to {s}\n", .{output_file});
+            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_file});
         }
     } else {
         try stdout.print("{s}\n", .{bytecode});
@@ -4239,7 +4680,7 @@ fn emitBytecodeFromSirText(
     // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
     // into final .sourcemap.json
     if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
         try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
@@ -4256,6 +4697,7 @@ fn mergeSourceMaps(
     sensei_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     // Read Sensei's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
     const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
@@ -4328,6 +4770,7 @@ fn mergeSourceMaps(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
     };
     var idx_to_provenance = std.AutoHashMap(u32, OpProvenance).init(allocator);
     defer idx_to_provenance.deinit();
@@ -4345,6 +4788,7 @@ fn mergeSourceMaps(
             is_synthetic: bool = false,
             synthetic_index: ?u32 = null,
             synthetic_count: ?u32 = null,
+            synthetic_path: ?[]const u8 = null,
         };
         const DebugInfoParse = struct {
             ops: []const DebugOp = &.{},
@@ -4369,6 +4813,7 @@ fn mergeSourceMaps(
                 .is_synthetic = op.is_synthetic,
                 .synthetic_index = op.synthetic_index,
                 .synthetic_count = op.synthetic_count,
+                .synthetic_path = op.synthetic_path,
             });
         }
     }
@@ -4406,6 +4851,7 @@ fn mergeSourceMaps(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         is_hoisted: bool = false,
         is_duplicated: bool = false,
         stmt: bool,
@@ -4456,6 +4902,7 @@ fn mergeSourceMaps(
             .is_synthetic = if (idx_to_provenance.get(loc.idx)) |p| p.is_synthetic else false,
             .synthetic_index = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_index else null,
             .synthetic_count = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_count else null,
+            .synthetic_path = if (idx_to_provenance.get(loc.idx)) |p| p.synthetic_path else null,
             .is_hoisted = false,
             .is_duplicated = false,
             .stmt = false,
@@ -4638,6 +5085,10 @@ fn mergeSourceMaps(
             if (entry.synthetic_count) |synthetic_count| {
                 try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
             }
+            if (entry.synthetic_path) |synthetic_path| {
+                try writer.writeAll(",\"synthetic_path\":");
+                try writeJsonString(writer, synthetic_path);
+            }
         }
         if (entry.is_hoisted) {
             try writer.writeAll(",\"is_hoisted\":true");
@@ -4667,7 +5118,43 @@ fn mergeSourceMaps(
     defer srcmap_file.close();
     try srcmap_file.writeAll(out.items);
 
-    try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
+    if (!suppress_log) try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
+}
+
+/// Write the FV proof sidecar `<output_dir>/<stem>.proof.json`.
+///
+/// Format: a flat JSON array of objects, one per proved guard:
+///   [{"file":"...", "line":N, "column":N, "status":"proved_safe"}, ...]
+///
+/// Today only `proved_safe` is emitted (UNSAT guards). The schema
+/// is open to `proved_unsafe` and `dynamic` once the verifier
+/// records those positions too. The TUI's `fv` overlay (lib/evm)
+/// reads this file alongside `<stem>.debug.json`.
+fn writeProofSidecar(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    stem: []const u8,
+    positions: []const @import("z3/errors.zig").ProvenGuardPosition,
+) !void {
+    const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
+    defer allocator.free(filename);
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    var w = out.writer(allocator);
+
+    try w.writeAll("[");
+    for (positions, 0..) |pos, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"file\":");
+        try writeJsonString(w, pos.file);
+        try w.print(",\"line\":{d},\"column\":{d},\"status\":", .{ pos.line, pos.column });
+        try writeJsonString(w, pos.status);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+
+    try std.fs.cwd().writeFile(.{ .sub_path = filename, .data = out.items });
 }
 
 fn writeDebugInfoSidecar(
@@ -4693,6 +5180,7 @@ fn writeDebugInfoSidecar(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -4743,6 +5231,7 @@ fn writeDebugInfoSidecar(
         is_synthetic: bool = false,
         synthetic_index: ?u32 = null,
         synthetic_count: ?u32 = null,
+        synthetic_path: ?[]const u8 = null,
         statement_id: ?u32 = null,
         origin_statement_id: ?u32 = null,
         execution_region_id: ?u32 = null,
@@ -4772,6 +5261,7 @@ fn writeDebugInfoSidecar(
             .is_synthetic = op.is_synthetic,
             .synthetic_index = op.synthetic_index,
             .synthetic_count = op.synthetic_count,
+            .synthetic_path = op.synthetic_path,
             .statement_id = op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
             .origin_statement_id = op.origin_statement_id orelse op.statement_id orelse if (stmt_meta) |meta| meta.stmt_id else null,
             .execution_region_id = op.execution_region_id,
@@ -4824,12 +5314,21 @@ fn writeDebugInfoSidecar(
         if (op.synthetic_count) |synthetic_count| {
             try writer.print(",\"synthetic_count\":{d}", .{synthetic_count});
         }
+        if (op.synthetic_path) |synthetic_path| {
+            try writer.writeAll(",\"synthetic_path\":");
+            try writeJsonString(writer, synthetic_path);
+        }
         if (op.kind) |kind| {
             try writer.writeAll(",\"kind\":");
             try writeJsonString(writer, executableStatementKindName(kind));
         }
         if (op.is_hoisted) try writer.writeAll(",\"is_hoisted\":true");
         if (op.is_duplicated) try writer.writeAll(",\"is_duplicated\":true");
+        // C5 FV-dead-branch: proof_status emission. Today the
+        // verifier doesn't thread per-statement results into this
+        // sidecar yet, so we always emit null. The schema slot is
+        // documented in lib/evm/src/debug_info.zig:OpMeta.
+        try writer.writeAll(",\"proof_status\":null");
         try writer.writeAll("}");
     }
     try writer.writeAll("]");
@@ -4864,6 +5363,13 @@ fn writeDebugInfoSidecar(
             }
             try writer.writeAll(",\"range\":");
             try writeDebugRangeJson(writer, sources, scope.file_id, scope.range);
+            // Reserved schema slot for the future inliner — see
+            // `lib/evm/src/debug_info.zig:InlinedFrame`. The compiler
+            // doesn't perform MLIR-level function inlining yet so
+            // this is always empty; emit it explicitly so artifacts
+            // written today round-trip cleanly through the
+            // schema-aware loader.
+            try writer.writeAll(",\"inlined_from\":[]");
             try writer.writeAll(",\"locals\":[");
             var first_local = true;
             for (scope_info.locals[scope.local_start .. scope.local_start + scope.local_count]) |local| {
@@ -4922,6 +5428,7 @@ fn writeDebugInfoSidecar(
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.print(",\"is_folded\":{s}", .{if (local.is_folded) "true" else "false"});
                 try writer.writeAll(",\"decl\":");
                 try writeDebugRangeJson(writer, sources, local.file_id, local.decl_range);
                 try writer.writeAll(",\"live\":");

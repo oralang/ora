@@ -1,0 +1,26 @@
+// Regression target for B3 (statement-level liveness).
+//
+// Today the compiler reports `temp` as live until the end of `compute`
+// — i.e., line 13 — even though its last actual use is line 9. A
+// future statement-level liveness pass should narrow `temp.live.end`
+// to the end of line 9, so the TUI's `bindingPastLiveRange` check
+// fires correctly between the last use and the function's end.
+//
+// The golden artifacts are intentionally NOT committed for this
+// fixture yet: today's `live.end` would just bake in the coarse
+// behavior, defeating the purpose of using this fixture as a
+// regression target. Once the analysis lands, the run that adds it
+// should also generate the golden in the same commit.
+
+contract LivenessDeadAfterUse {
+    storage var counter: u256 = 0;
+
+    pub fn compute(input: u256) -> u256 {
+        let temp: u256 = input + 1;
+        counter = counter + temp;
+        // After this point `temp` is dead — never referenced again.
+        // The remaining statements should not see `temp` as visible.
+        let other: u256 = counter * 2;
+        return other;
+    }
+}

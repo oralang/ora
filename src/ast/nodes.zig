@@ -156,6 +156,7 @@ pub const StructDestructureField = struct {
 pub const StructDestructurePattern = struct {
     range: source.TextRange,
     fields: []StructDestructureField,
+    has_rest: bool = false,
 };
 
 pub const Expr = union(enum) {
@@ -403,7 +404,22 @@ pub const ForStmt = struct {
 pub const SwitchPattern = union(enum) {
     Expr: ExprId,
     Range: RangeSwitchPattern,
+    Or: OrSwitchPattern,
+    Ok: PatternId,
+    Err: PatternId,
+    NamedError: NamedErrorSwitchPattern,
     Else: source.TextRange,
+};
+
+pub const OrSwitchPattern = struct {
+    range: source.TextRange,
+    alternatives: []const SwitchPattern,
+};
+
+pub const NamedErrorSwitchPattern = struct {
+    range: source.TextRange,
+    callee: ExprId,
+    bindings: []const PatternId,
 };
 
 pub const RangeSwitchPattern = struct {
@@ -548,6 +564,22 @@ pub const LogField = struct {
 pub const EnumVariant = struct {
     range: source.TextRange,
     name: []const u8,
+    payload: EnumVariantPayload = .none,
+    value: ?EnumVariantValue = null,
+};
+
+pub const EnumVariantValue = ExprId;
+
+pub const EnumVariantPayload = union(enum) {
+    none,
+    positional: []const TypeExprId,
+    named: []const EnumVariantPayloadField,
+};
+
+pub const EnumVariantPayloadField = struct {
+    range: source.TextRange,
+    name: []const u8,
+    type_expr: TypeExprId,
 };
 
 pub const TraitMethod = struct {
@@ -634,6 +666,7 @@ pub const EnumItem = struct {
     name: []const u8,
     is_generic: bool = false,
     template_parameters: []const Parameter,
+    base_type: ?TypeExprId,
     variants: []EnumVariant,
 };
 

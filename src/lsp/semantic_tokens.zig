@@ -221,6 +221,9 @@ fn symbolKindToTokenKind(kind: semantic_index.SymbolKind) SemanticTokenKind {
         .bitfield_decl => .@"struct",
         .enum_decl => .@"enum",
         .enum_member => .enumMember,
+        .trait_decl => .type,
+        .impl_decl => .namespace,
+        .type_alias => .type,
         .event => .event,
         .error_decl => .type,
     };
@@ -356,7 +359,7 @@ fn isVerificationKeyword(tt: TokenType) bool {
 
 fn isControlFlowKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .If, .Else, .While, .For, .Break, .Continue, .Return, .Switch, .Try, .Catch => true,
+        .If, .Else, .While, .For, .Break, .Continue, .Return, .Switch, .Match, .Try, .Catch => true,
         else => false,
     };
 }

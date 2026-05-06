@@ -31,7 +31,14 @@ namespace mlir
         class ConvertReturnOp : public OpConversionPattern<ora::ReturnOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertReturnOp(const TypeConverter &typeConverter, MLIRContext *ctx, bool payloadless_only = false)
+                : OpConversionPattern<ora::ReturnOp>(typeConverter, ctx), payloadless_only(payloadless_only)
+            {
+            }
+            ConvertReturnOp(const TypeConverter &typeConverter, MLIRContext *ctx, PatternBenefit benefit, bool payloadless_only = false)
+                : OpConversionPattern<ora::ReturnOp>(typeConverter, ctx, benefit), payloadless_only(payloadless_only)
+            {
+            }
 
             LogicalResult matchAndRewrite(
                 ora::ReturnOp op,
@@ -42,6 +49,9 @@ namespace mlir
                 ora::ReturnOp op,
                 OneToNOpAdaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            bool payloadless_only = false;
         };
 
         /// Pre-pass pattern (greedy, not conversion-framework).  Lowers
@@ -124,6 +134,36 @@ namespace mlir
                 PatternRewriter &rewriter) const override;
         };
 
+        class NormalizeAdtTagOp : public OpRewritePattern<ora::AdtTagOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtTagOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeAdtConstructOp : public OpRewritePattern<ora::AdtConstructOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtConstructOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
+        class NormalizeAdtPayloadOp : public OpRewritePattern<ora::AdtPayloadOp>
+        {
+        public:
+            using OpRewritePattern::OpRewritePattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtPayloadOp op,
+                PatternRewriter &rewriter) const override;
+        };
+
         class ConvertUnrealizedConversionCastOp : public OpConversionPattern<mlir::UnrealizedConversionCastOp>
         {
         public:
@@ -190,12 +230,22 @@ namespace mlir
         class ConvertCallOp : public OpConversionPattern<mlir::func::CallOp>
         {
         public:
-            using OpConversionPattern<mlir::func::CallOp>::OpConversionPattern;
+            ConvertCallOp(const TypeConverter &typeConverter, MLIRContext *ctx, bool payloadless_only = false)
+                : OpConversionPattern<mlir::func::CallOp>(typeConverter, ctx), payloadless_only(payloadless_only)
+            {
+            }
+            ConvertCallOp(const TypeConverter &typeConverter, MLIRContext *ctx, PatternBenefit benefit, bool payloadless_only = false)
+                : OpConversionPattern<mlir::func::CallOp>(typeConverter, ctx, benefit), payloadless_only(payloadless_only)
+            {
+            }
 
             LogicalResult matchAndRewrite(
                 mlir::func::CallOp op,
                 typename mlir::func::CallOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            bool payloadless_only = false;
         };
 
         class ConvertAbiEncodeOp : public OpConversionPattern<ora::AbiEncodeOp>
@@ -483,6 +533,11 @@ namespace mlir
                 ora::ErrorUnwrapOp op,
                 typename ora::ErrorUnwrapOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorUnwrapOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
         };
 
         class ConvertErrorGetErrorOp : public OpConversionPattern<ora::ErrorGetErrorOp>
@@ -493,6 +548,43 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::ErrorGetErrorOp op,
                 typename ora::ErrorGetErrorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::ErrorGetErrorOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertAdtTagOneToNOp : public OpConversionPattern<ora::AdtTagOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtTagOp op,
+                typename ora::AdtTagOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtTagOp op,
+                OneToNOpAdaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertAdtPayloadOneToNOp : public OpConversionPattern<ora::AdtPayloadOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtPayloadOp op,
+                typename ora::AdtPayloadOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+            LogicalResult matchAndRewrite(
+                ora::AdtPayloadOp op,
+                OneToNOpAdaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

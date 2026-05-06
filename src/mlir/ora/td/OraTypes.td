@@ -154,6 +154,33 @@ def Ora_StructType : Ora_Type<"Struct", "struct"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+// ADT type - named algebraic data type for payload-carrying enums
+def Ora_AdtType : Ora_Type<"Adt", "adt"> {
+  let summary = "Named algebraic data type";
+  let description = [{
+    Named algebraic data type with ordered variants and payload types.
+    Syntax: `!ora.adt<"adt_name", ("Variant", payload_type), ...>`
+  }];
+
+  let parameters = (ins "StringRef":$name,
+                        ArrayRefParameter<"StringRef">:$variantNames,
+                        ArrayRefParameter<"Type">:$payloadTypes);
+  let hasCustomAssemblyFormat = 1;
+}
+
+// Anonymous struct type - structural product with named fields
+def Ora_AnonymousStructType : Ora_Type<"AnonymousStruct", "struct_anon"> {
+  let summary = "Anonymous struct type";
+  let description = [{
+    Anonymous struct type carrying ordered field names and field types.
+    Syntax: `!ora.struct_anon<("x", i256), ("y", !ora.address)>`
+  }];
+
+  let parameters = (ins ArrayRefParameter<"StringRef">:$fieldNames,
+                        ArrayRefParameter<"Type">:$fieldTypes);
+  let hasCustomAssemblyFormat = 1;
+}
+
 // Enum type - named enum with representation type
 def Ora_EnumType : Ora_Type<"Enum", "enum"> {
   let summary = "Named enum type";
@@ -190,28 +217,17 @@ def Ora_FunctionType : Ora_Type<"Function", "function"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-// Union type - sum type T1 | T2 | ...
-def Ora_UnionType : Ora_Type<"Union", "union"> {
-  let summary = "Union type";
-  let description = [{
-    Union type representing a sum type.
-    Syntax: `!ora.union<type1, type2, ...>`
-  }];
-  
-  let parameters = (ins ArrayRefParameter<"Type">:$elementTypes);
-  let hasCustomAssemblyFormat = 1;
-}
-
-// Error union type - result type !T
+// Error union type - result type !T with optional declared error set
 def Ora_ErrorUnionType : Ora_Type<"ErrorUnion", "error_union"> {
   let summary = "Error union type";
   let description = [{
     Error union type representing a result that can be an error.
-    Syntax: `!ora.error_union<success_type>`
+    Syntax: `!ora.error_union<success_type[, error_type...]>`
   }];
   
-  let parameters = (ins "Type":$successType);
-  let assemblyFormat = "`<` $successType `>`";
+  let parameters = (ins "Type":$successType,
+                        ArrayRefParameter<"Type">:$errorTypes);
+  let hasCustomAssemblyFormat = 1;
 }
 
 //===----------------------------------------------------------------------===//

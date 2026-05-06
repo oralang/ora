@@ -1,5 +1,6 @@
 #include "patterns/MemRef.h"
 #include "patterns/Naming.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 #include "OraDialect.h"
@@ -35,6 +36,47 @@ static bool isNarrowErrorUnionType(Type type)
     return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
 }
 
+static bool hasForceWideErrorUnionAttr(Operation *op)
+{
+    if (!op)
+        return false;
+    if (auto attr = op->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
+        return attr.getValue();
+    if (auto func = op->getParentOfType<mlir::func::FuncOp>())
+    {
+        if (auto attr = func->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
+            return attr.getValue();
+    }
+    return false;
+}
+
+static bool valueHasForceWideErrorUnion(Value value)
+{
+    if (!value)
+        return false;
+    if (Operation *def = value.getDefiningOp())
+        return hasForceWideErrorUnionAttr(def);
+    return false;
+}
+
+static bool hasMaterializationKind(Operation *op, llvm::StringRef kind)
+{
+    if (!op)
+        return false;
+    if (auto attr = op->getAttrOfType<mlir::StringAttr>(kOraMaterializationKindAttr))
+        return attr.getValue() == kind;
+    return false;
+}
+
+static bool isScalarErrorUnionMemRefCarrier(Type type)
+{
+    auto errType = llvm::dyn_cast<mlir::ora::ErrorUnionType>(type);
+    if (!errType)
+        return false;
+    auto successType = errType.getSuccessType();
+    return llvm::isa<mlir::IntegerType, mlir::ora::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+}
+
 static mlir::MemRefType remapMemRefElementType(mlir::MemRefType type, Type elementType)
 {
     return mlir::MemRefType::get(type.getShape(), elementType, type.getLayout(), type.getMemorySpace());
@@ -47,6 +89,28 @@ static Value unwrapPackedErrorUnionCarrier(Value value)
         if (cast.getNumOperands() == 1)
         {
             value = cast.getOperand(0);
+            continue;
+        }
+        break;
+    }
+    return value;
+}
+
+static Value stripDimIndexCasts(Value value)
+{
+    while (true)
+    {
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() == 1)
+            {
+                value = cast.getOperand(0);
+                continue;
+            }
+        }
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            value = bitcast.getOperand();
             continue;
         }
         break;
@@ -105,9 +169,19 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     PatternRewriter &rewriter) const
 {
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-    if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
+    if (!memrefType)
         return failure();
-    if (!isNarrowErrorUnionType(op.getType()))
+    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
+    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    if (!narrowCarrier && !scalarCarrier)
+        return failure();
+    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
+        return failure();
+    if (!narrowCarrier && hasForceWideErrorUnionAttr(op) && !scalarCarrier)
+        return failure();
+    if (!isNarrowErrorUnionType(op.getType()) && !scalarCarrier)
+        return failure();
+    if (hasForceWideErrorUnionAttr(op) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -131,9 +205,17 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     PatternRewriter &rewriter) const
 {
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-    if (!memrefType || !isNarrowErrorUnionType(memrefType.getElementType()))
+    if (!memrefType)
         return failure();
-    if (!isNarrowErrorUnionType(op.getValue().getType()))
+    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
+    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    if (!narrowCarrier && !scalarCarrier)
+        return failure();
+    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
+        return failure();
+    if (!isNarrowErrorUnionType(op.getValue().getType()) && !scalarCarrier)
+        return failure();
+    if (valueHasForceWideErrorUnion(op.getValue()) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -167,9 +249,20 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     {
         if (cast.getNumOperands() == 2)
         {
+            if (!narrowCarrier && !hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion))
+                return failure();
             consumedCast = cast;
             Value tag = ensureI256(cast.getOperand(0));
             Value payload = ensureI256(cast.getOperand(1));
+            if (!payload)
+            {
+                auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);
+                if (auto materialized = ora::materializePtrCarrierFromOraValue(
+                        rewriter, loc, ptrType, cast.getOperand(1)))
+                {
+                    payload = ensureI256(*materialized);
+                }
+            }
             if (!tag || !payload)
                 return failure();
             Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
@@ -297,7 +390,8 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Convert memref.dim → sir.const (static shape only)
+// Convert memref.dim → sir.const for static memrefs, or load the leading length
+// word for the supported dynamic 1-D memref representation [len | data...].
 // -----------------------------------------------------------------------------
 LogicalResult ConvertMemRefDimOp::matchAndRewrite(
     mlir::memref::DimOp op,
@@ -309,15 +403,16 @@ LogicalResult ConvertMemRefDimOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto ctx = rewriter.getContext();
     auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getSource().getType());
-    if (!memrefType || !memrefType.hasStaticShape())
+    if (!memrefType)
     {
-        DBG("ConvertMemRefDimOp: dynamic shape not supported");
+        DBG("ConvertMemRefDimOp: source is not memref");
         return failure();
     }
 
     // only handle constant dimension index
     int64_t dimIndex = -1;
-    if (auto indexConst = adaptor.getIndex().getDefiningOp<sir::ConstOp>())
+    Value dimIndexValue = stripDimIndexCasts(adaptor.getIndex());
+    if (auto indexConst = dimIndexValue.getDefiningOp<sir::ConstOp>())
     {
         auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValueAttr());
         if (!indexAttr)
@@ -327,7 +422,7 @@ LogicalResult ConvertMemRefDimOp::matchAndRewrite(
         }
         dimIndex = indexAttr.getInt();
     }
-    else if (auto indexConst = adaptor.getIndex().getDefiningOp<mlir::arith::ConstantOp>())
+    else if (auto indexConst = dimIndexValue.getDefiningOp<mlir::arith::ConstantOp>())
     {
         auto indexAttr = llvm::dyn_cast<mlir::IntegerAttr>(indexConst.getValue());
         if (!indexAttr)
@@ -348,12 +443,31 @@ LogicalResult ConvertMemRefDimOp::matchAndRewrite(
         return failure();
     }
 
-    int64_t dimSize = memrefType.getDimSize(dimIndex);
     auto u256Type = sir::U256Type::get(ctx);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(dimSize));
-    auto sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-    rewriter.replaceOp(op, sizeConst.getResult());
+
+    if (memrefType.hasStaticShape())
+    {
+        int64_t dimSize = memrefType.getDimSize(dimIndex);
+        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(dimSize));
+        auto sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+        rewriter.replaceOp(op, sizeConst.getResult());
+        return success();
+    }
+
+    if (memrefType.getRank() != 1 || dimIndex != 0 || !memrefType.isDynamicDim(0))
+    {
+        DBG("ConvertMemRefDimOp: unsupported dynamic memref shape");
+        return failure();
+    }
+
+    Value base = adaptor.getSource();
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    if (!llvm::isa<sir::PtrType>(base.getType()))
+        base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
+
+    Value length = rewriter.create<sir::LoadOp>(loc, u256Type, base);
+    rewriter.replaceOp(op, length);
     return success();
 }
 
@@ -387,9 +501,9 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
     if (!indices.empty())
     {
         auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-        if (!memrefType || !memrefType.hasStaticShape())
+        if (!memrefType)
         {
-            DBG("ConvertMemRefLoadOp: non-static memref shape not supported");
+            DBG("ConvertMemRefLoadOp: memref type missing");
             return failure();
         }
 
@@ -426,25 +540,47 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
             return failure();
         }
 
-        int64_t stride = 1;
-        for (int64_t i = rank - 1; i >= 0; --i)
+        if (!memrefType.hasStaticShape())
         {
-            Value idx = indices[i];
-            if (!llvm::isa<sir::U256Type>(idx.getType()))
+            if (rank != 1 || !memrefType.isDynamicDim(0))
             {
-                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+                DBG("ConvertMemRefLoadOp: non-static memref shape not supported");
+                return failure();
             }
 
-            Value strideConst = rewriter.create<sir::ConstOp>(
-                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
-            Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
-            linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+            Value idx = indices.front();
+            if (!llvm::isa<sir::U256Type>(idx.getType()))
+                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+            linear = idx;
+        }
+        else
+        {
+            int64_t stride = 1;
+            for (int64_t i = rank - 1; i >= 0; --i)
+            {
+                Value idx = indices[i];
+                if (!llvm::isa<sir::U256Type>(idx.getType()))
+                {
+                    idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+                }
 
-            stride *= shape[i];
+                Value strideConst = rewriter.create<sir::ConstOp>(
+                    elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+                Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
+                linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+
+                stride *= shape[i];
+            }
         }
 
         unsigned offsetIndex = naming.getNextOffsetIndex();
         Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, linear, elementSize);
+        if (!memrefType.hasStaticShape())
+        {
+            Value headerSize = rewriter.create<sir::ConstOp>(
+                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, 32ULL));
+            offset = rewriter.create<sir::AddOp>(elemLoc, u256Type, offset, headerSize);
+        }
         naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
 
         // Add offset to base pointer
@@ -599,9 +735,9 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
     if (!indices.empty())
     {
         auto memrefType = llvm::dyn_cast<mlir::MemRefType>(op.getMemref().getType());
-        if (!memrefType || !memrefType.hasStaticShape())
+        if (!memrefType)
         {
-            DBG("ConvertMemRefStoreOp: non-static memref shape not supported");
+            DBG("ConvertMemRefStoreOp: memref type missing");
             return failure();
         }
 
@@ -637,25 +773,47 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
             return failure();
         }
 
-        int64_t stride = 1;
-        for (int64_t i = rank - 1; i >= 0; --i)
+        if (!memrefType.hasStaticShape())
         {
-            Value idx = indices[i];
-            if (!llvm::isa<sir::U256Type>(idx.getType()))
+            if (rank != 1 || !memrefType.isDynamicDim(0))
             {
-                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+                DBG("ConvertMemRefStoreOp: non-static memref shape not supported");
+                return failure();
             }
 
-            Value strideConst = rewriter.create<sir::ConstOp>(
-                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
-            Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
-            linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+            Value idx = indices.front();
+            if (!llvm::isa<sir::U256Type>(idx.getType()))
+                idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+            linear = idx;
+        }
+        else
+        {
+            int64_t stride = 1;
+            for (int64_t i = rank - 1; i >= 0; --i)
+            {
+                Value idx = indices[i];
+                if (!llvm::isa<sir::U256Type>(idx.getType()))
+                {
+                    idx = rewriter.create<sir::BitcastOp>(elemLoc, u256Type, idx);
+                }
 
-            stride *= shape[i];
+                Value strideConst = rewriter.create<sir::ConstOp>(
+                    elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
+                Value scaled = rewriter.create<sir::MulOp>(elemLoc, u256Type, idx, strideConst);
+                linear = rewriter.create<sir::AddOp>(elemLoc, u256Type, linear, scaled);
+
+                stride *= shape[i];
+            }
         }
 
         unsigned offsetIndex = naming.getNextOffsetIndex();
         Value offset = rewriter.create<sir::MulOp>(elemLoc, u256Type, linear, elementSize);
+        if (!memrefType.hasStaticShape())
+        {
+            Value headerSize = rewriter.create<sir::ConstOp>(
+                elemLoc, u256Type, mlir::IntegerAttr::get(ui64Type, 32ULL));
+            offset = rewriter.create<sir::AddOp>(elemLoc, u256Type, offset, headerSize);
+        }
         naming.nameOffset(offset.getDefiningOp(), 0, offsetIndex);
 
         // Add offset to base pointer

@@ -1,0 +1,21 @@
+contract BytesStringLenIndex {
+    pub fn firstByte(data: bytes) -> u8
+        guard data.len > 0
+    {
+        return data[0];
+    }
+
+    pub fn firstChar(text: string) -> u8
+        guard text.len > 0
+    {
+        return text[0];
+    }
+
+    pub fn byteLen(data: bytes) -> u256 {
+        return data.len;
+    }
+
+    pub fn stringLen(text: string) -> u256 {
+        return text.len;
+    }
+}

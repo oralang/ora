@@ -1,0 +1,32 @@
+comptime const std = @import("std");
+
+error Failure(code: u256);
+
+pub contract ResultRoundtrip {
+    pub fn make(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure(7));
+    }
+
+    pub fn consume_and_bump(value: Result<u256, Failure>, bump: u256) -> Result<u256, Failure>
+        requires(bump < std.constants.U256_MAX)
+    {
+        match (value) {
+            Ok(inner) => {
+                return Ok(inner);
+            },
+            Err(err) => {
+                return Err(Failure(7));
+            }
+        }
+    }
+
+    pub fn project(value: Result<u256, Failure>) -> u256 {
+        return match (value) {
+            Ok(inner) => inner,
+            Err(err) => err.code,
+        };
+    }
+}
