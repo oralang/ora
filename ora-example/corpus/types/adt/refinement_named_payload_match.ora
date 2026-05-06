@@ -1,0 +1,26 @@
+// Refinement facts through named ADT payloads.
+//
+// Covers refined values stored in named payload fields and recovered through a
+// structural match without a manual assert.
+
+enum RefinedEvent {
+    None,
+    Amount { value: MinValue<u256, 10> },
+}
+
+contract RefinementNamedPayloadMatch {
+    fn build(raw: MinValue<u256, 10>) -> RefinedEvent {
+        return RefinedEvent.Amount {
+            value: raw,
+        };
+    }
+
+    pub fn read(raw: MinValue<u256, 10>) -> u256
+        ensures(result >= 10)
+    {
+        return match (build(raw)) {
+            RefinedEvent.None => 10,
+            RefinedEvent.Amount { value } => value,
+        };
+    }
+}

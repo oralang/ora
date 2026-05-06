@@ -1,0 +1,32 @@
+// ADT named payload storage flow.
+//
+// Covers storing a named payload-carrying enum in contract state and recovering
+// a named field through a structural match after sload.
+
+enum StoredTransferEvent {
+    None,
+    Move {
+        from_account: u256,
+        to_account: u256,
+        amount: u256,
+    },
+}
+
+contract StorageNamedPayloadFlow {
+    storage var saved: StoredTransferEvent;
+
+    pub fn save(from_account: u256, to_account: u256, amount: u256) {
+        saved = StoredTransferEvent.Move {
+            amount: amount,
+            to_account: to_account,
+            from_account: from_account,
+        };
+    }
+
+    pub fn read_amount() -> u256 {
+        return match (saved) {
+            StoredTransferEvent.None => 0,
+            StoredTransferEvent.Move { amount: selected, .. } => selected,
+        };
+    }
+}
