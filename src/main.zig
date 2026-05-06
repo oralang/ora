@@ -55,6 +55,7 @@ const MlirOptions = struct {
     cpp_lowering_stub: bool = false,
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
+    suppress_artifact_logs: bool = false,
     metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -910,6 +911,7 @@ fn runBuildArtifacts(
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
     build_mlir_options.persist_sir_mlir = true;
+    build_mlir_options.suppress_artifact_logs = true;
     var verification_failed = false;
     const build_emit_result = runMlirEmitAdvanced(allocator, file_path, build_mlir_options, resolver_options, build_mlir_options.debug_enabled);
     build_emit_result catch |err| switch (err) {
@@ -933,9 +935,6 @@ fn runBuildArtifacts(
     defer allocator.free(ora_mlir_file);
     try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
 
-    try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
-    try stdout.flush();
-
     // Reorganize generated outputs under stable subfolders only after a successful
     // verification/build run. Verification failures intentionally stop before
     // OraToSIR and bytecode emission, so these artifacts do not exist yet.
@@ -947,10 +946,60 @@ fn runBuildArtifacts(
     defer allocator.free(hex_file);
     try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
 
+    const source_map_file = try std.fmt.allocPrint(allocator, "{s}.sourcemap.json", .{stem});
+    defer allocator.free(source_map_file);
+    try moveArtifactFileIfExists(allocator, artifact_root, source_map_file, bin_dir);
+
     const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
     defer allocator.free(sir_mlir_file);
     try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+
+    try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
+    try stdout.flush();
     build_succeeded = true;
+}
+
+fn printBuildArtifactSummary(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    artifact_root: []const u8,
+    stem: []const u8,
+    bin_dir: []const u8,
+    sir_dir: []const u8,
+    verify_dir: []const u8,
+    mlir_dir: []const u8,
+) !void {
+    const bytecode_path = try pathJoinWithStem(allocator, bin_dir, stem, ".hex");
+    defer allocator.free(bytecode_path);
+
+    const source_map_path = try pathJoinWithStem(allocator, bin_dir, stem, ".sourcemap.json");
+    defer allocator.free(source_map_path);
+
+    const sir_path = try pathJoinWithStem(allocator, sir_dir, stem, ".sir");
+    defer allocator.free(sir_path);
+    const ora_mlir_path = try pathJoinWithStem(allocator, mlir_dir, stem, ".ora.mlir");
+    defer allocator.free(ora_mlir_path);
+    const sir_mlir_path = try pathJoinWithStem(allocator, mlir_dir, stem, ".sir.mlir");
+    defer allocator.free(sir_mlir_path);
+    const smt_md_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.md");
+    defer allocator.free(smt_md_path);
+    const smt_json_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.json");
+    defer allocator.free(smt_json_path);
+
+    try stdout.print("Bytecode saved to {s}\n", .{bytecode_path});
+    try stdout.print("Source map saved to {s}\n", .{source_map_path});
+    try stdout.print("SIR saved to {s}\n", .{sir_path});
+    try stdout.print("Ora MLIR saved to {s}\n", .{ora_mlir_path});
+    try stdout.print("SIR MLIR saved to {s}\n", .{sir_mlir_path});
+    try stdout.print("SMT report saved to {s}\n", .{smt_md_path});
+    try stdout.print("SMT report JSON saved to {s}\n", .{smt_json_path});
+    try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
+}
+
+fn pathJoinWithStem(allocator: std.mem.Allocator, dir: []const u8, stem: []const u8, suffix: []const u8) ![]u8 {
+    const filename = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stem, suffix });
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &.{ dir, filename });
 }
 
 fn runDebugArtifacts(
@@ -4055,13 +4104,13 @@ fn runMlirEmitAdvanced(
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
             m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
             m.end();
         }
     }
 
     if (pending_smt_report) |*report| {
-        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout);
+        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
         report.deinit(mlir_allocator);
         pending_smt_report = null;
     }
@@ -4407,6 +4456,7 @@ fn writeSmtReportArtifacts(
     output_dir: ?[]const u8,
     report: @import("z3/mod.zig").SmtReportArtifacts,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const base_name = std.fs.path.stem(file_path);
     const md_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{base_name});
@@ -4444,8 +4494,10 @@ fn writeSmtReportArtifacts(
     defer json_file.close();
     try json_file.writeAll(pretty_json);
 
-    try stdout.print("SMT report saved to {s}\n", .{md_path});
-    try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+    if (!suppress_log) {
+        try stdout.print("SMT report saved to {s}\n", .{md_path});
+        try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+    }
 }
 
 // ============================================================================
@@ -4478,6 +4530,7 @@ fn emitBytecodeFromSirText(
     sir_debug_info_json: ?[]const u8,
     source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const sir_path = try resolveSenseiSirPath(allocator);
     defer allocator.free(sir_path);
@@ -4601,7 +4654,7 @@ fn emitBytecodeFromSirText(
             defer out_file.close();
             try out_file.writeAll(bytecode);
             bytecode_output_path = try allocator.dupe(u8, out_dir);
-            try stdout.print("Bytecode saved to {s}\n", .{out_dir});
+            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_dir});
         } else {
             std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -4618,7 +4671,7 @@ fn emitBytecodeFromSirText(
             defer out_file.close();
             try out_file.writeAll(bytecode);
             bytecode_output_path = try allocator.dupe(u8, output_file);
-            try stdout.print("Bytecode saved to {s}\n", .{output_file});
+            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_file});
         }
     } else {
         try stdout.print("{s}\n", .{bytecode});
@@ -4627,7 +4680,7 @@ fn emitBytecodeFromSirText(
     // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
     // into final .sourcemap.json
     if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout);
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
         try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
@@ -4644,6 +4697,7 @@ fn mergeSourceMaps(
     sensei_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     // Read Sensei's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
     const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
@@ -5064,7 +5118,7 @@ fn mergeSourceMaps(
     defer srcmap_file.close();
     try srcmap_file.writeAll(out.items);
 
-    try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
+    if (!suppress_log) try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
 }
 
 /// Write the FV proof sidecar `<output_dir>/<stem>.proof.json`.
