@@ -124,7 +124,7 @@ test "lsp semantic index: collects traits impls aliases and ADT variant details"
     try testing.expectEqualStrings("u256", index.symbols[amount_idx].detail.?);
     try testing.expectEqualStrings(": u8", index.symbols[event_idx].detail.?);
     try testing.expectEqualStrings("(u256) = 1", index.symbols[value_idx].detail.?);
-    try testing.expectEqualStrings(" { left: u256, right: u256 } = 2", index.symbols[pair_idx].detail.?);
+    try testing.expectEqualStrings("{ left: u256, right: u256 } = 2", index.symbols[pair_idx].detail.?);
     try testing.expectEqual(@as(?usize, event_idx), index.symbols[value_idx].parent);
     try testing.expectEqual(@as(?usize, event_idx), index.symbols[pair_idx].parent);
     try testing.expectEqual(@as(?usize, null), index.symbols[token_idx].parent);

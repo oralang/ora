@@ -47,7 +47,8 @@ pub fn main() !void {
     const source_map_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_map_path, limits.artifact_max_bytes);
     defer allocator.free(source_map_json);
     var source_map = try SourceMap.loadFromJson(allocator, source_map_json);
-    defer source_map.deinit();
+    var source_map_transferred = false;
+    defer if (!source_map_transferred) source_map.deinit();
 
     const source_text = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_path, limits.artifact_max_bytes);
     defer allocator.free(source_text);
@@ -105,6 +106,7 @@ pub fn main() !void {
         }
         break :blk try Debugger.init(allocator, &evm, source_map, source_text);
     };
+    source_map_transferred = true;
     defer debugger.deinit();
     debugger.max_steps = limits.max_steps;
 

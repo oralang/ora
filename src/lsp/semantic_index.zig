@@ -494,7 +494,7 @@ fn formatEnumVariantDetailAlloc(allocator: Allocator, file: *const compiler.ast.
             try writer.writeByte(')');
         },
         .named => |fields| {
-            try writer.writeAll(" { ");
+            try writer.writeAll("{ ");
             for (fields, 0..) |field, i| {
                 if (i > 0) try writer.writeAll(", ");
                 try writer.print("{s}: ", .{field.name});
@@ -884,7 +884,7 @@ const SymbolBuilder = struct {
         const start: usize = @intCast(@min(range.start, self.source_text.len));
         const end: usize = @intCast(@min(range.end, self.source_text.len));
         if (start <= end and end <= self.source_text.len) {
-            if (std.mem.indexOf(u8, self.source_text[start..end], name)) |relative| {
+            if (indexOfIdentifier(self.source_text[start..end], name)) |relative| {
                 const relative_u32 = std.math.cast(u32, relative) orelse std.math.maxInt(u32);
                 name_start = std.math.add(u32, range.start, relative_u32) catch range.start;
             }
@@ -899,3 +899,19 @@ const SymbolBuilder = struct {
         return selection;
     }
 };
+
+fn indexOfIdentifier(haystack: []const u8, needle: []const u8) ?usize {
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, offset, needle)) |index| {
+        const before_ok = index == 0 or !isIdentChar(haystack[index - 1]);
+        const after_index = index + needle.len;
+        const after_ok = after_index >= haystack.len or !isIdentChar(haystack[after_index]);
+        if (before_ok and after_ok) return index;
+        offset = index + needle.len;
+    }
+    return null;
+}
+
+fn isIdentChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}

@@ -1083,7 +1083,7 @@ pub const Ui = struct {
             try self.appendLogLine(name_buf);
         }
         try self.appendLogLine("keys: see KEYBINDINGS.md (or `man 1 ora-evm-debug-tui`)");
-        try self.appendLogLine("legend: . direct  ~ synthetic  + mixed  = folded  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
+        try self.appendLogLine("legend: . direct  ~ synthetic  + mixed  = folded  s smt-only  ! guard  - removed  * breakpoint  ^ origin  >|< sir-range");
         self.command_status = "help";
     }
 
@@ -1539,6 +1539,13 @@ pub const Ui = struct {
             });
             return;
         }
+        if (self.isProofOnlySourceLine(line)) {
+            try self.setCommandStatusFmt("line {d}: SMT-only source line; {s}", .{
+                line,
+                self.proofOnlyLineExplanation(line),
+            });
+            return;
+        }
         if (self.isStructuralSourceLine(line)) {
             try self.setCommandStatusFmt("line {d}: structural source line; syntax only, no standalone runtime stop", .{line});
             return;
@@ -1603,7 +1610,7 @@ pub const Ui = struct {
     }
 
     fn describeCurrentStop(self: *Ui) !void {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const entry = self.session.debugger.currentEntry() orelse {
             self.command_status = "no active stop";
             return;
@@ -2003,7 +2010,10 @@ pub const Ui = struct {
             if (!std.mem.eql(u8, entry_function, function_name)) return true;
         }
 
-        if (!entry.is_synthetic and !entry.is_hoisted) return true;
+        // Hoisting changes backend order, not user visibility. A direct source
+        // statement is still the right initial stop even if lowering moved it
+        // before later body statements.
+        if (!entry.is_synthetic) return true;
         return !self.hasPreferredInitialStatementLater(function_name, entry.pc);
     }
 
@@ -2013,7 +2023,7 @@ pub const Ui = struct {
             if (entry.pc <= after_pc) continue;
             const entry_function = entry.function orelse continue;
             if (!std.mem.eql(u8, entry_function, function_name)) continue;
-            if (entry.is_synthetic or entry.is_hoisted) continue;
+            if (entry.is_synthetic) continue;
             return true;
         }
         return false;
@@ -2030,7 +2040,6 @@ pub const Ui = struct {
                 return;
             }
         }
-        if (self.focus_line == null) self.focus_line = self.session.debugger.currentSourceLine();
     }
 
     fn syncInitialFocusFromDebugger(self: *Ui) void {
@@ -2140,9 +2149,18 @@ pub const Ui = struct {
         return self.session.debugger.lastStatementSirLine();
     }
 
+    fn currentDisplayLine(self: *const Ui) ?u32 {
+        if (self.focus_line) |line| return line;
+        if (self.session.debugger.lastStatementLine()) |line| return line;
+        if (self.session.debugger.currentEntry()) |entry| {
+            if (entry.is_statement) return entry.line;
+        }
+        return null;
+    }
+
     fn currentMappingWindow(self: *const Ui) ?MappingWindow {
         const file = self.seed.source_path;
-        const ora_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse return null;
+        const ora_line = self.currentDisplayLine() orelse return null;
         const entry = self.session.debugger.currentEntry() orelse return null;
         const statement_id = entry.statement_id orelse self.session.debugger.lastStatementId();
         const execution_region_id = entry.execution_region_id;
@@ -2398,7 +2416,7 @@ pub const Ui = struct {
 
         const top_h: u16 = @max(8, @as(u16, @intCast((@as(u32, content_h) * 52) / 100)));
         const bottom_h: u16 = content_h - top_h;
-        const current_source_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_source_line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const current_sir_line = if (mapping) |m| m.sir_start else self.currentSirLine() orelse 0;
         const current_idx = if (mapping) |m| m.idx_start else if (self.session.debugger.currentEntry()) |entry| entry.idx else null;
@@ -2439,17 +2457,16 @@ pub const Ui = struct {
                             self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.?, stmt_id }) catch " SIR Text "
                     else
                         self.scratchFmt(" SIR Text  lines {d}..{d}  idx {d}..{d} ", .{ m.sir_start, m.sir_end, m.idx_start.?, m.idx_end.? }) catch " SIR Text "
-                else
-                    if (m.statement_id) |stmt_id|
-                        if (m.execution_region_id) |region_id|
-                            if (m.statement_run_index) |run_index|
-                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id, run_index }) catch " SIR Text "
-                            else
-                                self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id }) catch " SIR Text "
+                else if (m.statement_id) |stmt_id|
+                    if (m.execution_region_id) |region_id|
+                        if (m.statement_run_index) |run_index|
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d}.{d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id, run_index }) catch " SIR Text "
                         else
-                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, stmt_id }) catch " SIR Text "
+                            self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d}  region {d} ", .{ m.sir_start, m.sir_end, stmt_id, region_id }) catch " SIR Text "
                     else
-                        self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
+                        self.scratchFmt(" SIR Text  lines {d}..{d}  stmt {d} ", .{ m.sir_start, m.sir_end, stmt_id }) catch " SIR Text "
+                else
+                    self.scratchFmt(" SIR Text  lines {d}..{d} ", .{ m.sir_start, m.sir_end }) catch " SIR Text "
             else if (current_idx) |idx|
                 self.scratchFmt(" SIR Text  line {d}  idx {d} ", .{ current_sir_line, idx }) catch " SIR Text "
             else
@@ -2515,7 +2532,7 @@ pub const Ui = struct {
 
     fn drawHeader(self: *Ui, win: Window) void {
         const source_name = std.fs.path.basename(self.seed.source_path);
-        const line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const sir_line = if (mapping) |m| m.sir_start else self.currentSirLine() orelse 0;
         const origin_line = self.currentOriginLine();
@@ -2614,16 +2631,15 @@ pub const Ui = struct {
                     self.session.debugger.getCallDepth(),
                     gas_remaining,
                 }) catch "status";
-            } else
-                self.scratchFmt(" error {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}", .{
-                    err_name,
-                    line,
-                    sir_line,
-                    self.session.debugger.getPC(),
-                    opcode,
-                    self.session.debugger.getCallDepth(),
-                    gas_remaining,
-                }) catch "status"
+            } else self.scratchFmt(" error {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}", .{
+                err_name,
+                line,
+                sir_line,
+                self.session.debugger.getPC(),
+                opcode,
+                self.session.debugger.getCallDepth(),
+                gas_remaining,
+            }) catch "status"
         else if (entry) |e| blk: {
             if (e.idx) |idx| {
                 if (mapping) |m| {
@@ -2667,18 +2683,17 @@ pub const Ui = struct {
                 gas_spent_step,
                 gas_spent_total,
             }) catch "status";
-        } else
-            self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
-                self.status,
-                line,
-                sir_line,
-                self.session.debugger.getPC(),
-                opcode,
-                self.session.debugger.getCallDepth(),
-                gas_remaining,
-                gas_spent_step,
-                gas_spent_total,
-            }) catch "status";
+        } else self.scratchFmt(" {s}  |  ora {d}  |  sir {d}  |  pc {d}  |  {s}  |  depth {d}  |  gas {d}  |  step -{d}  |  total -{d}", .{
+            self.status,
+            line,
+            sir_line,
+            self.session.debugger.getPC(),
+            opcode,
+            self.session.debugger.getCallDepth(),
+            gas_remaining,
+            gas_spent_step,
+            gas_spent_total,
+        }) catch "status";
         drawSegments(meta, 0, 0, &.{seg(status_text, style_header_meta())});
 
         const current_source = if (line != 0) blk: {
@@ -2714,26 +2729,25 @@ pub const Ui = struct {
                         m.pc_end,
                         current_source,
                     }) catch "map"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                    stmt_id,
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    current_source,
+                }) catch "map"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" map  |  stmt {d}  ->  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                        stmt_id,
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        current_source,
-                    }) catch "map"
-                else
-                    self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        current_source,
-                    }) catch "map"
+                self.scratchFmt(" map  |  ora {d}  ->  sir {d}..{d}  ->  pc {d}..{d}  |  {s}", .{
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    current_source,
+                }) catch "map"
         else if (entry) |e|
             if (e.idx) |idx|
                 self.scratchFmt(" map  |  ora {d}  ->  sir {d}  ->  idx {d}  ->  pc {d}  |  {s}", .{
@@ -2771,7 +2785,7 @@ pub const Ui = struct {
 
         const help = win.child(.{ .y_off = @intCast(win.height - 1), .height = 1 });
         help.fill(.{ .char = .{ .grapheme = " " }, .style = style_header_title() });
-        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  = folded  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
+        drawSegments(help, 0, 0, &.{seg(" s step-in  x opcode  n step-over  o step-out  c continue  p previous  : command  j/k Ora  J/K SIR  = sync SIR  1..5 tabs  [/] cycle  q quit  |  . direct  ~ synthetic  + mixed  = folded  s smt-only  ! guard  - removed  * break  ^ origin  >|< sir-range ", style_header_title())});
     }
 
     fn clearCommandLog(self: *Ui) void {
@@ -2822,7 +2836,7 @@ pub const Ui = struct {
     }
 
     fn drawSourcePane(self: *Ui, win: Window) void {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const mapping = self.currentMappingWindow();
         const origin_line = self.currentOriginLine();
         const summary = if (mapping) |m|
@@ -2874,30 +2888,29 @@ pub const Ui = struct {
                         m.pc_start,
                         m.pc_end,
                     }) catch "runtime mapping"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                    self.statementKindLabel(current_line),
+                    self.lineProvenanceLabel(current_line),
+                    stmt_id,
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                }) catch "runtime mapping"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" runtime {s}/{s} | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
-                        self.statementKindLabel(current_line),
-                        self.lineProvenanceLabel(current_line),
-                        stmt_id,
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                    }) catch "runtime mapping"
-                else
-                    self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
-                        self.statementKindLabel(current_line),
-                        self.lineProvenanceLabel(current_line),
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                    }) catch "runtime mapping"
+                self.scratchFmt(" runtime {s}/{s} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d}", .{
+                    self.statementKindLabel(current_line),
+                    self.lineProvenanceLabel(current_line),
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                }) catch "runtime mapping"
         else
             self.scratchFmt(" runtime {s}/{s} | {s} | ora {d}", .{
                 self.statementKindLabel(current_line),
@@ -2932,6 +2945,8 @@ pub const Ui = struct {
             else if (self.isFoldedSourceLine(line))
                 style_hint()
             else if (self.isRemovedSourceLine(line))
+                style_dead()
+            else if (self.isProofOnlySourceLine(line))
                 style_dead()
             else
                 style_text();
@@ -2995,28 +3010,27 @@ pub const Ui = struct {
                         m.pc_end,
                         self.writeEffectLabel(effect),
                     }) catch "lowered region"
+            else if (m.statement_id) |stmt_id|
+                self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                    stmt_id,
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    self.writeEffectLabel(effect),
+                }) catch "lowered region"
             else
-                if (m.statement_id) |stmt_id|
-                    self.scratchFmt(" lowered region | stmt {d} | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
-                        stmt_id,
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        self.writeEffectLabel(effect),
-                    }) catch "lowered region"
-                else
-                    self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
-                        self.currentProvenanceLabel(),
-                        m.ora_line,
-                        m.sir_start,
-                        m.sir_end,
-                        m.pc_start,
-                        m.pc_end,
-                        self.writeEffectLabel(effect),
-                    }) catch "lowered region"
+                self.scratchFmt(" lowered region | {s} | ora {d} => sir {d}..{d} | pc {d}..{d} | effect {s}", .{
+                    self.currentProvenanceLabel(),
+                    m.ora_line,
+                    m.sir_start,
+                    m.sir_end,
+                    m.pc_start,
+                    m.pc_end,
+                    self.writeEffectLabel(effect),
+                }) catch "lowered region"
         else if (self.session.debugger.currentOpMeta()) |meta|
             self.scratchFmt(" lowered op | {s} [{s}:{s}] | effect {s}", .{
                 meta.op,
@@ -3046,6 +3060,7 @@ pub const Ui = struct {
     fn statementKindLabel(self: *Ui, line: u32) []const u8 {
         if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
+        if (self.isProofOnlySourceLine(line)) return "smt-only";
         const kind = self.statementKindForLine(line) orelse return "none";
         return switch (kind) {
             .runtime => "stmt",
@@ -3064,7 +3079,8 @@ pub const Ui = struct {
     fn lineProvenanceLabel(self: *Ui, line: u32) []const u8 {
         if (self.isFoldedSourceLine(line)) return "folded";
         if (self.isRemovedSourceLine(line)) return "removed";
-        const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line) orelse return "none";
+        if (self.isProofOnlySourceLine(line)) return "smt-only";
+        const provenance = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line) orelse return "none";
         return provenance.label();
     }
 
@@ -3089,8 +3105,14 @@ pub const Ui = struct {
         return "removed from runtime: source declaration has no SIR or bytecode coverage";
     }
 
+    fn proofOnlyLineExplanation(self: *Ui, line: u32) []const u8 {
+        _ = self;
+        _ = line;
+        return "SMT-only source line: verified by the proof sidecar, but no runtime bytecode stop is emitted";
+    }
+
     fn isFoldedSourceLine(self: *Ui, line: u32) bool {
-        if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.seed.source_path, line)) return false;
         const info = self.session.debugger.debug_info orelse return false;
         if (!self.lineInAnyFunctionScope(info, line)) return false;
 
@@ -3148,20 +3170,16 @@ pub const Ui = struct {
         var saw_safe = false;
 
         if (self.proof_lines.get(line)) |status| {
-            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
-            else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
-            else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
         }
 
         if (self.session.debugger.debug_info) |info| {
-            if (self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line)) |entry| {
+            if (self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line)) |entry| {
                 if (entry.statement_id) |sid| {
                     for (info.parsed.value.ops) |meta| {
                         if (meta.statement_id != sid) continue;
                         if (meta.proof_status) |status| {
-                            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true
-                            else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true
-                            else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
+                            if (std.mem.eql(u8, status, "proved_unsafe")) saw_unsafe = true else if (std.mem.eql(u8, status, "dynamic")) saw_dynamic = true else if (std.mem.eql(u8, status, "proved_safe")) saw_safe = true;
                         }
                     }
                 }
@@ -3172,6 +3190,11 @@ pub const Ui = struct {
         if (saw_dynamic) return .dynamic;
         if (saw_safe) return .proved_safe;
         return .none;
+    }
+
+    fn isProofOnlySourceLine(self: *Ui, line: u32) bool {
+        if (self.lineProofStatusSummary(line) == .none) return false;
+        return self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line) == null;
     }
 
     /// Parse `<stem>.proof.json` and populate `proof_lines`. The
@@ -3220,7 +3243,7 @@ pub const Ui = struct {
     /// all-entries-for-line iterator, and adding one for an overlay
     /// hint isn't justified yet.
     fn hoistOriginForLine(self: *Ui, line: u32) ?u32 {
-        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.config.source_path, line) orelse return null;
+        const entry = self.session.debugger.src_map.getFirstStatementEntryForLine(self.seed.source_path, line) orelse return null;
         if (entry.is_hoisted) {
             if (entry.origin_statement_id) |o| return o;
         }
@@ -3236,7 +3259,7 @@ pub const Ui = struct {
     }
 
     fn isRemovedSourceLine(self: *Ui, line: u32) bool {
-        if (self.session.debugger.src_map.hasAnyEntryForLine(self.config.source_path, line)) return false;
+        if (self.session.debugger.src_map.hasAnyEntryForLine(self.seed.source_path, line)) return false;
         const info = self.session.debugger.debug_info orelse return false;
         if (!self.lineInAnyFunctionScope(info, line)) return false;
         if (!self.isMeaningfulRemovedSourceText(line)) return false;
@@ -3293,7 +3316,7 @@ pub const Ui = struct {
 
     fn currentWriteEffectKind(self: *Ui) WriteEffectKind {
         const meta = self.session.debugger.currentOpMeta() orelse return .none;
-        const current_line = (self.focus_line orelse self.session.debugger.currentSourceLine()) orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const source_text = if (current_line != 0)
             if (self.session.debugger.getSourceLineText(current_line)) |line_text|
                 std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t")
@@ -3326,8 +3349,8 @@ pub const Ui = struct {
     }
 
     fn currentProvenanceLabel(self: *Ui) []const u8 {
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
-        const line_prov = self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line);
+        const current_line = self.currentDisplayLine() orelse 0;
+        const line_prov = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, current_line);
         if (self.session.debugger.currentOpMeta()) |meta| {
             switch (line_prov orelse .direct) {
                 .direct => return "direct",
@@ -3372,8 +3395,8 @@ pub const Ui = struct {
     fn currentOriginLine(self: *Ui) ?u32 {
         const entry = self.session.debugger.currentEntry() orelse return null;
         const origin_stmt_id = entry.origin_statement_id orelse return null;
-        return self.session.debugger.src_map.getFirstLineForStatementId(self.config.source_path, origin_stmt_id) orelse
-            self.session.debugger.src_map.getFirstLineForOriginStatementId(self.config.source_path, origin_stmt_id);
+        return self.session.debugger.src_map.getFirstLineForStatementId(self.seed.source_path, origin_stmt_id) orelse
+            self.session.debugger.src_map.getFirstLineForOriginStatementId(self.seed.source_path, origin_stmt_id);
     }
 
     fn currentSyntheticPath(self: *Ui) ?[]const u8 {
@@ -3417,7 +3440,7 @@ pub const Ui = struct {
     fn updateCommandStatusForCurrentStop(self: *Ui, action: []const u8) !void {
         defer self.appendDegradedSuffix();
         const entry = self.session.debugger.currentEntry();
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const origin_line = self.currentOriginLine();
 
         if (self.session.debugger.lastErrorName()) |err_name| {
@@ -3547,7 +3570,7 @@ pub const Ui = struct {
 
     fn updateExecutionErrorStatus(self: *Ui, action: []const u8) !void {
         const err_name = self.session.debugger.lastErrorName() orelse "execution_error";
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const source_text = if (current_line != 0) self.session.debugger.getSourceLineText(current_line) else null;
         const opcode_name = self.session.debugger.getCurrentOpcodeName();
 
@@ -3736,24 +3759,23 @@ pub const Ui = struct {
                     self.scratchFmt("provenance={s}", .{
                         self.currentProvenanceLabel(),
                     }) catch "prov"
-            else
-                if (entry.statement_id) |stmt_id|
-                    if (entry.origin_statement_id) |origin_stmt_id|
-                        self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
-                            self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
-                        }) catch "prov"
-                    else
-                        self.scratchFmt("provenance={s}  stmt={d}", .{
-                            self.currentProvenanceLabel(), stmt_id,
-                        }) catch "prov"
-                else if (entry.origin_statement_id) |origin_stmt_id|
-                    self.scratchFmt("provenance={s}  origin={d}", .{
-                        self.currentProvenanceLabel(), origin_stmt_id,
+            else if (entry.statement_id) |stmt_id|
+                if (entry.origin_statement_id) |origin_stmt_id|
+                    self.scratchFmt("provenance={s}  stmt={d}  origin={d}", .{
+                        self.currentProvenanceLabel(), stmt_id, origin_stmt_id,
                     }) catch "prov"
                 else
-                    self.scratchFmt("provenance={s}", .{
-                        self.currentProvenanceLabel(),
+                    self.scratchFmt("provenance={s}  stmt={d}", .{
+                        self.currentProvenanceLabel(), stmt_id,
                     }) catch "prov"
+            else if (entry.origin_statement_id) |origin_stmt_id|
+                self.scratchFmt("provenance={s}  origin={d}", .{
+                    self.currentProvenanceLabel(), origin_stmt_id,
+                }) catch "prov"
+            else
+                self.scratchFmt("provenance={s}", .{
+                    self.currentProvenanceLabel(),
+                }) catch "prov"
         else
             self.scratchFmt("provenance={s}", .{
                 self.currentProvenanceLabel(),
@@ -3818,7 +3840,7 @@ pub const Ui = struct {
 
     fn drawTracePane(self: *Ui, root: Window) void {
         var row: u16 = 0;
-        const current_line = self.focus_line orelse self.session.debugger.currentSourceLine() orelse 0;
+        const current_line = self.currentDisplayLine() orelse 0;
         const origin_line = self.currentOriginLine();
         const entry = self.session.debugger.currentEntry();
         const prov = self.currentProvenanceLabel();
@@ -3890,10 +3912,10 @@ pub const Ui = struct {
                     self.scratchFmt("origin={d}  kind={s}/{s}", .{
                         origin_stmt, self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
                     }) catch "meta"
-                    else
-                        self.scratchFmt("kind={s}/{s}", .{
-                            self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
-                        }) catch "meta";
+                else
+                    self.scratchFmt("kind={s}/{s}", .{
+                        self.statementKindLabel(current_line), self.lineProvenanceLabel(current_line),
+                    }) catch "meta";
                 drawSegments(root, 1, row, &.{seg(meta_line, style_muted())});
                 row += 1;
             }
@@ -3903,10 +3925,12 @@ pub const Ui = struct {
                     self.foldedLineExplanation(current_line)
                 else if (self.isRemovedSourceLine(current_line))
                     self.removedLineExplanation(current_line)
+                else if (self.isProofOnlySourceLine(current_line))
+                    self.proofOnlyLineExplanation(current_line)
                 else
                     self.scratchFmt("{s}; {s}", .{
                         self.statementKindExplanation(self.statementKindForLine(current_line)),
-                        self.lineProvenanceExplanation(self.session.debugger.src_map.getLineProvenance(self.config.source_path, current_line)),
+                        self.lineProvenanceExplanation(self.session.debugger.src_map.getLineProvenance(self.seed.source_path, current_line)),
                     }) catch "explain";
                 drawSegments(root, 1, row, &.{seg(explain_line, style_footer_note())});
                 row += 2;
@@ -4109,8 +4133,8 @@ pub const Ui = struct {
     fn scratchShortAddressBytes(self: *Ui, bytes: [20]u8) []const u8 {
         var raw: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&raw, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
-            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+            bytes[0],  bytes[1],  bytes[2],  bytes[3],  bytes[4],
+            bytes[5],  bytes[6],  bytes[7],  bytes[8],  bytes[9],
             bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
             bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
         }) catch return "????????";
@@ -4290,7 +4314,7 @@ pub const Ui = struct {
     /// which currently depend on Ui state and aren't on the
     /// controller yet.
     fn evalResolveBinding(ctx: *anyopaque, name: []const u8) ora_evm.debug_eval.EvalError!?ora_evm.debug_eval.Value {
-        const self: *Ui = @alignCast(@ptrCast(ctx));
+        const self: *Ui = @ptrCast(@alignCast(ctx));
 
         // 1. Controller path — folded value + storage/memory/tstore root.
         if (self.controller.resolveBindingNumeric(name)) |numeric| {
@@ -4456,7 +4480,6 @@ pub const Ui = struct {
         for (word) |byte| value = (value << 8) | byte;
         return .{ .numeric = value };
     }
-
 
     /// Try to decode a revert payload (as left in `frame.output` after a
     /// REVERT) against the loaded ABI. Returns `null` when the payload
@@ -4673,9 +4696,10 @@ pub const Ui = struct {
             const is_current = line == current_line;
             const is_origin = if (origin_line) |origin| origin == line and origin != current_line else false;
             const kind = self.statementKindForLine(line);
-            const provenance = self.session.debugger.src_map.getLineProvenance(self.config.source_path, line);
+            const provenance = self.session.debugger.src_map.getLineProvenance(self.seed.source_path, line);
             const folded = self.isFoldedSourceLine(line);
             const removed = self.isRemovedSourceLine(line);
+            const proof_only = self.isProofOnlySourceLine(line);
             const marker = if (has_break and is_current)
                 ">"
             else if (has_break)
@@ -4684,6 +4708,8 @@ pub const Ui = struct {
                 "^"
             else if (folded)
                 "="
+            else if (proof_only)
+                "s"
             else if (removed)
                 "-"
             else if (provenance == .mixed)
@@ -4702,6 +4728,8 @@ pub const Ui = struct {
                 style_emphasis()
             else if (folded)
                 style_hint()
+            else if (proof_only)
+                style_dead()
             else if (removed)
                 style_dead()
             else if (provenance == .mixed)
@@ -4787,7 +4815,7 @@ pub const Ui = struct {
     }
 
     fn statementKindForLine(self: *Ui, line: u32) ?ora_evm.SourceMap.StatementKind {
-        return self.session.debugger.src_map.getStatementKindForLine(self.config.source_path, line);
+        return self.session.debugger.src_map.getStatementKindForLine(self.seed.source_path, line);
     }
 
     fn hasBreakpointLine(self: *Ui, line: u32) bool {
@@ -4941,6 +4969,7 @@ fn runMain() !void {
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
     const initial_winsize = try vaxis.Tty.getWinsize(tty.fd);
     try vx.resize(allocator, tty.writer(), initial_winsize);
+    ui.updateCommandStatusForCurrentStop("start") catch {};
     ui.render(&vx);
     try vx.render(tty.writer());
 
@@ -4996,6 +5025,8 @@ pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig
 
     const source_text = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_path, limits.artifact_max_bytes);
     errdefer allocator.free(source_text);
+    const canonical_source_path = try canonicalizeSourcePath(allocator, config.source_path);
+    errdefer allocator.free(canonical_source_path);
 
     var debug_info_json: ?[]u8 = null;
     errdefer if (debug_info_json) |bytes| allocator.free(bytes);
@@ -5057,12 +5088,19 @@ pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig
         .source_map = source_map,
         .debug_info_json = debug_info_json,
         .source_text = source_text,
-        .source_path = try allocator.dupe(u8, config.source_path),
+        .source_path = canonical_source_path,
         .sir_text = sir_text,
         .calldata = try allocator.dupe(u8, config.calldata),
         .caller = caller,
         .contract = contract,
         .limits = limits,
+    };
+}
+
+fn canonicalizeSourcePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound, error.NameTooLong, error.AccessDenied, error.NotDir => try allocator.dupe(u8, path),
+        else => return err,
     };
 }
 

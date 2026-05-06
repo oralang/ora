@@ -149,7 +149,7 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "var", "Declares a mutable variable." },
     .{ "const", "Declares a compile-time constant." },
     .{ "storage", "Storage qualifier — persists on-chain between calls." },
-    .{ "transient", "Transient storage qualifier — cleared after each transaction." },
+    .{ "tstore", "Transient storage qualifier — cleared after each transaction." },
     .{ "memory", "Memory qualifier — temporary data within a call." },
     .{ "import", "Imports declarations from another module." },
     .{ "log", "Declares an event (emits an EVM log)." },

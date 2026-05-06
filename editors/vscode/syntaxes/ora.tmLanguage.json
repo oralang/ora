@@ -74,7 +74,7 @@
       "patterns": [
         {
           "name": "storage.modifier.ora",
-          "match": "\\b(storage|memory|tstore|transient|immutable)\\b"
+          "match": "\\b(storage|memory|tstore|immutable)\\b"
         }
       ]
     },
