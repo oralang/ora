@@ -123,6 +123,7 @@ pub const TypeKind = enum {
     string,
     address,
     bytes,
+    fixed_bytes,
     external_proxy,
     named,
     function,
@@ -165,6 +166,11 @@ pub const ExternalProxyType = struct {
 pub const IntegerType = struct {
     bits: ?u16 = null,
     signed: ?bool = null,
+    spelling: ?[]const u8 = null,
+};
+
+pub const FixedBytesType = struct {
+    len: u8,
     spelling: ?[]const u8 = null,
 };
 
@@ -216,6 +222,7 @@ pub const Type = union(TypeKind) {
     string: void,
     address: void,
     bytes: void,
+    fixed_bytes: FixedBytesType,
     external_proxy: ExternalProxyType,
     named: NamedType,
     function: FunctionType,
@@ -238,6 +245,7 @@ pub const Type = union(TypeKind) {
     pub fn name(self: *const Type) ?[]const u8 {
         return switch (self.*) {
             .integer => |integer| integer.spelling,
+            .fixed_bytes => |fixed_bytes| fixed_bytes.spelling,
             .external_proxy => |proxy| proxy.trait_name,
             .named => |named| named.name,
             .function => |function| function.name,
@@ -353,6 +361,7 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
         .address => try buffer.appendSlice(allocator, "address"),
         .string => try buffer.appendSlice(allocator, "string"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
+        .fixed_bytes => |fixed_bytes| try buffer.writer(allocator).print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try buffer.writer(allocator).print("external_{s}", .{proxy.trait_name}),
         .void => try buffer.appendSlice(allocator, "void"),
         .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),

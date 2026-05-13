@@ -1776,6 +1776,20 @@ test "compiler lowers std coinbase and msg value builtins" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c0_i256 : i256"));
 }
 
+test "compiler lowers runtime keccak256 builtin" {
+    const source_text =
+        \\pub fn hash(data: bytes) -> u256 {
+        \\    return @keccak256(data);
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.keccak256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c0_i256 : i256"));
+}
+
 test "compiler lowers builtin cast through real conversion ops" {
     const source_text =
         \\pub fn casts(value: u256, raw: u160) -> address {

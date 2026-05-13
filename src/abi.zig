@@ -1135,7 +1135,7 @@ const CompilerAbiGenerator = struct {
 
     fn publicAbiSupportsResultDynamicArrayElement(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
         return switch (ty) {
-            .bool, .address, .integer, .enum_, .bitfield => true,
+            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
             .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(ctx, refinement.base_type.*),
             .named => |named| blk: {
                 const item_id = ctx.item_index.lookup(named.name) orelse break :blk false;
@@ -1160,7 +1160,7 @@ const CompilerAbiGenerator = struct {
 
     fn publicAbiStaticWordCount(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) ?usize {
         return switch (ty) {
-            .bool, .address, .integer, .enum_, .bitfield => 1,
+            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
             .refinement => |refinement| self.publicAbiStaticWordCount(ctx, refinement.base_type.*),
             .tuple => |elements| blk: {
                 var total: usize = 0;
@@ -1186,6 +1186,7 @@ const CompilerAbiGenerator = struct {
             .named => |named| blk: {
                 if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
                 if (parseIntegerSpelling(named.name) != null) break :blk 1;
+                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
                 const item_id = ctx.item_index.lookup(named.name) orelse break :blk null;
                 break :blk switch (ctx.file.item(item_id).*) {
                     .Enum, .Bitfield => 1,
@@ -1289,7 +1290,7 @@ const CompilerAbiGenerator = struct {
     ) anyerror!ResolvedType {
         _ = stack;
         switch (ty) {
-            .bool, .address, .string, .bytes, .integer => {
+            .bool, .address, .string, .bytes, .fixed_bytes, .integer => {
                 const wire = try compiler_abi.canonicalAbiType(self.allocator, ty);
                 errdefer self.allocator.free(wire);
                 var node = AbiTypeNode{
@@ -1300,6 +1301,7 @@ const CompilerAbiGenerator = struct {
                         .address => "address",
                         .string => "string",
                         .bytes => "bytes",
+                        .fixed_bytes => |fixed_bytes| fixed_bytes.spelling orelse wire,
                         .integer => |integer| integer.spelling orelse "u256",
                         else => unreachable,
                     },
@@ -1330,6 +1332,7 @@ const CompilerAbiGenerator = struct {
                 if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
                 if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{});
                 if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
+                if (parseFixedBytesSpelling(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
                 return error.UnsupportedAbiType;
             },
             else => return error.UnsupportedAbiType,
@@ -1345,6 +1348,16 @@ const CompilerAbiGenerator = struct {
         };
         const bits = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
         return .{ .integer = .{ .bits = bits, .signed = signed, .spelling = name } };
+    }
+
+    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
+        if (!std.mem.startsWith(u8, name, "bytes")) return null;
+        if (name.len <= "bytes".len) return null;
+        const digits = name["bytes".len..];
+        if (digits.len > 1 and digits[0] == '0') return null;
+        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
+        if (len < 1 or len > 32) return null;
+        return len;
     }
 
     fn resolveArrayType(
@@ -2053,10 +2066,19 @@ fn defaultWidgetForWireType(wire_type: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, wire_type, "uint")) return "number";
     if (std.mem.startsWith(u8, wire_type, "int")) return "number";
     if (std.mem.eql(u8, wire_type, "address")) return "address";
-    if (std.mem.eql(u8, wire_type, "bytes")) return "bytes";
+    if (std.mem.eql(u8, wire_type, "bytes") or isFixedBytesWireType(wire_type)) return "bytes";
     if (std.mem.eql(u8, wire_type, "string")) return "text";
     if (std.mem.eql(u8, wire_type, "bool")) return "select";
     return null;
+}
+
+fn isFixedBytesWireType(wire_type: []const u8) bool {
+    if (!std.mem.startsWith(u8, wire_type, "bytes")) return false;
+    if (wire_type.len <= "bytes".len) return false;
+    const digits = wire_type["bytes".len..];
+    if (digits.len > 1 and digits[0] == '0') return false;
+    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return false;
+    return len >= 1 and len <= 32;
 }
 
 fn writeWireType(writer: anytype, wire_type: []const u8) !void {

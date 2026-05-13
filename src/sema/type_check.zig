@@ -42,6 +42,7 @@ const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
+const refinements = @import("refinements.zig");
 
 pub const ImportQuery = struct {
     context: *anyopaque,
@@ -67,15 +68,14 @@ fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) Lo
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .refinement) {
-        if (std.mem.eql(u8, expected_type.refinement.name, "Scaled")) {
-            return scaledFlowCompatible(expected_type.refinement, actual_type);
-        }
-        if (std.mem.eql(u8, expected_type.refinement.name, "Exact")) {
-            return exactFlowCompatible(expected_type.refinement, actual_type);
+        switch (refinements.kindForName(expected_type.refinement.name) orelse return false) {
+            .scaled => return scaledFlowCompatible(expected_type.refinement, actual_type),
+            .exact => return exactFlowCompatible(expected_type.refinement, actual_type),
+            else => {},
         }
     }
 
-    if (expected_type.kind() == .refinement and !refinementSupportsRuntimeGuard(expected_type.refinement)) {
+    if (expected_type.kind() == .refinement and !refinements.supportsRuntimeGuard(expected_type.refinement)) {
         if (actual_type.kind() != .refinement) return false;
         return typesAssignable(expected_type, actual_type) and typesAssignable(actual_type, expected_type);
     }
@@ -83,8 +83,8 @@ fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (typesAssignable(expected_type, actual_type)) return true;
 
     if (expected_type.kind() == .refinement and actual_type.kind() == .refinement) {
-        if (!refinementSupportsRuntimeGuard(expected_type.refinement) or
-            !refinementSupportsRuntimeGuard(actual_type.refinement))
+        if (!refinements.supportsRuntimeGuard(expected_type.refinement) or
+            !refinements.supportsRuntimeGuard(actual_type.refinement))
         {
             return false;
         }
@@ -95,34 +95,23 @@ fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     return false;
 }
 
-fn refinementSupportsRuntimeGuard(refinement: model.RefinementType) bool {
-    return !std.mem.eql(u8, refinement.name, "Exact") and
-        !std.mem.eql(u8, refinement.name, "Scaled");
-}
-
 fn exactFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
-    if (actual_type.kind() == .refinement) {
-        if (!std.mem.eql(u8, actual_type.refinement.name, "Exact")) return false;
-        return typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) and
-            typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*);
-    }
-    return typesAssignable(expected.base_type.*, actual_type) and
-        typesAssignable(actual_type, expected.base_type.*);
+    if (actual_type.kind() != .refinement) return false;
+    if (refinements.kindForName(actual_type.refinement.name) != .exact) return false;
+    return typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) and
+        typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*);
 }
 
 fn scaledFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
-    if (actual_type.kind() == .refinement) {
-        if (!std.mem.eql(u8, actual_type.refinement.name, "Scaled")) return false;
-        if (!typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) or
-            !typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*))
-        {
-            return false;
-        }
-        return typesAssignable(.{ .refinement = expected }, actual_type) and
-            typesAssignable(actual_type, .{ .refinement = expected });
+    if (actual_type.kind() != .refinement) return false;
+    if (refinements.kindForName(actual_type.refinement.name) != .scaled) return false;
+    if (!typesAssignable(expected.base_type.*, actual_type.refinement.base_type.*) or
+        !typesAssignable(actual_type.refinement.base_type.*, expected.base_type.*))
+    {
+        return false;
     }
-    return typesAssignable(expected.base_type.*, actual_type) and
-        typesAssignable(actual_type, expected.base_type.*);
+    return typesAssignable(.{ .refinement = expected }, actual_type) and
+        typesAssignable(actual_type, .{ .refinement = expected });
 }
 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
@@ -1263,7 +1252,7 @@ const TypeChecker = struct {
         return switch (ty) {
             .unknown => true,
             .void => position == .output,
-            .bool, .address, .string, .bytes, .integer, .bitfield => true,
+            .bool, .address, .string, .bytes, .fixed_bytes, .integer, .bitfield => true,
             .enum_ => |named| !self.enumHasPayload(named.name),
             .refinement => |refinement| self.publicAbiSupportsType(refinement.base_type.*, position),
             .array => |array| self.publicAbiSupportsType(array.element_type.*, position),
@@ -1317,7 +1306,7 @@ const TypeChecker = struct {
 
     fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
         return switch (ty) {
-            .bool, .address, .integer, .enum_, .bitfield => true,
+            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
             .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
             .named => |named| blk: {
                 const item_id = self.item_index.lookup(named.name) orelse break :blk false;
@@ -1333,7 +1322,7 @@ const TypeChecker = struct {
 
     fn publicAbiStaticWordCount(self: *const TypeChecker, ty: Type) ?usize {
         return switch (ty) {
-            .bool, .address, .integer, .bitfield => 1,
+            .bool, .address, .fixed_bytes, .integer, .bitfield => 1,
             .enum_ => |named| if (self.enumHasPayload(named.name)) null else 1,
             .refinement => |refinement| self.publicAbiStaticWordCount(refinement.base_type.*),
             .tuple => |elements| blk: {
@@ -1360,6 +1349,7 @@ const TypeChecker = struct {
             .named => |named| blk: {
                 if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
                 if (parseIntegerSpelling(named.name) != null) break :blk 1;
+                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
                 const item_id = self.item_index.lookup(named.name) orelse break :blk null;
                 break :blk switch (self.file.item(item_id).*) {
                     .Enum => if (self.enumHasPayload(named.name)) null else 1,
@@ -1452,6 +1442,16 @@ const TypeChecker = struct {
         if (name.len < 2) return null;
         if (name[0] != 'u' and name[0] != 'i') return null;
         _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
+    }
+
+    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
+        if (!std.mem.startsWith(u8, name, "bytes")) return null;
+        if (name.len <= "bytes".len) return null;
+        const digits = name["bytes".len..];
+        if (digits.len > 1 and digits[0] == '0') return null;
+        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
+        if (len < 1 or len > 32) return null;
+        return len;
     }
 
     fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
@@ -2954,6 +2954,24 @@ const TypeChecker = struct {
         {
             try self.checkDivisionBuiltinArguments(builtin);
         }
+        if (std.mem.eql(u8, builtin.name, "keccak256")) {
+            try self.checkKeccak256BuiltinArguments(builtin);
+        }
+    }
+
+    fn checkKeccak256BuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@keccak256 expects 1 argument", .{});
+            return;
+        }
+
+        const arg_type = self.expr_types[builtin.args[0].index()];
+        switch (arg_type.kind()) {
+            .string, .bytes => {},
+            else => try self.emitRangeError(builtin.range, "@keccak256 expects a string or bytes argument, found '{s}'", .{
+                diagnosticTypeDisplayName(self, arg_type),
+            }),
+        }
     }
 
     fn checkDivisionBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
@@ -3545,7 +3563,7 @@ const TypeChecker = struct {
         return switch (self.file.typeExpr(type_expr).*) {
             .Path => |path| blk: {
                 const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                if (std.mem.eql(u8, trimmed, "NonZeroAddress")) {
+                if (refinements.isPathFormName(trimmed)) {
                     break :blk .{ .refinement = .{
                         .name = "NonZeroAddress",
                         .base_type = try self.storeType(.{ .address = {} }),
@@ -3685,15 +3703,7 @@ const TypeChecker = struct {
             } };
         }
 
-        if (std.mem.eql(u8, generic.name, "MinValue") or
-            std.mem.eql(u8, generic.name, "MaxValue") or
-            std.mem.eql(u8, generic.name, "InRange") or
-            std.mem.eql(u8, generic.name, "Scaled") or
-            std.mem.eql(u8, generic.name, "Exact") or
-            std.mem.eql(u8, generic.name, "NonZero") or
-            std.mem.eql(u8, generic.name, "NonZeroAddress") or
-            std.mem.eql(u8, generic.name, "BasisPoints"))
-        {
+        if (refinements.isKnownName(generic.name)) {
             if (generic.args.len > 0 and generic.args[0] == .Type) {
                 const resolved_args = try self.substituteGenericArgs(generic.args, bindings);
                 return .{ .refinement = .{
@@ -5573,7 +5583,7 @@ const TypeChecker = struct {
         if (lhs_type.kind() != .refinement or rhs_type.kind() != .refinement) return null;
         const lhs = lhs_type.refinement;
         const rhs = rhs_type.refinement;
-        if (!std.mem.eql(u8, lhs.name, "Scaled") or !std.mem.eql(u8, rhs.name, "Scaled")) return null;
+        if (refinements.kindForName(lhs.name) != .scaled or refinements.kindForName(rhs.name) != .scaled) return null;
         if (!typesAssignable(lhs.base_type.*, rhs.base_type.*) or !typesAssignable(rhs.base_type.*, lhs.base_type.*)) return null;
         const lhs_decimals = refinementIntegerArg(lhs, 1) orelse return null;
         const rhs_decimals = refinementIntegerArg(rhs, 1) orelse return null;
@@ -5643,7 +5653,8 @@ const TypeChecker = struct {
             std.mem.eql(u8, trimmed, "bool") or
             std.mem.eql(u8, trimmed, "string") or
             std.mem.eql(u8, trimmed, "address") or
-            std.mem.eql(u8, trimmed, "bytes"))
+            std.mem.eql(u8, trimmed, "bytes") or
+            parseFixedBytesSpelling(trimmed) != null)
         {
             return descriptorFromPathName(self.file, self.item_index, trimmed);
         }
@@ -7419,6 +7430,7 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
     if (lhs_type.kind() != rhs_type.kind()) return false;
     return switch (lhs_type) {
         .unknown, .void, .bool, .string, .address, .bytes => true,
+        .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
         .integer => |left| blk: {
             const right = rhs_type.integer;
@@ -7490,6 +7502,7 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .string => try buffer.appendSlice(allocator, "string"),
         .address => try buffer.appendSlice(allocator, "address"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
+        .fixed_bytes => |fixed_bytes| try buffer.writer(allocator).print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
         .named => |named| try buffer.appendSlice(allocator, named.name),
         .function => |function| try buffer.appendSlice(allocator, function.name orelse "function"),
@@ -7571,6 +7584,7 @@ fn typeDisplayName(ty: Type) []const u8 {
         .string => "string",
         .address => "address",
         .bytes => "bytes",
+        .fixed_bytes => |fixed_bytes| fixed_bytes.spelling orelse "fixed bytes",
         .external_proxy => "external proxy",
         .named => |named| named.name,
         .function => |function| function.name orelse "function",

@@ -109,6 +109,45 @@ test "compiler abi emits uint256 for enum without declared repr" {
     return error.TestUnexpectedResult;
 }
 
+test "compiler abi emits fixed bytes public ABI types" {
+    const source_text =
+        \\contract C {
+        \\    pub fn set(a: bytes1, b: bytes4, c: bytes20, d: bytes31, e: bytes32, value: u256) -> bytes31 {
+        \\        return d;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "set")) continue;
+        try testing.expectEqual(@as(usize, 6), callable.inputs.len);
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+        try testing.expectEqualStrings("0x36a0470c", callable.selector.?);
+        const b1_input = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        const b4_input = contract_abi.findType(callable.inputs[1].type_id) orelse return error.TestUnexpectedResult;
+        const b20_input = contract_abi.findType(callable.inputs[2].type_id) orelse return error.TestUnexpectedResult;
+        const b31_input = contract_abi.findType(callable.inputs[3].type_id) orelse return error.TestUnexpectedResult;
+        const b32_input = contract_abi.findType(callable.inputs[4].type_id) orelse return error.TestUnexpectedResult;
+        const value_input = contract_abi.findType(callable.inputs[5].type_id) orelse return error.TestUnexpectedResult;
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("bytes1", b1_input.wire_type.?);
+        try testing.expectEqualStrings("bytes4", b4_input.wire_type.?);
+        try testing.expectEqualStrings("bytes20", b20_input.wire_type.?);
+        try testing.expectEqualStrings("bytes31", b31_input.wire_type.?);
+        try testing.expectEqualStrings("bytes32", b32_input.wire_type.?);
+        try testing.expectEqualStrings("uint256", value_input.wire_type.?);
+        try testing.expectEqualStrings("bytes31", output.wire_type.?);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "compiler abi keeps anonymous structs distinct from tuples" {
     const source_text =
         \\contract Test {
@@ -375,4 +414,35 @@ test "compiler emits ABI attrs for public contract entries" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_params"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"address\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"uint256\""));
+}
+
+test "compiler emits ABI attrs for slice of struct containing bitfield" {
+    const source_text =
+        \\bitfield CustomFlags : u256 {
+        \\    enabled: bool @bits(0..1);
+        \\    code: u8 @bits(1..6);
+        \\    delta: i16 @bits(6..22);
+        \\    amount: u32 @bits(22..54);
+        \\}
+        \\
+        \\struct Row {
+        \\    head: u256;
+        \\    flags: CustomFlags;
+        \\    tail: u256;
+        \\}
+        \\
+        \\contract Entries {
+        \\    storage var rows: slice[Row];
+        \\
+        \\    pub fn set(values: slice[Row]) {
+        \\        rows = values;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_params"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(uint256,uint256,uint256)[]\""));
 }

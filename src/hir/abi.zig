@@ -8,6 +8,11 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
         .address => allocator.dupe(u8, "address"),
         .string => allocator.dupe(u8, "string"),
         .bytes => allocator.dupe(u8, "bytes"),
+        .fixed_bytes => |fixed_bytes| fixedBytesAbiType(allocator, fixed_bytes),
+        .named => |named| if (parseFixedBytesSpelling(named.name)) |len|
+            fixedBytesAbiType(allocator, .{ .len = len, .spelling = named.name })
+        else
+            error.UnsupportedAbiType,
         .enum_ => error.UnsupportedAbiType,
         .bitfield => allocator.dupe(u8, "uint256"),
         .integer => |integer| blk: {
@@ -63,10 +68,25 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8
     };
 }
 
+pub fn parseFixedBytesSpelling(name: []const u8) ?u8 {
+    if (!std.mem.startsWith(u8, name, "bytes")) return null;
+    if (name.len <= "bytes".len) return null;
+    const digits = name["bytes".len..];
+    if (digits.len > 1 and digits[0] == '0') return null;
+    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
+    if (len < 1 or len > 32) return null;
+    return len;
+}
+
+pub fn fixedBytesAbiType(allocator: std.mem.Allocator, fixed_bytes: sema.FixedBytesType) ![]const u8 {
+    if (fixed_bytes.spelling) |spelling| return allocator.dupe(u8, spelling);
+    return std.fmt.allocPrint(allocator, "bytes{d}", .{fixed_bytes.len});
+}
+
 fn errorTypeHasPayload(ty: sema.Type) bool {
     return switch (ty) {
         .named, .anonymous_struct, .tuple, .bytes, .string, .slice, .array, .struct_, .contract => true,
-        .bool, .address, .integer, .enum_, .bitfield => true,
+        .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
         .refinement => |refinement| errorTypeHasPayload(refinement.base_type.*),
         else => false,
     };
@@ -74,7 +94,7 @@ fn errorTypeHasPayload(ty: sema.Type) bool {
 
 fn resultDynamicArrayElementSupported(ty: sema.Type) bool {
     return switch (ty) {
-        .bool, .address, .integer, .enum_, .bitfield => true,
+        .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
         .refinement => |refinement| resultDynamicArrayElementSupported(refinement.base_type.*),
         else => false,
     };
@@ -103,7 +123,8 @@ pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const
 
 pub fn staticAbiWordCount(ty: sema.Type) ?usize {
     return switch (ty) {
-        .bool, .address, .integer, .enum_, .bitfield => 1,
+        .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
+        .named => |named| if (parseFixedBytesSpelling(named.name) != null) 1 else null,
         .refinement => |refinement| staticAbiWordCount(refinement.base_type.*),
         .tuple => |elements| blk: {
             var total: usize = 0;

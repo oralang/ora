@@ -413,6 +413,7 @@ const Lowerer = struct {
             .address => support.addressType(self.context),
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
+            .fixed_bytes => support.defaultIntegerType(self.context),
             .external_proxy => support.addressType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
             .array => |array| support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), array.len orelse 0),
@@ -638,7 +639,7 @@ const Lowerer = struct {
         if (self.substitutedType(name)) |substituted| {
             return self.lowerSemaType(substituted, source.TextRange.empty(0));
         }
-        if (std.mem.eql(u8, std.mem.trim(u8, name, " \t\n\r"), "NonZeroAddress")) {
+        if (sema.refinements.isPathFormName(name)) {
             return mlir.oraNonZeroAddressTypeGet(self.context);
         }
         if (self.item_index.lookup(name)) |item_id| {
@@ -1224,7 +1225,7 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             else => lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
     }
-    if (std.mem.eql(u8, generic.name, "NonZeroAddress")) {
+    if (sema.refinements.isPathFormName(generic.name)) {
         return mlir.oraNonZeroAddressTypeGet(lowerer.context);
     }
     return support.lowerPathType(lowerer.context, generic.name);
