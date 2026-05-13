@@ -105,9 +105,11 @@ pub const VerificationProbeSummary = struct {
     diagnostics_len: usize,
     degraded: bool,
     error_kinds: []u8,
+    soundness_losses: []u8,
 
     pub fn deinit(self: *VerificationProbeSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.error_kinds);
+        allocator.free(self.soundness_losses);
     }
 };
 
@@ -116,7 +118,52 @@ pub fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, r
     try testing.expectEqual(lhs.errors_len, rhs.errors_len);
     try testing.expectEqual(lhs.diagnostics_len, rhs.diagnostics_len);
     try testing.expectEqualStrings(lhs.error_kinds, rhs.error_kinds);
+    try testing.expectEqualStrings(lhs.soundness_losses, rhs.soundness_losses);
     try testing.expectEqual(lhs.degraded, rhs.degraded);
+}
+
+fn appendSortedLabelsCsv(builder: *std.ArrayList(u8), labels: []const []const u8) !void {
+    var sorted = std.ArrayList([]const u8){};
+    defer sorted.deinit(testing.allocator);
+    for (labels) |label| {
+        try sorted.append(testing.allocator, label);
+    }
+    std.mem.sort([]const u8, sorted.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.lessThan);
+
+    for (sorted.items, 0..) |label, i| {
+        if (i != 0) try builder.append(testing.allocator, ',');
+        try builder.appendSlice(testing.allocator, label);
+    }
+}
+
+fn collectErrorKindCsv(result: anytype) ![]u8 {
+    var labels = std.ArrayList([]const u8){};
+    defer labels.deinit(testing.allocator);
+    for (result.errors.items) |err| {
+        try labels.append(testing.allocator, @tagName(err.error_type));
+    }
+
+    var builder = std.ArrayList(u8){};
+    errdefer builder.deinit(testing.allocator);
+    try appendSortedLabelsCsv(&builder, labels.items);
+    return try builder.toOwnedSlice(testing.allocator);
+}
+
+fn collectSoundnessLossCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
+    var labels = std.ArrayList([]const u8){};
+    defer labels.deinit(testing.allocator);
+    for (verifier.encoder.soundnessLosses()) |loss| {
+        try labels.append(testing.allocator, @tagName(loss));
+    }
+
+    var builder = std.ArrayList(u8){};
+    errdefer builder.deinit(testing.allocator);
+    try appendSortedLabelsCsv(&builder, labels.items);
+    return try builder.toOwnedSlice(testing.allocator);
 }
 
 pub fn verifyExampleWithoutDegradation(
@@ -131,33 +178,17 @@ pub fn verifyExampleWithoutDegradation(
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     errdefer verifier.deinit();
-    verifier.parallel = parallel;
+    _ = parallel;
     verifier.filter_function_name = function_name;
     verifier.timeout_ms = timeout_ms;
 
-    var result = if (parallel)
-        try verifier.runVerificationPass(hir_result.module.raw_module)
-    else
-        try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
     errdefer result.deinit();
     const degraded = verifier.encoder.isDegraded();
-    var kinds = std.ArrayList([]const u8){};
-    defer kinds.deinit(testing.allocator);
-    for (result.errors.items) |err| {
-        try kinds.append(testing.allocator, @tagName(err.error_type));
-    }
-    std.mem.sort([]const u8, kinds.items, {}, struct {
-        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return std.mem.order(u8, lhs, rhs) == .lt;
-        }
-    }.lessThan);
-
-    var builder = std.ArrayList(u8){};
-    defer builder.deinit(testing.allocator);
-    for (kinds.items, 0..) |kind, i| {
-        if (i != 0) try builder.append(testing.allocator, ',');
-        try builder.appendSlice(testing.allocator, kind);
-    }
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
 
     defer result.deinit();
     verifier.deinit();
@@ -166,7 +197,8 @@ pub fn verifyExampleWithoutDegradation(
         .errors_len = result.errors.items.len,
         .diagnostics_len = result.diagnostics.items.len,
         .degraded = degraded,
-        .error_kinds = try builder.toOwnedSlice(testing.allocator),
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
     };
 }
 
@@ -191,23 +223,10 @@ pub fn verifyTextWithoutDegradationWithTimeout(
     var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
     errdefer result.deinit();
     const degraded = verifier.encoder.isDegraded();
-    var kinds = std.ArrayList([]const u8){};
-    defer kinds.deinit(testing.allocator);
-    for (result.errors.items) |err| {
-        try kinds.append(testing.allocator, @tagName(err.error_type));
-    }
-    std.mem.sort([]const u8, kinds.items, {}, struct {
-        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return std.mem.order(u8, lhs, rhs) == .lt;
-        }
-    }.lessThan);
-
-    var builder = std.ArrayList(u8){};
-    defer builder.deinit(testing.allocator);
-    for (kinds.items, 0..) |kind, i| {
-        if (i != 0) try builder.append(testing.allocator, ',');
-        try builder.appendSlice(testing.allocator, kind);
-    }
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
 
     defer result.deinit();
     verifier.deinit();
@@ -216,7 +235,8 @@ pub fn verifyTextWithoutDegradationWithTimeout(
         .errors_len = result.errors.items.len,
         .diagnostics_len = result.diagnostics.items.len,
         .degraded = degraded,
-        .error_kinds = try builder.toOwnedSlice(testing.allocator),
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
     };
 }
 

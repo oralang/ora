@@ -36,6 +36,38 @@ pub const Encoder = struct {
         frame,
     };
 
+    pub const SoundnessLoss = enum {
+        user_disabled_state_verification,
+        user_disabled_call_verification,
+        missing_type_metadata,
+        missing_product_metadata,
+        missing_control_flow_summary,
+        unsupported_operation,
+        unsupported_error_encoding,
+        unsupported_sort_coercion,
+        unresolved_callee,
+        inexact_call_summary,
+        inexact_state_summary,
+        internal_encoding_failure,
+    };
+
+    pub fn soundnessLossLabel(loss: SoundnessLoss) []const u8 {
+        return switch (loss) {
+            .user_disabled_state_verification => "user_disabled_state_verification",
+            .user_disabled_call_verification => "user_disabled_call_verification",
+            .missing_type_metadata => "missing_type_metadata",
+            .missing_product_metadata => "missing_product_metadata",
+            .missing_control_flow_summary => "missing_control_flow_summary",
+            .unsupported_operation => "unsupported_operation",
+            .unsupported_error_encoding => "unsupported_error_encoding",
+            .unsupported_sort_coercion => "unsupported_sort_coercion",
+            .unresolved_callee => "unresolved_callee",
+            .inexact_call_summary => "inexact_call_summary",
+            .inexact_state_summary => "inexact_state_summary",
+            .internal_encoding_failure => "internal_encoding_failure",
+        };
+    }
+
     pub const PendingConstraint = struct {
         ast: z3.Z3_ast,
         source_kind: PendingConstraintSourceKind = .generic,
@@ -218,6 +250,8 @@ pub const Encoder = struct {
     encoding_degraded_reason: ?[]const u8,
     /// Bounded list of degradation reasons in encounter order.
     encoding_degraded_reasons: std.ArrayList([]const u8),
+    /// Bounded list of structured soundness-loss kinds in encounter order.
+    encoding_soundness_losses: std.ArrayList(SoundnessLoss),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.StringHashMap(ErrorUnionSort),
     /// Cache of product tuple sorts for tuples and structs.
@@ -261,6 +295,7 @@ pub const Encoder = struct {
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
             .encoding_degraded_reasons = std.ArrayList([]const u8){},
+            .encoding_soundness_losses = std.ArrayList(SoundnessLoss){},
             .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
@@ -282,6 +317,7 @@ pub const Encoder = struct {
         self.encoding_degraded = false;
         self.encoding_degraded_reason = null;
         self.encoding_degraded_reasons.clearRetainingCapacity();
+        self.encoding_soundness_losses.clearRetainingCapacity();
     }
 
     pub fn isDegraded(self: *const Encoder) bool {
@@ -296,6 +332,10 @@ pub const Encoder = struct {
         return self.encoding_degraded_reasons.items;
     }
 
+    pub fn soundnessLosses(self: *const Encoder) []const SoundnessLoss {
+        return self.encoding_soundness_losses.items;
+    }
+
     /// Public wrapper used by verifier-side test hooks and other callers that need
     /// to taint the current encoder state without reaching into private internals.
     pub fn noteDegradation(self: *Encoder, reason: []const u8) void {
@@ -304,6 +344,14 @@ pub const Encoder = struct {
 
     pub fn noteDegradationAtOp(self: *Encoder, op: mlir.MlirOperation, reason: []const u8) void {
         self.recordDegradation(self.formatDegradationAtOp(op, reason));
+    }
+
+    pub fn noteSoundnessLoss(self: *Encoder, loss: SoundnessLoss, detail: []const u8) void {
+        self.recordSoundnessLoss(loss, detail);
+    }
+
+    pub fn noteSoundnessLossAtOp(self: *Encoder, loss: SoundnessLoss, op: mlir.MlirOperation, detail: []const u8) void {
+        self.recordSoundnessLoss(loss, self.formatDegradationAtOp(op, detail));
     }
 
     pub fn getOrCreateCurrentGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
@@ -320,6 +368,14 @@ pub const Encoder = struct {
         if (self.encoding_degraded_reasons.items.len < degradation_reason_cap) {
             self.encoding_degraded_reasons.append(self.allocator, persistent_reason) catch {};
         }
+    }
+
+    fn recordSoundnessLoss(self: *Encoder, loss: SoundnessLoss, detail: []const u8) void {
+        const degradation_reason_cap = 10;
+        if (self.encoding_soundness_losses.items.len < degradation_reason_cap) {
+            self.encoding_soundness_losses.append(self.allocator, loss) catch {};
+        }
+        self.recordDegradation(detail);
     }
 
     fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
@@ -360,14 +416,14 @@ pub const Encoder = struct {
         if (full_reason) |owned| {
             defer self.allocator.free(owned);
             const persistent = self.allocPersistentMessage(owned) catch {
-                self.recordDegradation(reason);
+                self.recordSoundnessLoss(.inexact_call_summary, reason);
                 return;
             };
-            self.recordDegradation(persistent);
+            self.recordSoundnessLoss(.inexact_call_summary, persistent);
             return;
         } else |_| {}
 
-        self.recordDegradation(reason);
+        self.recordSoundnessLoss(.inexact_call_summary, reason);
     }
 
     fn astEquivalent(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) bool {
@@ -1157,7 +1213,7 @@ pub const Encoder = struct {
             field_names_csv_owned = field_names_csv != null;
         }
         const csv = field_names_csv orelse {
-            if (missing_names_reason) |reason| self.recordDegradation(reason);
+            if (missing_names_reason) |reason| self.recordSoundnessLoss(.missing_product_metadata, reason);
             return null;
         };
 
@@ -1180,7 +1236,7 @@ pub const Encoder = struct {
                 field_type = self.tryLookupStructFieldTypeFromValue(source_value, field_index) catch mlir.MlirType{ .ptr = null };
             }
             if (mlir.oraTypeIsNull(field_type)) {
-                if (missing_type_reason) |reason| self.recordDegradation(reason);
+                if (missing_type_reason) |reason| self.recordSoundnessLoss(.missing_product_metadata, reason);
                 return null;
             }
 
@@ -1283,7 +1339,7 @@ pub const Encoder = struct {
                 error.UnsupportedOperation => null,
                 else => return err,
             }) |product| return product.sort;
-            self.recordDegradation("printed product type requires exact metadata-backed sort reconstruction");
+            self.recordSoundnessLoss(.missing_product_metadata, "printed product type requires exact metadata-backed sort reconstruction");
             return error.UnsupportedOperation;
         }
         if ((std.mem.startsWith(u8, trimmed, "memref<") or std.mem.startsWith(u8, trimmed, "tensor<")) and trimmed[trimmed.len - 1] == '>') {
@@ -1306,7 +1362,7 @@ pub const Encoder = struct {
             }
             return sort;
         }
-        self.recordDegradation("unsupported printed type encoded via opaque bv256 fallback");
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported printed type encoded via opaque bv256 fallback");
         return self.mkBitVectorSort(256);
     }
 
@@ -1708,10 +1764,12 @@ pub const Encoder = struct {
             const preserved = if (self.astEquivalent(try_val, catch_val))
                 try_val
             else
-                try self.mkUndefValue(
+                try self.soundnessLossUndef(
                     z3.Z3_get_sort(self.context.ctx, fallback),
                     "try_state_global",
                     opaqueTryStateSlotId(name, op_id),
+                    .inexact_state_summary,
+                    "try state summary merged incompatible branch state",
                 );
             try self.putOwnedStringAst(&self.global_map, name, preserved);
 
@@ -1879,6 +1937,7 @@ pub const Encoder = struct {
         self.pending_constraints.deinit(self.allocator);
         self.pending_obligations.deinit(self.allocator);
         self.encoding_degraded_reasons.deinit(self.allocator);
+        self.encoding_soundness_losses.deinit(self.allocator);
         var error_union_it = self.error_union_sorts.iterator();
         while (error_union_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -2148,18 +2207,6 @@ pub const Encoder = struct {
         }
     }
 
-    fn copyGlobalStateMapFrom(self: *Encoder, other: *const Encoder, use_old: bool) !void {
-        const source = if (use_old) &other.global_old_map else &other.global_map;
-        const destination = if (use_old) &self.global_old_map else &self.global_map;
-        var it = source.iterator();
-        while (it.next()) |entry| {
-            const name = entry.key_ptr.*;
-            if (destination.contains(name)) continue;
-            const key = try self.allocator.dupe(u8, name);
-            try destination.put(key, entry.value_ptr.*);
-        }
-    }
-
     fn copyGlobalEntryMapFrom(self: *Encoder, other: *const Encoder) !void {
         var it = other.global_entry_map.iterator();
         while (it.next()) |entry| {
@@ -2167,6 +2214,24 @@ pub const Encoder = struct {
             if (self.global_entry_map.contains(name)) continue;
             const key = try self.allocator.dupe(u8, name);
             try self.global_entry_map.put(key, entry.value_ptr.*);
+        }
+    }
+
+    fn seedCallSiteGlobalSnapshotFrom(self: *Encoder, other: *const Encoder, use_old: bool) !void {
+        const source = if (use_old) &other.global_old_map else &other.global_map;
+        var it = source.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+
+            if (!self.global_map.contains(name)) {
+                try self.global_map.put(try self.allocator.dupe(u8, name), entry.value_ptr.*);
+            }
+            if (!self.global_old_map.contains(name)) {
+                try self.global_old_map.put(try self.allocator.dupe(u8, name), entry.value_ptr.*);
+            }
+            if (!self.global_entry_map.contains(name)) {
+                try self.global_entry_map.put(try self.allocator.dupe(u8, name), entry.value_ptr.*);
+            }
         }
     }
 
@@ -2462,15 +2527,22 @@ pub const Encoder = struct {
         return z3.Z3_mk_string_symbol(self.context.ctx, name_copy);
     }
 
-    fn mkUndefValue(self: *Encoder, sort: z3.Z3_sort, label: []const u8, id: u64) EncodeError!z3.Z3_ast {
+    fn freshSymbol(self: *Encoder, sort: z3.Z3_sort, label: []const u8, id: u64) EncodeError!z3.Z3_ast {
         const name = try std.fmt.allocPrint(self.allocator, "undef_{s}_{d}", .{ label, id });
         defer self.allocator.free(name);
         return try self.mkVariable(name, sort);
     }
 
-    fn degradeToUndef(self: *Encoder, sort: z3.Z3_sort, label: []const u8, id: u64, reason: []const u8) EncodeError!z3.Z3_ast {
-        self.recordDegradation(reason);
-        return try self.mkUndefValue(sort, label, id);
+    fn soundnessLossUndef(
+        self: *Encoder,
+        sort: z3.Z3_sort,
+        label: []const u8,
+        id: u64,
+        loss: SoundnessLoss,
+        detail: []const u8,
+    ) EncodeError!z3.Z3_ast {
+        self.recordSoundnessLoss(loss, detail);
+        return try self.freshSymbol(sort, label, id);
     }
 
     fn getValueConstUnsigned(self: *Encoder, value: mlir.MlirValue, width: u32) ?u256 {
@@ -2591,7 +2663,7 @@ pub const Encoder = struct {
             .source_kind = source_kind,
             .detail = persisted_detail,
         }) catch {
-            self.recordDegradation("failed to record SMT constraint");
+            self.recordSoundnessLoss(.internal_encoding_failure, "failed to record SMT constraint");
         };
     }
 
@@ -2637,7 +2709,7 @@ pub const Encoder = struct {
             self.encodeImplies(self.encodeAnd(self.return_path_assumptions.items), obligation);
         const stored_callee_name = if (imported_callee_name) |name|
             self.persistOwnedString(name) catch blk: {
-                self.recordDegradation("failed to persist imported callee obligation name");
+                self.recordSoundnessLoss(.internal_encoding_failure, "failed to persist imported callee obligation name");
                 break :blk null;
             }
         else
@@ -2647,7 +2719,7 @@ pub const Encoder = struct {
             .imported_callee_name = stored_callee_name,
             .source_kind = source_kind,
         }) catch {
-            self.recordDegradation("failed to record SMT obligation");
+            self.recordSoundnessLoss(.internal_encoding_failure, "failed to record SMT obligation");
         };
     }
 
@@ -2729,8 +2801,6 @@ pub const Encoder = struct {
 
     fn getOrCreateEnv(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         if (self.env_map.get(name)) |existing| {
-            const existing_sort = z3.Z3_get_sort(self.context.ctx, existing);
-            self.addEnvironmentConstraints(name, existing, existing_sort);
             return existing;
         }
         const key = try self.allocator.dupe(u8, name);
@@ -2739,29 +2809,120 @@ pub const Encoder = struct {
         const env_name = try std.fmt.allocPrint(self.allocator, "env_{s}", .{name});
         defer self.allocator.free(env_name);
         const ast = try self.mkVariable(env_name, sort);
-        self.addEnvironmentConstraints(name, ast, sort);
         try self.env_map.put(key, ast);
         return ast;
     }
 
-    fn addEnvironmentConstraints(self: *Encoder, name: []const u8, ast: z3.Z3_ast, sort: z3.Z3_sort) void {
-        // EVM caller is always a non-zero address in runtime semantics.
-        if (std.mem.eql(u8, name, "evm_caller")) {
-            self.addNonZeroBitVectorConstraintWithSource(ast, sort, .env_assume, "environment assumption (evm_caller != 0)");
+    const EvmEnvOp = struct {
+        op_name: []const u8,
+        env_name: []const u8,
+        expected_bv_bits: u32,
+    };
+
+    const evm_env_ops = [_]EvmEnvOp{
+        .{ .op_name = "ora.evm.origin", .env_name = "evm_origin", .expected_bv_bits = 160 },
+        .{ .op_name = "ora.evm.caller", .env_name = "evm_caller", .expected_bv_bits = 160 },
+        .{ .op_name = "ora.evm.gasprice", .env_name = "evm_gasprice", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.callvalue", .env_name = "evm_callvalue", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.gas", .env_name = "evm_gas", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.timestamp", .env_name = "evm_timestamp", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.number", .env_name = "evm_number", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.coinbase", .env_name = "evm_coinbase", .expected_bv_bits = 160 },
+        .{ .op_name = "ora.evm.difficulty", .env_name = "evm_difficulty", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.prevrandao", .env_name = "evm_prevrandao", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.gaslimit", .env_name = "evm_gaslimit", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.chainid", .env_name = "evm_chainid", .expected_bv_bits = 256 },
+        .{ .op_name = "ora.evm.basefee", .env_name = "evm_basefee", .expected_bv_bits = 256 },
+    };
+
+    fn envEntryForEvmOp(op_name: []const u8) ?EvmEnvOp {
+        inline for (evm_env_ops) |entry| {
+            if (std.mem.eql(u8, op_name, entry.op_name)) return entry;
         }
+        return null;
     }
 
-    fn addNonZeroBitVectorConstraintWithSource(
+    fn encodeEvmEnvOp(self: *Encoder, mlir_op: mlir.MlirOperation, entry: EvmEnvOp) EncodeError!z3.Z3_ast {
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+        if (z3.Z3_get_sort_kind(self.context.ctx, result_sort) != z3.Z3_BV_SORT) return error.UnsupportedOperation;
+        const actual_bits: u32 = @intCast(z3.Z3_get_bv_sort_size(self.context.ctx, result_sort));
+        if (actual_bits != entry.expected_bv_bits) return error.UnsupportedOperation;
+        return try self.getOrCreateEnv(entry.env_name, result_sort);
+    }
+
+    const PrecompileOp = struct {
+        op_name: []const u8,
+        symbol_name: []const u8,
+        expected_operand_count: usize,
+        expected_bv_bits: ?u32,
+    };
+
+    const precompile_ops = [_]PrecompileOp{
+        .{ .op_name = "ora.precompile.ecrecover", .symbol_name = "precompile_ecrecover", .expected_operand_count = 4, .expected_bv_bits = 160 },
+        .{ .op_name = "ora.precompile.sha256", .symbol_name = "precompile_sha256", .expected_operand_count = 1, .expected_bv_bits = 256 },
+        .{ .op_name = "ora.precompile.ripemd160", .symbol_name = "precompile_ripemd160", .expected_operand_count = 1, .expected_bv_bits = 160 },
+        .{ .op_name = "ora.precompile.identity", .symbol_name = "precompile_identity", .expected_operand_count = 1, .expected_bv_bits = null },
+        .{ .op_name = "ora.precompile.modexp", .symbol_name = "precompile_modexp", .expected_operand_count = 3, .expected_bv_bits = 256 },
+        .{ .op_name = "ora.precompile.ecadd", .symbol_name = "precompile_ecadd", .expected_operand_count = 4, .expected_bv_bits = 256 },
+        .{ .op_name = "ora.precompile.ecmul", .symbol_name = "precompile_ecmul", .expected_operand_count = 3, .expected_bv_bits = 256 },
+        .{ .op_name = "ora.precompile.ecpairing", .symbol_name = "precompile_ecpairing", .expected_operand_count = 1, .expected_bv_bits = 256 },
+        .{ .op_name = "ora.precompile.blake2f", .symbol_name = "precompile_blake2f", .expected_operand_count = 6, .expected_bv_bits = 256 },
+    };
+
+    fn precompileEntryForOp(op_name: []const u8) ?PrecompileOp {
+        inline for (precompile_ops) |entry| {
+            if (std.mem.eql(u8, op_name, entry.op_name)) return entry;
+        }
+        return null;
+    }
+
+    fn encodePrecompileOp(
         self: *Encoder,
-        ast: z3.Z3_ast,
-        sort: z3.Z3_sort,
-        source_kind: PendingConstraintSourceKind,
-        detail: ?[]const u8,
-    ) void {
-        if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return;
-        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
-        const non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
-        self.addGlobalConstraintWithSource(non_zero, source_kind, detail);
+        mlir_op: mlir.MlirOperation,
+        entry: PrecompileOp,
+        operands: []const z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+        if (operands.len != entry.expected_operand_count) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
+        if (entry.expected_bv_bits) |expected_bits| {
+            if (z3.Z3_get_sort_kind(self.context.ctx, result_sort) != z3.Z3_BV_SORT) return error.UnsupportedOperation;
+            const actual_bits: u32 = @intCast(z3.Z3_get_bv_sort_size(self.context.ctx, result_sort));
+            if (actual_bits != expected_bits) return error.UnsupportedOperation;
+        }
+
+        var domain = try self.allocator.alloc(z3.Z3_sort, operands.len);
+        defer self.allocator.free(domain);
+        for (operands, 0..) |operand, index| {
+            domain[index] = z3.Z3_get_sort(self.context.ctx, operand);
+        }
+
+        const symbol = try self.mkSymbol(entry.symbol_name);
+        const decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(domain.len), domain.ptr, result_sort);
+        return z3.Z3_mk_app(self.context.ctx, decl, @intCast(operands.len), operands.ptr);
+    }
+
+    fn encodeKeccak256Op(self: *Encoder, operands: []const z3.Z3_ast, mlir_op: mlir.MlirOperation) EncodeError!z3.Z3_ast {
+        if (operands.len < 1) return error.InvalidOperandCount;
+        const num_results = mlir.oraOperationGetNumResults(mlir_op);
+        if (num_results < 1) return error.UnsupportedOperation;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, 0);
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRType(result_type);
+        const domain = [_]z3.Z3_sort{z3.Z3_get_sort(self.context.ctx, operands[0])};
+        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, "keccak256");
+        const decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(domain.len), domain[0..].ptr, result_sort);
+        return z3.Z3_mk_app(self.context.ctx, decl, 1, &[_]z3.Z3_ast{operands[0]});
     }
 
     //===----------------------------------------------------------------------===//
@@ -2779,11 +2940,63 @@ pub const Encoder = struct {
             .Add => z3.Z3_mk_bv_add(self.context.ctx, lhs, rhs),
             .Sub => z3.Z3_mk_bv_sub(self.context.ctx, lhs, rhs),
             .Mul => z3.Z3_mk_bv_mul(self.context.ctx, lhs, rhs),
-            .DivUnsigned => z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs),
-            .RemUnsigned => z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs),
-            .DivSigned => z3.Z3_mk_bvsdiv(self.context.ctx, lhs, rhs),
-            .RemSigned => z3.Z3_mk_bvsrem(self.context.ctx, lhs, rhs),
+            .DivUnsigned => self.encodeUnsignedDivTotal(lhs, rhs),
+            .RemUnsigned => self.encodeUnsignedRemTotal(lhs, rhs),
+            .DivSigned => self.encodeSignedDivTotal(lhs, rhs),
+            .RemSigned => self.encodeSignedRemTotal(lhs, rhs),
         };
+    }
+
+    fn signedMinIntAst(self: *Encoder, sort: z3.Z3_sort) z3.Z3_ast {
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+        const shift_amount = z3.Z3_mk_unsigned_int64(self.context.ctx, width - 1, sort);
+        return z3.Z3_mk_bvshl(self.context.ctx, one, shift_amount);
+    }
+
+    fn signedMinDivNegOneCondition(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast, sort: z3.Z3_sort) z3.Z3_ast {
+        const min_int = self.signedMinIntAst(sort);
+        const neg_one = z3.Z3_mk_numeral(self.context.ctx, "-1", sort);
+        const lhs_is_min = z3.Z3_mk_eq(self.context.ctx, lhs, min_int);
+        const rhs_is_neg_one = z3.Z3_mk_eq(self.context.ctx, rhs, neg_one);
+        return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs_is_min, rhs_is_neg_one });
+    }
+
+    fn encodeUnsignedDivTotal(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const raw = z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, raw);
+    }
+
+    fn encodeUnsignedRemTotal(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const raw = z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, raw);
+    }
+
+    fn encodeSignedDivTotal(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const min_int = self.signedMinIntAst(sort);
+        const special = self.signedMinDivNegOneCondition(lhs, rhs, sort);
+        const raw = z3.Z3_mk_bvsdiv(self.context.ctx, lhs, rhs);
+        const nonzero_result = z3.Z3_mk_ite(self.context.ctx, special, min_int, raw);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, nonzero_result);
+    }
+
+    fn encodeSignedRemTotal(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const special = self.signedMinDivNegOneCondition(lhs, rhs, sort);
+        const raw = z3.Z3_mk_bvsrem(self.context.ctx, lhs, rhs);
+        const nonzero_result = z3.Z3_mk_ite(self.context.ctx, special, zero, raw);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, nonzero_result);
     }
 
     /// Arithmetic operation types
@@ -2936,6 +3149,22 @@ pub const Encoder = struct {
             const in_range = z3.Z3_mk_bvult(self.context.ctx, coerced_rhs, max_shift);
             self.addObligation(in_range);
         }
+        return switch (op) {
+            .Shl => z3.Z3_mk_bvshl(self.context.ctx, lhs, coerced_rhs),
+            .ShrSigned => z3.Z3_mk_bvashr(self.context.ctx, lhs, coerced_rhs),
+            .ShrUnsigned => z3.Z3_mk_bvlshr(self.context.ctx, lhs, coerced_rhs),
+        };
+    }
+
+    fn encodeWrappingShiftOp(
+        self: *Encoder,
+        op: ShiftOp,
+        lhs: z3.Z3_ast,
+        rhs: z3.Z3_ast,
+        rhs_type: mlir.MlirType,
+        op_id: usize,
+    ) !z3.Z3_ast {
+        const coerced_rhs = try self.coerceShiftAmount(lhs, rhs, rhs_type, op_id);
         return switch (op) {
             .Shl => z3.Z3_mk_bvshl(self.context.ctx, lhs, coerced_rhs),
             .ShrSigned => z3.Z3_mk_bvashr(self.context.ctx, lhs, coerced_rhs),
@@ -3316,7 +3545,7 @@ pub const Encoder = struct {
     }
 
     fn degradeAstCoercion(self: *Encoder, target_sort: z3.Z3_sort, reason: []const u8) z3.Z3_ast {
-        self.recordDegradation(reason);
+        self.recordSoundnessLoss(.unsupported_sort_coercion, reason);
         return z3.Z3_mk_fresh_const(self.context.ctx, "ora_degraded_coercion", target_sort) orelse
             z3.Z3_mk_const(
                 self.context.ctx,
@@ -3501,7 +3730,7 @@ pub const Encoder = struct {
             const parent_range = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
             const parent_value_type = try self.shapedTypeAfterOneIndex(container_types[depth]);
             const parent_value = if (mlir.oraTypeIsNull(parent_value_type))
-                try self.degradeToUndef(parent_range, "tensor_insert_parent", @intFromPtr(mlir_op.ptr), "missing tensor parent value type metadata")
+                try self.soundnessLossUndef(parent_range, "tensor_insert_parent", @intFromPtr(mlir_op.ptr), .missing_type_metadata, "missing tensor parent value type metadata")
             else
                 try self.coerceTypedAstToSortOrUndef(
                     updated,
@@ -3514,6 +3743,84 @@ pub const Encoder = struct {
         }
 
         return updated;
+    }
+
+    const QuantifierKind = enum { forall, exists };
+
+    const QuantifierPatterns = union(enum) {
+        with_patterns: []const z3.Z3_pattern,
+        no_patterns: struct { reason: []const u8 },
+    };
+
+    fn mkPattern(self: *Encoder, terms: []const z3.Z3_ast) EncodeError!z3.Z3_pattern {
+        if (terms.len == 0) return error.InvalidOperandCount;
+        return z3.Z3_mk_pattern(self.context.ctx, @intCast(terms.len), terms.ptr);
+    }
+
+    fn astContainsDeclKind(self: *Encoder, term: z3.Z3_ast, target_kind: c_uint) bool {
+        if (z3.Z3_get_ast_kind(self.context.ctx, term) != z3.Z3_APP_AST) return false;
+        const app = z3.Z3_to_app(self.context.ctx, term);
+        const decl = z3.Z3_get_app_decl(self.context.ctx, app);
+        if (z3.Z3_get_decl_kind(self.context.ctx, decl) == target_kind) return true;
+        const arg_count = z3.Z3_get_app_num_args(self.context.ctx, app);
+        var index: c_uint = 0;
+        while (index < arg_count) : (index += 1) {
+            if (self.astContainsDeclKind(z3.Z3_get_app_arg(self.context.ctx, app, index), target_kind)) return true;
+        }
+        return false;
+    }
+
+    fn astAllowedInQuantifierPattern(self: *Encoder, term: z3.Z3_ast) bool {
+        return !self.astContainsDeclKind(term, z3.Z3_OP_ITE);
+    }
+
+    fn maybeMkPattern(self: *Encoder, terms: []const z3.Z3_ast) EncodeError!?z3.Z3_pattern {
+        for (terms) |term| {
+            if (!self.astAllowedInQuantifierPattern(term)) return null;
+        }
+        return try self.mkPattern(terms);
+    }
+
+    fn mkQuantifier(
+        self: *Encoder,
+        kind: QuantifierKind,
+        bounds: []const z3.Z3_app,
+        quantifier_patterns: QuantifierPatterns,
+        body: z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (bounds.len == 0) return error.InvalidOperandCount;
+
+        const patterns = switch (quantifier_patterns) {
+            .with_patterns => |items| blk: {
+                if (items.len == 0) return error.InvalidOperandCount;
+                break :blk items;
+            },
+            .no_patterns => |exception| blk: {
+                if (exception.reason.len == 0) return error.InvalidOperandCount;
+                break :blk &[_]z3.Z3_pattern{};
+            },
+        };
+        const pattern_ptr = if (patterns.len == 0) null else patterns.ptr;
+        return switch (kind) {
+            .exists => z3.Z3_mk_exists_const(
+                self.context.ctx,
+                0,
+                @intCast(bounds.len),
+                bounds.ptr,
+                @intCast(patterns.len),
+                pattern_ptr,
+                body,
+            ),
+            .forall => z3.Z3_mk_forall_const(
+                self.context.ctx,
+                0,
+                @intCast(bounds.len),
+                bounds.ptr,
+                @intCast(patterns.len),
+                pattern_ptr,
+                body,
+            ),
+        };
     }
 
     /// Emit quantified frame condition for a single array store:
@@ -3531,7 +3838,11 @@ pub const Encoder = struct {
         const body = z3.Z3_mk_implies(self.context.ctx, neq_key, eq_val);
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
-        const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, body);
+        const pattern_terms = [_]z3.Z3_ast{pre_val};
+        const frame = if (try self.maybeMkPattern(&pattern_terms)) |pattern| blk: {
+            const patterns = [_]z3.Z3_pattern{pattern};
+            break :blk try self.mkQuantifier(.forall, &bounds, .{ .with_patterns = &patterns }, body);
+        } else try self.mkQuantifier(.forall, &bounds, .{ .no_patterns = .{ .reason = "array-store frame trigger contains conditional state" } }, body);
         self.addConstraintWithSource(frame, .frame, "frame condition");
     }
 
@@ -3554,9 +3865,15 @@ pub const Encoder = struct {
         const eq_val = z3.Z3_mk_eq(self.context.ctx, post_val, pre_val);
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
-        const frame = z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, eq_val);
+        const pattern_terms = [_]z3.Z3_ast{pre_val};
+        const frame = if (try self.maybeMkPattern(&pattern_terms)) |pattern| blk: {
+            const patterns = [_]z3.Z3_pattern{pattern};
+            break :blk try self.mkQuantifier(.forall, &bounds, .{ .with_patterns = &patterns }, eq_val);
+        } else try self.mkQuantifier(.forall, &bounds, .{ .no_patterns = .{ .reason = "array-equality frame trigger contains conditional state" } }, eq_val);
         self.addConstraintWithSource(frame, .frame, "frame condition");
     }
+
+    // SENTINEL: end_of_mkQuantifier_helpers
 
     //===----------------------------------------------------------------------===//
     // mlir Operation Encoding
@@ -3596,6 +3913,10 @@ pub const Encoder = struct {
             return try self.encodeQuantifiedOp(mlir_op, mode);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.external_call")) {
+            return try self.encodeExternalCallResult(mlir_op, 0, mode);
+        }
+
         // get number of operands
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
 
@@ -3612,7 +3933,7 @@ pub const Encoder = struct {
         // dispatch based on operation name
         return self.dispatchOperation(op_name, operands, mlir_op, mode) catch |err| {
             if (err == error.UnsupportedOperation and !self.isDegraded()) {
-                self.noteDegradationAtOp(mlir_op, "unsupported SMT operation");
+                self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported SMT operation");
             }
             return err;
         };
@@ -3649,7 +3970,7 @@ pub const Encoder = struct {
             const defining_op = mlir.oraOpResultGetOwner(mlir_value);
             if (!mlir.oraOperationIsNull(defining_op)) {
                 const result_index = self.getResultIndex(defining_op, mlir_value) orelse {
-                    self.recordDegradation("failed to resolve defining result index");
+                    self.recordSoundnessLoss(.internal_encoding_failure, "failed to resolve defining result index");
                     return error.UnsupportedOperation;
                 };
                 const encoded = try self.encodeOperationResultWithMode(defining_op, result_index, mode);
@@ -4225,7 +4546,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "scf.if")) {
             return self.encodeScfIfResult(mlir_op, result_index, mode) catch |err| {
                 if (err == error.UnsupportedOperation and !self.isDegraded()) {
-                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                    self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported SMT operation result");
                 }
                 return err;
             };
@@ -4234,7 +4555,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.switch_expr") or std.mem.eql(u8, op_name, "ora.switch")) {
             return self.encodeOraSwitchExprResult(mlir_op, result_index, mode) catch |err| {
                 if (err == error.UnsupportedOperation and !self.isDegraded()) {
-                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                    self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported SMT operation result");
                 }
                 return err;
             };
@@ -4254,11 +4575,15 @@ pub const Encoder = struct {
             const result_sort = try self.encodeMLIRTypeForSymbol(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
             return (try self.extractRegionYield(mlir_op, 0, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
+                try self.soundnessLossUndef(result_sort, "execute_region_result", op_id, .missing_control_flow_summary, "scf.execute_region result missing region yield");
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
             return try self.encodeTryStmtResultWithMode(mlir_op, result_index, mode);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.external_call")) {
+            return try self.encodeExternalCallResult(mlir_op, result_index, mode);
         }
 
         if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
@@ -4266,7 +4591,7 @@ pub const Encoder = struct {
             defer self.allocator.free(operands);
             return self.encodeFuncCallResult(mlir_op, operands, result_index, mode) catch |err| {
                 if (err == error.UnsupportedOperation and !self.isDegraded()) {
-                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                    self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported SMT operation result");
                 }
                 return err;
             };
@@ -4275,7 +4600,7 @@ pub const Encoder = struct {
         if (result_index == 0) {
             return self.encodeOperationWithMode(mlir_op, mode) catch |err| {
                 if (err == error.UnsupportedOperation and !self.isDegraded()) {
-                    self.noteDegradationAtOp(mlir_op, "unsupported SMT operation result");
+                    self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported SMT operation result");
                 }
                 return err;
             };
@@ -4289,7 +4614,7 @@ pub const Encoder = struct {
         const op_id = @intFromPtr(mlir_op.ptr);
         const label = try std.fmt.allocPrint(self.allocator, "op_result_{d}", .{result_index});
         defer self.allocator.free(label);
-        return try self.degradeToUndef(result_sort, label, op_id, "failed to encode non-zero operation result precisely");
+        return try self.soundnessLossUndef(result_sort, label, op_id, .internal_encoding_failure, "failed to encode non-zero operation result precisely");
     }
 
     fn tryEncodeLoopResult(
@@ -4309,7 +4634,7 @@ pub const Encoder = struct {
                 (try self.tryExtractCanonicalIncrementScfWhileResult(mlir_op, result_index, mode)) orelse
                 (try self.tryExtractCanonicalDecrementScfWhileResult(mlir_op, result_index, mode)) orelse
                 (try self.tryExtractFiniteScfWhileResult(mlir_op, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "scf_while_result", op_id, "scf.while result requires loop summary");
+                try self.soundnessLossUndef(result_sort, "scf_while_result", op_id, .missing_control_flow_summary, "scf.while result requires loop summary");
         }
 
         if (std.mem.eql(u8, op_name, "scf.for")) {
@@ -4332,7 +4657,7 @@ pub const Encoder = struct {
                 return identity_result;
             }
             return (try self.tryExtractFiniteScfForResult(mlir_op, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "scf_for_result", op_id, "scf.for result requires loop summary");
+                try self.soundnessLossUndef(result_sort, "scf_for_result", op_id, .missing_control_flow_summary, "scf.for result requires loop summary");
         }
 
         return null;
@@ -4350,7 +4675,7 @@ pub const Encoder = struct {
         const then_expr = try self.extractRegionYieldGuarded(mlir_op, 0, result_index, mode, condition);
         const else_expr = try self.extractRegionYieldGuarded(mlir_op, 1, result_index, mode, self.encodeNot(condition));
         if (then_expr == null or else_expr == null) {
-            return try self.degradeToUndef(result_sort, "scf_if_result", op_id, "scf.if result missing branch yield");
+            return try self.soundnessLossUndef(result_sort, "scf_if_result", op_id, .missing_control_flow_summary, "scf.if result missing branch yield");
         }
         return try self.encodeControlFlow("scf.if", condition, then_expr, else_expr);
     }
@@ -4409,7 +4734,7 @@ pub const Encoder = struct {
             else
                 self.encodeAnd(&.{ remaining, raw_predicate });
             const branch_expr = (try self.extractRegionYieldGuarded(mlir_op, @intCast(region_index), result_index, mode, effective_predicate)) orelse default_expr orelse
-                try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
+                try self.soundnessLossUndef(result_sort, "switch_expr", op_id, .missing_control_flow_summary, "switch expression result initialized from unconstrained fallback");
             branch_exprs[region_index] = branch_expr;
             branch_predicates[region_index] = effective_predicate;
 
@@ -4434,7 +4759,7 @@ pub const Encoder = struct {
                 }
                 if (chosen) |expr| break :blk expr;
             }
-            break :blk try self.degradeToUndef(result_sort, "switch_expr", op_id, "switch expression result initialized from unconstrained fallback");
+            break :blk try self.soundnessLossUndef(result_sort, "switch_expr", op_id, .missing_control_flow_summary, "switch expression result initialized from unconstrained fallback");
         };
 
         region_index = num_regions;
@@ -4506,6 +4831,7 @@ pub const Encoder = struct {
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
         const operand_count: usize = @intCast(num_operands);
         var operands = try self.allocator.alloc(z3.Z3_ast, operand_count);
+        errdefer self.allocator.free(operands);
         for (0..operand_count) |i| {
             const operand_value = mlir.oraOperationGetOperand(mlir_op, @intCast(i));
             operands[i] = try self.encodeValueWithMode(operand_value, mode);
@@ -4520,7 +4846,7 @@ pub const Encoder = struct {
         operands: []const z3.Z3_ast,
         result_index: u32,
     ) EncodeError!z3.Z3_ast {
-        self.recordDegradation("structured control result encoded via opaque summary");
+        self.recordSoundnessLoss(.missing_control_flow_summary, "structured control result encoded via opaque summary");
         const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
         if (num_results == 0) {
             return self.encodeBoolConstant(true);
@@ -4542,6 +4868,26 @@ pub const Encoder = struct {
         }
         const func_decl = z3.Z3_mk_func_decl(self.context.ctx, symbol, @intCast(operands.len), domain.ptr, result_sort);
         return z3.Z3_mk_app(self.context.ctx, func_decl, @intCast(operands.len), operands.ptr);
+    }
+
+    fn encodeOpaqueBoundaryResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        op_name: []const u8,
+        operands: []const z3.Z3_ast,
+        result_index: u32,
+    ) EncodeError!z3.Z3_ast {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (num_results == 0) return self.encodeBoolConstant(true);
+        if (result_index >= num_results) return error.InvalidOperandCount;
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
+        const op_id = @intFromPtr(mlir_op.ptr);
+        const callee = try std.fmt.allocPrint(self.allocator, "{s}_boundary_{d}", .{ op_name, op_id });
+        defer self.allocator.free(callee);
+        return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
     }
 
     /// Encode MLIR type to Z3 sort
@@ -4635,7 +4981,7 @@ pub const Encoder = struct {
             const key_sort = if (!mlir.oraTypeIsNull(map_key_type))
                 try self.encodeMLIRTypeWithProductFallback(map_key_type, record_product_degradation)
             else blk: {
-                self.recordDegradation("map type missing key type encoded via opaque bv256 fallback");
+                self.recordSoundnessLoss(.missing_type_metadata, "map type missing key type encoded via opaque bv256 fallback");
                 break :blk self.mkBitVectorSort(256);
             };
             return self.mkArraySort(key_sort, value_sort);
@@ -4644,7 +4990,7 @@ pub const Encoder = struct {
         if (mlir.oraTypeIsAShaped(mlir_type)) {
             const elem_type = mlir.oraShapedTypeGetElementType(mlir_type);
             if (mlir.oraTypeIsNull(elem_type)) {
-                self.recordDegradation("shaped type missing element type encoded via opaque bv256 fallback");
+                self.recordSoundnessLoss(.missing_type_metadata, "shaped type missing element type encoded via opaque bv256 fallback");
                 return self.mkBitVectorSort(256);
             }
 
@@ -4676,12 +5022,12 @@ pub const Encoder = struct {
             std.mem.startsWith(u8, trimmed_type, "!ora.tuple<"))
         {
             if (record_product_degradation) {
-                self.recordDegradation("product MLIR type missing exact metadata encoded via opaque bv256 fallback");
+                self.recordSoundnessLoss(.missing_product_metadata, "product MLIR type missing exact metadata encoded via opaque bv256 fallback");
             }
             return self.mkBitVectorSort(256);
         }
 
-        self.recordDegradation("unsupported MLIR type encoded via opaque bv256 fallback");
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported MLIR type encoded via opaque bv256 fallback");
         return self.mkBitVectorSort(256);
     }
 
@@ -4701,7 +5047,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.cmp")) {
             if (operands.len < 2) return error.InvalidOperandCount;
             const predicate = self.getStringAttr(mlir_op, "predicate") orelse {
-                self.recordDegradation("ora.cmp missing predicate");
+                self.recordSoundnessLoss(.unsupported_operation, "ora.cmp missing predicate");
                 return error.UnsupportedOperation;
             };
             const lhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
@@ -4756,7 +5102,7 @@ pub const Encoder = struct {
             else
                 256;
             const value = self.parseConstAttrValue(value_attr, width) orelse blk: {
-                self.recordDegradation("failed to parse MLIR constant attribute");
+                self.recordSoundnessLoss(.internal_encoding_failure, "failed to parse MLIR constant attribute");
                 break :blk if (is_addr) 0 else self.getConstantValue(mlir_op, width);
             };
             return try self.encodeConstantOp(value, width);
@@ -4828,6 +5174,18 @@ pub const Encoder = struct {
                 return self.degradeAstCoercion(result_sort, "byte extraction to narrow bitvector requires explicit truncation semantics");
             }
             return try self.coerceTypedAstToSortOrUndef(byte_bv, result_type, result_sort, "byte_at_result", @intFromPtr(mlir_op.ptr));
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.keccak256")) {
+            return try self.encodeKeccak256Op(operands, mlir_op);
+        }
+
+        if (precompileEntryForOp(op_name)) |precompile_entry| {
+            return try self.encodePrecompileOp(mlir_op, precompile_entry, operands);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.abi_encode") or std.mem.eql(u8, op_name, "ora.abi_decode")) {
+            return try self.encodeOpaqueBoundaryResult(mlir_op, op_name, operands, 0);
         }
 
         if (std.mem.eql(u8, op_name, "ora.old")) {
@@ -4936,10 +5294,15 @@ pub const Encoder = struct {
             std.mem.eql(u8, op_name, "ora.shr_wrapping"))
         {
             if (operands.len < 2) return error.InvalidOperandCount;
-            return if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
-                z3.Z3_mk_bvshl(self.context.ctx, operands[0], operands[1])
+            const lhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 0));
+            const rhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
+            const shift_op: ShiftOp = if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
+                .Shl
+            else if (self.isSignedBitPatternType(lhs_type))
+                .ShrSigned
             else
-                z3.Z3_mk_bvlshr(self.context.ctx, operands[0], operands[1]);
+                .ShrUnsigned;
+            return try self.encodeWrappingShiftOp(shift_op, operands[0], operands[1], rhs_type, @intFromPtr(mlir_op.ptr));
         }
 
         if (std.mem.eql(u8, op_name, "ora.power")) {
@@ -4963,7 +5326,7 @@ pub const Encoder = struct {
             const result_sort = try self.encodeMLIRType(result_type);
             if (!self.verify_state) {
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "sload", op_id);
+                return try self.soundnessLossUndef(result_sort, "sload", op_id, .user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables storage-load verification");
             }
             if (mode == .Old) {
                 return try self.getOrCreateOldGlobal(global_name, result_sort);
@@ -4974,6 +5337,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.sstore")) {
             if (operands.len < 1) return error.InvalidOperandCount;
             if (!self.verify_state) {
+                self.recordSoundnessLoss(.user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables storage-store verification");
                 return operands[0];
             }
             const global_name = self.getStringAttr(mlir_op, "global") orelse return error.UnsupportedOperation;
@@ -5005,7 +5369,7 @@ pub const Encoder = struct {
                     const result_type = mlir.oraValueGetType(result_value);
                     const result_sort = try self.encodeMLIRType(result_type);
                     const op_id = @intFromPtr(mlir_op.ptr);
-                    return try self.mkUndefValue(result_sort, "map_get", op_id);
+                    return try self.soundnessLossUndef(result_sort, "map_get", op_id, .user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables map-load verification");
                 }
                 const map_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
@@ -5024,6 +5388,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.map_store")) {
             if (operands.len >= 3) {
                 if (!self.verify_state) {
+                    self.recordSoundnessLoss(.user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables map-store verification");
                     const num_results = mlir.oraOperationGetNumResults(mlir_op);
                     if (num_results > 0) return operands[2];
                     return self.encodeBoolConstant(true);
@@ -5049,7 +5414,7 @@ pub const Encoder = struct {
                 const stored = self.encodeStore(operands[0], key, value);
                 const op_id = @intFromPtr(mlir_op.ptr);
                 self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {
-                    self.recordDegradation("failed to encode map store frame constraint");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to encode map store frame constraint");
                 };
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -5105,8 +5470,8 @@ pub const Encoder = struct {
 
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
-            self.recordDegradation("tuple_extract requires exact product metadata");
-            return try self.degradeToUndef(result_sort, "tuple_extract_result", @intFromPtr(mlir_op.ptr), "tuple_extract requires exact product metadata");
+            self.recordSoundnessLoss(.missing_product_metadata, "tuple_extract requires exact product metadata");
+            return try self.soundnessLossUndef(result_sort, "tuple_extract_result", @intFromPtr(mlir_op.ptr), .missing_product_metadata, "tuple_extract requires exact product metadata");
         }
 
         if (std.mem.eql(u8, op_name, "ora.refinement_to_base")) {
@@ -5234,8 +5599,8 @@ pub const Encoder = struct {
                 }
 
                 const result_sort = try self.encodeMLIRType(result_type);
-                self.recordDegradation("ora.struct_instantiate requires exact product metadata");
-                return try self.degradeToUndef(result_sort, "struct_instantiate_result", @intFromPtr(mlir_op.ptr), "ora.struct_instantiate requires exact product metadata");
+                self.recordSoundnessLoss(.missing_product_metadata, "ora.struct_instantiate requires exact product metadata");
+                return try self.soundnessLossUndef(result_sort, "struct_instantiate_result", @intFromPtr(mlir_op.ptr), .missing_product_metadata, "ora.struct_instantiate requires exact product metadata");
             }
         }
 
@@ -5286,8 +5651,8 @@ pub const Encoder = struct {
                     }
                 }
                 const result_sort = try self.encodeMLIRType(result_type);
-                self.recordDegradation("ora.struct_init requires exact product metadata");
-                return try self.degradeToUndef(result_sort, "struct_init_result", @intFromPtr(mlir_op.ptr), "ora.struct_init requires exact product metadata");
+                self.recordSoundnessLoss(.missing_product_metadata, "ora.struct_init requires exact product metadata");
+                return try self.soundnessLossUndef(result_sort, "struct_init_result", @intFromPtr(mlir_op.ptr), .missing_product_metadata, "ora.struct_init requires exact product metadata");
             }
         }
 
@@ -5346,7 +5711,7 @@ pub const Encoder = struct {
                     defer self.allocator.free(token);
                     return try self.encodeByteSequence(token);
                 }
-                return try self.degradeToUndef(result_sort, "enum_constant", @intFromPtr(mlir_op.ptr), "unsupported enum constant result sort");
+                return try self.soundnessLossUndef(result_sort, "enum_constant", @intFromPtr(mlir_op.ptr), .unsupported_operation, "unsupported enum constant result sort");
             }
             const enum_sort = try self.getEnumSortByName(enum_name);
             const variant = enum_sort.findVariant(variant_name) orelse return error.UnsupportedOperation;
@@ -5373,7 +5738,7 @@ pub const Encoder = struct {
             const result_type = mlir.oraValueGetType(mlir.oraOperationGetResult(mlir_op, 0));
             const result_sort = try self.encodeMLIRType(result_type);
             if (z3.Z3_get_sort_kind(self.context.ctx, result_sort) != z3.Z3_BV_SORT) {
-                return try self.degradeToUndef(result_sort, "adt_tag", @intFromPtr(mlir_op.ptr), "adt.tag result must be a bitvector integer");
+                return try self.soundnessLossUndef(result_sort, "adt_tag", @intFromPtr(mlir_op.ptr), .unsupported_operation, "adt.tag result must be a bitvector integer");
             }
             const width = z3.Z3_get_bv_sort_size(self.context.ctx, result_sort);
             const adt_sort = try self.getAdtSort(value_type);
@@ -5401,7 +5766,7 @@ pub const Encoder = struct {
         }
 
         if (std.mem.eql(u8, op_name, "ora.adt.match_arm")) {
-            self.noteDegradationAtOp(mlir_op, "ora.adt.match_arm must be lowered before SMT encoding");
+            self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "ora.adt.match_arm must be lowered before SMT encoding");
             return error.UnsupportedOperation;
         }
 
@@ -5420,7 +5785,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.struct_field_extract")) {
             if (operands.len >= 1) {
                 const field_name = self.getStringAttr(mlir_op, "field_name") orelse {
-                    self.recordDegradation("struct_field_extract missing field_name");
+                    self.recordSoundnessLoss(.missing_product_metadata, "struct_field_extract missing field_name");
                     return error.UnsupportedOperation;
                 };
                 const struct_operand = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -5449,8 +5814,8 @@ pub const Encoder = struct {
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
-                self.recordDegradation("struct_field_extract requires exact product metadata");
-                return try self.degradeToUndef(result_sort, "struct_field_extract_result", @intFromPtr(mlir_op.ptr), "struct_field_extract requires exact product metadata");
+                self.recordSoundnessLoss(.missing_product_metadata, "struct_field_extract requires exact product metadata");
+                return try self.soundnessLossUndef(result_sort, "struct_field_extract_result", @intFromPtr(mlir_op.ptr), .missing_product_metadata, "struct_field_extract requires exact product metadata");
             }
         }
 
@@ -5458,7 +5823,7 @@ pub const Encoder = struct {
             if (operands.len >= 2 and mlir.oraOperationGetNumResults(mlir_op) >= 1) {
                 const source_value = mlir.oraOperationGetOperand(mlir_op, 0);
                 const field_name = self.getStringAttr(mlir_op, "field_name") orelse {
-                    self.recordDegradation("struct_field_update missing field_name");
+                    self.recordSoundnessLoss(.missing_product_metadata, "struct_field_update missing field_name");
                     return error.UnsupportedOperation;
                 };
                 const result_value = mlir.oraOperationGetResult(mlir_op, 0);
@@ -5493,8 +5858,8 @@ pub const Encoder = struct {
                     }
                 }
                 const result_sort = try self.encodeMLIRType(result_type);
-                self.recordDegradation("struct_field_update requires exact product metadata");
-                return try self.degradeToUndef(result_sort, "struct_field_update_result", @intFromPtr(mlir_op.ptr), "struct_field_update requires exact product metadata");
+                self.recordSoundnessLoss(.missing_product_metadata, "struct_field_update requires exact product metadata");
+                return try self.soundnessLossUndef(result_sort, "struct_field_update_result", @intFromPtr(mlir_op.ptr), .missing_product_metadata, "struct_field_update requires exact product metadata");
             }
         }
 
@@ -5520,7 +5885,7 @@ pub const Encoder = struct {
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
             const op_id = @intFromPtr(mlir_op.ptr);
             return (try self.extractRegionYield(mlir_op, 0, 0, mode)) orelse
-                try self.degradeToUndef(result_sort, "execute_region_result", op_id, "scf.execute_region result missing region yield");
+                try self.soundnessLossUndef(result_sort, "execute_region_result", op_id, .missing_control_flow_summary, "scf.execute_region result missing region yield");
         }
 
         if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
@@ -5534,7 +5899,7 @@ pub const Encoder = struct {
                 const result_type = mlir.oraValueGetType(result_value);
                 const result_sort = try self.encodeMLIRType(result_type);
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.mkUndefValue(result_sort, "memref_alloca", op_id);
+                return try self.freshSymbol(result_sort, "memref_alloca", op_id);
             }
         }
 
@@ -5616,10 +5981,11 @@ pub const Encoder = struct {
                             }
                         }
                         const op_id_unknown_conditional = @intFromPtr(mlir_op.ptr);
-                        const fresh_conditional = try self.degradeToUndef(
+                        const fresh_conditional = try self.soundnessLossUndef(
                             result_sort,
                             "memref_load",
                             op_id_unknown_conditional,
+                            .inexact_state_summary,
                             self.formatDegradationAtOp(mlir_op, "memref.load read from conditionally initialized tracked local state"),
                         );
                         try map.put(memref_id, .{
@@ -5635,10 +6001,11 @@ pub const Encoder = struct {
                     }
 
                     const op_id_unknown = @intFromPtr(mlir_op.ptr);
-                    const fresh = try self.degradeToUndef(
+                    const fresh = try self.soundnessLossUndef(
                         result_sort,
                         "memref_load",
                         op_id_unknown,
+                        .inexact_state_summary,
                         self.formatDegradationAtOp(mlir_op, "memref.load read from uninitialized tracked local state"),
                     );
                     try map.put(memref_id, .{
@@ -5672,10 +6039,11 @@ pub const Encoder = struct {
                     .{num_operands},
                 );
                 defer self.allocator.free(shape_reason);
-                return try self.degradeToUndef(
+                return try self.soundnessLossUndef(
                     result_sort,
                     "memref_load",
                     op_id,
+                    .unsupported_operation,
                     self.formatDegradationAtOp(mlir_op, shape_reason),
                 );
             }
@@ -5693,34 +6061,8 @@ pub const Encoder = struct {
             return try self.encodeTensorExtractOp(operands, mlir_op);
         }
 
-        if (std.mem.eql(u8, op_name, "ora.evm.origin")) {
-            const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results >= 1) {
-                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-                const result_type = mlir.oraValueGetType(result_value);
-                const result_sort = try self.encodeMLIRType(result_type);
-                return try self.getOrCreateEnv("evm_origin", result_sort);
-            }
-        }
-
-        if (std.mem.eql(u8, op_name, "ora.evm.caller")) {
-            const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results >= 1) {
-                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-                const result_type = mlir.oraValueGetType(result_value);
-                const result_sort = try self.encodeMLIRType(result_type);
-                return try self.getOrCreateEnv("evm_caller", result_sort);
-            }
-        }
-
-        if (std.mem.eql(u8, op_name, "ora.evm.timestamp")) {
-            const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results >= 1) {
-                const result_value = mlir.oraOperationGetResult(mlir_op, 0);
-                const result_type = mlir.oraValueGetType(result_value);
-                const result_sort = try self.encodeMLIRType(result_type);
-                return try self.getOrCreateEnv("evm_timestamp", result_sort);
-            }
+        if (envEntryForEvmOp(op_name)) |env_entry| {
+            return try self.encodeEvmEnvOp(mlir_op, env_entry);
         }
 
         if (std.mem.eql(u8, op_name, "ora.tload")) {
@@ -6052,9 +6394,9 @@ pub const Encoder = struct {
         var result: ?z3.Z3_ast = null;
         for (eu.error_variants) |variant| {
             const sym_name = errorVariantSymbolName(variant) orelse
-                return try self.degradeToUndef(target_sort, "error_get_error", op_id, "missing error variant symbol name");
+                return try self.soundnessLossUndef(target_sort, "error_get_error", op_id, .unsupported_error_encoding, "missing error variant symbol name");
             const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse
-                return try self.degradeToUndef(target_sort, "error_get_error", op_id, "failed to resolve error declaration id");
+                return try self.soundnessLossUndef(target_sort, "error_get_error", op_id, .unsupported_error_encoding, "failed to resolve error declaration id");
             const id_ast = try self.encodeIntegerConstant(error_id, width);
             if (result) |current| {
                 const is_variant = z3.Z3_mk_app(self.context.ctx, variant.tester, 1, &[_]z3.Z3_ast{value});
@@ -6082,12 +6424,12 @@ pub const Encoder = struct {
         var result: ?z3.Z3_ast = null;
         for (eu.error_variants) |variant| {
             const sym_name = errorVariantSymbolName(variant) orelse
-                return try self.degradeToUndef(eu.sort, "error_err", op_id, "missing error variant symbol name");
+                return try self.soundnessLossUndef(eu.sort, "error_err", op_id, .unsupported_error_encoding, "missing error variant symbol name");
             if (source_error_union_type) |source_type| {
                 if (!self.errorUnionTypeContainsSymbol(source_type, sym_name)) continue;
             }
             const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse
-                return try self.degradeToUndef(eu.sort, "error_err", op_id, "failed to resolve error declaration id");
+                return try self.soundnessLossUndef(eu.sort, "error_err", op_id, .unsupported_error_encoding, "failed to resolve error declaration id");
             const id_ast = try self.encodeIntegerConstant(error_id, width);
             const is_variant = z3.Z3_mk_eq(self.context.ctx, discriminant, id_ast);
             const payload = try self.encodeErrorIdValueForSymbol(mlir_op, sym_name, variant.payload_sort, op_id);
@@ -6131,7 +6473,7 @@ pub const Encoder = struct {
             if (try self.encodeErrorUnionFromDiscriminant(mlir_op, eu, operands[0], source_error_union_type, op_id)) |wrapped| {
                 return wrapped;
             }
-            return try self.degradeToUndef(eu.sort, "error_err", op_id, "error payload type not in error_union error set");
+            return try self.soundnessLossUndef(eu.sort, "error_err", op_id, .unsupported_error_encoding, "error payload type not in error_union error set");
         }
 
         const operand_value = mlir.oraOperationGetOperand(mlir_op, 0);
@@ -6182,7 +6524,7 @@ pub const Encoder = struct {
                     }
                 }
                 if (eu.error_variants.len != 1 or !mlir.oraTypeIsNull(eu.error_variants[0].payload_type)) {
-                    return try self.degradeToUndef(result_sort, "error_get_error", op_id, "error get_error result type not in error_union error set");
+                    return try self.soundnessLossUndef(result_sort, "error_get_error", op_id, .unsupported_error_encoding, "error get_error result type not in error_union error set");
                 }
             }
             return z3.Z3_mk_app(self.context.ctx, eu.proj_err, 1, &[_]z3.Z3_ast{operands[0]});
@@ -6209,16 +6551,16 @@ pub const Encoder = struct {
             const variant = if (self.getStringAttr(mlir_op, "sym_name")) |sym_name|
                 findErrorVariantForSymbol(self, eu, sym_name) orelse
                     legacyErrorVariant(eu) orelse
-                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set")
+                    return try self.soundnessLossUndef(eu.sort, "error_return", op_id, .unsupported_error_encoding, "error symbol not in error_union error set")
             else if (operands.len >= 1)
                 findErrorVariantForType(eu, payload_type) orelse
-                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error payload type not in error_union error set")
+                    return try self.soundnessLossUndef(eu.sort, "error_return", op_id, .unsupported_error_encoding, "error payload type not in error_union error set")
             else blk: {
                 const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse
-                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "missing error symbol name");
+                    return try self.soundnessLossUndef(eu.sort, "error_return", op_id, .unsupported_error_encoding, "missing error symbol name");
                 break :blk findErrorVariantForSymbol(self, eu, sym_name) orelse
                     legacyErrorVariant(eu) orelse
-                    return try self.degradeToUndef(eu.sort, "error_return", op_id, "error symbol not in error_union error set");
+                    return try self.soundnessLossUndef(eu.sort, "error_return", op_id, .unsupported_error_encoding, "error symbol not in error_union error set");
             };
             const err_val = if (operands.len >= 1) blk: {
                 if (!mlir.oraTypeIsNull(variant.payload_type)) {
@@ -6228,7 +6570,7 @@ pub const Encoder = struct {
                     };
                     if (maybe_product) |product| {
                         if (operands.len != product.fields.len) {
-                            return try self.degradeToUndef(eu.sort, "error_return", op_id, "error payload constructor operand count mismatch");
+                            return try self.soundnessLossUndef(eu.sort, "error_return", op_id, .unsupported_error_encoding, "error payload constructor operand count mismatch");
                         }
                         const args = try self.allocator.alloc(z3.Z3_ast, operands.len);
                         defer self.allocator.free(args);
@@ -6263,7 +6605,7 @@ pub const Encoder = struct {
         };
         if (maybe_product) |product| {
             if (operands.len != product.fields.len) {
-                return try self.degradeToUndef(result_sort, "error_return", op_id, "error payload constructor operand count mismatch");
+                return try self.soundnessLossUndef(result_sort, "error_return", op_id, .unsupported_error_encoding, "error payload constructor operand count mismatch");
             }
             const args = try self.allocator.alloc(z3.Z3_ast, operands.len);
             defer self.allocator.free(args);
@@ -6296,7 +6638,7 @@ pub const Encoder = struct {
         if (value_sort == target_sort) return value;
         const coerced = self.coerceAstToSort(value, target_sort);
         if (z3.Z3_get_sort(self.context.ctx, coerced) == target_sort) return coerced;
-        return try self.degradeToUndef(target_sort, prefix, op_id, "failed to coerce AST to target sort");
+        return try self.soundnessLossUndef(target_sort, prefix, op_id, .unsupported_sort_coercion, "failed to coerce AST to target sort");
     }
 
     fn coerceTypedAstToSortOrUndef(
@@ -6332,27 +6674,27 @@ pub const Encoder = struct {
                 const mask = self.bitMaskForWidth(dst_width);
                 if ((numeral & ~mask) == 0) {
                     return self.encodeIntegerConstant(numeral, dst_width) catch
-                        try self.degradeToUndef(target_sort, prefix, op_id, "failed to encode exact narrowed typed bitvector numeral");
+                        try self.soundnessLossUndef(target_sort, prefix, op_id, .unsupported_sort_coercion, "failed to encode exact narrowed typed bitvector numeral");
                 }
             }
-            return try self.degradeToUndef(target_sort, prefix, op_id, "failed to coerce typed AST to target sort");
+            return try self.soundnessLossUndef(target_sort, prefix, op_id, .unsupported_sort_coercion, "failed to coerce typed AST to target sort");
         }
 
         return try self.coerceAstToSortOrUndef(value, target_sort, prefix, op_id);
     }
 
     fn encodeErrorIdValue(self: *Encoder, mlir_op: mlir.MlirOperation, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
-        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "missing error symbol name");
+        const sym_name = self.getStringAttr(mlir_op, "sym_name") orelse return try self.soundnessLossUndef(target_sort, "error_id", op_id, .unsupported_error_encoding, "missing error symbol name");
         return try self.encodeErrorIdValueForSymbol(mlir_op, sym_name, target_sort, op_id);
     }
 
     fn encodeErrorIdValueForSymbol(self: *Encoder, mlir_op: mlir.MlirOperation, sym_name: []const u8, target_sort: z3.Z3_sort, op_id: usize) EncodeError!z3.Z3_ast {
-        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.degradeToUndef(target_sort, "error_id", op_id, "failed to resolve error declaration id");
+        const error_id = self.lookupErrorDeclId(mlir_op, sym_name) orelse return try self.soundnessLossUndef(target_sort, "error_id", op_id, .unsupported_error_encoding, "failed to resolve error declaration id");
         if (z3.Z3_get_sort_kind(self.context.ctx, target_sort) == z3.Z3_BV_SORT) {
             const width = z3.Z3_get_bv_sort_size(self.context.ctx, target_sort);
             return try self.encodeIntegerConstant(error_id, width);
         }
-        return try self.degradeToUndef(target_sort, "error_id", op_id, "unsupported error id target sort");
+        return try self.soundnessLossUndef(target_sort, "error_id", op_id, .unsupported_error_encoding, "unsupported error id target sort");
     }
 
     fn lookupErrorDeclId(self: *Encoder, op: mlir.MlirOperation, sym_name: []const u8) ?u256 {
@@ -6421,6 +6763,54 @@ pub const Encoder = struct {
         return self.encodeFuncCallResult(mlir_op, operands, 0, mode);
     }
 
+    fn encodeExternalCallResult(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        result_index: u32,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        const num_results: u32 = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        if (num_results < 1 or result_index >= num_results) return error.UnsupportedOperation;
+
+        var empty_operands = [_]z3.Z3_ast{};
+        var owned_operands: ?[]z3.Z3_ast = null;
+        defer if (owned_operands) |ops| self.allocator.free(ops);
+        const operands: []const z3.Z3_ast = blk: {
+            const encoded = self.encodeOperationOperandsWithMode(mlir_op, mode) catch |err| {
+                if (err == error.UnsupportedOperation) {
+                    self.noteSoundnessLossAtOp(.unsupported_operation, mlir_op, "unsupported external-call operand encoding");
+                    break :blk empty_operands[0..];
+                }
+                return err;
+            };
+            owned_operands = encoded;
+            break :blk encoded;
+        };
+
+        const result_value = mlir.oraOperationGetResult(mlir_op, @intCast(result_index));
+        const result_id = @intFromPtr(result_value.ptr);
+        if (mode == .Current) {
+            if (self.value_map.get(result_id)) |cached| return cached;
+            if (self.verify_calls) {
+                try self.materializeCallSummaryCurrent(mlir_op, operands);
+                if (self.value_map.get(result_id)) |cached_after| return cached_after;
+            }
+        }
+
+        const result_type = mlir.oraValueGetType(result_value);
+        const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
+        if (!self.verify_calls) {
+            const op_id = @intFromPtr(mlir_op.ptr);
+            const label = try std.fmt.allocPrint(self.allocator, "external_call_r{d}", .{result_index});
+            defer self.allocator.free(label);
+            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "ORA_VERIFY_CALLS=0 disables external-call verification");
+        }
+
+        const callee = try self.getOpaqueCalleeKey(mlir_op);
+        defer self.allocator.free(callee);
+        return try self.encodeCallResultUFSymbol(callee, operands, &[_]CallSlotState{}, result_index, result_sort);
+    }
+
     fn encodeFuncCallResult(
         self: *Encoder,
         mlir_op: mlir.MlirOperation,
@@ -6468,7 +6858,7 @@ pub const Encoder = struct {
             const op_id = @intFromPtr(mlir_op.ptr);
             const label = try std.fmt.allocPrint(self.allocator, "call_r{d}", .{result_index});
             defer self.allocator.free(label);
-            return try self.mkUndefValue(result_sort, label, op_id);
+            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "ORA_VERIFY_CALLS=0 disables call-summary verification");
         }
 
         if (mode == .Old) {
@@ -6535,10 +6925,26 @@ pub const Encoder = struct {
     }
 
     fn getOpaqueCalleeKey(self: *Encoder, mlir_op: mlir.MlirOperation) ![]u8 {
+        if (self.operationNameEq(mlir_op, "ora.external_call")) {
+            const call_kind = self.getStringAttr(mlir_op, "call_kind") orelse "external";
+            const trait_name = self.getStringAttr(mlir_op, "trait_name") orelse "unknown_trait";
+            const method_name = self.getStringAttr(mlir_op, "method_name") orelse "unknown_method";
+            return try std.fmt.allocPrint(
+                self.allocator,
+                "external:{s}:{s}:{s}",
+                .{ call_kind, trait_name, method_name },
+            );
+        }
         if (try self.resolveCalleeName(mlir_op)) |callee| {
             return callee;
         }
         return try std.fmt.allocPrint(self.allocator, "call_site_{d}", .{@intFromPtr(mlir_op.ptr)});
+    }
+
+    fn isNoWriteExternalCall(self: *Encoder, mlir_op: mlir.MlirOperation) bool {
+        if (!self.operationNameEq(mlir_op, "ora.external_call")) return false;
+        const call_kind = self.getStringAttr(mlir_op, "call_kind") orelse return false;
+        return std.mem.eql(u8, call_kind, "staticcall");
     }
 
     fn encodeCallStateTransitionUFSymbol(
@@ -6628,6 +7034,60 @@ pub const Encoder = struct {
         try read_slots.append(self.allocator, try self.allocator.dupe(u8, slot_name));
     }
 
+    fn slotListContains(slots: []const []u8, slot_name: []const u8) bool {
+        for (slots) |existing| {
+            if (std.mem.eql(u8, existing, slot_name)) return true;
+        }
+        return false;
+    }
+
+    fn seedDeclaredGlobalSlotsForUnresolvedCall(
+        self: *Encoder,
+        call_op: mlir.MlirOperation,
+        write_slots: *std.ArrayList([]u8),
+    ) EncodeError!void {
+        var root = call_op;
+        while (true) {
+            const parent = mlir.mlirOperationGetParentOperation(root);
+            if (mlir.oraOperationIsNull(parent)) break;
+            root = parent;
+        }
+        try self.collectDeclaredGlobalSlotsRecursive(root, write_slots);
+    }
+
+    fn collectDeclaredGlobalSlotsRecursive(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        write_slots: *std.ArrayList([]u8),
+    ) EncodeError!void {
+        if (mlir.oraOperationIsNull(op)) return;
+        if (self.operationNameEq(op, "ora.global")) {
+            if (self.getStringAttr(op, "sym_name")) |slot_name| {
+                const slot_type = mlir.oraGlobalOpGetType(op);
+                if (!mlir.oraTypeIsNull(slot_type)) {
+                    const sort = try self.encodeMLIRType(slot_type);
+                    _ = try self.getOrCreateGlobal(slot_name, sort);
+                    try self.appendWriteSlotUnique(write_slots, slot_name);
+                }
+            }
+        }
+
+        const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+        for (0..num_regions) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, region_idx);
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectDeclaredGlobalSlotsRecursive(nested, write_slots);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
     fn transientSlotName(self: *Encoder, key: []const u8) EncodeError![]u8 {
         return try std.fmt.allocPrint(self.allocator, "transient:{s}", .{key});
     }
@@ -6685,9 +7145,10 @@ pub const Encoder = struct {
         const has_write_effect = self.functionHasWriteEffect(func_op);
 
         // Prefer explicit metadata when available.
-        var saw_slot_metadata = false;
+        var has_slot_metadata_attr = false;
         const slots_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.write_slots", 15));
         if (!mlir.oraAttributeIsNull(slots_attr)) {
+            has_slot_metadata_attr = true;
             const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(slots_attr));
             for (0..count) |i| {
                 const elem = mlir.oraArrayAttrGetElement(slots_attr, i);
@@ -6695,22 +7156,39 @@ pub const Encoder = struct {
                 const slot_ref = mlir.oraStringAttrGetValue(elem);
                 if (slot_ref.data == null or slot_ref.length == 0) continue;
                 const slot_name = slot_ref.data[0..slot_ref.length];
-                saw_slot_metadata = true;
                 try self.appendWriteSlotUnique(write_slots, slot_name);
             }
         }
 
         // Compiler-emitted slot metadata is the sema summary for tracked state.
-        // Trust it for set recovery; scanning is only the fallback for hand-built
-        // or legacy IR without explicit summary attrs.
-        if (saw_slot_metadata) return;
+        // Cross-check it against an independent body walk before trusting it.
+        if (has_slot_metadata_attr) {
+            var body_write_slots = std.ArrayList([]u8){};
+            defer {
+                for (body_write_slots.items) |slot_name| self.allocator.free(slot_name);
+                body_write_slots.deinit(self.allocator);
+            }
+            var body_writes_unknown = false;
+            try self.collectWriteInfoFromOperation(func_op, &body_write_slots, &body_writes_unknown, visited_funcs);
+            for (body_write_slots.items) |slot_name| {
+                if (!slotListContains(write_slots.items, slot_name)) {
+                    self.recordSoundnessLoss(.inexact_call_summary, "ora.write_slots metadata omitted a body write");
+                    try self.appendWriteSlotUnique(write_slots, slot_name);
+                }
+            }
+            if (body_writes_unknown) {
+                self.recordSoundnessLoss(.inexact_call_summary, "ora.write_slots metadata could not be fully cross-validated");
+                writes_unknown.* = true;
+            }
+            return;
+        }
 
         // Also scan function body and transitive callees to recover missing metadata.
         try self.collectWriteInfoFromOperation(func_op, write_slots, writes_unknown, visited_funcs);
 
         // If function is marked as writing but we still couldn't recover any slots,
         // conservatively model as unknown write set.
-        if (has_write_effect and !saw_slot_metadata and write_slots.items.len == slots_before) {
+        if (has_write_effect and !has_slot_metadata_attr and write_slots.items.len == slots_before) {
             writes_unknown.* = true;
         }
     }
@@ -6756,6 +7234,11 @@ pub const Encoder = struct {
                     writes_unknown.* = true;
                 }
             }
+        } else if (std.mem.eql(u8, op_name, "ora.external_call")) {
+            if (!self.isNoWriteExternalCall(op)) {
+                self.recordSoundnessLoss(.unresolved_callee, "external call in known callee body has no sound state summary");
+                writes_unknown.* = true;
+            }
         } else if (self.verify_calls and
             (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")))
         {
@@ -6789,6 +7272,20 @@ pub const Encoder = struct {
         }
     }
 
+    fn collectWriteInfoFromBlock(
+        self: *Encoder,
+        block: mlir.MlirBlock,
+        write_slots: *std.ArrayList([]u8),
+        writes_unknown: *bool,
+        visited_funcs: *std.AutoHashMap(u64, void),
+    ) EncodeError!void {
+        if (mlir.oraBlockIsNull(block)) return;
+        var nested = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(nested)) : (nested = mlir.oraOperationGetNextInBlock(nested)) {
+            try self.collectWriteInfoFromOperation(nested, write_slots, writes_unknown, visited_funcs);
+        }
+    }
+
     fn collectFunctionReadInfoRecursive(
         self: *Encoder,
         func_op: mlir.MlirOperation,
@@ -6803,9 +7300,10 @@ pub const Encoder = struct {
         const slots_before = read_slots.items.len;
         const has_read_effect = self.functionHasReadEffect(func_op);
 
-        var saw_slot_metadata = false;
+        var has_slot_metadata_attr = false;
         const slots_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.read_slots", 14));
         if (!mlir.oraAttributeIsNull(slots_attr)) {
+            has_slot_metadata_attr = true;
             const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(slots_attr));
             for (0..count) |i| {
                 const elem = mlir.oraArrayAttrGetElement(slots_attr, i);
@@ -6813,16 +7311,34 @@ pub const Encoder = struct {
                 const slot_ref = mlir.oraStringAttrGetValue(elem);
                 if (slot_ref.data == null or slot_ref.length == 0) continue;
                 const slot_name = slot_ref.data[0..slot_ref.length];
-                saw_slot_metadata = true;
                 try self.appendReadSlotUnique(read_slots, slot_name);
             }
         }
 
-        if (saw_slot_metadata) return;
+        if (has_slot_metadata_attr) {
+            var body_read_slots = std.ArrayList([]u8){};
+            defer {
+                for (body_read_slots.items) |slot_name| self.allocator.free(slot_name);
+                body_read_slots.deinit(self.allocator);
+            }
+            var body_reads_unknown = false;
+            try self.collectReadInfoFromOperation(func_op, &body_read_slots, &body_reads_unknown, visited_funcs);
+            for (body_read_slots.items) |slot_name| {
+                if (!slotListContains(read_slots.items, slot_name)) {
+                    self.recordSoundnessLoss(.inexact_call_summary, "ora.read_slots metadata omitted a body read");
+                    try self.appendReadSlotUnique(read_slots, slot_name);
+                }
+            }
+            if (body_reads_unknown) {
+                self.recordSoundnessLoss(.inexact_call_summary, "ora.read_slots metadata could not be fully cross-validated");
+                reads_unknown.* = true;
+            }
+            return;
+        }
 
         try self.collectReadInfoFromOperation(func_op, read_slots, reads_unknown, visited_funcs);
 
-        if (has_read_effect and !saw_slot_metadata and read_slots.items.len == slots_before) {
+        if (has_read_effect and !has_slot_metadata_attr and read_slots.items.len == slots_before) {
             reads_unknown.* = true;
         }
     }
@@ -6899,7 +7415,7 @@ pub const Encoder = struct {
         }
     }
 
-    fn operationMayWriteTrackedState(self: *Encoder, op: mlir.MlirOperation) EncodeError!bool {
+    pub fn operationMayWriteTrackedState(self: *Encoder, op: mlir.MlirOperation) EncodeError!bool {
         var write_slots = std.ArrayList([]u8){};
         defer {
             for (write_slots.items) |slot_name| self.allocator.free(slot_name);
@@ -6908,7 +7424,19 @@ pub const Encoder = struct {
         var writes_unknown = false;
         var visited_funcs = std.AutoHashMap(u64, void).init(self.allocator);
         defer visited_funcs.deinit();
-        try self.collectWriteInfoFromOperation(op, &write_slots, &writes_unknown, &visited_funcs);
+        const name_ref = mlir.oraOperationGetName(op);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "scf.while")) {
+            try self.collectWriteInfoFromBlock(mlir.oraScfWhileOpGetBeforeBlock(op), &write_slots, &writes_unknown, &visited_funcs);
+            try self.collectWriteInfoFromBlock(mlir.oraScfWhileOpGetAfterBlock(op), &write_slots, &writes_unknown, &visited_funcs);
+        } else {
+            try self.collectWriteInfoFromOperation(op, &write_slots, &writes_unknown, &visited_funcs);
+        }
         return writes_unknown or write_slots.items.len > 0;
     }
 
@@ -7110,9 +7638,9 @@ pub const Encoder = struct {
                 if (message) |owned| {
                     defer self.allocator.free(owned);
                     const persistent = self.allocPersistentMessage(owned) catch null;
-                    self.recordDegradation(persistent orelse "failed to infer global sort for call summary slot");
+                    self.recordSoundnessLoss(.inexact_call_summary, persistent orelse "failed to infer global sort for call summary slot");
                 } else {
-                    self.recordDegradation("failed to infer global sort for call summary slot");
+                    self.recordSoundnessLoss(.inexact_call_summary, "failed to infer global sort for call summary slot");
                 }
                 break :blk self.mkBitVectorSort(256);
             };
@@ -7168,7 +7696,7 @@ pub const Encoder = struct {
         try summary_encoder.copyInlineStackFrom(self);
         try summary_encoder.copyEnvMapFrom(self);
         try summary_encoder.copyReturnPathAssumptionsFrom(self);
-        try summary_encoder.copyGlobalStateMapFrom(self, mode == .Old);
+        try summary_encoder.seedCallSiteGlobalSnapshotFrom(self, mode == .Old);
         try summary_encoder.copyGlobalEntryMapFrom(self);
         try summary_encoder.pushInlineFunction(callee);
 
@@ -7567,7 +8095,7 @@ pub const Encoder = struct {
                 error.InvalidOperandCount,
                 error.InvalidControlFlow,
                 error.UnsupportedPredicate,
-                => self.recordDegradation("failed to replay local state effect during pure return extraction"),
+                => self.recordSoundnessLoss(.inexact_call_summary, "failed to replay local state effect during pure return extraction"),
                 error.OutOfMemory => return error.OutOfMemory,
             };
 
@@ -9814,12 +10342,12 @@ pub const Encoder = struct {
 
         if (try self.tryStmtAlwaysEntersCatch(try_stmt, mode)) {
             return (try self.extractRegionYield(try_stmt, 1, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing catch-region yield");
+                try self.soundnessLossUndef(result_sort, "try_stmt_result", op_id, .missing_control_flow_summary, "ora.try_stmt result missing catch-region yield");
         }
 
         if (!self.tryStmtMayEnterCatch(try_stmt)) {
             return (try self.extractRegionYield(try_stmt, 0, result_index, mode)) orelse
-                try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result missing try-region yield");
+                try self.soundnessLossUndef(result_sort, "try_stmt_result", op_id, .missing_control_flow_summary, "ora.try_stmt result missing try-region yield");
         }
 
         if (try self.tryExtractTryRegionCatchPredicate(try_stmt, mode)) |catch_pred| {
@@ -9837,7 +10365,7 @@ pub const Encoder = struct {
         }
 
         return (try self.tryExtractEquivalentTryStmtResult(try_stmt, result_index, mode)) orelse
-            try self.degradeToUndef(result_sort, "try_stmt_result", op_id, "ora.try_stmt result requires exact catch summary");
+            try self.soundnessLossUndef(result_sort, "try_stmt_result", op_id, .missing_control_flow_summary, "ora.try_stmt result requires exact catch summary");
     }
 
     const DirectTryUnwrapInfo = struct {
@@ -11209,7 +11737,7 @@ pub const Encoder = struct {
                 if (result_exprs.len > 0) {
                     self.recordCalleeResultDegradation(call_op, callee, reason);
                 } else {
-                    self.recordDegradation(reason);
+                    self.recordSoundnessLoss(.inexact_call_summary, reason);
                 }
             }
 
@@ -11278,7 +11806,7 @@ pub const Encoder = struct {
             if (summary_encoder.isDegraded()) {
                 const reason = summary_encoder.degradationReason() orelse "summary encoder degraded while materializing call summary";
                 if (slots.len > 0) {
-                    self.recordDegradation(reason);
+                    self.recordSoundnessLoss(.inexact_call_summary, reason);
                 }
                 if (result_exprs.len > 0) {
                     self.recordCalleeResultDegradation(call_op, callee, reason);
@@ -11327,7 +11855,7 @@ pub const Encoder = struct {
                 if (!mlir.oraAttributeIsNull(requires_attr) and mlir.oraOperationGetNumOperands(op) >= 1) {
                     const condition_value = mlir.oraOperationGetOperand(op, 0);
                     const encoded = self.encodeValue(condition_value) catch blk: {
-                        self.recordDegradation("failed to encode summary precondition");
+                        self.recordSoundnessLoss(.inexact_call_summary, "failed to encode summary precondition");
                         break :blk null;
                     };
                     if (encoded) |cond| {
@@ -11338,7 +11866,7 @@ pub const Encoder = struct {
                 if (mlir.oraOperationGetNumOperands(op) >= 1) {
                     const condition_value = mlir.oraOperationGetOperand(op, 0);
                     const encoded = self.encodeValue(condition_value) catch blk: {
-                        self.recordDegradation("failed to encode summary precondition");
+                        self.recordSoundnessLoss(.inexact_call_summary, "failed to encode summary precondition");
                         break :blk null;
                     };
                     if (encoded) |cond| {
@@ -11381,7 +11909,7 @@ pub const Encoder = struct {
                     else blk: {
                         const condition_value = mlir.oraOperationGetOperand(op, 0);
                         break :blk self.encodeValue(condition_value) catch {
-                            self.recordDegradation("failed to encode summary ensures");
+                            self.recordSoundnessLoss(.inexact_call_summary, "failed to encode summary ensures");
                             return;
                         };
                     };
@@ -11394,7 +11922,7 @@ pub const Encoder = struct {
                         specialized
                     else
                         self.encodeValue(condition_value) catch {
-                            self.recordDegradation("failed to encode summary ensures");
+                            self.recordSoundnessLoss(.inexact_call_summary, "failed to encode summary ensures");
                             return;
                         };
                     self.addImportedCalleeEnsures(self.coerceToBool(encoded), callee_name);
@@ -11463,7 +11991,7 @@ pub const Encoder = struct {
         var guard_terms = std.ArrayList(z3.Z3_ast){};
         defer guard_terms.deinit(self.allocator);
         guard_terms.appendSlice(self.allocator, requires) catch {
-            self.recordDegradation("failed to allocate summary obligation guards");
+            self.recordSoundnessLoss(.inexact_call_summary, "failed to allocate summary obligation guards");
             for (obligations) |obl| {
                 const imported = importedSourceKind.resolve(obl, callee_name);
                 self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
@@ -11471,7 +11999,7 @@ pub const Encoder = struct {
             return;
         };
         guard_terms.appendSlice(self.allocator, path_guards) catch {
-            self.recordDegradation("failed to allocate summary obligation guards");
+            self.recordSoundnessLoss(.inexact_call_summary, "failed to allocate summary obligation guards");
             for (obligations) |obl| {
                 const imported = importedSourceKind.resolve(obl, callee_name);
                 self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
@@ -11501,18 +12029,18 @@ pub const Encoder = struct {
             }
             if (std.mem.eql(u8, op_name, "scf.if")) {
                 if (mlir.oraOperationGetNumOperands(op) < 1) {
-                    self.recordDegradation("scf.if missing condition while encoding state effects");
+                    self.recordSoundnessLoss(.inexact_state_summary, "scf.if missing condition while encoding state effects");
                     return;
                 }
 
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
                 const condition = self.encodeValue(condition_value) catch {
-                    self.recordDegradation("failed to encode scf.if condition for state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to encode scf.if condition for state summary");
                     return;
                 };
 
                 var base_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture base state for scf.if summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture base state for scf.if summary");
                     return;
                 };
                 defer base_state.deinit(self.allocator);
@@ -11523,7 +12051,7 @@ pub const Encoder = struct {
                 defer else_state.deinit(self.allocator);
 
                 self.restoreStateSnapshot(&base_state) catch {
-                    self.recordDegradation("failed to restore base state for scf.if then-branch");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for scf.if then-branch");
                     return;
                 };
                 const then_region = mlir.oraOperationGetRegion(op, 0);
@@ -11531,18 +12059,18 @@ pub const Encoder = struct {
                     const saved_len = self.return_path_assumptions.items.len;
                     defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
                     self.return_path_assumptions.append(self.allocator, self.coerceToBool(condition)) catch {
-                        self.recordDegradation("failed to record scf.if then-branch path assumption");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to record scf.if then-branch path assumption");
                         return;
                     };
                     self.encodeStateEffectsInRegion(then_region);
                 }
                 then_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture scf.if then-branch state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture scf.if then-branch state summary");
                     return;
                 };
 
                 self.restoreStateSnapshot(&base_state) catch {
-                    self.recordDegradation("failed to restore base state for scf.if else-branch");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for scf.if else-branch");
                     return;
                 };
                 const else_region = mlir.oraOperationGetRegion(op, 1);
@@ -11550,18 +12078,18 @@ pub const Encoder = struct {
                     const saved_len = self.return_path_assumptions.items.len;
                     defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
                     self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition))) catch {
-                        self.recordDegradation("failed to record scf.if else-branch path assumption");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to record scf.if else-branch path assumption");
                         return;
                     };
                     self.encodeStateEffectsInRegion(else_region);
                 }
                 else_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture scf.if else-branch state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture scf.if else-branch state summary");
                     return;
                 };
 
                 self.mergeStateSnapshotsIf(condition, &base_state, &then_state, &else_state) catch {
-                    self.recordDegradation("failed to merge scf.if branch state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to merge scf.if branch state summary");
                     return;
                 };
                 return;
@@ -11574,25 +12102,25 @@ pub const Encoder = struct {
 
             if (std.mem.eql(u8, op_name, "scf.for")) {
                 const loop_writes_state = self.operationMayWriteTrackedState(op) catch {
-                    self.recordDegradation("failed to recover scf.for write set for state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to recover scf.for write set for state summary");
                     return;
                 };
                 if (!loop_writes_state) return;
                 if (self.isZeroIterationScfFor(op)) return;
                 if (self.tryEncodeFiniteScfForStateEffects(op)) return;
-                self.recordDegradation("loop state summary is not encoded exactly");
+                self.recordSoundnessLoss(.inexact_state_summary, "loop state summary is not encoded exactly");
                 return;
             }
 
             if (std.mem.eql(u8, op_name, "scf.while")) {
                 const loop_writes_state = self.operationMayWriteTrackedState(op) catch {
-                    self.recordDegradation("failed to recover scf.while write set for state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to recover scf.while write set for state summary");
                     return;
                 };
                 if ((self.isStaticallyFalseScfWhile(op, .Current) catch false)) return;
                 if (!loop_writes_state) return;
                 if (self.tryEncodeFiniteScfWhileStateEffects(op)) return;
-                self.recordDegradation("loop state summary is not encoded exactly");
+                self.recordSoundnessLoss(.inexact_state_summary, "loop state summary is not encoded exactly");
                 return;
             }
 
@@ -11615,7 +12143,7 @@ pub const Encoder = struct {
 
                 if (self.tryGetDirectErrorUnwrapTryPredicate(op, .Current) catch null) |info| {
                     var base_state = self.captureStateSnapshot() catch {
-                        self.recordDegradation("failed to capture base state for direct ora.try_stmt summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to capture base state for direct ora.try_stmt summary");
                         return;
                     };
                     defer base_state.deinit(self.allocator);
@@ -11626,7 +12154,7 @@ pub const Encoder = struct {
                     defer catch_state.deinit(self.allocator);
 
                     self.restoreStateSnapshot(&base_state) catch {
-                        self.recordDegradation("failed to restore base state for direct ora.try_stmt try-summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for direct ora.try_stmt try-summary");
                         return;
                     };
                     const try_region = mlir.oraOperationGetRegion(op, 0);
@@ -11634,18 +12162,18 @@ pub const Encoder = struct {
                         const saved_len = self.return_path_assumptions.items.len;
                         defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
                         self.return_path_assumptions.append(self.allocator, self.encodeNot(info.is_err)) catch {
-                            self.recordDegradation("failed to record direct ora.try_stmt success-path assumption");
+                            self.recordSoundnessLoss(.inexact_state_summary, "failed to record direct ora.try_stmt success-path assumption");
                             return;
                         };
                         self.encodeStateEffectsInRegion(try_region);
                     }
                     try_state = self.captureStateSnapshot() catch {
-                        self.recordDegradation("failed to capture direct ora.try_stmt try-state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to capture direct ora.try_stmt try-state summary");
                         return;
                     };
 
                     self.restoreStateSnapshot(&base_state) catch {
-                        self.recordDegradation("failed to restore base state for direct ora.try_stmt catch-summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for direct ora.try_stmt catch-summary");
                         return;
                     };
                     const catch_region = mlir.oraOperationGetRegion(op, 1);
@@ -11653,25 +12181,25 @@ pub const Encoder = struct {
                         const saved_len = self.return_path_assumptions.items.len;
                         defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
                         self.return_path_assumptions.append(self.allocator, info.is_err) catch {
-                            self.recordDegradation("failed to record direct ora.try_stmt catch-path assumption");
+                            self.recordSoundnessLoss(.inexact_state_summary, "failed to record direct ora.try_stmt catch-path assumption");
                             return;
                         };
                         self.encodeStateEffectsInRegion(catch_region);
                     }
                     catch_state = self.captureStateSnapshot() catch {
-                        self.recordDegradation("failed to capture direct ora.try_stmt catch-state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to capture direct ora.try_stmt catch-state summary");
                         return;
                     };
 
                     self.mergeStateSnapshotsIf(info.is_err, &base_state, &catch_state, &try_state) catch {
-                        self.recordDegradation("failed to merge direct ora.try_stmt state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to merge direct ora.try_stmt state summary");
                         return;
                     };
                     return;
                 }
 
                 var base_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture base state for ora.try_stmt summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture base state for ora.try_stmt summary");
                     return;
                 };
                 defer base_state.deinit(self.allocator);
@@ -11682,7 +12210,7 @@ pub const Encoder = struct {
                 defer catch_state.deinit(self.allocator);
 
                 self.restoreStateSnapshot(&base_state) catch {
-                    self.recordDegradation("failed to restore base state for ora.try_stmt try-summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for ora.try_stmt try-summary");
                     return;
                 };
                 const try_region = mlir.oraOperationGetRegion(op, 0);
@@ -11690,12 +12218,12 @@ pub const Encoder = struct {
                     self.encodeStateEffectsInRegion(try_region);
                 }
                 try_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture ora.try_stmt try-state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture ora.try_stmt try-state summary");
                     return;
                 };
 
                 self.restoreStateSnapshot(&base_state) catch {
-                    self.recordDegradation("failed to restore base state for ora.try_stmt catch-summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for ora.try_stmt catch-summary");
                     return;
                 };
                 const catch_region = mlir.oraOperationGetRegion(op, 1);
@@ -11703,17 +12231,17 @@ pub const Encoder = struct {
                     self.encodeStateEffectsInRegion(catch_region);
                 }
                 catch_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture ora.try_stmt catch-state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture ora.try_stmt catch-state summary");
                     return;
                 };
 
                 const branch_condition = self.tryExtractTryRegionCatchPredicate(op, .Current) catch {
-                    self.recordDegradation("failed to extract branch-conditioned ora.try_stmt catch predicate");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to extract branch-conditioned ora.try_stmt catch predicate");
                     return;
                 };
                 if (branch_condition) |catch_pred| {
                     self.mergeStateSnapshotsIf(catch_pred, &base_state, &catch_state, &try_state) catch {
-                        self.recordDegradation("failed to merge branch-conditioned ora.try_stmt state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to merge branch-conditioned ora.try_stmt state summary");
                         return;
                     };
                     return;
@@ -11721,46 +12249,46 @@ pub const Encoder = struct {
 
                 if (self.stateSnapshotsEquivalent(&try_state, &catch_state)) {
                     self.restoreStateSnapshot(&try_state) catch {
-                        self.recordDegradation("failed to restore equivalent ora.try_stmt state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to restore equivalent ora.try_stmt state summary");
                     };
                     return;
                 }
 
                 self.restoreEquivalentTryStateSnapshot(&base_state, &try_state, &catch_state, @intFromPtr(op.ptr)) catch {
-                    self.recordDegradation("failed to preserve equivalent ora.try_stmt state summary slots");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to preserve equivalent ora.try_stmt state summary slots");
                     return;
                 };
-                self.recordDegradation("try state summary is not encoded exactly");
+                self.recordSoundnessLoss(.inexact_state_summary, "try state summary is not encoded exactly");
                 return;
             }
 
             if (std.mem.eql(u8, op_name, "ora.switch") or std.mem.eql(u8, op_name, "ora.switch_expr")) {
                 if (mlir.oraOperationGetNumOperands(op) < 1) {
-                    self.recordDegradation("ora.switch missing scrutinee while encoding state effects");
+                    self.recordSoundnessLoss(.inexact_state_summary, "ora.switch missing scrutinee while encoding state effects");
                     return;
                 }
 
                 const scrutinee_value = mlir.oraOperationGetOperand(op, 0);
                 const scrutinee = self.encodeValue(scrutinee_value) catch {
-                    self.recordDegradation("failed to encode ora.switch scrutinee for state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to encode ora.switch scrutinee for state summary");
                     return;
                 };
 
                 const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
                 var metadata = self.getSwitchCaseMetadata(op, num_regions) catch {
-                    self.recordDegradation("failed to recover ora.switch case metadata for state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to recover ora.switch case metadata for state summary");
                     return;
                 };
                 defer metadata.deinit(self.allocator);
 
                 var base_state = self.captureStateSnapshot() catch {
-                    self.recordDegradation("failed to capture base state for ora.switch summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to capture base state for ora.switch summary");
                     return;
                 };
                 defer base_state.deinit(self.allocator);
 
                 var branch_states = self.allocator.alloc(StateSnapshot, num_regions) catch {
-                    self.recordDegradation("failed to allocate ora.switch branch summary state");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to allocate ora.switch branch summary state");
                     return;
                 };
                 defer self.allocator.free(branch_states);
@@ -11770,7 +12298,7 @@ pub const Encoder = struct {
                 }
 
                 var branch_conditions = self.allocator.alloc(z3.Z3_ast, num_regions) catch {
-                    self.recordDegradation("failed to allocate ora.switch branch predicates");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to allocate ora.switch branch predicates");
                     return;
                 };
                 defer self.allocator.free(branch_conditions);
@@ -11778,7 +12306,7 @@ pub const Encoder = struct {
                 var remaining = self.encodeBoolConstant(true);
                 for (0..num_regions) |region_index| {
                     self.restoreStateSnapshot(&base_state) catch {
-                        self.recordDegradation("failed to restore base state for ora.switch branch summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for ora.switch branch summary");
                         return;
                     };
 
@@ -11790,7 +12318,7 @@ pub const Encoder = struct {
                         metadata.range_ends,
                         region_index,
                     ) catch {
-                        self.recordDegradation("failed to encode ora.switch branch predicate for state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to encode ora.switch branch predicate for state summary");
                         return;
                     };
                     const effective_predicate = if (metadata.default_case_index != null and metadata.default_case_index.? == @as(i64, @intCast(region_index)))
@@ -11802,7 +12330,7 @@ pub const Encoder = struct {
                     const region = mlir.oraOperationGetRegion(op, @intCast(region_index));
                     self.encodeStateEffectsInRegion(region);
                     branch_states[region_index] = self.captureStateSnapshot() catch {
-                        self.recordDegradation("failed to capture ora.switch branch state summary");
+                        self.recordSoundnessLoss(.inexact_state_summary, "failed to capture ora.switch branch state summary");
                         return;
                     };
 
@@ -11812,7 +12340,7 @@ pub const Encoder = struct {
                 }
 
                 self.mergeStateSnapshotsMany(branch_conditions, &base_state, branch_states) catch {
-                    self.recordDegradation("failed to merge ora.switch branch state summary");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to merge ora.switch branch state summary");
                     return;
                 };
                 return;
@@ -11827,7 +12355,7 @@ pub const Encoder = struct {
                 std.mem.eql(u8, op_name, "ora.assert"))
             {
                 _ = self.encodeOperation(op) catch {
-                    self.recordDegradation("failed to encode state effect operation");
+                    self.recordSoundnessLoss(.inexact_state_summary, "failed to encode state effect operation");
                 };
             }
         }
@@ -11841,18 +12369,18 @@ pub const Encoder = struct {
         next_op: mlir.MlirOperation,
     ) void {
         if (mlir.oraOperationGetNumOperands(op) < 1) {
-            self.recordDegradation("ora.conditional_return missing condition while encoding state effects");
+            self.recordSoundnessLoss(.inexact_state_summary, "ora.conditional_return missing condition while encoding state effects");
             return;
         }
 
         const condition_value = mlir.oraOperationGetOperand(op, 0);
         const condition = self.encodeValue(condition_value) catch {
-            self.recordDegradation("failed to encode ora.conditional_return condition for state summary");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to encode ora.conditional_return condition for state summary");
             return;
         };
 
         var base_state = self.captureStateSnapshot() catch {
-            self.recordDegradation("failed to capture base state for ora.conditional_return summary");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to capture base state for ora.conditional_return summary");
             return;
         };
         defer base_state.deinit(self.allocator);
@@ -11863,7 +12391,7 @@ pub const Encoder = struct {
         defer else_state.deinit(self.allocator);
 
         self.restoreStateSnapshot(&base_state) catch {
-            self.recordDegradation("failed to restore base state for ora.conditional_return then-branch");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for ora.conditional_return then-branch");
             return;
         };
         const then_block = mlir.oraConditionalReturnOpGetThenBlock(op);
@@ -11871,7 +12399,7 @@ pub const Encoder = struct {
             const saved_len = self.return_path_assumptions.items.len;
             defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
             self.return_path_assumptions.append(self.allocator, self.coerceToBool(condition)) catch {
-                self.recordDegradation("failed to record ora.conditional_return then-branch path assumption");
+                self.recordSoundnessLoss(.inexact_state_summary, "failed to record ora.conditional_return then-branch path assumption");
                 return;
             };
             self.encodeStateEffectsInBlockFrom(then_block, mlir.oraBlockGetFirstOperation(then_block));
@@ -11883,12 +12411,12 @@ pub const Encoder = struct {
             }
         }
         then_state = self.captureStateSnapshot() catch {
-            self.recordDegradation("failed to capture ora.conditional_return then-branch state summary");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to capture ora.conditional_return then-branch state summary");
             return;
         };
 
         self.restoreStateSnapshot(&base_state) catch {
-            self.recordDegradation("failed to restore base state for ora.conditional_return else-branch");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to restore base state for ora.conditional_return else-branch");
             return;
         };
         const else_block = mlir.oraConditionalReturnOpGetElseBlock(op);
@@ -11896,7 +12424,7 @@ pub const Encoder = struct {
             const saved_len = self.return_path_assumptions.items.len;
             defer self.return_path_assumptions.shrinkRetainingCapacity(saved_len);
             self.return_path_assumptions.append(self.allocator, z3.Z3_mk_not(self.context.ctx, self.coerceToBool(condition))) catch {
-                self.recordDegradation("failed to record ora.conditional_return else-branch path assumption");
+                self.recordSoundnessLoss(.inexact_state_summary, "failed to record ora.conditional_return else-branch path assumption");
                 return;
             };
             self.encodeStateEffectsInBlockFrom(else_block, mlir.oraBlockGetFirstOperation(else_block));
@@ -11908,12 +12436,12 @@ pub const Encoder = struct {
             }
         }
         else_state = self.captureStateSnapshot() catch {
-            self.recordDegradation("failed to capture ora.conditional_return else-branch state summary");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to capture ora.conditional_return else-branch state summary");
             return;
         };
 
         self.mergeStateSnapshotsIf(condition, &base_state, &then_state, &else_state) catch {
-            self.recordDegradation("failed to merge ora.conditional_return branch state summary");
+            self.recordSoundnessLoss(.inexact_state_summary, "failed to merge ora.conditional_return branch state summary");
             return;
         };
     }
@@ -11991,11 +12519,19 @@ pub const Encoder = struct {
                     try self.collectFunctionReadInfo(fop, &read_slots, &reads_unknown);
                 }
                 if (writes_unknown) {
-                    self.recordDegradation("failed to recover known callee write set exactly");
+                    self.recordSoundnessLoss(.inexact_call_summary, "failed to recover known callee write set exactly");
                 }
                 if (reads_unknown) {
-                    self.recordDegradation("failed to recover known callee read set exactly");
+                    self.recordSoundnessLoss(.inexact_call_summary, "failed to recover known callee read set exactly");
                 }
+            } else if (self.isNoWriteExternalCall(mlir_op)) {
+                // EVM STATICCALL cannot write storage. Result values remain opaque
+                // UFs, but current-contract storage is framed instead of degraded.
+                try self.seedDeclaredGlobalSlotsForUnresolvedCall(mlir_op, &read_slots);
+            } else {
+                self.recordSoundnessLoss(.unresolved_callee, "unresolved external callee has no sound state summary");
+                try self.seedDeclaredGlobalSlotsForUnresolvedCall(mlir_op, &write_slots);
+                writes_unknown = true;
             }
         }
 
@@ -12049,7 +12585,7 @@ pub const Encoder = struct {
                     self.recordCalleeResultDegradation(mlir_op, callee, "failed to encode known callee results exactly");
                 }
                 if (slots.items.len > 0) {
-                    self.recordDegradation("failed to encode known callee state exactly");
+                    self.recordSoundnessLoss(.inexact_call_summary, "failed to encode known callee state exactly");
                 }
             }
         }
@@ -12075,7 +12611,7 @@ pub const Encoder = struct {
                 var post = slot.post orelse slot.pre;
                 if (slot.is_write and slot.post == null) {
                     if (func_op != null) {
-                        self.recordDegradation("known callee state fell back to opaque UF summary");
+                        self.recordSoundnessLoss(.inexact_call_summary, "known callee state fell back to opaque UF summary");
                     }
                     post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
                 } else if (!slot.is_write) {
@@ -12089,7 +12625,7 @@ pub const Encoder = struct {
                         const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));
                         const frame_id = @as(u64, @intCast(slot_idx)) ^ (call_id_u64 << 8);
                         self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {
-                            self.recordDegradation("failed to encode call-state frame constraint");
+                            self.recordSoundnessLoss(.inexact_call_summary, "failed to encode call-state frame constraint");
                         };
                     }
                 }
@@ -12313,7 +12849,7 @@ pub const Encoder = struct {
                 @intFromPtr(ancestor.parent_map.ptr),
             );
             const parent_value = if (mlir.oraTypeIsNull(updated_type))
-                try self.degradeToUndef(value_sort, "nested_map_parent_value", @intFromPtr(ancestor.parent_map.ptr), "missing nested map parent value type metadata")
+                try self.soundnessLossUndef(value_sort, "nested_map_parent_value", @intFromPtr(ancestor.parent_map.ptr), .missing_type_metadata, "missing nested map parent value type metadata")
             else
                 try self.coerceTypedAstToSortOrUndef(
                     updated,
@@ -12331,7 +12867,7 @@ pub const Encoder = struct {
                 updated,
                 op_id +% @as(u64, @intCast(depth + 1)),
             ) catch {
-                self.recordDegradation("failed to encode nested map-store frame constraint");
+                self.recordSoundnessLoss(.inexact_state_summary, "failed to encode nested map-store frame constraint");
             };
         }
 
@@ -12553,7 +13089,7 @@ pub const Encoder = struct {
         errdefer collector.buffer.deinit(self.allocator);
         mlir.mlirTypePrint(ty, printMlirChunk, &collector);
         if (collector.failed) {
-            self.recordDegradation("failed to collect printed MLIR type");
+            self.recordSoundnessLoss(.missing_type_metadata, "failed to collect printed MLIR type");
         }
         return try collector.buffer.toOwnedSlice(self.allocator);
     }
@@ -13096,7 +13632,7 @@ pub const Encoder = struct {
             const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
             return z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, ast, zero));
         }
-        self.recordDegradation("coerceToBool on non-bool non-bv sort");
+        self.recordSoundnessLoss(.unsupported_sort_coercion, "coerceToBool on non-bool non-bv sort");
         return ast;
     }
 
@@ -13170,7 +13706,7 @@ pub const Encoder = struct {
             return self.mkBitVectorSort(width);
         }
 
-        self.recordDegradation("unsupported quantified binder type encoded via opaque bv256 fallback");
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported quantified binder type encoded via opaque bv256 fallback");
         return self.mkBitVectorSort(256);
     }
 
@@ -13206,10 +13742,11 @@ pub const Encoder = struct {
         }
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, bound_var)};
+        const no_patterns_reason = "user quantified expression trigger inference is not implemented yet";
         if (std.ascii.eqlIgnoreCase(quantifier, "exists")) {
-            return z3.Z3_mk_exists_const(self.context.ctx, 0, 1, &bounds, 0, null, quantified_body);
+            return try self.mkQuantifier(.exists, &bounds, .{ .no_patterns = .{ .reason = no_patterns_reason } }, quantified_body);
         }
-        return z3.Z3_mk_forall_const(self.context.ctx, 0, 1, &bounds, 0, null, quantified_body);
+        return try self.mkQuantifier(.forall, &bounds, .{ .no_patterns = .{ .reason = no_patterns_reason } }, quantified_body);
     }
 
     fn bitMaskForWidth(_: *Encoder, width: u32) u256 {
@@ -13334,7 +13871,7 @@ pub const Encoder = struct {
         const attr_name_ref = mlir.oraStringRefCreate("predicate".ptr, "predicate".len);
         const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
         if (mlir.oraAttributeIsNull(attr)) {
-            self.recordDegradation("arith.cmpi missing predicate");
+            self.recordSoundnessLoss(.unsupported_operation, "arith.cmpi missing predicate");
             return error.UnsupportedOperation;
         }
 
@@ -13353,7 +13890,7 @@ pub const Encoder = struct {
         const attr_name_ref = mlir.oraStringRefCreate("value".ptr, "value".len);
         const attr = mlir.oraOperationGetAttributeByName(mlir_op, attr_name_ref);
         return self.parseConstAttrValue(attr, width) orelse blk: {
-            self.recordDegradation("failed to decode constant value");
+            self.recordSoundnessLoss(.internal_encoding_failure, "failed to decode constant value");
             break :blk 0;
         };
     }
@@ -13448,8 +13985,8 @@ pub const Encoder = struct {
 
         const result_sort = try self.encodeMLIRTypeForSymbol(result_type);
         const op_id = @intFromPtr(mlir_op.ptr);
-        const in_width = self.getTypeBitWidth(operand_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine operand cast width");
-        const out_width = self.getTypeBitWidth(result_type) orelse return try self.degradeToUndef(result_sort, "cast_width", op_id, "failed to determine result cast width");
+        const in_width = self.getTypeBitWidth(operand_type) orelse return try self.soundnessLossUndef(result_sort, "cast_width", op_id, .missing_type_metadata, "failed to determine operand cast width");
+        const out_width = self.getTypeBitWidth(result_type) orelse return try self.soundnessLossUndef(result_sort, "cast_width", op_id, .missing_type_metadata, "failed to determine result cast width");
         if (in_width == out_width) return operands[0];
 
         // Convert Bool sort to BitVec<1> if needed (Z3_mk_zero_ext/sign_ext require bitvector operands)
