@@ -80,6 +80,8 @@ set -euo pipefail
 #   the recursive field slot and elements at keccak256(field_slot) + index
 # - high-arity external ABI entrypoints preserve 6- and 8-argument values across
 #   dispatcher decoding and Sensei internal-call argument transfer
+# - two deployed contracts preserve storage isolation across a state-changing
+#   external call: caller storage remains unchanged while callee storage mutates
 
 RPC_URL="${RPC_URL:-http://127.0.0.1:8547}"
 ORA_BIN="${ORA_BIN:-./zig-out/bin/ora}"
@@ -256,6 +258,22 @@ deploy_contract() {
   echo "$addr"
 }
 
+send_contract_tx() {
+  local addr="$1"
+  local label="$2"
+  local signature="$3"
+  shift 3
+  local out tx_hash receipt status
+
+  out="$(cast send --no-proxy --rpc-url "$RPC_URL" --async --unlocked --from "$DEPLOYER" "$addr" "$signature" "$@")"
+  tx_hash="$(extract_tx_hash "$out")"
+  [[ -n "$tx_hash" ]] || fail "failed to extract $label transaction hash"
+
+  receipt="$(wait_receipt_json "$tx_hash")" || fail "timed out waiting for $label receipt"
+  status="$(receipt_json_field "$receipt" status)"
+  [[ "$status" == "0x1" || "$status" == "1" ]] || fail "$label failed with status=$status"
+}
+
 send_increment() {
   local out tx_hash receipt status
 
@@ -290,7 +308,23 @@ compile_bytecode() {
   echo "Compiling $source" >&2
   "$ORA_BIN" --emit-bytecode -o "$output" "$source" >&2
 
+  read_compiled_bytecode "$output"
+}
+
+compile_bytecode_without_verification() {
+  local source="$1"
+  local output="$2"
+
+  echo "Compiling $source with --no-verify for deployed-runtime smoke" >&2
+  "$ORA_BIN" --no-verify --emit-bytecode -o "$output" "$source" >&2
+
+  read_compiled_bytecode "$output"
+}
+
+read_compiled_bytecode() {
+  local output="$1"
   local bytecode
+
   bytecode="$(tr -d '[:space:]' < "$output")"
   [[ -n "$bytecode" ]] || fail "empty bytecode in $output"
   if [[ "$bytecode" != 0x* ]]; then
@@ -2188,6 +2222,93 @@ contract HighArityAbiSmoke {
     }
 }
 ORA
+}
+
+write_multicontract_callee_fixture() {
+  local source="$1"
+
+  cat >"$source" <<'ORA'
+contract ExternalCallTargetSmoke {
+    storage var value: u256;
+
+    pub fn set_value(next: u256) -> bool {
+        value = next;
+        return true;
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+}
+ORA
+}
+
+write_multicontract_caller_fixture() {
+  local source="$1"
+
+  cat >"$source" <<'ORA'
+extern trait Target {
+    call fn set_value(self, next: u256) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract ExternalCallCallerSmoke {
+    storage var local: u256;
+
+    pub fn call_target(target: address, next: u256) -> !bool | ExternalCallFailed {
+        return external<Target>(target, gas: 50000).set_value(next);
+    }
+
+    pub fn mark_local(next: u256) {
+        local = next;
+    }
+
+    pub fn get_local() -> u256 {
+        return local;
+    }
+}
+ORA
+}
+
+assert_contract_raw_slot() {
+  local addr="$1"
+  local slot="$2"
+  local expected="$3"
+  local label="$4"
+  local slot_raw slot_expected
+
+  slot_raw="$(trim "$(cast storage --no-proxy --rpc-url "$RPC_URL" "$addr" "$slot")")"
+  slot_expected="$(expected_slot_hex "$expected")"
+  [[ "${slot_raw,,}" == "${slot_expected,,}" ]] || fail "$label slot $slot mismatch at $addr: expected=$slot_expected got=$slot_raw"
+
+  ok "$label slot $slot at $addr equals $expected"
+}
+
+assert_multicontract_callee() {
+  local addr="$1"
+  local expected="$2"
+  local getter_raw getter
+
+  assert_contract_raw_slot "$addr" 0 "$expected" "external-call callee"
+  getter_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_value()(uint256)")"
+  getter="$(normalize_uint "$getter_raw")"
+  [[ "$getter" == "$expected" ]] || fail "external-call callee getter mismatch: expected=$expected got=$getter"
+
+  ok "external-call callee getter equals $expected"
+}
+
+assert_multicontract_caller() {
+  local addr="$1"
+  local expected="$2"
+  local getter_raw getter
+
+  assert_contract_raw_slot "$addr" 0 "$expected" "external-call caller"
+  getter_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_local()(uint256)")"
+  getter="$(normalize_uint "$getter_raw")"
+  [[ "$getter" == "$expected" ]] || fail "external-call caller getter mismatch: expected=$expected got=$getter"
+
+  ok "external-call caller getter equals $expected"
 }
 
 assert_mapping_raw_slot() {
@@ -6037,6 +6158,21 @@ send_high_arity_set8() {
   [[ "$status" == "0x1" || "$status" == "1" ]] || fail "high-arity set8 failed with status=$status"
 }
 
+send_multicontract_call_target() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local value="$3"
+
+  send_contract_tx "$caller_addr" "external-call caller call_target" "call_target(address,uint256)" "$target_addr" "$value"
+}
+
+send_multicontract_mark_local() {
+  local caller_addr="$1"
+  local value="$2"
+
+  send_contract_tx "$caller_addr" "external-call caller mark_local" "mark_local(uint256)" "$value"
+}
+
 send_set_map_nested_struct_inner_middle() {
   local account="$1"
   local middle="$2"
@@ -7700,6 +7836,40 @@ send_high_arity_set6 "$ALICE" 11 22 33 44 55
 assert_high_arity_slots "$ALICE" 11 22 33 44 55 0 0
 send_high_arity_set8 "$BOB" 101 202 303 404 505 606 707
 assert_high_arity_slots "$BOB" 101 202 303 404 505 606 707
+
+MULTICONTRACT_CALLEE_SOURCE="$WORK_DIR/multicontract_callee_smoke.ora"
+MULTICONTRACT_CALLEE_BYTECODE_FILE="$WORK_DIR/multicontract_callee_smoke.hex"
+write_multicontract_callee_fixture "$MULTICONTRACT_CALLEE_SOURCE"
+MULTICONTRACT_CALLEE_BYTECODE="$(compile_bytecode "$MULTICONTRACT_CALLEE_SOURCE" "$MULTICONTRACT_CALLEE_BYTECODE_FILE")"
+
+MULTICONTRACT_CALLER_SOURCE="$WORK_DIR/multicontract_caller_smoke.ora"
+MULTICONTRACT_CALLER_BYTECODE_FILE="$WORK_DIR/multicontract_caller_smoke.hex"
+write_multicontract_caller_fixture "$MULTICONTRACT_CALLER_SOURCE"
+# The caller intentionally contains an unresolved state-changing external call.
+# Source verification correctly fails closed for that shape, so this runtime
+# equivalence fixture uses --no-verify only to test deployed external-call
+# bytecode behavior. This is not an SMT verification claim.
+MULTICONTRACT_CALLER_BYTECODE="$(compile_bytecode_without_verification "$MULTICONTRACT_CALLER_SOURCE" "$MULTICONTRACT_CALLER_BYTECODE_FILE")"
+
+echo "Deploying multi-contract callee bytecode"
+MULTICONTRACT_CALLEE_ADDR="$(deploy_contract "$MULTICONTRACT_CALLEE_BYTECODE")"
+ok "deployed multi-contract callee $MULTICONTRACT_CALLEE_ADDR"
+
+echo "Deploying multi-contract caller bytecode"
+MULTICONTRACT_CALLER_ADDR="$(deploy_contract "$MULTICONTRACT_CALLER_BYTECODE")"
+ok "deployed multi-contract caller $MULTICONTRACT_CALLER_ADDR"
+
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 0
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+send_multicontract_call_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 42
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+send_multicontract_mark_local "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+send_multicontract_call_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 99
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 99
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
 
 MAP_NESTED_STRUCT_SOURCE="$WORK_DIR/map_nested_struct_storage_smoke.ora"
 MAP_NESTED_STRUCT_BYTECODE_FILE="$WORK_DIR/map_nested_struct_storage_smoke.hex"
