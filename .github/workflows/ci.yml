@@ -413,6 +413,132 @@ jobs:
             zig-out/lib/
           retention-days: 7
 
+  mutation-tests:
+    name: SMT Mutation Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    needs: [mlir-build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            clang \
+            libc++-dev \
+            libc++abi-dev \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config \
+            z3 \
+            libz3-dev \
+            git
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
+          path: vendor/mlir
+
+      - name: Build compiler (cached MLIR)
+        shell: bash
+        run: zig build -Dskip-mlir=true
+
+      - name: Run SMT mutation tests
+        shell: bash
+        run: python3 scripts/verify_mutations.py --compiler ./zig-out/bin/ora --timeout 60
+
+  bytecode-equivalence-smoke:
+    name: Bytecode Storage Equivalence Smoke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    needs: [mlir-build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Setup Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            clang \
+            libc++-dev \
+            libc++abi-dev \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config \
+            z3 \
+            libz3-dev \
+            git
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
+          path: vendor/mlir
+
+      - name: Build compiler (cached MLIR)
+        shell: bash
+        run: zig build -Dskip-mlir=true
+
+      - name: Build Sensei SIR CLI
+        shell: bash
+        run: zig build sensei-sir
+
+      - name: Run bytecode storage equivalence smoke
+        shell: bash
+        run: scripts/bytecode_storage_equivalence_smoke.sh
+
   security:
     name: Security Scan
     runs-on: macos-latest
