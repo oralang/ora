@@ -1551,6 +1551,13 @@ extern "C"
         MlirValue index,
         MlirType resultType);
 
+    /// Create an ora.keccak256 operation
+    MLIR_CAPI_EXPORTED MlirOperation oraKeccak256OpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirType resultType);
+
     /// Create an ora.expression_capture operation
     MLIR_CAPI_EXPORTED MlirOperation oraExpressionCaptureOpCreate(
         MlirContext ctx,

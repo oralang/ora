@@ -31,6 +31,77 @@ const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
 
+fn extractSirGlobalSlotsJson(context: mlir.MlirContext, module: mlir.MlirModule) ![]u8 {
+    const slots_ref = mlir.oraExtractSIRGlobalSlots(context, module);
+    defer if (slots_ref.data != null) mlir.oraStringRefFree(slots_ref);
+    if (slots_ref.data == null or slots_ref.length == 0) return error.TestUnexpectedResult;
+    return try testing.allocator.dupe(u8, slots_ref.data[0..slots_ref.length]);
+}
+
+fn expectGlobalSlot(slots_json: []const u8, name: []const u8, expected: i128) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, slots_json, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .object);
+    const actual = parsed.value.object.get(name) orelse return error.TestUnexpectedResult;
+    try testing.expect(actual == .integer);
+    try testing.expectEqual(expected, actual.integer);
+}
+
+fn createOraMlirContext() mlir.MlirContext {
+    const ctx = mlir.oraContextCreate();
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(ctx, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    return ctx;
+}
+
+fn parseOraModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
+    const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+    if (mlir.oraModuleIsNull(module)) return error.TestUnexpectedResult;
+    return module;
+}
+
+fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {
+    const header = try std.fmt.allocPrint(testing.allocator, "fn {s}:", .{function_name});
+    defer testing.allocator.free(header);
+    const start = std.mem.indexOf(u8, sir_text, header) orelse return error.TestUnexpectedResult;
+    const search_from = start + header.len;
+    const rel_end = std.mem.indexOfPos(u8, sir_text, search_from, "\nfn ");
+    const end = rel_end orelse sir_text.len;
+    return sir_text[start..end];
+}
+
+fn expectOrderedNeedles(haystack: []const u8, needles: []const []const u8) !void {
+    var cursor: usize = 0;
+    for (needles) |needle| {
+        const found = std.mem.indexOfPos(u8, haystack, cursor, needle) orelse return error.TestUnexpectedResult;
+        cursor = found + needle.len;
+    }
+}
+
+test "compiler lowers runtime keccak256 through OraToSIR" {
+    const source_text =
+        \\pub fn hash(data: bytes) -> u256 {
+        \\    return @keccak256(data);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "keccak256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
+}
+
 test "compiler lowers Err discard patterns through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);
@@ -608,6 +679,176 @@ test "compiler converts contract storage through explicit slot metadata" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "slot_owner"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sload"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sstore"));
+}
+
+test "compiler permits ambiguous duplicate storage names in syntax examples" {
+    const source_text =
+        \\contract First {
+        \\    storage var owner: address;
+        \\}
+        \\
+        \\contract Second {
+        \\    storage var owner: address;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.global_slot_ambiguous_names"));
+}
+
+test "OraToSIR rejects mismatched strict storage slot metadata" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {counter = 0 : ui64}} {
+        \\  ora.global "counter" : !ora.int<256, false> {ora.slot_index = 1 : ui64}
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
+test "OraToSIR rejects missing strict storage slot metadata" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {counter = 0 : ui64}} {
+        \\  ora.global "counter" : !ora.int<256, false>
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
+test "compiler storage layout manifest matches SIR slot usage" {
+    const source_text =
+        \\contract LayoutProbe {
+        \\    storage var balance: u256 = 0;
+        \\    storage var owner: address;
+        \\    storage var balances: map<address, u256>;
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\    storage var history: [u256; 4];
+        \\
+        \\    pub fn write(who: address, spender: address, index: u256, amount: u256) {
+        \\        balance = amount;
+        \\        balances[who] = amount;
+        \\        allowances[who][spender] = amount;
+        \\        history[index] = amount;
+        \\    }
+        \\
+        \\    pub fn read(who: address, index: u256) -> u256 {
+        \\        return balance + balances[who] + history[index];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const slots_json = try extractSirGlobalSlotsJson(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(slots_json);
+    try expectGlobalSlot(slots_json, "balance", 0);
+    try expectGlobalSlot(slots_json, "owner", 1);
+    try expectGlobalSlot(slots_json, "balances", 2);
+    try expectGlobalSlot(slots_json, "allowances", 3);
+    try expectGlobalSlot(slots_json, "history", 4);
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const write_fn = try functionSlice(rendered, "write");
+    try expectOrderedNeedles(write_fn, &.{
+        "slot_balances",
+        "mstore256 ptr",
+        "mstore256 ptr_off slot_balances",
+        "keccak256",
+        "sstore",
+    });
+    try expectOrderedNeedles(write_fn, &.{
+        "slot_allowances",
+        "mstore256 ptr_",
+        "mstore256 ptr_off_",
+        "slot_allowances",
+        "keccak256",
+        "mstore256 ptr_",
+        "mstore256 ptr_off_",
+        "keccak256",
+        "sstore",
+    });
+    try expectOrderedNeedles(write_fn, &.{
+        "slot_history",
+        "mul",
+        "add slot_history",
+        "sstore",
+    });
+
+    const read_fn = try functionSlice(rendered, "read");
+    try expectOrderedNeedles(read_fn, &.{
+        "slot_history",
+        "mul",
+        "add slot_history",
+        "sload",
+    });
+}
+
+test "OraToSIR lowers deep dynamic struct scalar update to direct field sstore" {
+    const source_text =
+        \\struct Leaf {
+        \\    left: u256;
+        \\    values: slice[u256];
+        \\    right: u256;
+        \\}
+        \\
+        \\struct Mid {
+        \\    before: u256;
+        \\    leaf: Leaf;
+        \\    after: u256;
+        \\}
+        \\
+        \\struct Outer {
+        \\    head: u256;
+        \\    mid: Mid;
+        \\    tail: u256;
+        \\}
+        \\
+        \\contract DeepDynamicStructStorageSmoke {
+        \\    storage var record: Outer;
+        \\
+        \\    pub fn set_leaf_right(value: u256) {
+        \\        record.mid.leaf.right = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const update_fn = try functionSlice(rendered, "set_leaf_right");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, update_fn, "sstore"));
+    try testing.expect(!std.mem.containsAtLeast(u8, update_fn, 1, "keccak256"));
 }
 
 test "compiler converts narrowed carried locals in nested scf ifs" {
