@@ -1426,7 +1426,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
             return switch (ty) {
-                .bool, .address, .integer, .enum_, .bitfield => 1,
+                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
                 .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
                 .error_union => |error_union| blk: {
                     const payload_words = @This().staticAbiWordCountForType(self, error_union.payload_type.*) orelse break :blk null;
@@ -1461,6 +1461,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) {
                 return self.allocator.dupe(u8, name);
             }
+            if (abi_support.parseFixedBytesSpelling(name)) |_| return self.allocator.dupe(u8, name);
             if (std.mem.eql(u8, name, "u256")) return self.allocator.dupe(u8, "uint256");
             if (std.mem.eql(u8, name, "i256")) return self.allocator.dupe(u8, "int256");
             if (std.mem.startsWith(u8, name, "u")) return std.fmt.allocPrint(self.allocator, "uint{s}", .{name[1..]});
@@ -1470,7 +1471,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             return switch (ty) {
-                .bool, .address, .string, .bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
+                .bool, .address, .string, .bytes, .fixed_bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
                 .enum_ => |named| @This().abiLayoutForNamedEnum(self, named.name),
                 .bitfield => |named| @This().abiLayoutForNamedBitfield(self, named.name),
                 .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
@@ -1570,7 +1571,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn resultInputDynamicArrayElementSupported(self: *Lowerer, ty: sema.Type) bool {
             return switch (ty) {
-                .bool, .address, .integer, .enum_, .bitfield => true,
+                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
                 .refinement => |refinement| @This().resultInputDynamicArrayElementSupported(self, refinement.base_type.*),
                 .named => |named| blk: {
                     const item_id = self.item_index.lookup(named.name) orelse break :blk false;
@@ -1595,7 +1596,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn resultInputPayloadAbiWordCount(self: *Lowerer, ty: sema.Type) ?usize {
             return switch (ty) {
-                .bool, .address, .integer, .enum_, .bitfield => 1,
+                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
                 .refinement => |refinement| @This().resultInputPayloadAbiWordCount(self, refinement.base_type.*),
                 .named => |named| blk: {
                     const item_id = self.item_index.lookup(named.name) orelse break :blk null;
@@ -1613,6 +1614,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn abiLayoutForNamedType(self: *Lowerer, name: []const u8) anyerror![]const u8 {
+            if (abi_support.parseFixedBytesSpelling(name)) |_| return self.allocator.dupe(u8, name);
             if (self.typecheck.instantiatedEnumByName(name)) |_| return @This().abiLayoutForNamedEnum(self, name);
             if (self.typecheck.instantiatedBitfieldByName(name)) |bitfield| {
                 return @This().abiLayoutForBitfieldBaseType(self, bitfield.base_type);
@@ -1706,6 +1708,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn staticAbiWordCountForNamedType(self: *Lowerer, name: []const u8) ?usize {
+            if (abi_support.parseFixedBytesSpelling(name) != null) return 1;
             if (self.typecheck.instantiatedEnumByName(name)) |_| return 1;
             if (self.typecheck.instantiatedBitfieldByName(name)) |_| return 1;
             const item_id = self.item_index.lookup(name) orelse return null;
@@ -1729,7 +1732,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (self.file.typeExpr(type_expr_id).*) {
                 .Path => |path| blk: {
                     const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                    break :blk @This().abiLayoutForPrimitiveName(self, trimmed) catch @This().abiLayoutForNamedStruct(self, trimmed);
+                    break :blk @This().abiLayoutForPrimitiveName(self, trimmed) catch @This().abiLayoutForNamedType(self, trimmed);
                 },
                 .Generic => |generic| blk: {
                     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {

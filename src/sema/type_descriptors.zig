@@ -1,13 +1,14 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const model = @import("model.zig");
+const refinements = @import("refinements.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const Type = model.Type;
 
 pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.AstFile, item_index: *const ItemIndexResult, type_expr_id: ast.TypeExprId) anyerror!Type {
     return switch (file.typeExpr(type_expr_id).*) {
-        .Path => |path| if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "NonZeroAddress"))
+        .Path => |path| if (refinements.isPathFormName(path.name))
             .{ .refinement = .{
                 .name = "NonZeroAddress",
                 .base_type = try storeType(allocator, .{ .address = {} }),
@@ -61,6 +62,7 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
     if (std.mem.eql(u8, trimmed, "string")) return .{ .string = {} };
     if (std.mem.eql(u8, trimmed, "address")) return .{ .address = {} };
     if (std.mem.eql(u8, trimmed, "bytes")) return .{ .bytes = {} };
+    if (parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
     if (parseIntegerType(trimmed)) |integer| return .{ .integer = integer };
     if (item_index.lookup(trimmed)) |item_id| {
         return switch (file.item(item_id).*) {
@@ -88,15 +90,7 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
         } };
     }
 
-    if (std.mem.eql(u8, generic.name, "MinValue") or
-        std.mem.eql(u8, generic.name, "MaxValue") or
-        std.mem.eql(u8, generic.name, "InRange") or
-        std.mem.eql(u8, generic.name, "Scaled") or
-        std.mem.eql(u8, generic.name, "Exact") or
-        std.mem.eql(u8, generic.name, "NonZero") or
-        std.mem.eql(u8, generic.name, "NonZeroAddress") or
-        std.mem.eql(u8, generic.name, "BasisPoints"))
-    {
+    if (refinements.isKnownName(generic.name)) {
         if (generic.args.len > 0) {
             return switch (generic.args[0]) {
                 .Type => |type_expr_id| .{ .refinement = .{
@@ -171,6 +165,7 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
         .unknown, .void, .bool, .string, .address, .bytes => true,
+        .fixed_bytes => |left| left.len == rhs.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
         .integer => |left| blk: {
             const right = rhs.integer;
@@ -205,6 +200,16 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
             break :blk std.mem.eql(u8, left.name, right.name) and typeEql(left.base_type.*, right.base_type.*) and refinementArgSliceEql(left.args, right.args);
         },
     };
+}
+
+pub fn parseFixedBytesType(name: []const u8) ?model.FixedBytesType {
+    if (!std.mem.startsWith(u8, name, "bytes")) return null;
+    if (name.len <= "bytes".len) return null;
+    const digits = name["bytes".len..];
+    if (digits.len > 1 and digits[0] == '0') return null;
+    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
+    if (len < 1 or len > 32) return null;
+    return .{ .len = len, .spelling = name };
 }
 
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
@@ -326,12 +331,6 @@ fn unwrapRefinement(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
 }
 
-const RefinementBounds = struct {
-    base_type: Type,
-    min_text: ?[]const u8 = null,
-    max_text: ?[]const u8 = null,
-};
-
 fn typeSliceEql(lhs: []const Type, rhs: []const Type) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
@@ -386,13 +385,13 @@ fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.Ref
     if (!typesAssignable(expected.base_type.*, actual.base_type.*) or !typesAssignable(actual.base_type.*, expected.base_type.*)) {
         return false;
     }
-    if (std.mem.eql(u8, expected.name, "NonZeroAddress")) {
-        return std.mem.eql(u8, actual.name, "NonZeroAddress");
+    if (refinements.kindForName(expected.name) == .non_zero_address) {
+        return refinements.kindForName(actual.name) == .non_zero_address;
     }
     if (refinementSemanticallyEqual(expected, actual)) return true;
 
-    const expected_bounds = refinementBounds(expected) orelse return false;
-    const actual_bounds = refinementBounds(actual) orelse return false;
+    const expected_bounds = refinements.bounds(expected) orelse return false;
+    const actual_bounds = refinements.bounds(actual) orelse return false;
     if (!typesAssignable(expected_bounds.base_type, actual_bounds.base_type) or
         !typesAssignable(actual_bounds.base_type, expected_bounds.base_type))
     {
@@ -427,53 +426,6 @@ fn refinementSemanticallyEqual(lhs: model.RefinementType, rhs: model.RefinementT
         }
     }
     return true;
-}
-
-fn refinementBounds(refinement: model.RefinementType) ?RefinementBounds {
-    if (std.mem.eql(u8, refinement.name, "MinValue")) {
-        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
-        return .{
-            .base_type = refinement.base_type.*,
-            .min_text = refinement.args[1].Integer.text,
-        };
-    }
-    if (std.mem.eql(u8, refinement.name, "MaxValue")) {
-        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
-        return .{
-            .base_type = refinement.base_type.*,
-            .max_text = refinement.args[1].Integer.text,
-        };
-    }
-    if (std.mem.eql(u8, refinement.name, "InRange")) {
-        if (refinement.args.len < 3 or refinement.args[1] != .Integer or refinement.args[2] != .Integer) return null;
-        return .{
-            .base_type = refinement.base_type.*,
-            .min_text = refinement.args[1].Integer.text,
-            .max_text = refinement.args[2].Integer.text,
-        };
-    }
-    if (std.mem.eql(u8, refinement.name, "BasisPoints")) {
-        return .{
-            .base_type = refinement.base_type.*,
-            .min_text = "0",
-            .max_text = "10000",
-        };
-    }
-    if (std.mem.eql(u8, refinement.name, "NonZero")) {
-        return .{
-            .base_type = refinement.base_type.*,
-            .min_text = "1",
-        };
-    }
-    if (std.mem.eql(u8, refinement.name, "Exact")) {
-        if (refinement.args.len < 2 or refinement.args[1] != .Integer) return null;
-        return .{
-            .base_type = refinement.base_type.*,
-            .min_text = refinement.args[1].Integer.text,
-            .max_text = refinement.args[1].Integer.text,
-        };
-    }
-    return null;
 }
 
 fn compareIntegerText(lhs_raw: []const u8, rhs_raw: []const u8) std.math.Order {

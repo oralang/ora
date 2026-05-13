@@ -104,7 +104,6 @@ pub fn isComptimeOnlyIntrinsic(name: []const u8) bool {
         "hasDecl",
         "typeName",
         "errorName",
-        "keccak256",
     };
 
     for (comptime_intrinsics) |ci| {
@@ -139,6 +138,6 @@ test "comptime-only intrinsic detection" {
     try std.testing.expect(isComptimeOnlyIntrinsic("TypeOf"));
     try std.testing.expect(isComptimeOnlyIntrinsic("sizeOf"));
     try std.testing.expect(isComptimeOnlyIntrinsic("typeName"));
-    try std.testing.expect(isComptimeOnlyIntrinsic("keccak256"));
+    try std.testing.expect(!isComptimeOnlyIntrinsic("keccak256"));
     try std.testing.expect(!isComptimeOnlyIntrinsic("msg.sender"));
 }

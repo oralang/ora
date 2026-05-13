@@ -873,7 +873,6 @@ test "compiler verifies impls with trait ghost blocks end to end" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
-    verifier.parallel = false;
 
     var result = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer result.deinit();
@@ -917,7 +916,6 @@ test "compiler verifies trait ghost method calls with self end to end" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
-    verifier.parallel = false;
 
     var result = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer result.deinit();
@@ -959,7 +957,6 @@ test "compiler inherits trait method clauses onto impl methods" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
-    verifier.parallel = false;
 
     var result = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer result.deinit();

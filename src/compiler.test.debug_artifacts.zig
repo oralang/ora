@@ -71,6 +71,7 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn assertEqualOrDescribeDiff(
     allocator: std.mem.Allocator,
+    fixture: Fixture,
     fixture_name: []const u8,
     label: []const u8,
     actual_path: []const u8,
@@ -92,11 +93,14 @@ fn assertEqualOrDescribeDiff(
             "  cp /tmp/dbg/{s}.sourcemap.json tests/debug_artifacts/{s}/sourcemap.golden.json && \\\n" ++
             "  cp /tmp/dbg/{s}.debug.json     tests/debug_artifacts/{s}/debug.golden.json\n",
         .{
-            fixture_name, label,      golden_path,
-            actual_path,  actual.len, golden_path,
+            fixture_name,
+            label,
+            golden_path,
+            actual_path,
+            actual.len,
+            golden_path,
             golden.len,
-                // regen instructions:
-            FIXTURES[0].source_relpath, // simple_counter for now
+            fixture.source_relpath,
             fixture_name,
             fixture_name,
             fixture_name,
@@ -158,7 +162,7 @@ test "debug-artifacts regression corpus matches goldens" {
         );
         defer allocator.free(golden_debug);
 
-        try assertEqualOrDescribeDiff(allocator, fixture.name, "sourcemap.json", actual_sourcemap, golden_sourcemap);
-        try assertEqualOrDescribeDiff(allocator, fixture.name, "debug.json", actual_debug, golden_debug);
+        try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "sourcemap.json", actual_sourcemap, golden_sourcemap);
+        try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "debug.json", actual_debug, golden_debug);
     }
 }

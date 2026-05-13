@@ -6,6 +6,7 @@ const resolve = @import("resolve.zig");
 const type_check = @import("type_check.zig");
 const verification = @import("verification.zig");
 const type_descriptors = @import("type_descriptors.zig");
+pub const refinements = @import("refinements.zig");
 
 pub const ModuleImport = model.ModuleImport;
 pub const ModuleGraphInput = model.ModuleGraphInput;
@@ -29,6 +30,7 @@ pub const TypeKind = model.TypeKind;
 pub const Region = model.Region;
 pub const Provenance = model.Provenance;
 pub const Type = model.Type;
+pub const FixedBytesType = model.FixedBytesType;
 pub const LocatedType = model.LocatedType;
 pub const ArrayType = model.ArrayType;
 pub const SliceType = model.SliceType;

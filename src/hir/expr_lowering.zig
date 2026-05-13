@@ -2292,6 +2292,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (builtin.args.len > 0 and std.mem.eql(u8, builtin.name, "truncate")) {
                 return try @This().lowerCastBuiltin(self, expr_id, builtin, locals, false);
             }
+            if (builtin.args.len == 1 and std.mem.eql(u8, builtin.name, "keccak256")) {
+                const value = try self.lowerExpr(builtin.args[0], locals);
+                const result_type = self.parent.lowerExprType(expr_id);
+                var operands = [_]mlir.MlirValue{value};
+                const op = mlir.oraEvmOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    strRef("ora.keccak256"),
+                    &operands,
+                    operands.len,
+                    result_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
+                return appendValueOp(self.block, op);
+            }
             return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
         }
 

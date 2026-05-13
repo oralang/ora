@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
+const hir_abi = @import("abi.zig");
 const hir_locals = @import("locals.zig");
 
 pub const LoopContext = struct {
@@ -90,6 +91,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     if (std.mem.eql(u8, trimmed, "string")) return stringType(ctx);
     if (std.mem.eql(u8, trimmed, "bytes")) return bytesType(ctx);
     if (std.mem.eql(u8, trimmed, "void")) return mlir.oraNoneTypeCreate(ctx);
+    if (hir_abi.parseFixedBytesSpelling(trimmed) != null) return defaultIntegerType(ctx);
     if (parseSignedIntegerType(trimmed)) |int_info| {
         return mlir.oraIntegerTypeCreate(ctx, int_info.bits);
     }
@@ -103,6 +105,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocat
         .address => addressType(ctx),
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
+        .fixed_bytes => defaultIntegerType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
         .array => |array| arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), array.len orelse 0),
         .slice => |slice| sliceMemRefType(ctx, try lowerTypeDescriptor(ctx, slice.element_type.*, allocator)),
@@ -141,12 +144,7 @@ pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementTyp
 }
 
 pub fn isRefinementTypeName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "MinValue") or
-        std.mem.eql(u8, name, "MaxValue") or
-        std.mem.eql(u8, name, "InRange") or
-        std.mem.eql(u8, name, "Scaled") or
-        std.mem.eql(u8, name, "Exact") or
-        std.mem.eql(u8, name, "NonZeroAddress");
+    return sema.refinements.hasNativeMlirTypeName(name);
 }
 
 pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg) ?mlir.MlirType {

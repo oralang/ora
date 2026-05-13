@@ -415,6 +415,24 @@ def Ora_ByteAtOp : Ora_PureOp<"byte_at"> {
   let assemblyFormat = "$value `,` $index attr-dict `:` type($value) `,` type($index) `->` type($result)";
 }
 
+def Ora_Keccak256Op : Ora_PureOp<"keccak256"> {
+  let summary = "Runtime keccak256 over dynamic string or bytes";
+  let description = [{
+    Computes the EVM keccak256 hash of the runtime bytes contained in an Ora
+    `string` or `bytes` value.
+
+    Example:
+    ```mlir
+    %hash = ora.keccak256 %data : !ora.bytes -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value attr-dict `:` type($value) `->` type($result)";
+}
+
 
 def Ora_HexConstantOp : Ora_PureOp<"hex.constant"> {
   let summary = "Hexadecimal constant";

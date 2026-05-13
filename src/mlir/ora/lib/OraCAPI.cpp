@@ -6116,6 +6116,27 @@ MlirOperation oraByteAtOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraKeccak256OpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.keccak256");
+        state.addOperands(val);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraExpressionCaptureOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
 {
     try

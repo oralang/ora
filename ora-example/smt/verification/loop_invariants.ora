@@ -58,6 +58,7 @@ contract LoopInvariants {
         while (i < n)
             invariant i >= 0
             invariant total >= start_total
+            invariant total <= start_total + i
             invariant i <= n
         {
             total = total + 1;

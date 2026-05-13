@@ -141,7 +141,6 @@ test "compiler HIR output runs through Z3 verification" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
-    verifier.parallel = false;
 
     var result = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer result.deinit();
@@ -2612,11 +2611,11 @@ test "complex SMT app probes do not degrade verification encoding" {
     }
 }
 
-test "stale flagship probes remain non-degraded on current branch" {
-    const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32 }{
-        .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000 },
-        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000 },
-        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000 },
+test "stale flagship probes remain non-degraded and vacuous specs fail closed" {
+    const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32, expect_success: bool }{
+        .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000, .expect_success = true },
+        .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = false },
     };
 
     for (probes) |probe| {
@@ -2624,8 +2623,13 @@ test "stale flagship probes remain non-degraded on current branch" {
         defer result.deinit(testing.allocator);
 
         try testing.expect(!result.degraded);
-        try testing.expect(result.success);
-        try testing.expectEqual(@as(usize, 0), result.errors_len);
+        try testing.expectEqual(probe.expect_success, result.success);
+        if (probe.expect_success) {
+            try testing.expectEqual(@as(usize, 0), result.errors_len);
+        } else {
+            try testing.expect(result.errors_len > 0);
+            try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
+        }
     }
 }
 

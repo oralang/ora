@@ -31,6 +31,24 @@ fn loadAllDialects(ctx: mlir.MlirContext) void {
     mlir.oraContextLoadAllAvailableDialects(ctx);
 }
 
+fn expectAstEquivalent(ctx: *Context, lhs: z3.Z3_ast, rhs: z3.Z3_ast) !void {
+    var solver = try Solver.init(ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(ctx.ctx, z3.Z3_mk_eq(ctx.ctx, lhs, rhs)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+fn expectSingleSelectTrigger(ctx: *Context, quantifier: z3.Z3_ast) !void {
+    try testing.expectEqual(@as(c_uint, 1), z3.Z3_get_quantifier_num_patterns(ctx.ctx, quantifier));
+    const pattern = z3.Z3_get_quantifier_pattern_ast(ctx.ctx, quantifier, 0);
+    try testing.expectEqual(@as(c_uint, 1), z3.Z3_get_pattern_num_terms(ctx.ctx, pattern));
+    const trigger = z3.Z3_get_pattern(ctx.ctx, pattern, 0);
+    try testing.expectEqual(@as(c_uint, z3.Z3_APP_AST), z3.Z3_get_ast_kind(ctx.ctx, trigger));
+    const app = z3.Z3_to_app(ctx.ctx, trigger);
+    const decl = z3.Z3_get_app_decl(ctx.ctx, app);
+    try testing.expectEqual(@as(c_uint, z3.Z3_OP_SELECT), @as(c_uint, @intCast(z3.Z3_get_decl_kind(ctx.ctx, decl))));
+}
+
 test "encodeMLIRType maps bool and i32" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -3114,7 +3132,7 @@ test "encodeValue errors on unsupported operation" {
     _ = try encoder.encodeValue(result);
 }
 
-test "ora.evm.caller shares symbol and is constrained non-zero" {
+test "ora.evm.caller shares symbol without assuming non-zero" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -3135,7 +3153,6 @@ test "ora.evm.caller shares symbol and is constrained non-zero" {
     const caller_b = try encoder.encodeOperation(caller_b_op);
     const constraints = try encoder.takeConstraints(testing.allocator);
     defer if (constraints.len > 0) testing.allocator.free(constraints);
-    try testing.expect(constraints.len > 0);
 
     // Repeated caller reads within one function should resolve to the same symbol.
     var solver_same = try Solver.init(&z3_ctx, testing.allocator);
@@ -3145,14 +3162,89 @@ test "ora.evm.caller shares symbol and is constrained non-zero" {
     solver_same.assert(neq);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_same.check());
 
-    // Runtime semantics guarantee msg.sender/caller is non-zero.
-    var solver_non_zero = try Solver.init(&z3_ctx, testing.allocator);
-    defer solver_non_zero.deinit();
-    for (constraints) |cst| solver_non_zero.assert(cst);
+    // The verifier must not globally assume caller is non-zero; CREATE and
+    // low-level harness contexts can expose a zero caller.
+    var solver_zero = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_zero.deinit();
+    for (constraints) |cst| solver_zero.assert(cst);
     const caller_sort = z3.Z3_get_sort(z3_ctx.ctx, caller_a);
     const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, caller_sort);
-    solver_non_zero.assert(z3.Z3_mk_eq(z3_ctx.ctx, caller_a, zero));
-    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_non_zero.check());
+    solver_zero.assert(z3.Z3_mk_eq(z3_ctx.ctx, caller_a, zero));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_zero.check());
+}
+
+test "declared ora.evm environment ops encode as stable env symbols" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const EnvCase = struct {
+        op_name: []const u8,
+        symbol: []const u8,
+        address: bool = false,
+    };
+
+    const cases = [_]EnvCase{
+        .{ .op_name = "ora.evm.origin", .symbol = "env_evm_origin", .address = true },
+        .{ .op_name = "ora.evm.caller", .symbol = "env_evm_caller", .address = true },
+        .{ .op_name = "ora.evm.gasprice", .symbol = "env_evm_gasprice" },
+        .{ .op_name = "ora.evm.callvalue", .symbol = "env_evm_callvalue" },
+        .{ .op_name = "ora.evm.gas", .symbol = "env_evm_gas" },
+        .{ .op_name = "ora.evm.timestamp", .symbol = "env_evm_timestamp" },
+        .{ .op_name = "ora.evm.number", .symbol = "env_evm_number" },
+        .{ .op_name = "ora.evm.coinbase", .symbol = "env_evm_coinbase", .address = true },
+        .{ .op_name = "ora.evm.difficulty", .symbol = "env_evm_difficulty" },
+        .{ .op_name = "ora.evm.prevrandao", .symbol = "env_evm_prevrandao" },
+        .{ .op_name = "ora.evm.gaslimit", .symbol = "env_evm_gaslimit" },
+        .{ .op_name = "ora.evm.chainid", .symbol = "env_evm_chainid" },
+        .{ .op_name = "ora.evm.basefee", .symbol = "env_evm_basefee" },
+    };
+
+    inline for (cases) |case| {
+        const result_ty = if (case.address) addr_ty else i256_ty;
+        const first_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef(case.op_name), null, 0, result_ty);
+        const second_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef(case.op_name), null, 0, result_ty);
+
+        const first = try encoder.encodeOperation(first_op);
+        const second = try encoder.encodeOperation(second_op);
+        try expectAstEquivalent(&z3_ctx, first, second);
+
+        const encoded_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, first));
+        try testing.expect(std.mem.indexOf(u8, encoded_text, case.symbol) != null);
+    }
+
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "declared ora.evm environment ops reject mismatched result sorts" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const mistyped_coinbase = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.evm.coinbase"), null, 0, i256_ty);
+
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(mistyped_coinbase));
+    try testing.expect(encoder.isDegraded());
 }
 
 test "scf.for induction variable is constrained by loop bounds" {
@@ -4278,7 +4370,7 @@ test "func.call summary with direct symbolic ora.try_stmt state effects encodes 
 
     try encoder.registerFunctionOperation(helper);
 
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
     const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicTryWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{}, 0);
     _ = try encoder.encodeOperation(call_helper);
@@ -4356,7 +4448,7 @@ test "func.call summary with direct symbolic ora.try_stmt result and state stay 
 
     try encoder.registerFunctionOperation(helper);
 
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
     const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicTryResultWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{i256_ty}, 1);
     const encoded_result = try encoder.encodeOperation(call_helper);
@@ -4459,7 +4551,7 @@ test "func.call summary with direct symbolic no-result ora.try_stmt state effect
 
     try encoder.registerFunctionOperation(helper);
 
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const outer_maybe_result = mlir.oraOperationGetResult(outer_maybe, 0);
     const call_helper = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("symbolicNoResultTryWriter"), &[_]mlir.MlirValue{outer_maybe_result}, 1, &[_]mlir.MlirType{}, 0);
     _ = try encoder.encodeOperation(call_helper);
@@ -4555,7 +4647,7 @@ test "func.call summary with branch-conditioned ora.try_stmt state effects encod
     try encoder.registerFunctionOperation(helper);
 
     const outer_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const helper_call = mlir.oraFuncCallOpCreate(
         mlir_ctx,
         loc,
@@ -4652,7 +4744,7 @@ test "func.call summary with conditional-return ora.try_stmt state effects encod
     try encoder.registerFunctionOperation(helper);
 
     const outer_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const helper_call = mlir.oraFuncCallOpCreate(
         mlir_ctx,
         loc,
@@ -4784,7 +4876,7 @@ test "func.call summary with switch_expr ora.try_stmt state effects encodes exac
     try encoder.registerFunctionOperation(helper);
 
     const outer_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const helper_call = mlir.oraFuncCallOpCreate(
         mlir_ctx,
         loc,
@@ -4895,7 +4987,7 @@ test "func.call summary with switch ora.try_stmt state effects encodes exactly" 
     try encoder.registerFunctionOperation(helper);
 
     const outer_flag = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("condValue"), i1_ty);
-    const outer_maybe = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
+    const outer_maybe = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
     const helper_call = mlir.oraFuncCallOpCreate(
         mlir_ctx,
         loc,
@@ -9403,9 +9495,8 @@ test "direct symbolic error-union ora.try_stmt result encodes exactly" {
     const try_block = mlir.oraTryStmtOpGetTryBlock(try_stmt);
     const catch_block = mlir.oraTryStmtOpGetCatchBlock(try_stmt);
 
-    const call = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("maybeValue"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{eu_ty}, 1);
-    mlir.oraBlockAppendOwnedOperation(try_block, call);
-    const call_result = mlir.oraOperationGetResult(call, 0);
+    const maybe_value = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("maybeValue"), eu_ty);
+    const call_result = mlir.oraOperationGetResult(maybe_value, 0);
     const unwrap_op = mlir.oraErrorUnwrapOpCreate(mlir_ctx, loc, call_result, i256_ty);
     mlir.oraBlockAppendOwnedOperation(try_block, unwrap_op);
     mlir.oraBlockAppendOwnedOperation(try_block, mlir.oraYieldOpCreate(
@@ -13793,6 +13884,79 @@ test "arith divui encodes unsigned division" {
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvudiv") != null);
 }
 
+test "arithmetic div and rem by zero encode EVM zero result" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const lhs = try encoder.encodeIntegerConstant(10, 256);
+    const rhs_zero = try encoder.encodeIntegerConstant(0, 256);
+    const expected_zero = try encoder.encodeIntegerConstant(0, 256);
+
+    inline for (.{ Encoder.ArithmeticOp.DivUnsigned, Encoder.ArithmeticOp.RemUnsigned, Encoder.ArithmeticOp.DivSigned, Encoder.ArithmeticOp.RemSigned }) |op| {
+        const ast = try encoder.encodeArithmeticOp(op, lhs, rhs_zero);
+        try expectAstEquivalent(&z3_ctx, ast, expected_zero);
+    }
+}
+
+test "arith divui by zero still emits nonzero divisor obligation" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, lhs, rhs);
+    const ast = try encoder.encodeOperation(div_op);
+    const expected_zero = try encoder.encodeIntegerConstant(0, 256);
+    try expectAstEquivalent(&z3_ctx, ast, expected_zero);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 1), obligations.len);
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(obligations[0]);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "signed div and rem int_min by negative one are explicit and portable" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const min_int_value = @as(u256, 1) << 255;
+    const lhs_min = try encoder.encodeIntegerConstant(min_int_value, 256);
+    const rhs_neg_one = try encoder.encodeIntegerConstant(std.math.maxInt(u256), 256);
+    const expected_div = try encoder.encodeIntegerConstant(min_int_value, 256);
+    const expected_rem = try encoder.encodeIntegerConstant(0, 256);
+
+    const div_ast = try encoder.encodeArithmeticOp(.DivSigned, lhs_min, rhs_neg_one);
+    try expectAstEquivalent(&z3_ctx, div_ast, expected_div);
+
+    const rem_ast = try encoder.encodeArithmeticOp(.RemSigned, lhs_min, rhs_neg_one);
+    try expectAstEquivalent(&z3_ctx, rem_ast, expected_rem);
+}
+
 test "ora.power encodes modular exponentiation" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -14195,6 +14359,176 @@ test "arith shrsi encodes arithmetic right shift" {
     const ast = try encoder.encodeOperation(shr_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") != null);
+}
+
+test "ora.shl_wrapping coerces narrow shift amount" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i8_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i8_ty, 8);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i8_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shl_op = mlir.oraShlWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_ty);
+    const ast = try encoder.encodeOperation(shl_op);
+    const expected = try encoder.encodeIntegerConstant(256, 256);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 0), obligations.len);
+}
+
+test "ora.shl_wrapping keeps bvshl for signed integer type" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_signed_ty = mlir.oraIntegerTypeGet(mlir_ctx, 256, true);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, -8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shl_op = mlir.oraShlWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_signed_ty);
+    const ast = try encoder.encodeOperation(shl_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvshl") != null);
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") == null);
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") == null);
+}
+
+test "ora.shr_wrapping uses arithmetic shift for signed integer type" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_signed_ty = mlir.oraIntegerTypeGet(mlir_ctx, 256, true);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, -8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, 1);
+    const expected_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, -4);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, rhs_attr);
+    const expected_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, expected_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shr_op = mlir.oraShrWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_signed_ty);
+    const ast = try encoder.encodeOperation(shr_op);
+    const expected = try encoder.encodeOperation(expected_const);
+
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") != null);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.shr_wrapping coerces narrow shift amount for signed integer type" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i8_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+    const i256_signed_ty = mlir.oraIntegerTypeGet(mlir_ctx, 256, true);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, -8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i8_ty, 1);
+    const expected_attr = mlir.oraIntegerAttrCreateI64FromType(i256_signed_ty, -4);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i8_ty, rhs_attr);
+    const expected_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_signed_ty, expected_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shr_op = mlir.oraShrWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_signed_ty);
+    const ast = try encoder.encodeOperation(shr_op);
+    const expected = try encoder.encodeOperation(expected_const);
+
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") != null);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, ast, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.shr_wrapping keeps logical shift for unsigned integer type" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, -8);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const shr_op = mlir.oraShrWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_ty);
+    const ast = try encoder.encodeOperation(shr_op);
+    const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
+    try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") != null);
 }
 
 test "storage store threads into later load" {
@@ -16402,6 +16736,221 @@ test "ora.byte_at zero-extends extracted byte to wider bitvector results" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "ora.keccak256 encodes as deterministic uninterpreted function over bytes" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const bytes_a_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xdeadbeef"), bytes_ty);
+    const bytes_b_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xcafebabe"), bytes_ty);
+    const bytes_a = mlir.oraOperationGetResult(bytes_a_op, 0);
+    const bytes_b = mlir.oraOperationGetResult(bytes_b_op, 0);
+    var operands_a = [_]mlir.MlirValue{bytes_a};
+    var operands_b = [_]mlir.MlirValue{bytes_b};
+
+    const hash_a_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.keccak256"), &operands_a, operands_a.len, i256_ty);
+    const hash_a_again_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.keccak256"), &operands_a, operands_a.len, i256_ty);
+    const hash_b_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.keccak256"), &operands_b, operands_b.len, i256_ty);
+
+    const hash_a = try encoder.encodeOperation(hash_a_op);
+    const hash_a_again = try encoder.encodeOperation(hash_a_again_op);
+    const hash_b = try encoder.encodeOperation(hash_b_op);
+    try testing.expect(!encoder.isDegraded());
+
+    try expectAstEquivalent(&z3_ctx, hash_a, hash_a_again);
+
+    var solver_eq = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_eq.deinit();
+    solver_eq.assert(z3.Z3_mk_eq(z3_ctx.ctx, hash_a, hash_b));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_eq.check());
+
+    var solver_neq = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_neq.deinit();
+    solver_neq.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, hash_a, hash_b)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_neq.check());
+}
+
+test "precompile boundaries encode as deterministic uninterpreted functions" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const addr_ty = mlir.oraAddressTypeGet(mlir_ctx);
+    const i8_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 8);
+    const i160_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 160);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const data_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileData"), bytes_ty);
+    const other_data_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileOtherData"), bytes_ty);
+    const hash_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileHash"), i256_ty);
+    const v_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileV"), i8_ty);
+    const r_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileR"), i256_ty);
+    const s_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileS"), i256_ty);
+    const x1_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileX1"), i256_ty);
+    const y1_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileY1"), i256_ty);
+    const x2_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileX2"), i256_ty);
+    const y2_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileY2"), i256_ty);
+    const scalar_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileScalar"), i256_ty);
+    const rounds_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileRounds"), i256_ty);
+    const t0_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileT0"), i256_ty);
+    const t1_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileT1"), i256_ty);
+    const final_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("precompileFinal"), i8_ty);
+
+    const data = mlir.oraOperationGetResult(data_op, 0);
+    const other_data = mlir.oraOperationGetResult(other_data_op, 0);
+    const hash = mlir.oraOperationGetResult(hash_op, 0);
+    const v = mlir.oraOperationGetResult(v_op, 0);
+    const r = mlir.oraOperationGetResult(r_op, 0);
+    const s = mlir.oraOperationGetResult(s_op, 0);
+    const x1 = mlir.oraOperationGetResult(x1_op, 0);
+    const y1 = mlir.oraOperationGetResult(y1_op, 0);
+    const x2 = mlir.oraOperationGetResult(x2_op, 0);
+    const y2 = mlir.oraOperationGetResult(y2_op, 0);
+    const scalar = mlir.oraOperationGetResult(scalar_op, 0);
+    const rounds = mlir.oraOperationGetResult(rounds_op, 0);
+    const t0 = mlir.oraOperationGetResult(t0_op, 0);
+    const t1 = mlir.oraOperationGetResult(t1_op, 0);
+    const final = mlir.oraOperationGetResult(final_op, 0);
+
+    const Helper = struct {
+        fn expectPrecompile(
+            ctx: *Context,
+            enc: *Encoder,
+            mlir_ctx_inner: mlir.MlirContext,
+            loc_inner: mlir.MlirLocation,
+            comptime op_name: []const u8,
+            comptime symbol_name: []const u8,
+            operands: []mlir.MlirValue,
+            result_ty: mlir.MlirType,
+            expected_bv_bits: ?u32,
+        ) !z3.Z3_ast {
+            const first_op = mlir.oraEvmOpCreate(mlir_ctx_inner, loc_inner, stringRef(op_name), operands.ptr, operands.len, result_ty);
+            const second_op = mlir.oraEvmOpCreate(mlir_ctx_inner, loc_inner, stringRef(op_name), operands.ptr, operands.len, result_ty);
+
+            const first = try enc.encodeOperation(first_op);
+            const second = try enc.encodeOperation(second_op);
+            try expectAstEquivalent(ctx, first, second);
+
+            const encoded_text = std.mem.span(z3.Z3_ast_to_string(ctx.ctx, first));
+            try testing.expect(std.mem.indexOf(u8, encoded_text, symbol_name) != null);
+
+            const result_sort = z3.Z3_get_sort(ctx.ctx, first);
+            if (expected_bv_bits) |bits| {
+                try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(ctx.ctx, result_sort))));
+                try testing.expectEqual(bits, @as(u32, @intCast(z3.Z3_get_bv_sort_size(ctx.ctx, result_sort))));
+            } else {
+                try testing.expect(z3.Z3_is_seq_sort(ctx.ctx, result_sort));
+            }
+
+            return first;
+        }
+    };
+
+    var ecrecover_operands = [_]mlir.MlirValue{ hash, v, r, s };
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.ecrecover", "precompile_ecrecover", &ecrecover_operands, addr_ty, 160);
+
+    var sha_operands = [_]mlir.MlirValue{data};
+    const sha_a = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.sha256", "precompile_sha256", &sha_operands, i256_ty, 256);
+
+    var ripemd_operands = [_]mlir.MlirValue{data};
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.ripemd160", "precompile_ripemd160", &ripemd_operands, i160_ty, 160);
+
+    var identity_operands = [_]mlir.MlirValue{data};
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.identity", "precompile_identity", &identity_operands, bytes_ty, null);
+
+    var modexp_operands = [_]mlir.MlirValue{ data, other_data, data };
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.modexp", "precompile_modexp", &modexp_operands, i256_ty, 256);
+
+    var ecadd_operands = [_]mlir.MlirValue{ x1, y1, x2, y2 };
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.ecadd", "precompile_ecadd", &ecadd_operands, i256_ty, 256);
+
+    var ecmul_operands = [_]mlir.MlirValue{ x1, y1, scalar };
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.ecmul", "precompile_ecmul", &ecmul_operands, i256_ty, 256);
+
+    var ecpairing_operands = [_]mlir.MlirValue{data};
+    const ecpairing = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.ecpairing", "precompile_ecpairing", &ecpairing_operands, i256_ty, 256);
+
+    var blake2f_operands = [_]mlir.MlirValue{ rounds, data, other_data, t0, t1, final };
+    _ = try Helper.expectPrecompile(&z3_ctx, &encoder, mlir_ctx, loc, "ora.precompile.blake2f", "precompile_blake2f", &blake2f_operands, i256_ty, 256);
+
+    var sha_b_operands = [_]mlir.MlirValue{other_data};
+    const sha_b_op = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.precompile.sha256"), &sha_b_operands, sha_b_operands.len, i256_ty);
+    const sha_b = try encoder.encodeOperation(sha_b_op);
+    try testing.expect(!encoder.isDegraded());
+
+    var solver_eq = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_eq.deinit();
+    solver_eq.assert(z3.Z3_mk_eq(z3_ctx.ctx, sha_a, sha_b));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_eq.check());
+
+    var solver_neq = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_neq.deinit();
+    solver_neq.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, sha_a, sha_b)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_neq.check());
+
+    var solver_cross_precompile = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver_cross_precompile.deinit();
+    solver_cross_precompile.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, sha_a, ecpairing)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_cross_precompile.check());
+}
+
+test "precompile boundaries reject unregistered and mismatched shapes" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const data_op = mlir.oraVariablePlaceholderOpCreate(mlir_ctx, loc, stringRef("unregisteredPrecompileData"), bytes_ty);
+    const data = mlir.oraOperationGetResult(data_op, 0);
+
+    var unregistered_encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer unregistered_encoder.deinit();
+    var unregistered_operands = [_]mlir.MlirValue{data};
+    const unregistered = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.precompile.modexp_alt"), &unregistered_operands, unregistered_operands.len, i256_ty);
+    try testing.expectError(error.UnsupportedOperation, unregistered_encoder.encodeOperation(unregistered));
+    try testing.expect(unregistered_encoder.isDegraded());
+
+    var width_encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer width_encoder.deinit();
+    var ecrecover_operands = [_]mlir.MlirValue{ data, data, data, data };
+    const mistyped_ecrecover = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.precompile.ecrecover"), &ecrecover_operands, ecrecover_operands.len, i256_ty);
+    try testing.expectError(error.UnsupportedOperation, width_encoder.encodeOperation(mistyped_ecrecover));
+    try testing.expect(width_encoder.isDegraded());
+
+    var arity_encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer arity_encoder.deinit();
+    var short_modexp_operands = [_]mlir.MlirValue{data};
+    const short_modexp = mlir.oraEvmOpCreate(mlir_ctx, loc, stringRef("ora.precompile.modexp"), &short_modexp_operands, short_modexp_operands.len, i256_ty);
+    try testing.expectError(error.UnsupportedOperation, arity_encoder.encodeOperation(short_modexp));
+    try testing.expect(arity_encoder.isDegraded());
+}
+
 test "degradation reason keeps first recorded cause" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -16448,6 +16997,38 @@ test "degradation reasons are capped and preserve encounter order" {
     try testing.expectEqualStrings("reason-0", reasons[0]);
     try testing.expectEqualStrings("reason-9", reasons[9]);
     try testing.expectEqualStrings("reason-0", encoder.degradationReason().?);
+}
+
+test "soundness loss kinds are structured and capped" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    inline for (std.meta.fields(Encoder.SoundnessLoss)) |field| {
+        const loss: Encoder.SoundnessLoss = @enumFromInt(field.value);
+        try testing.expect(Encoder.soundnessLossLabel(loss).len > 0);
+        encoder.noteSoundnessLoss(loss, Encoder.soundnessLossLabel(loss));
+    }
+
+    const losses = encoder.soundnessLosses();
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 10), losses.len);
+    try testing.expectEqual(Encoder.SoundnessLoss.user_disabled_state_verification, losses[0]);
+    try testing.expectEqual(Encoder.SoundnessLoss.inexact_call_summary, losses[9]);
+}
+
+test "encoder undef API separates fresh symbols from soundness loss" {
+    const source = try std.fs.cwd().readFileAlloc(testing.allocator, "src/z3/encoder.zig", 2 * 1024 * 1024);
+    defer testing.allocator.free(source);
+
+    try testing.expect(std.mem.indexOf(u8, source, "mkUndefValue") == null);
+    try testing.expect(std.mem.indexOf(u8, source, "degradeToUndef") == null);
+    try testing.expect(std.mem.indexOf(u8, source, "fn freshSymbol") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "fn soundnessLossUndef") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "\"try_state_global\"") != null);
+    try testing.expect(std.mem.indexOf(u8, source, ".inexact_state_summary") != null);
 }
 
 test "known pure callee first-iteration scf.for return encodes exactly" {
@@ -17118,6 +17699,7 @@ test "known callee with partially recovered write set still degrades encoder" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
     encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -17183,6 +17765,7 @@ test "known callee with unknown read set degrades encoder" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
     encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -17242,7 +17825,7 @@ test "known callee with unknown read set degrades encoder" {
     try testing.expect(found_read_reason);
 }
 
-test "known callee write metadata keeps unresolved body calls from widening the write set" {
+test "known callee write metadata does not hide unresolved body calls" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -17301,15 +17884,421 @@ test "known callee write metadata keeps unresolved body calls from widening the 
         0,
     );
     _ = try encoder.encodeOperation(call);
+    try testing.expect(encoder.isDegraded());
+
+    var found_reason = false;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "unresolved external callee has no sound state summary")) {
+            found_reason = true;
+            break;
+        }
+    }
+    try testing.expect(found_reason);
+}
+
+test "known callee write metadata omission degrades and widens write set" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const write_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writerWithOmittedSlot"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, write_slots.len, &write_slots)),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const omitted_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(value_op, 0), stringRef("secret"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, value_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, omitted_store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("secret")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writerWithOmittedSlot"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    var found_loss = false;
+    for (encoder.soundnessLosses()) |loss| {
+        if (loss == .inexact_call_summary) {
+            found_loss = true;
+            break;
+        }
+    }
+    try testing.expect(found_loss);
+
+    var found_reason = false;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "ora.write_slots metadata omitted a body write")) {
+            found_reason = true;
+            break;
+        }
+    }
+    try testing.expect(found_reason);
+}
+
+test "known callee empty write metadata omission degrades with specific reason" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const no_write_slots = [_]mlir.MlirAttribute{};
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writerWithEmptySlots"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, no_write_slots.len, &no_write_slots)),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 5);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const omitted_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(value_op, 0), stringRef("counter"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, value_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, omitted_store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("counter")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writerWithEmptySlots"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    var found_reason = false;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "ora.write_slots metadata omitted a body write")) {
+            found_reason = true;
+            break;
+        }
+    }
+    try testing.expect(found_reason);
+}
+
+test "known callee exact write metadata does not degrade" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const write_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writerWithExactSlots"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, write_slots.len, &write_slots)),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(value_op, 0), stringRef("counter"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, value_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("counter")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writerWithExactSlots"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
     try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+}
 
-    const loaded = try encoder.encodeOperation(mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("counter"), i256_ty));
-    const expected = try encoder.encodeValue(value);
+test "known callee conservative write metadata superset does not degrade" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
 
-    var solver = try Solver.init(&z3_ctx, testing.allocator);
-    defer solver.deinit();
-    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
-    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const write_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("secret")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writerWithSupersetSlots"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, write_slots.len, &write_slots)),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 9);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(value_op, 0), stringRef("counter"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, value_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    const seed = mlir.oraOperationGetResult(seed_op, 0);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, seed, stringRef("counter")));
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, seed, stringRef("secret")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("writerWithSupersetSlots"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+}
+
+test "known callee transient write metadata uses canonical transient prefix" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const write_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("transient:pending")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("transientWriterWithSummary"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, write_slots.len, &write_slots)),
+    };
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 13);
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, value_attr);
+    const store = mlir.oraTStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(value_op, 0), stringRef("pending"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, value_op);
+    mlir.oraBlockAppendOwnedOperation(helper_body, store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    _ = try encoder.encodeOperation(mlir.oraTStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("pending")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("transientWriterWithSummary"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+}
+
+test "known callee recursive write metadata omissions are still cross-checked" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const caller_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("callee_secret")),
+    };
+    const caller_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("recursiveCaller"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, caller_slots.len, &caller_slots)),
+    };
+    const callee_slots = [_]mlir.MlirAttribute{};
+    const callee_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("recursiveCallee"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.write_slots", mlir.oraArrayAttrCreate(mlir_ctx, callee_slots.len, &callee_slots)),
+    };
+
+    const caller = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &caller_attrs, caller_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const caller_body = mlir.oraFuncOpGetBodyBlock(caller);
+    const caller_value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 21);
+    const caller_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, caller_value_attr);
+    const caller_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(caller_value_op, 0), stringRef("caller_secret"));
+    const call_callee = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("recursiveCallee"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    const caller_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(caller_body, caller_value_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, caller_store);
+    mlir.oraBlockAppendOwnedOperation(caller_body, call_callee);
+    mlir.oraBlockAppendOwnedOperation(caller_body, caller_ret);
+
+    const callee = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &callee_attrs, callee_attrs.len, &[_]mlir.MlirType{}, &[_]mlir.MlirLocation{}, 0);
+    const callee_body = mlir.oraFuncOpGetBodyBlock(callee);
+    const callee_value_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 34);
+    const callee_value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, callee_value_attr);
+    const callee_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(callee_value_op, 0), stringRef("callee_secret"));
+    const call_caller = mlir.oraFuncCallOpCreate(mlir_ctx, loc, stringRef("recursiveCaller"), &[_]mlir.MlirValue{}, 0, &[_]mlir.MlirType{}, 0);
+    const callee_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(callee_body, callee_value_op);
+    mlir.oraBlockAppendOwnedOperation(callee_body, callee_store);
+    mlir.oraBlockAppendOwnedOperation(callee_body, call_caller);
+    mlir.oraBlockAppendOwnedOperation(callee_body, callee_ret);
+
+    try encoder.registerFunctionOperation(caller);
+    try encoder.registerFunctionOperation(callee);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    const seed = mlir.oraOperationGetResult(seed_op, 0);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, seed, stringRef("caller_secret")));
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, seed, stringRef("callee_secret")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("recursiveCaller"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    var omission_count: usize = 0;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "ora.write_slots metadata omitted a body write")) {
+            omission_count += 1;
+        }
+    }
+    try testing.expect(omission_count >= 2);
+}
+
+test "unresolved callee degrades even before storage is materialized" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("external_thing"),
+        &[_]mlir.MlirValue{},
+        0,
+        &[_]mlir.MlirType{},
+        0,
+    );
+
+    try testing.expectEqual(@as(usize, 0), encoder.global_map.count());
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 1), encoder.soundnessLosses().len);
+    try testing.expectEqual(Encoder.SoundnessLoss.unresolved_callee, encoder.soundnessLosses()[0]);
 }
 
 test "known callee read metadata keeps unresolved body calls from widening the read set" {
@@ -17378,6 +18367,76 @@ test "known callee read metadata keeps unresolved body calls from widening the r
     defer solver.deinit();
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "known callee read metadata omission degrades and widens read set" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const read_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("readerWithOmittedSlot"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("reads"))),
+        namedAttr(mlir_ctx, "ora.read_slots", mlir.oraArrayAttrCreate(mlir_ctx, read_slots.len, &read_slots)),
+    };
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const result_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &helper_attrs, helper_attrs.len, &result_types, &result_locs, result_types.len);
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const omitted_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("secret"), i256_ty);
+    const ret_vals = [_]mlir.MlirValue{mlir.oraOperationGetResult(omitted_load, 0)};
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &ret_vals, ret_vals.len);
+    mlir.oraBlockAppendOwnedOperation(helper_body, omitted_load);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const seed_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11);
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, seed_attr);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("secret")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("readerWithOmittedSlot"),
+        &[_]mlir.MlirValue{},
+        0,
+        &result_types,
+        result_types.len,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(encoder.isDegraded());
+    var found_loss = false;
+    for (encoder.soundnessLosses()) |loss| {
+        if (loss == .inexact_call_summary) {
+            found_loss = true;
+            break;
+        }
+    }
+    try testing.expect(found_loss);
+
+    var found_reason = false;
+    for (encoder.degradationReasons()) |reason| {
+        if (std.mem.eql(u8, reason, "ora.read_slots metadata omitted a body read")) {
+            found_reason = true;
+            break;
+        }
+    }
+    try testing.expect(found_reason);
 }
 
 test "known callee nested map write set stays exact" {
@@ -17934,6 +18993,7 @@ test "map_store emits quantified frame constraint" {
         const text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, cst));
         if (std.mem.indexOf(u8, text, "forall") != null) {
             saw_forall = true;
+            try expectSingleSelectTrigger(&z3_ctx, cst);
             break;
         }
     }
@@ -17998,6 +19058,7 @@ test "func.call adds quantified frame constraint for untouched map slot" {
         const text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, cst));
         if (std.mem.indexOf(u8, text, "forall") != null and std.mem.indexOf(u8, text, "frame_eq_k_") != null) {
             saw_frame_forall = true;
+            try expectSingleSelectTrigger(&z3_ctx, cst);
             break;
         }
     }
@@ -20137,6 +21198,7 @@ test "quantified operation encodes to z3 quantifier" {
     const qast = try encoder.encodeOperation(qop);
     const qstr = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, qast));
     try testing.expect(std.mem.indexOf(u8, qstr, "forall") != null);
+    try testing.expectEqual(@as(c_uint, 0), z3.Z3_get_quantifier_num_patterns(z3_ctx.ctx, qast));
 }
 
 test "quantified operation with placeholder keeps bound variable name" {
@@ -20245,4 +21307,24 @@ test "quantified forall and exists have expected solver semantics" {
 
     solver.assert(exists_ast);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver.check());
+}
+
+test "production encoder quantifiers are created only through mkQuantifier" {
+    const source = @embedFile("encoder.zig");
+    const needle_forall = "Z3_mk_forall_const";
+    const needle_exists = "Z3_mk_exists_const";
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, needle_forall));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, needle_exists));
+
+    const forall_index = std.mem.indexOf(u8, source, needle_forall).?;
+    const exists_index = std.mem.indexOf(u8, source, needle_exists).?;
+    const helper_index = std.mem.indexOf(u8, source, "fn mkQuantifier").?;
+    const helper_end = std.mem.indexOfPos(u8, source, helper_index, "// SENTINEL: end_of_mkQuantifier_helpers") orelse {
+        std.debug.print("encoder.zig sentinel moved or reworded; update the raw-quantifier regression test\n", .{});
+        return error.TestUnexpectedResult;
+    };
+
+    try testing.expect(forall_index > helper_index and forall_index < helper_end);
+    try testing.expect(exists_index > helper_index and exists_index < helper_end);
 }

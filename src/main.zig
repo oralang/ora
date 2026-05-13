@@ -3411,6 +3411,7 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .string => try writer.writeAll("string"),
         .address => try writer.writeAll("address"),
         .bytes => try writer.writeAll("bytes"),
+        .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
         .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
         .named => |named| try writer.writeAll(named.name),
@@ -3783,7 +3784,13 @@ fn runMlirEmitAdvanced(
         defer verifier.deinit();
 
         if (mlir_options.verify_mode) |mode| {
-            if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
+            if (std.ascii.eqlIgnoreCase(mode, "full")) {
+                verifier.setVerifyMode(.Full);
+            } else if (std.ascii.eqlIgnoreCase(mode, "basic")) {
+                verifier.setVerifyMode(.Basic);
+            } else {
+                return error.InvalidVerificationMode;
+            }
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
@@ -3823,7 +3830,13 @@ fn runMlirEmitAdvanced(
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
         if (mlir_options.verify_mode) |mode| {
-            if (std.ascii.eqlIgnoreCase(mode, "full")) verifier.setVerifyMode(.Full) else verifier.setVerifyMode(.Basic);
+            if (std.ascii.eqlIgnoreCase(mode, "full")) {
+                verifier.setVerifyMode(.Full);
+            } else if (std.ascii.eqlIgnoreCase(mode, "basic")) {
+                verifier.setVerifyMode(.Basic);
+            } else {
+                return error.InvalidVerificationMode;
+            }
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);

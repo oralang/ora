@@ -55,7 +55,7 @@ contract ERC20Token {
         
         // Check sufficient balance (runtime check required - sender_balance is from storage)
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return InvalidAmount;  // error values are @stack
+            return InsufficientBalance(amount, sender_balance);  // error values are @stack
         }
         
         // After the check, we know sender_balance >= amount
@@ -113,13 +113,13 @@ contract ERC20Token {
         // Check allowance
         let current_allowance: u256 = allowances[sender][spender];  // @stack: nested storage map read (@storage[@calldata][@stack]) returns stack value
         if (current_allowance < amount) {  // @stack < @calldata: allowed comparison
-            return InvalidAmount;  // @stack: error value
+            return InsufficientAllowance(amount, current_allowance);  // @stack: error value
         }
         
         // Check sender balance (runtime check required - sender_balance is from storage)
         let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@calldata]) returns stack value
         if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return InvalidAmount;  // @stack: error value
+            return InsufficientBalance(amount, sender_balance);  // @stack: error value
         }
         
         // After the check, we know sender_balance >= amount and current_allowance >= amount

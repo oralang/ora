@@ -616,6 +616,7 @@ static void assignGlobalSlots(ModuleOp module)
     auto *ctx = module.getContext();
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
     SmallVector<NamedAttribute> slotAttrs;
+    const bool requireExistingSlotMetadata = module->hasAttr("ora.global_slots_built");
 
     auto assignInBlock = [&](Block &block)
     {
@@ -632,6 +633,11 @@ static void assignGlobalSlots(ModuleOp module)
                     {
                         slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
                     }
+                    slot++;
+                    continue;
+                }
+                if (requireExistingSlotMetadata)
+                {
                     slot++;
                     continue;
                 }
@@ -665,6 +671,11 @@ static void assignGlobalSlots(ModuleOp module)
                     slot++;
                     continue;
                 }
+                if (requireExistingSlotMetadata)
+                {
+                    slot++;
+                    continue;
+                }
                 auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
                 op.setAttr("ora.slot_index", slotAttr);
                 slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
@@ -679,9 +690,46 @@ static void assignGlobalSlots(ModuleOp module)
     if (!module.getBody()->empty())
         assignInBlock(module.getBodyRegion().front());
 
-    if (!slotAttrs.empty())
+    SmallVector<Attribute> ambiguousNames;
+    for (size_t i = 0; i < slotAttrs.size(); i++)
+    {
+        auto name = slotAttrs[i].getName();
+        bool duplicate = false;
+        for (size_t j = 0; j < slotAttrs.size(); j++)
+        {
+            if (i != j && slotAttrs[j].getName() == name)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            continue;
+
+        bool alreadyRecorded = false;
+        for (Attribute existing : ambiguousNames)
+        {
+            if (existing == name)
+            {
+                alreadyRecorded = true;
+                break;
+            }
+        }
+        if (!alreadyRecorded)
+            ambiguousNames.push_back(name);
+    }
+
+    if (!slotAttrs.empty() && !requireExistingSlotMetadata)
     {
         module->setAttr("ora.global_slots", DictionaryAttr::get(ctx, slotAttrs));
+    }
+    if (!requireExistingSlotMetadata && !slotAttrs.empty())
+    {
+        module->setAttr("ora.global_slots_built", UnitAttr::get(ctx));
+    }
+    if (!ambiguousNames.empty())
+    {
+        module->setAttr("ora.global_slot_ambiguous_names", ArrayAttr::get(ctx, ambiguousNames));
     }
 }
 
@@ -964,6 +1012,7 @@ public:
             patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
+            patterns.add<ConvertArithExtSIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
@@ -986,6 +1035,7 @@ public:
             patterns.add<ConvertConstOp>(typeConverter, ctx);
             patterns.add<ConvertLengthOp>(typeConverter, ctx);
             patterns.add<ConvertByteAtOp>(typeConverter, ctx);
+            patterns.add<ConvertKeccak256Op>(typeConverter, ctx);
             patterns.add<ConvertStringConstantOp>(typeConverter, ctx);
             patterns.add<ConvertBytesConstantOp>(typeConverter, ctx);
             patterns.add<ConvertHexConstantOp>(typeConverter, ctx);
@@ -1372,6 +1422,7 @@ public:
             phase2Patterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
+            phase2Patterns.add<ConvertArithExtSIOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase2Patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
 
@@ -1421,6 +1472,7 @@ public:
             phase2bPatterns.add<ConvertErrorUnwrapOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertErrorGetErrorOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
+            phase2bPatterns.add<ConvertArithExtSIOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             phase2bPatterns.add<ConvertScfIfOp>(typeConverter, ctx,
@@ -1625,6 +1677,7 @@ public:
             phase4Patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertLengthOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertByteAtOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertKeccak256Op>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAddIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertAddWrappingOp>(typeConverter, ctx);
@@ -1646,6 +1699,7 @@ public:
             phase4Patterns.add<ConvertShrWrappingOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithSelectOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithExtUIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertArithExtSIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
@@ -1732,6 +1786,7 @@ public:
             phase4Target.addIllegalOp<ora::AbiEncodeOp>();
             phase4Target.addIllegalOp<ora::ExternalCallOp>();
             phase4Target.addIllegalOp<ora::AbiDecodeOp>();
+            phase4Target.addIllegalOp<ora::Keccak256Op>();
             phase4Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before Phase 4.

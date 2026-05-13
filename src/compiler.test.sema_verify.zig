@@ -177,7 +177,6 @@ test "compiler removes proven guard clauses after verification" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
-    verifier.parallel = false;
 
     var vr = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer vr.deinit();
@@ -447,29 +446,34 @@ test "compiler lowers unsigned requires comparisons with unsigned predicates" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi slt"));
 }
 
-test "compiler allows base integer flow into exact and scaled refinements" {
-    const source_text =
-        \\fn exactLiteral() {
-        \\    let total: Exact<u256> = 1000;
-        \\}
-        \\
-        \\fn scaledLiteral() {
-        \\    let amount: Scaled<u256, 18> = 1_000_000_000_000_000_000;
-        \\}
-        \\
-        \\fn exactFromBase(x: u256) {
+test "compiler rejects base integer flow into exact and scaled refinements" {
+    const exact_source =
+        \\pub fn exactFromBase(x: u256) {
         \\    let exact_x: Exact<u256> = x;
         \\}
     ;
 
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
+    var exact_compilation = try compileText(exact_source);
+    defer exact_compilation.deinit();
 
-    const root_module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(root_module.file_id);
-    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
-    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
-    _ = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const exact_root = exact_compilation.db.sources.module(exact_compilation.root_module_id);
+    const exact_ast = try exact_compilation.db.astFile(exact_root.file_id);
+    const exact_typecheck = try exact_compilation.db.typeCheck(exact_compilation.root_module_id, .{ .item = exact_ast.root_items[0] });
+    try testing.expect(diagnosticMessagesContain(&exact_typecheck.diagnostics, "declaration expects type 'Exact"));
+
+    const scaled_source =
+        \\pub fn scaledFromBase(x: u256) {
+        \\    let scaled_x: Scaled<u256, 18> = x;
+        \\}
+    ;
+
+    var scaled_compilation = try compileText(scaled_source);
+    defer scaled_compilation.deinit();
+
+    const scaled_root = scaled_compilation.db.sources.module(scaled_compilation.root_module_id);
+    const scaled_ast = try scaled_compilation.db.astFile(scaled_root.file_id);
+    const scaled_typecheck = try scaled_compilation.db.typeCheck(scaled_compilation.root_module_id, .{ .item = scaled_ast.root_items[0] });
+    try testing.expect(diagnosticMessagesContain(&scaled_typecheck.diagnostics, "declaration expects type 'Scaled"));
 }
 
 test "compiler lowers ghost items into ghost AST nodes" {

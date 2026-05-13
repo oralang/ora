@@ -117,6 +117,101 @@ test "verification supports explicit bytes enum storage roundtrip without degrad
     try testing.expect(!result.degraded);
 }
 
+test "verification accepts wrapping shifts with narrow shift operand without degradation" {
+    const source_text =
+        \\contract C {
+        \\    pub fn shift_left(a: u256, bits: u8) -> u256 {
+        \\        let shifted: u256 = a <<% bits;
+        \\        return 1 +% shifted;
+        \\    }
+        \\
+        \\    pub fn shift_right(a: i256, bits: u8) -> i256 {
+        \\        return a >>% bits;
+        \\    }
+        \\}
+    ;
+
+    var left_result = try verifyTextWithoutDegradation(source_text, "shift_left");
+    defer left_result.deinit(testing.allocator);
+    try testing.expect(left_result.success);
+    try testing.expectEqual(@as(usize, 0), left_result.errors_len);
+    try testing.expect(!left_result.degraded);
+
+    var right_result = try verifyTextWithoutDegradation(source_text, "shift_right");
+    defer right_result.deinit(testing.allocator);
+    try testing.expect(right_result.success);
+    try testing.expectEqual(@as(usize, 0), right_result.errors_len);
+    try testing.expect(!right_result.degraded);
+}
+
+test "verification accepts lowered EVM environment builtins without degradation" {
+    const source_text =
+        \\contract EnvProbe {
+        \\    pub fn sender() -> address {
+        \\        return std.msg.sender();
+        \\    }
+        \\
+        \\    pub fn origin() -> address {
+        \\        return std.tx.origin();
+        \\    }
+        \\
+        \\    pub fn coinbase() -> address {
+        \\        return std.block.coinbase();
+        \\    }
+        \\
+        \\    pub fn numeric_env() -> u256 {
+        \\        return std.msg.value() +% std.transaction.gasprice() +%
+        \\            std.block.timestamp() +% std.block.number();
+        \\    }
+        \\}
+    ;
+
+    inline for (.{ "sender", "origin", "coinbase", "numeric_env" }) |function_name| {
+        var result = try verifyTextWithoutDegradation(source_text, function_name);
+        defer result.deinit(testing.allocator);
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.errors_len);
+        try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+        try testing.expect(!result.degraded);
+        try testing.expectEqualStrings("", result.soundness_losses);
+    }
+}
+
+test "verification accepts runtime keccak256 without degradation" {
+    const source_text =
+        \\pub fn hash_identity(data: bytes) -> u256
+        \\    ensures(result == @keccak256(data))
+        \\{
+        \\    return @keccak256(data);
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "hash_identity");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not assume runtime keccak256 collision resistance" {
+    const source_text =
+        \\pub fn hash_collision_claim(a: bytes, b: bytes)
+        \\    ensures(@keccak256(a) == @keccak256(b))
+        \\{
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "hash_collision_claim");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
 test "verification supports native string and bytes len field access under bounded byte-sequence model" {
     const source_text =
         \\pub fn same_string_len(text: string) -> bool
@@ -249,6 +344,604 @@ test "verification accepts requires helper calls that read storage without degra
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expect(!result.degraded);
+}
+
+test "verification rejects unresolved external call preserving storage" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(s == old(s))
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, "unresolved_callee"));
+}
+
+test "verification frames storage across unresolved staticcall" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(s == old(s))
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not assume unresolved staticcall return value" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    pub fn f(target: address) -> bool
+        \\        ensures(result)
+        \\    {
+        \\        try {
+        \\            let r: bool = try external<External>(target, gas: 50000).x();
+        \\            return r;
+        \\        } catch {
+        \\            return true;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification treats unresolved staticcall return as deterministic" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    pub fn f(target: address) -> bool
+        \\        ensures(result == result)
+        \\    {
+        \\        try {
+        \\            let r: bool = try external<External>(target, gas: 50000).x();
+        \\            return r;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames storage through known helper staticcall" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    fn observe(target: address) -> !bool | ExternalCallFailed {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(s == old(s))
+        \\    {
+        \\        return observe(target);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects storage preservation through known helper external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    fn observe(target: address) -> !bool | ExternalCallFailed {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(s == old(s))
+        \\    {
+        \\        return observe(target);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, "unresolved_callee"));
+}
+
+test "verification rebinds pure callee old storage to call-site state" {
+    const source_text =
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    fn observe() -> u256
+        \\        ensures(result == old(s))
+        \\    {
+        \\        return s;
+        \\    }
+        \\
+        \\    pub fn f(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        s = value;
+        \\        return observe();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rebinds pure callee old mapping storage to call-site state" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn observe(account: address) -> u256
+        \\        ensures(result == old(balances[account]))
+        \\    {
+        \\        return balances[account];
+        \\    }
+        \\
+        \\    pub fn f(account: address, value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        balances[account] = value;
+        \\        return observe(account);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rebinds pure callee old storage for multiple slots" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var left: u256 = 0;
+        \\    storage var right: u256 = 0;
+        \\
+        \\    fn observe() -> u256
+        \\        requires(old(left) <= std.constants.U256_MAX - old(right))
+        \\        ensures(result == old(left) + old(right))
+        \\    {
+        \\        return left + right;
+        \\    }
+        \\
+        \\    pub fn f(a: u256, b: u256) -> u256
+        \\        requires(a <= std.constants.U256_MAX - b)
+        \\        ensures(result == a + b)
+        \\    {
+        \\        left = a;
+        \\        right = b;
+        \\        return observe();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rebinds nested pure callee old storage to call-site state" {
+    const source_text =
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    fn leaf() -> u256
+        \\        ensures(result == old(s))
+        \\    {
+        \\        return s;
+        \\    }
+        \\
+        \\    fn observe() -> u256
+        \\        ensures(result == old(s))
+        \\    {
+        \\        return leaf();
+        \\    }
+        \\
+        \\    pub fn f(value: u256) -> u256
+        \\        ensures(result == value)
+        \\    {
+        \\        s = value;
+        \\        return observe();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rebinds stateful callee old storage to call-site state" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var s: u256 = 0;
+        \\
+        \\    fn bump()
+        \\        requires(s < std.constants.U256_MAX)
+        \\        ensures(s == old(s) + 1)
+        \\    {
+        \\        s = s + 1;
+        \\    }
+        \\
+        \\    pub fn f(value: u256)
+        \\        requires(value < std.constants.U256_MAX)
+        \\        ensures(s == value + 1)
+        \\    {
+        \\        s = value;
+        \\        bump();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification treats old in loop invariants as function entry state" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 101)
+        \\        ensures(total == old(total) + 1)
+        \\    {
+        \\        total = total + 1;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == old(total) + 1
+        \\        {
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification supports explicit loop-entry snapshot idiom" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 101)
+        \\        ensures(total == old(total) + 1)
+        \\    {
+        \\        total = total + 1;
+        \\        let loop_start: u256 = total;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == loop_start
+        \\        {
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects loop-entry interpretation of old in loop invariants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 101)
+        \\    {
+        \\        total = total + 1;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == old(total)
+        \\        {
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses invariants for storage-mutating while loops" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 100)
+        \\        ensures(total == old(total) + n)
+        \\    {
+        \\        let start_total: u256 = total;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == start_total + added
+        \\        {
+        \\            total = total + 1;
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves pre-loop storage snapshots in effectful loop invariants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 100)
+        \\        ensures(total >= old(total))
+        \\    {
+        \\        let start_total: u256 = total;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total >= start_total
+        \\            invariant total <= start_total + added
+        \\        {
+        \\            total = total + 1;
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects loop body overflow in inductive iteration" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n == 6)
+        \\        requires(total == std.constants.U256_MAX - 5)
+        \\        ensures(total >= 0)
+        \\    {
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\        {
+        \\            total = total + 1;
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves map storage snapshots in effectful loop invariants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn f(account: address, n: u256)
+        \\        requires(n <= 100)
+        \\        requires(balances[account] <= std.constants.U256_MAX - 100)
+        \\        ensures(balances[account] == old(balances[account]) + n)
+        \\    {
+        \\        let start_balance: u256 = balances[account];
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant balances[account] == start_balance + added
+        \\        {
+        \\            balances[account] = balances[account] + 1;
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves multiple storage slots in effectful loop invariants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total_a: u256 = 0;
+        \\    storage var total_b: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total_a <= std.constants.U256_MAX - 100)
+        \\        requires(total_b <= std.constants.U256_MAX - 100)
+        \\        ensures(total_a == old(total_a) + n)
+        \\        ensures(total_b == old(total_b) + n)
+        \\    {
+        \\        let start_a: u256 = total_a;
+        \\        let start_b: u256 = total_b;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total_a == start_a + added
+        \\            invariant total_b == start_b + added
+        \\        {
+        \\            total_a = total_a + 1;
+        \\            total_b = total_b + 1;
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
 }
 
 test "verification infers transitive call-summary slot sorts without degradation" {
@@ -868,10 +1561,10 @@ test "verification reports invalid refined struct field construction without deg
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 
@@ -896,10 +1589,10 @@ test "verification reports invalid refined ADT payload construction without degr
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 
@@ -920,10 +1613,10 @@ test "verification reports invalid MaxValue struct field construction without de
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 
@@ -948,10 +1641,10 @@ test "verification reports invalid InRange ADT payload construction without degr
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 
@@ -972,10 +1665,10 @@ test "verification reports invalid NonZeroAddress struct field construction with
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 
@@ -1000,10 +1693,10 @@ test "verification reports invalid NonZeroAddress ADT payload construction witho
     var result = try verifyTextWithoutDegradation(source_text, "build");
     defer result.deinit(testing.allocator);
 
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors_len);
-    try testing.expectEqual(@as(usize, 1), result.diagnostics_len);
-    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expectEqualStrings("RefinementViolation", result.error_kinds);
     try testing.expect(!result.degraded);
 }
 

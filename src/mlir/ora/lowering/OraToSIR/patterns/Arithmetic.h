@@ -96,6 +96,18 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertKeccak256Op : public ConversionPattern
+        {
+        public:
+            ConvertKeccak256Op(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertAddrToI160Op : public OpConversionPattern<ora::AddrToI160Op>
         {
         public:
@@ -486,6 +498,17 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 mlir::arith::ExtUIOp op,
                 typename mlir::arith::ExtUIOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertArithExtSIOp : public OpConversionPattern<mlir::arith::ExtSIOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                mlir::arith::ExtSIOp op,
+                typename mlir::arith::ExtSIOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
         };
 

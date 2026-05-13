@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -122,6 +123,7 @@ namespace mlir
                 Int,
                 Bool,
                 Address,
+                FixedBytes,
                 BytesDyn,
                 String,
                 Unknown,
@@ -146,7 +148,7 @@ namespace mlir
                 }
                 bool isStaticBase() const
                 {
-                    return base == AbiBase::Uint || base == AbiBase::Int || base == AbiBase::Bool || base == AbiBase::Address;
+                    return base == AbiBase::Uint || base == AbiBase::Int || base == AbiBase::Bool || base == AbiBase::Address || base == AbiBase::FixedBytes;
                 }
                 bool supportsStaticArray() const
                 {
@@ -155,6 +157,10 @@ namespace mlir
                 bool supportsDynamicArray() const
                 {
                     return isStaticBase() && isArray() && dims.size() == 1 && dims.front() < 0;
+                }
+                bool supportsNestedDynamicArray() const
+                {
+                    return isStaticBase() && isArray() && dims.size() == 2 && dims[0] < 0 && dims[1] < 0;
                 }
                 int64_t headSlots() const
                 {
@@ -195,6 +201,15 @@ namespace mlir
                     out.base = AbiBase::String;
                 else
                     out.base = AbiBase::Unknown;
+
+                if (out.base == AbiBase::Unknown && base.starts_with("bytes") && base.size() > 5)
+                {
+                    StringRef bytesDigits = base.drop_front(5);
+                    unsigned bytesLen = 0;
+                    if (!(bytesDigits.size() > 1 && bytesDigits.front() == '0') &&
+                        !bytesDigits.getAsInteger(10, bytesLen) && bytesLen >= 1 && bytesLen <= 32)
+                        out.base = AbiBase::FixedBytes;
+                }
 
                 size_t pos = baseEnd;
                 while (pos != StringRef::npos && pos < s.size() && s[pos] == '[')
@@ -248,8 +263,42 @@ namespace mlir
                 std::vector<AbiLayout> fields;
 
                 bool isTupleLike() const { return !fields.empty(); }
+                bool hasDynamicArrayDim() const
+                {
+                    return abi.dims.size() == 1 && abi.dims.front() < 0;
+                }
+                int64_t staticElementWordCount() const
+                {
+                    if (isTupleLike())
+                    {
+                        int64_t total = 0;
+                        for (const AbiLayout &field : fields)
+                        {
+                            if (field.isDynamic())
+                                return -1;
+                            int64_t slots = field.headSlots();
+                            if (slots <= 0)
+                                return -1;
+                            total += slots;
+                        }
+                        return total;
+                    }
+                    if (!abi.isStaticBase())
+                        return -1;
+                    if (abi.dims.empty())
+                        return 1;
+                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
+                        return abi.dims.front();
+                    return -1;
+                }
+                bool supportsDynamicArray() const
+                {
+                    return hasDynamicArrayDim() && staticElementWordCount() > 0;
+                }
                 bool isDynamic() const
                 {
+                    if (supportsDynamicArray())
+                        return true;
                     if (isTupleLike())
                     {
                         return llvm::any_of(fields, [](const AbiLayout &field) { return field.isDynamic(); });
@@ -258,6 +307,15 @@ namespace mlir
                 }
                 int64_t headSlots() const
                 {
+                    if (supportsDynamicArray())
+                        return 1;
+                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
+                    {
+                        int64_t elemWords = staticElementWordCount();
+                        if (elemWords <= 0)
+                            return -1;
+                        return elemWords * abi.dims.front();
+                    }
                     if (isTupleLike())
                     {
                         int64_t total = 0;
@@ -368,6 +426,15 @@ namespace mlir
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
                 auto i64Type = IntegerType::get(ctx, 64, IntegerType::Unsigned);
                 Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (layout.supportsDynamicArray())
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
+                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.staticElementWordCount()));
+                    Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
+                    Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
+                    return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
+                }
 
                 if (!layout.isTupleLike())
                 {
@@ -1157,19 +1224,22 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
-                    // Initialize runtime malloc free-pointer slot (memory[0x20]).
-                    // Without this, malloc may start at address 0 and clobber scratch state.
+                    // Sensei initializes memory[0x20] to its static memory high-water mark
+                    // before entering main. Only raise it here when debug named-memory slots
+                    // need room after CODESIZE.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
-                    Value heapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
-                    Value initialFreePtr = heapBase;
+                    Value runtimeHeapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
                     if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
                     {
                         Value reservedBytes = builder.create<sir::ConstOp>(
                             dispatcherMainLoc,
                             u256Type,
                             IntegerAttr::get(i64Type, debugNamedMemoryBytes));
-                        initialFreePtr = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, heapBase, reservedBytes);
+                        runtimeHeapBase = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, runtimeHeapBase, reservedBytes);
                     }
+                    Value currentFreePtr = builder.create<sir::LoadOp>(dispatcherMainLoc, u256Type, freePtrSlot);
+                    Value shouldRaiseFreePtr = builder.create<sir::LtOp>(dispatcherMainLoc, u256Type, currentFreePtr, runtimeHeapBase);
+                    Value initialFreePtr = builder.create<sir::SelectOp>(dispatcherMainLoc, u256Type, shouldRaiseFreePtr, runtimeHeapBase, currentFreePtr);
                     builder.create<sir::StoreOp>(dispatcherMainLoc, freePtrSlot, initialFreePtr);
 
                     Value cv = builder.create<sir::CallValueOp>(dispatcherMainLoc, u256Type);
@@ -1277,16 +1347,21 @@ namespace mlir
                                        isa<sir::PtrType>(info.inputTypes[loweredArgIndex + 1]);
                             };
                             auto materializeDynamicAbiValue = [&](const AbiLayout &fieldLayout, Value absOff, bool expectsPtr) -> FailureOr<Value> {
-                                if (fieldLayout.isTupleLike())
-                                    return failure();
                                 if (!expectsPtr)
                                     return failure();
-                                if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String || fieldLayout.abi.supportsDynamicArray()))
+                                if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String || fieldLayout.abi.supportsDynamicArray() || fieldLayout.supportsDynamicArray()))
                                     return failure();
 
                                 Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
                                 Value total = nullptr;
-                                if (fieldLayout.abi.baseIsDynamic())
+                                if (fieldLayout.supportsDynamicArray())
+                                {
+                                    Value elemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldLayout.staticElementWordCount(), constCache, caseBody);
+                                    Value words = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, elemWords);
+                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, words, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                }
+                                else if (fieldLayout.abi.baseIsDynamic())
                                 {
                                     Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
                                     Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
@@ -1499,9 +1574,260 @@ namespace mlir
                                 }
                                 if (layout.isDynamic())
                                 {
-                                    module.emitError("unsupported dynamic ABI type for dispatcher");
-                                    signalPassFailure();
-                                    return;
+                                    if (layout.hasDynamicArrayDim() && layout.isTupleLike() && !layout.supportsDynamicArray())
+                                    {
+                                        std::function<int64_t(const AbiLayout &)> compactWordCount =
+                                            [&](const AbiLayout &node) -> int64_t {
+                                            if (node.isTupleLike())
+                                            {
+                                                int64_t total = 0;
+                                                for (const AbiLayout &field : node.fields)
+                                                {
+                                                    int64_t words = compactWordCount(field);
+                                                    if (words <= 0)
+                                                        return -1;
+                                                    total += words;
+                                                }
+                                                return total;
+                                            }
+                                            if (node.isDynamic())
+                                            {
+                                                if (node.abi.base == AbiBase::BytesDyn || node.abi.base == AbiBase::String ||
+                                                    node.abi.supportsDynamicArray() || node.supportsDynamicArray())
+                                                    return 1;
+                                                return -1;
+                                            }
+                                            return node.headSlots();
+                                        };
+
+                                        int64_t elemWords = compactWordCount(layout);
+                                        int64_t abiHeadWords = layout.headSlots();
+                                        if (elemWords <= 0)
+                                        {
+                                            module.emitError("unsupported dynamic ABI type for dispatcher");
+                                            signalPassFailure();
+                                            return;
+                                        }
+                                        if (abiHeadWords <= 0)
+                                        {
+                                            module.emitError("unsupported dynamic ABI type for dispatcher");
+                                            signalPassFailure();
+                                            return;
+                                        }
+
+                                        Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
+                                        Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                                        Value one_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                        Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
+                                        Value outerLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
+                                        Value elemWordsVal = getConst(builder, caseDecodeLoc, u256Type, i64Type, elemWords, constCache, caseBody);
+                                        Value compactWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerLen, elemWordsVal);
+                                        Value compactWordsWithLen = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, compactWords, one_dyn);
+                                        Value compactTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, compactWordsWithLen, c32_dyn);
+
+                                        Value outerHeadWords = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outerLen, one_dyn);
+                                        Value outerHeadTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerHeadWords, c32_dyn);
+                                        Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                        Value outerEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, outerHeadTotal);
+                                        Value outerTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, outerEnd);
+                                        Value validOuter = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, outerTooShort);
+                                        Block *outerBody = mainFunc.addBlock();
+                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validOuter, ValueRange{}, ValueRange{}, outerBody, revertError);
+                                        builder.setInsertionPointToEnd(outerBody);
+
+                                        Value outerBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, compactTotal);
+                                        builder.create<sir::StoreOp>(caseDecodeLoc, outerBuf, outerLen);
+
+                                        Block *loopCond = mainFunc.addBlock();
+                                        loopCond->addArgument(u256Type, caseDecodeLoc);
+                                        Block *loopBody = mainFunc.addBlock();
+                                        loopBody->addArgument(u256Type, caseDecodeLoc);
+                                        Block *loopAfter = mainFunc.addBlock();
+                                        Value zero_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, builder.getInsertionBlock(), "zero");
+                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{zero_dyn}, loopCond);
+
+                                        builder.setInsertionPointToEnd(loopCond);
+                                        Value row = loopCond->getArgument(0);
+                                        Value rowLt = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, row, outerLen);
+                                        builder.create<sir::CondBrOp>(caseDecodeLoc, rowLt, ValueRange{row}, ValueRange{}, loopBody, loopAfter);
+
+                                        builder.setInsertionPointToEnd(loopBody);
+                                        Value rowBody = loopBody->getArgument(0);
+                                        Value rowIndexBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowBody, c32_dyn);
+                                        Value rowHeadOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowIndexBytes, c32_dyn);
+                                        Value rowHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, rowHeadOffset);
+                                        Value rowRelOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowHeadAbs);
+                                        Value rowDataBase = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, c32_dyn);
+                                        Value rowAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowDataBase, rowRelOff);
+                                        Value rowHeadSize = getConst(builder, caseDecodeLoc, u256Type, i64Type, abiHeadWords * 32, constCache, caseBody);
+                                        Value rowHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowAbsOff, rowHeadSize);
+                                        Value rowTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, rowHeadEnd);
+                                        Value validRow = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, rowTooShort);
+                                        Block *rowCopy = mainFunc.addBlock();
+                                        rowCopy->addArgument(u256Type, caseDecodeLoc);
+                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validRow, ValueRange{rowBody}, ValueRange{}, rowCopy, revertError);
+
+                                        builder.setInsertionPointToEnd(rowCopy);
+                                        Value rowCopyIndex = rowCopy->getArgument(0);
+                                        Value rowCompactWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCopyIndex, elemWordsVal);
+                                        Value rowCompactBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCompactWords, c32_dyn);
+                                        Value rowOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCompactBytes, c32_dyn);
+
+                                        std::function<LogicalResult(const AbiLayout &, Value, Value)> compactTuple =
+                                            [&](const AbiLayout &tupleLayout, Value tupleBaseOff, Value outBaseOffset) -> LogicalResult {
+                                            if (!tupleLayout.isTupleLike())
+                                                return failure();
+
+                                            int64_t fieldHeadByteOffset = 0;
+                                            int64_t fieldWordOffset = 0;
+                                            for (const AbiLayout &fieldLayout : tupleLayout.fields)
+                                            {
+                                                int64_t compactWordsForField = compactWordCount(fieldLayout);
+                                                if (compactWordsForField <= 0)
+                                                    return failure();
+
+                                                Value fieldHeadOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldHeadByteOffset, constCache, builder.getInsertionBlock());
+                                                Value fieldHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, fieldHeadOffset);
+                                                Value fieldOutWordOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldWordOffset * 32, constCache, builder.getInsertionBlock());
+                                                Value fieldOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outBaseOffset, fieldOutWordOffset);
+
+                                                if (fieldLayout.isDynamic())
+                                                {
+                                                    Value relOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadAbs);
+                                                    Value fieldAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, relOff);
+                                                    if (fieldLayout.isTupleLike())
+                                                    {
+                                                        if (failed(compactTuple(fieldLayout, fieldAbsOff, fieldOutOffset)))
+                                                            return failure();
+                                                    }
+                                                    else
+                                                    {
+                                                        if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String ||
+                                                              fieldLayout.abi.supportsDynamicArray() || fieldLayout.supportsDynamicArray()))
+                                                        {
+                                                            return failure();
+                                                        }
+
+                                                        Value fieldOutPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, fieldOutOffset);
+                                                        Value fieldLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldAbsOff);
+                                                        Value fieldTotal = nullptr;
+                                                        if (fieldLayout.supportsDynamicArray())
+                                                        {
+                                                            Value fieldElemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldLayout.staticElementWordCount(), constCache, caseBody);
+                                                            Value fieldWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldLen, fieldElemWords);
+                                                            Value fieldLenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldWords, c32_dyn);
+                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldLenBytes, c32_dyn);
+                                                        }
+                                                        else if (fieldLayout.abi.baseIsDynamic())
+                                                        {
+                                                            Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
+                                                            Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
+                                                            Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldLen, c31);
+                                                            Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
+                                                            Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
+                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, c32_dyn);
+                                                        }
+                                                        else
+                                                        {
+                                                            Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldLen, c32_dyn);
+                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
+                                                        }
+
+                                                        Value fieldEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldAbsOff, fieldTotal);
+                                                        Value fieldTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, fieldEnd);
+                                                        Value validField = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, fieldTooShort);
+                                                        Block *fieldCopy = mainFunc.addBlock();
+                                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validField, ValueRange{}, ValueRange{}, fieldCopy, revertError);
+
+                                                        builder.setInsertionPointToEnd(fieldCopy);
+                                                        Value fieldBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, fieldTotal);
+                                                        builder.create<sir::CallDataCopyOp>(caseDecodeLoc, fieldBuf, fieldAbsOff, fieldTotal);
+                                                        Value fieldPtrWord = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, fieldBuf);
+                                                        builder.create<sir::StoreOp>(caseDecodeLoc, fieldOutPtr, fieldPtrWord);
+                                                    }
+
+                                                    fieldHeadByteOffset += 32;
+                                                    fieldWordOffset += compactWordsForField;
+                                                    continue;
+                                                }
+
+                                                if (fieldLayout.isTupleLike())
+                                                {
+                                                    if (failed(compactTuple(fieldLayout, fieldHeadAbs, fieldOutOffset)))
+                                                        return failure();
+                                                    fieldHeadByteOffset += fieldLayout.headSlots() * 32;
+                                                    fieldWordOffset += compactWordsForField;
+                                                    continue;
+                                                }
+
+                                                int64_t fieldWords = fieldLayout.headSlots();
+                                                if (fieldWords <= 0)
+                                                    return failure();
+                                                for (int64_t fieldWord = 0; fieldWord < fieldWords; ++fieldWord)
+                                                {
+                                                    Value fieldWordByteOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldWord * 32, constCache, builder.getInsertionBlock());
+                                                    Value srcOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldHeadAbs, fieldWordByteOffset);
+                                                    Value dstOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldOutOffset, fieldWordByteOffset);
+                                                    Value dstPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, dstOff);
+                                                    Value wordVal = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, srcOff);
+                                                    builder.create<sir::StoreOp>(caseDecodeLoc, dstPtr, wordVal);
+                                                }
+                                                fieldHeadByteOffset += fieldWords * 32;
+                                                fieldWordOffset += fieldWords;
+                                            }
+                                            return success();
+                                        };
+
+                                        if (failed(compactTuple(layout, rowAbsOff, rowOutOffset)))
+                                        {
+                                            module.emitError("unsupported dynamic ABI type for dispatcher");
+                                            signalPassFailure();
+                                            return;
+                                        }
+
+                                        Value nextRow = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCopyIndex, one_dyn);
+                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextRow}, loopCond);
+
+                                        builder.setInsertionPointToEnd(loopAfter);
+                                        argVal = outerBuf;
+                                        argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
+
+                                        args.push_back(argVal);
+                                        loweredArgIndex += 1;
+                                        continue;
+                                    }
+                                    if (!layout.supportsDynamicArray())
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+
+                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
+                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
+                                    Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
+                                    Value elemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, layout.staticElementWordCount(), constCache, caseBody);
+                                    Value words = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, elemWords);
+                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, words, c32_dyn);
+                                    Value total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
+
+                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value end = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, total);
+                                    Value tooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, end);
+                                    Value valid_dyn = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tooShort);
+                                    Block *dynBody = mainFunc.addBlock();
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
+                                    builder.setInsertionPointToEnd(dynBody);
+
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
+                                    argVal = buf;
+                                    argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
+
+                                    args.push_back(argVal);
+                                    loweredArgIndex += 1;
+                                    continue;
                                 }
                                 int64_t words = layout.headSlots();
                                 if (words <= 0)
@@ -1517,7 +1843,74 @@ namespace mlir
                             }
                             else if (!info.abiParams.empty() && abi.isDynamic())
                             {
-                                if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
+                                if (abi.supportsNestedDynamicArray())
+                                {
+                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
+                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                                    Value one_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
+                                    Value outerLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
+                                    Value outerWords = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outerLen, one_dyn);
+                                    Value outerTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerWords, c32_dyn);
+
+                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value outerEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, outerTotal);
+                                    Value outerTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, outerEnd);
+                                    Value validOuter = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, outerTooShort);
+                                    Block *outerBody = mainFunc.addBlock();
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, validOuter, ValueRange{}, ValueRange{}, outerBody, revertError);
+                                    builder.setInsertionPointToEnd(outerBody);
+
+                                    Value outerBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, outerTotal);
+                                    builder.create<sir::StoreOp>(caseDecodeLoc, outerBuf, outerLen);
+
+                                    Block *loopCond = mainFunc.addBlock();
+                                    loopCond->addArgument(u256Type, caseDecodeLoc);
+                                    Block *loopBody = mainFunc.addBlock();
+                                    loopBody->addArgument(u256Type, caseDecodeLoc);
+                                    Block *loopAfter = mainFunc.addBlock();
+                                    Value zero_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, builder.getInsertionBlock(), "zero");
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{zero_dyn}, loopCond);
+
+                                    builder.setInsertionPointToEnd(loopCond);
+                                    Value row = loopCond->getArgument(0);
+                                    Value rowLt = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, row, outerLen);
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, rowLt, ValueRange{row}, ValueRange{}, loopBody, loopAfter);
+
+                                    builder.setInsertionPointToEnd(loopBody);
+                                    Value rowBody = loopBody->getArgument(0);
+                                    Value rowBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowBody, c32_dyn);
+                                    Value rowHeadOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowBytes, c32_dyn);
+                                    Value rowHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, rowHeadOffset);
+                                    Value rowRelOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowHeadAbs);
+                                    Value rowDataBase = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, c32_dyn);
+                                    Value rowAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowDataBase, rowRelOff);
+                                    Value rowLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowAbsOff);
+                                    Value rowLenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowLen, c32_dyn);
+                                    Value rowTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowLenBytes, c32_dyn);
+                                    Value rowEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowAbsOff, rowTotal);
+                                    Value rowTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, rowEnd);
+                                    Value validRow = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, rowTooShort);
+                                    Block *rowCopy = mainFunc.addBlock();
+                                    rowCopy->addArgument(u256Type, caseDecodeLoc);
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, validRow, ValueRange{rowBody}, ValueRange{}, rowCopy, revertError);
+
+                                    builder.setInsertionPointToEnd(rowCopy);
+                                    Value rowCopyIndex = rowCopy->getArgument(0);
+                                    Value rowBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, rowTotal);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, rowBuf, rowAbsOff, rowTotal);
+                                    Value rowPtrWord = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, rowBuf);
+                                    Value rowOutBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCopyIndex, c32_dyn);
+                                    Value rowOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowOutBytes, c32_dyn);
+                                    Value rowOutPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, rowOutOffset);
+                                    builder.create<sir::StoreOp>(caseDecodeLoc, rowOutPtr, rowPtrWord);
+                                    Value nextRow = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCopyIndex, one_dyn);
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextRow}, loopCond);
+
+                                    builder.setInsertionPointToEnd(loopAfter);
+                                    argVal = outerBuf;
+                                }
+                                else if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
                                 {
                                     Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
                                     Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");

@@ -467,6 +467,38 @@ LogicalResult ConvertByteAtOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert ora.keccak256 → sir.keccak256 over dynamic string/bytes payload
+// Layout: [len: u256][bytes...]
+// -----------------------------------------------------------------------------
+LogicalResult ConvertKeccak256Op::matchAndRewrite(
+    Operation *op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op->getName().getStringRef() != "ora.keccak256")
+        return failure();
+    if (op->getNumResults() != 1 || operands.size() != 1)
+        return rewriter.notifyMatchFailure(op, "ora.keccak256 expects one operand and one result");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value source = operands[0];
+    if (!llvm::isa<sir::PtrType>(source.getType()))
+        source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
+
+    Value length = rewriter.create<sir::LoadOp>(loc, u256Type, source);
+    Value headerSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value payload = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, headerSize);
+    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, payload, length);
+    rewriter.replaceOp(op, hash);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert ora.string.constant → ptr (dynamic bytes layout)
 // Layout: [len: u256][bytes...]
 // -----------------------------------------------------------------------------
@@ -1639,6 +1671,46 @@ LogicalResult ConvertArithExtUIOp::matchAndRewrite(
 
     auto newOp = rewriter.create<sir::BitcastOp>(op.getLoc(), resultType, adaptor.getIn());
     rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert arith.extsi → sign extension through shl/sar
+// -----------------------------------------------------------------------------
+LogicalResult ConvertArithExtSIOp::matchAndRewrite(
+    mlir::arith::ExtSIOp op,
+    typename mlir::arith::ExtSIOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto *typeConverter = getTypeConverter();
+    if (!typeConverter)
+    {
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+    }
+    auto resultType = typeConverter->convertType(op.getResult().getType());
+    if (!resultType)
+    {
+        return rewriter.notifyMatchFailure(op, "unable to convert extsi result type");
+    }
+
+    auto loc = op.getLoc();
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    Value input = ensureU256(rewriter, loc, adaptor.getIn());
+
+    unsigned sourceWidth = op.getIn().getType().getIntOrFloatBitWidth();
+    if (sourceWidth < 256)
+    {
+        llvm::APInt shiftAmount(256, 256 - sourceWidth);
+        Value shift = rewriter.create<sir::ConstOp>(loc, shiftAmount);
+        Value shiftedLeft = rewriter.create<sir::ShlOp>(loc, u256Type, shift, input).getResult();
+        input = rewriter.create<sir::SarOp>(loc, u256Type, shift, shiftedLeft).getResult();
+    }
+
+    if (resultType != u256Type)
+    {
+        input = rewriter.create<sir::BitcastOp>(loc, resultType, input).getResult();
+    }
+    rewriter.replaceOp(op, input);
     return success();
 }
 
