@@ -71,7 +71,7 @@ contract VerifiedToken {
         requires(amount > 0)
         requires(recipient != std.msg.sender())
         requires(totalSupply == spec_total_minted)
-        requires(balances[std.msg.sender()] == amount)
+        requires(balances[std.msg.sender()] >= amount)
         requires(balances[recipient] <= std.constants.U256_MAX - amount)
         ensures(totalSupply == old(totalSupply))
         ensures(spec_total_minted == old(spec_total_minted))

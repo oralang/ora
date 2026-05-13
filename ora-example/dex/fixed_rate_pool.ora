@@ -1,4 +1,4 @@
-// Fixed-rate swap pool with internal balance accounting.
+// Fixed-rate pool with internal balance accounting.
 //
 // Demonstrates v0.2 features that fully verify under `ora build`:
 //   - multi-error error unions (!u256 | E1 | E2 | E3)

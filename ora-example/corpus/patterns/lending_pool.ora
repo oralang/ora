@@ -39,8 +39,50 @@ contract LendingPool {
             return 0;
         }
 
+        let timeElapsed: u256 = currentTime - lastTime;
+        if (interestRate == 0) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        if (userBorrow > std.constants.U256_MAX / interestRate) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        let rateScaledDebt: u256 = userBorrow * interestRate;
+        if (rateScaledDebt == 0) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        if (timeElapsed > std.constants.U256_MAX / rateScaledDebt) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        let accruedNumerator: u256 = rateScaledDebt * timeElapsed;
+        // interestRate is annual basis points; denominator = 365 days * 86400 seconds * 10000.
+        let interest: u256 = accruedNumerator / 315360000000;
+        if (interest == 0) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        if (borrows[user] > std.constants.U256_MAX - interest) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        if (totalBorrows > std.constants.U256_MAX - interest) {
+            lastUpdate[user] = currentTime;
+            return 0;
+        }
+
+        borrows[user] += interest;
+        totalBorrows += interest;
         lastUpdate[user] = currentTime;
-        return 0;
+        return interest;
     }
 
     pub fn getHealthFactor(user: address) -> u256 {

@@ -4,7 +4,10 @@
   <img src="website/static/img/logo-round.png" alt="Ora logo" width="220" />
 </p>
 
-Ora is a smart-contract language and compiler for EVM with explicit semantics, verification-aware IR, and a strict MLIR-based pipeline.
+Ora is a verification-first smart-contract language and compiler for EVM. It is
+best suited today for token contracts, vaults, escrows, fixed-rate pools,
+multisigs, and other arithmetic-heavy contracts where the compiler can prove
+storage and value invariants.
 
 > **Pre-release (Asuka track).** Breaking changes are expected. Not production-ready.
 
@@ -46,22 +49,32 @@ contract Vault {
 }
 ```
 
-This contract uses refinement types (`MinValue`, `NonZeroAddress`), error unions (`!bool | InsufficientBalance`), specification clauses (`requires`/`ensures`/`old()`), events (`log`), and explicit storage regions — all checked by the compiler and Z3 SMT solver.
+This contract uses refinement types (`MinValue`, `NonZeroAddress`), error
+unions (`!bool | InsufficientBalance`), specification clauses
+(`requires`/`ensures`/`old()`), events (`log`), and explicit storage. The
+compiler checks the full surface; the SMT verifier proves the supported
+properties below and fails closed when it cannot model a proof soundly.
 
-## Language features
+## Verification capabilities
 
-| Area | Features |
-|------|----------|
-| **Types** | `u8`–`u256`, `i8`–`i256`, `bool`, `address`, `string`, `bytes`; structs, enums, tuples, arrays, maps, anonymous structs, bitfields |
-| **Refinement types** | `NonZero`, `NonZeroAddress`, `MinValue`, `MaxValue`, `InRange`, `BasisPoints`, `Scaled`; compile-time proof or runtime guard |
-| **Error handling** | Error unions (`!T \| E1 \| E2`), `try`/`catch`, error propagation, `errors` clause |
-| **Regions** | Explicit data location: `storage`, `memory`, `calldata`, `transient`; compile-time coercion checks |
-| **Control flow** | `if`/`else`, `while`, `for` (ranges, iterators), `switch` (expressions/statements, range patterns, `else`), labeled blocks, `break`/`continue` |
-| **Abstraction** | Generics (`comptime T: type`), traits and `impl`, extern traits (`call`/`staticcall`), comptime evaluation |
-| **Verification** | Z3 SMT: `requires`/`ensures`/`invariant`/`assume`/`assert`, `old()`, `ghost` state, `forall`/`exists`, path-sensitive reasoning |
-| **Events** | `log` declarations with `indexed` fields |
-| **Safety** | `@lock`/`@unlock` reentrancy guards, overflow builtins (`@addWithOverflow`, etc.), wrapping arithmetic (`+%`, `*%`) |
-| **Imports** | `@import("./path.ora")`, namespace-qualified access, `ora.toml` project config |
+| Capability | Current status |
+|------------|----------------|
+| Checked arithmetic overflow/underflow | Proved for modeled paths |
+| Division/remainder by zero | Proved as explicit safety obligations |
+| Closed refinement lexicon | Proven or kept as runtime guards |
+| Function contracts | `requires`, `ensures`, `assert`, and contract invariants are SMT obligations |
+| `old()` | Function-entry snapshot, including loop invariants; call summaries rebind to call-site state |
+| Storage frames | Proved for resolved callees and known write sets |
+| Unresolved state-changing external calls | Fail closed / degrade; never silently preserve storage |
+| Unresolved `staticcall` | Modeled as no-write with opaque return values |
+| Effectful loops | Supported when supplied invariants prove body safety and post-state obligations |
+| Runtime `keccak256` | Deterministic uninterpreted function; no collision-resistance axiom |
+| Precompiles | Encoder boundary only; cryptographic semantics, gas, and failure behavior not proved |
+| Bytecode equivalence | Not yet proven end-to-end against emitted EVM bytecode |
+| Reentrancy | `@lock` is checked by sema/effects, separate from SMT |
+
+See [`website/docs/compiler/what-ora-proves.md`](website/docs/compiler/what-ora-proves.md)
+for the full soundness model.
 
 ## Installation
 
@@ -211,13 +224,19 @@ Environment variables for tuning:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ORA_Z3_TIMEOUT_MS` | `60000` | Per-query timeout (ms) |
-| `ORA_Z3_PARALLEL` | `1` | Parallel query execution |
-| `ORA_Z3_WORKERS` | CPU count | Worker thread count |
-| `ORA_VERIFY_MODE` | `full` | `basic` or `full` |
-| `ORA_VERIFY_CALLS` | `1` | Interprocedural call summaries |
-| `ORA_VERIFY_STATE` | `1` | Storage state tracking |
+| `ORA_Z3_PARALLEL` | unset / off | Parallel SMT is disabled; `1` is rejected |
+| `ORA_Z3_WORKERS` | unset | Worker override is unsupported and rejected |
+| `ORA_VERIFY_MODE` | `full` | `basic` is a reduced-trust mode |
+| `ORA_VERIFY_CALLS` | `1` | `0` disables call summaries and prevents full verification success |
+| `ORA_VERIFY_STATE` | `1` | `0` disables storage tracking and prevents full verification success |
 | `ORA_VERIFY_STATS` | `0` | Print query statistics |
+| `ORA_Z3_EXPLAIN` | `0` | Include unsat-core explanation data |
+| `ORA_Z3_PROOFS` | `0` | Include raw Z3 proof payloads in JSON reports |
 | `ORA_Z3_DEBUG` | unset | Verbose Z3 debug output |
+
+`ORA_VERIFY_MODE=basic`, `ORA_VERIFY_CALLS=0`, `ORA_VERIFY_STATE=0`, and
+`--no-verify` are soundness-reducing escape hatches. Their reports must not be
+treated as fully verified.
 
 ## Advanced MLIR controls
 
@@ -242,6 +261,7 @@ Stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-l
 - **[The Ora Little Book](website/docs/book/)** — 20-chapter progressive guide from first contract to production vault
 - **[Language reference](website/docs/)** — feature docs: types, regions, error unions, traits, verification, comptime
 - **[Compiler Field Guide](website/docs/compiler/field-guide/)** — contributor onboarding (14 chapters)
+- **[What Ora Proves](website/docs/compiler/what-ora-proves.md)** — public SMT soundness model and trust boundaries
 - **[Formal specification](docs/formal-specs/ora-2.md)** — type system calculus
 - **[CLI and config reference](docs/ora-cli-imports-config-reference.md)** — full CLI, import system, and `ora.toml` schema
 - **[Examples](ora-example/)** — apps, vault tiers, and feature demos

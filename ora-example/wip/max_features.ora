@@ -1,4 +1,4 @@
-// Fixes we need to do:
+// Work-in-progress feature stress test. Known compiler gaps:
 // - [ ] Add slice support
 // - [ ] Allow file-level const (compile-time only, no region)
 // - [ ] Keep immutable contract-level only (error at file level)
