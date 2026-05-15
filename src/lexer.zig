@@ -627,65 +627,9 @@ pub const Lexer = struct {
         return &[_]LexerDiagnostic{};
     }
 
-    /// Create a diagnostic report with all errors and warnings
-    pub fn createDiagnosticReport(self: *Lexer) ![]u8 {
-        if (self.error_recovery) |*recovery| {
-            return recovery.createDetailedReport(self.allocator);
-        }
-        return self.allocator.dupe(u8, "No diagnostics available");
-    }
-
     /// Check if error recovery is enabled
     pub fn hasErrorRecovery(self: *Lexer) bool {
         return self.error_recovery != null;
-    }
-
-    /// Get diagnostics filtered by severity
-    pub fn getDiagnosticsBySeverity(self: *Lexer, severity: DiagnosticSeverity) std.ArrayList(LexerDiagnostic) {
-        if (self.error_recovery) |*recovery| {
-            return recovery.getErrorsBySeverity(severity);
-        }
-        return std.ArrayList(LexerDiagnostic){};
-    }
-
-    /// Get diagnostics grouped by type
-    pub fn getDiagnosticsByType(self: *Lexer) ?std.ArrayList(ErrorRecovery.ErrorTypeCount) {
-        if (self.error_recovery) |*recovery| {
-            return recovery.getErrorsByType();
-        }
-        return null;
-    }
-
-    /// Get diagnostics grouped by line number
-    pub fn getDiagnosticsByLine(self: *Lexer) ?std.ArrayList(ErrorRecovery.LineCount) {
-        if (self.error_recovery) |*recovery| {
-            return recovery.getErrorsByLine();
-        }
-        return null;
-    }
-
-    /// Create a summary report of all diagnostics
-    pub fn createDiagnosticSummary(self: *Lexer, allocator: Allocator) ![]u8 {
-        if (self.error_recovery) |*recovery| {
-            return recovery.createSummaryReport(allocator);
-        }
-        return try std.fmt.allocPrint(allocator, "No diagnostics available", .{});
-    }
-
-    /// Filter diagnostics by minimum severity level
-    pub fn filterDiagnosticsBySeverity(self: *Lexer, min_severity: DiagnosticSeverity) std.ArrayList(LexerDiagnostic) {
-        if (self.error_recovery) |*recovery| {
-            return recovery.filterByMinimumSeverity(min_severity);
-        }
-        return std.ArrayList(LexerDiagnostic){};
-    }
-
-    /// Get related diagnostics (same line or nearby)
-    pub fn getRelatedDiagnostics(self: *Lexer, diagnostic: LexerDiagnostic, max_distance: u32) std.ArrayList(LexerDiagnostic) {
-        if (self.error_recovery) |*recovery| {
-            return recovery.getRelatedErrors(diagnostic, max_distance);
-        }
-        return std.ArrayList(LexerDiagnostic){};
     }
 
     /// Get string pool statistics (if interning is enabled)
@@ -1261,9 +1205,9 @@ pub const Lexer = struct {
         return self.source[self.current + 2];
     }
 
-    pub fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
-        const text = self.source[self.start..self.current];
-        const range = SourceRange{
+    /// Build a SourceRange spanning from `self.start` to `self.current` on the current line.
+    pub fn currentRange(self: *const Lexer) SourceRange {
+        return .{
             .start_line = self.line,
             .start_column = self.start_column,
             .end_line = self.line,
@@ -1271,54 +1215,70 @@ pub const Lexer = struct {
             .start_offset = self.start,
             .end_offset = self.current,
         };
+    }
 
-        // create token value for boolean literals
-        var token_value: ?TokenValue = null;
-        if (token_type == .True) {
-            token_value = TokenValue{ .boolean = true };
-        } else if (token_type == .False) {
-            token_value = TokenValue{ .boolean = false };
+    /// Record a lexer error at `range`. In fail-fast mode (no recovery), returns `err`.
+    /// In recovery mode, records and returns void (caller continues scanning).
+    pub fn reportLexError(self: *Lexer, err: LexerError, range: SourceRange, message: []const u8, suggestion: ?[]const u8) LexerError!void {
+        if (self.error_recovery) |*recovery| {
+            if (suggestion) |s| {
+                recovery.recordDetailedErrorWithSuggestion(err, range, self.source, message, s) catch {};
+            } else {
+                recovery.recordDetailedError(err, range, self.source, message) catch {};
+            }
+        } else {
+            return err;
         }
+    }
 
+    /// Like `reportLexError` but also advances `self.current` past the next token boundary
+    /// in recovery mode, so scanning can resume cleanly.
+    pub fn reportLexErrorAndAdvance(self: *Lexer, err: LexerError, range: SourceRange, message: []const u8, suggestion: ?[]const u8) LexerError!void {
+        if (self.error_recovery) |*recovery| {
+            if (suggestion) |s| {
+                recovery.recordDetailedErrorWithSuggestion(err, range, self.source, message, s) catch {};
+            } else {
+                recovery.recordDetailedError(err, range, self.source, message) catch {};
+            }
+            self.current = ErrorRecovery.findNextTokenBoundary(self.source, self.current);
+        } else {
+            return err;
+        }
+    }
+
+    /// Append a token with an explicit TokenValue, using the current lexeme and range.
+    pub fn appendTokenWithValue(self: *Lexer, token_type: TokenType, value: ?TokenValue) LexerError!void {
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
-            .lexeme = text,
-            .range = range,
-            .value = token_value,
-            // legacy fields for backward compatibility
+            .lexeme = self.source[self.start..self.current],
+            .range = self.currentRange(),
+            .value = value,
             .line = self.line,
             .column = self.start_column,
         });
     }
 
-    pub fn addTokenWithInterning(self: *Lexer, token_type: TokenType) LexerError!void {
-        const text = self.source[self.start..self.current];
-        const range = SourceRange{
-            .start_line = self.line,
-            .start_column = self.start_column,
-            .end_line = self.line,
-            .end_column = self.column,
-            .start_offset = self.start,
-            .end_offset = self.current,
+    pub fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
+        const token_value: ?TokenValue = switch (token_type) {
+            .True => .{ .boolean = true },
+            .False => .{ .boolean = false },
+            else => null,
         };
+        try self.appendTokenWithValue(token_type, token_value);
+    }
 
-        // intern the string for identifiers and keywords to reduce memory usage
-        const interned_text = try self.internString(text);
-
-        // create token value for boolean literals
-        var token_value: ?TokenValue = null;
-        if (token_type == .True) {
-            token_value = TokenValue{ .boolean = true };
-        } else if (token_type == .False) {
-            token_value = TokenValue{ .boolean = false };
-        }
-
+    pub fn addTokenWithInterning(self: *Lexer, token_type: TokenType) LexerError!void {
+        const interned_text = try self.internString(self.source[self.start..self.current]);
+        const token_value: ?TokenValue = switch (token_type) {
+            .True => .{ .boolean = true },
+            .False => .{ .boolean = false },
+            else => null,
+        };
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
             .lexeme = interned_text,
-            .range = range,
+            .range = self.currentRange(),
             .value = token_value,
-            // legacy fields for backward compatibility
             .line = self.line,
             .column = self.start_column,
         });

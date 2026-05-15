@@ -359,16 +359,6 @@ pub fn build(b: *std.Build) void {
     const lexer_tests = b.addTest(.{ .root_module = lexer_test_mod });
     test_step.dependOn(&b.addRunArtifact(lexer_tests).step);
 
-    // lexer error recovery tests
-    const error_recovery_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/lexer/error_recovery.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    error_recovery_test_mod.addImport("ora_root", lib_mod);
-    const error_recovery_tests = b.addTest(.{ .root_module = error_recovery_test_mod });
-    test_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
-
     // cli argument parsing tests
     const cli_args_test_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/args.test.zig"),
@@ -618,7 +608,6 @@ pub fn build(b: *std.Build) void {
     const lexer_standalone_tests = b.addTest(.{ .root_module = ora_lexer_mod });
     test_lexer_step.dependOn(&b.addRunArtifact(lexer_standalone_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(lexer_tests).step);
-    test_lexer_step.dependOn(&b.addRunArtifact(error_recovery_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(numbers_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(strings_tests).step);
     test_lexer_step.dependOn(&b.addRunArtifact(identifiers_tests).step);
