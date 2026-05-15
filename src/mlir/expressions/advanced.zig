@@ -15,6 +15,7 @@ const LocalVarMap = @import("../symbols.zig").LocalVarMap;
 const expr_helpers = @import("helpers.zig");
 const expr_access = @import("access.zig");
 const expr_literals = @import("literals.zig");
+const refinements = @import("ora_refinements");
 const log = @import("log");
 
 /// ExpressionLowerer type (forward declaration)
@@ -1832,12 +1833,12 @@ pub fn getTypeString(
             .tuple => "tuple",
             .anonymous_struct => "anonymous_struct",
             .module => "module",
-            .min_value => "MinValue",
-            .max_value => "MaxValue",
-            .in_range => "InRange",
-            .scaled => "Scaled",
-            .exact => "Exact",
-            .non_zero_address => "NonZeroAddress",
+            .min_value => refinements.nameForKind(.min_value),
+            .max_value => refinements.nameForKind(.max_value),
+            .in_range => refinements.nameForKind(.in_range),
+            .scaled => refinements.nameForKind(.scaled),
+            .exact => refinements.nameForKind(.exact),
+            .non_zero_address => refinements.nameForKind(.non_zero_address),
             .type => "type",
             .type_parameter => "type_parameter",
         };
