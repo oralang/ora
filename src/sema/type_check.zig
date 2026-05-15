@@ -3565,7 +3565,7 @@ const TypeChecker = struct {
                 const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
                 if (refinements.isPathFormName(trimmed)) {
                     break :blk .{ .refinement = .{
-                        .name = "NonZeroAddress",
+                        .name = refinements.nameForKind(.non_zero_address),
                         .base_type = try self.storeType(.{ .address = {} }),
                         .args = &.{},
                     } };
@@ -5619,7 +5619,7 @@ const TypeChecker = struct {
         args[0] = ast.TypeArg{ .Type = ast.TypeExprId.fromIndex(0) };
         args[1] = ast.TypeArg{ .Integer = .{ .range = undefined, .text = total_text } };
         return .{ .refinement = .{
-            .name = "Scaled",
+            .name = refinements.nameForKind(.scaled),
             .base_type = stored_base,
             .args = args,
         } };

@@ -1,61 +1,21 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const model = @import("model.zig");
+const registry = @import("ora_refinements");
 
-pub const Kind = enum {
-    min_value,
-    max_value,
-    in_range,
-    non_zero_address,
-    non_zero,
-    basis_points,
-    exact,
-    scaled,
-};
-
-pub const Entry = struct {
-    kind: Kind,
-    name: []const u8,
-    has_runtime_guard: bool,
-    compile_time_only: bool = false,
-    has_native_mlir_type: bool,
-    path_form: bool = false,
-};
-
-pub const entries = [_]Entry{
-    .{ .kind = .min_value, .name = "MinValue", .has_runtime_guard = true, .has_native_mlir_type = true },
-    .{ .kind = .max_value, .name = "MaxValue", .has_runtime_guard = true, .has_native_mlir_type = true },
-    .{ .kind = .in_range, .name = "InRange", .has_runtime_guard = true, .has_native_mlir_type = true },
-    .{ .kind = .non_zero_address, .name = "NonZeroAddress", .has_runtime_guard = true, .has_native_mlir_type = true, .path_form = true },
-    .{ .kind = .non_zero, .name = "NonZero", .has_runtime_guard = true, .has_native_mlir_type = false },
-    .{ .kind = .basis_points, .name = "BasisPoints", .has_runtime_guard = true, .has_native_mlir_type = false },
-    .{ .kind = .exact, .name = "Exact", .has_runtime_guard = false, .compile_time_only = true, .has_native_mlir_type = true },
-    .{ .kind = .scaled, .name = "Scaled", .has_runtime_guard = false, .compile_time_only = true, .has_native_mlir_type = true },
-};
-
-pub fn entryForName(name: []const u8) ?Entry {
-    const trimmed = std.mem.trim(u8, name, " \t\n\r");
-    for (entries) |entry| {
-        if (std.mem.eql(u8, trimmed, entry.name)) return entry;
-    }
-    return null;
-}
-
-pub fn kindForName(name: []const u8) ?Kind {
-    return if (entryForName(name)) |entry| entry.kind else null;
-}
-
-pub fn isKnownName(name: []const u8) bool {
-    return entryForName(name) != null;
-}
-
-pub fn isPathFormName(name: []const u8) bool {
-    return if (entryForName(name)) |entry| entry.path_form else false;
-}
-
-pub fn hasNativeMlirTypeName(name: []const u8) bool {
-    return if (entryForName(name)) |entry| entry.has_native_mlir_type else false;
-}
+// Re-export the neutral registry, then add sema-specific helpers that work with
+// model.RefinementType values.
+pub const Kind = registry.Kind;
+pub const Entry = registry.Entry;
+pub const entries = registry.entries;
+pub const entryForName = registry.entryForName;
+pub const entryForKind = registry.entryForKind;
+pub const kindForName = registry.kindForName;
+pub const nameForKind = registry.nameForKind;
+pub const isKnownName = registry.isKnownName;
+pub const isPathFormName = registry.isPathFormName;
+pub const hasNativeMlirTypeName = registry.hasNativeMlirTypeName;
+pub const isBoundsBackedKind = registry.isBoundsBackedKind;
 
 pub fn supportsRuntimeGuard(refinement: model.RefinementType) bool {
     return if (entryForName(refinement.name)) |entry| entry.has_runtime_guard else false;
@@ -101,6 +61,8 @@ pub fn bounds(refinement: model.RefinementType) ?Bounds {
             .min_text = "0",
             .max_text = "10000",
         },
+        // Current numeric comptime validation models NonZero integer literals as
+        // unsigned values, so "not zero" is represented as the lower bound 1.
         .non_zero => .{
             .base_type = refinement.base_type.*,
             .min_text = "1",
@@ -108,6 +70,30 @@ pub fn bounds(refinement: model.RefinementType) ?Bounds {
         .exact => null,
         .scaled => null,
         .non_zero_address => null,
+    };
+}
+
+pub fn expectationText(allocator: std.mem.Allocator, refinement: model.RefinementType) ![]const u8 {
+    const kind = kindForName(refinement.name) orelse
+        return std.fmt.allocPrint(allocator, "expected {s}", .{refinement.name});
+    return switch (kind) {
+        .min_value => blk: {
+            const info = bounds(refinement) orelse break :blk try allocator.dupe(u8, "expected MinValue");
+            break :blk try std.fmt.allocPrint(allocator, "expected MinValue value >= {s}", .{info.min_text.?});
+        },
+        .max_value => blk: {
+            const info = bounds(refinement) orelse break :blk try allocator.dupe(u8, "expected MaxValue");
+            break :blk try std.fmt.allocPrint(allocator, "expected MaxValue value <= {s}", .{info.max_text.?});
+        },
+        .in_range => blk: {
+            const info = bounds(refinement) orelse break :blk try allocator.dupe(u8, "expected InRange");
+            break :blk try std.fmt.allocPrint(allocator, "expected InRange value between {s} and {s}", .{ info.min_text.?, info.max_text.? });
+        },
+        .basis_points => try allocator.dupe(u8, "expected BasisPoints value between 0 and 10000"),
+        .non_zero => try allocator.dupe(u8, "expected NonZero value != 0"),
+        .non_zero_address => try allocator.dupe(u8, "expected NonZeroAddress value != 0"),
+        .exact => try allocator.dupe(u8, "expected Exact"),
+        .scaled => try allocator.dupe(u8, "expected Scaled"),
     };
 }
 
@@ -130,11 +116,28 @@ fn storeType(allocator: std.mem.Allocator, ty: model.Type) !*model.Type {
     return ptr;
 }
 
-test "refinement registry classifies runtime and compile-time-only refinements" {
-    try std.testing.expect(isKnownName("MinValue"));
-    try std.testing.expect(isKnownName("BasisPoints"));
-    try std.testing.expect(isPathFormName("NonZeroAddress"));
-    try std.testing.expect(!isPathFormName("MinValue"));
-    try std.testing.expect(hasNativeMlirTypeName("Exact"));
-    try std.testing.expect(!hasNativeMlirTypeName("BasisPoints"));
+test "refinement registry exposes bounds for bounds-backed refinements" {
+    const base: model.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
+    const ten_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 2 }, .text = "10" } };
+    const twenty_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 2 }, .text = "20" } };
+
+    for (entries) |entry| {
+        if (!isBoundsBackedKind(entry.kind)) continue;
+        const refinement: model.RefinementType = switch (entry.kind) {
+            .min_value, .max_value => .{ .name = entry.name, .base_type = &base, .args = &.{ type_arg, ten_arg } },
+            .in_range => .{ .name = entry.name, .base_type = &base, .args = &.{ type_arg, ten_arg, twenty_arg } },
+            .basis_points, .non_zero => .{ .name = entry.name, .base_type = &base, .args = &.{type_arg} },
+            else => unreachable,
+        };
+        const info = bounds(refinement) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(info.min_text != null or info.max_text != null);
+    }
+
+    const basis_points = bounds(.{ .name = nameForKind(.basis_points), .base_type = &base, .args = &.{type_arg} }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("0", basis_points.min_text.?);
+    try std.testing.expectEqualStrings("10000", basis_points.max_text.?);
+
+    const non_zero = bounds(.{ .name = nameForKind(.non_zero), .base_type = &base, .args = &.{type_arg} }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("1", non_zero.min_text.?);
 }

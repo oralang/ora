@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
+const refinements = ora_root.compiler.sema.refinements;
 
 fn hasLabel(items: []const completion.Item, label: []const u8) bool {
     for (items) |item| {
@@ -100,4 +101,19 @@ test "lsp completion: includes current language keywords and types" {
     try testing.expect(hasLabel(items, "bytes"));
     try testing.expect(hasLabel(items, "slice"));
     try testing.expect(hasLabel(items, "result"));
+}
+
+test "lsp completion: includes registry-backed refinement types" {
+    const source =
+        \\pub fn run() {
+        \\
+        \\}
+    ;
+
+    const position: frontend.Position = .{ .line = 1, .character = 0 };
+
+    const items = try completion.completionAt(testing.allocator, source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    for (refinements.entries) |entry| try testing.expect(hasLabel(items, entry.name));
 }

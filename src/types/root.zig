@@ -7,6 +7,7 @@ pub const source_span = @import("source_span.zig");
 pub const region = @import("region.zig");
 pub const type_info = @import("type_info.zig");
 pub const ast_arena = @import("ast_arena.zig");
+pub const refinements = @import("ora_refinements");
 
 pub const SourceSpan = source_span.SourceSpan;
 pub const MemoryRegion = region.MemoryRegion;

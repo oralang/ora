@@ -2234,6 +2234,50 @@ test "compiler const eval rejects invalid refinement ADT payload construction" {
     try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "expected MinValue value >= 10"));
 }
 
+test "compiler const eval validates registry-backed BasisPoints refinement" {
+    const source_text =
+        \\struct Fees {
+        \\    rate: BasisPoints<u256>,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let fees = Fees { rate: 10001 };
+        \\        fees.rate;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "comptime refinement violation"));
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "expected BasisPoints value between 0 and 10000"));
+}
+
+test "compiler const eval accepts registry-backed BasisPoints boundaries" {
+    const source_text =
+        \\struct Fees {
+        \\    rate: BasisPoints<u256>,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let low = Fees { rate: 0 };
+        \\        let high = Fees { rate: 10000 };
+        \\        low.rate + high.rate;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), consteval.diagnostics.items.items.len);
+}
+
 test "compiler const eval generic calls can return nested generic struct values" {
     const source_text =
         \\struct Pair(comptime T: type) {

@@ -5,6 +5,7 @@ const comptime_mod = @import("mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
+const refinements = @import("../sema/refinements.zig");
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 
@@ -1207,29 +1208,12 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Generic => |generic| blk: {
-                if (!isKnownRefinementName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
+                if (!refinements.isKnownName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
                 const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
-                const base_ptr = try self.allocator.create(model.Type);
-                base_ptr.* = base_type;
-                break :blk model.Type{ .refinement = .{
-                    .name = generic.name,
-                    .base_type = base_ptr,
-                    .args = generic.args,
-                } };
+                break :blk try refinements.refinementType(self.allocator, generic.name, base_type, generic.args);
             },
             else => null,
         };
-    }
-
-    fn isKnownRefinementName(name: []const u8) bool {
-        return std.mem.eql(u8, name, "MinValue") or
-            std.mem.eql(u8, name, "MaxValue") or
-            std.mem.eql(u8, name, "InRange") or
-            std.mem.eql(u8, name, "NonZero") or
-            std.mem.eql(u8, name, "NonZeroAddress") or
-            std.mem.eql(u8, name, "Scaled") or
-            std.mem.eql(u8, name, "Exact") or
-            std.mem.eql(u8, name, "BasisPoints");
     }
 
     fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: model.Type, range: source.TextRange) !bool {
@@ -1240,35 +1224,19 @@ const ConstEvaluator = struct {
     }
 
     fn validateCtValueForRefinement(self: *ConstEvaluator, value: CtValue, refinement: model.RefinementType, range: source.TextRange) !bool {
-        const valid = if (std.mem.eql(u8, refinement.name, "MinValue")) blk: {
-            const min = refinementU256Arg(refinement.args, 1) orelse break :blk true;
+        const valid = if (refinements.bounds(refinement)) |info| blk: {
             const integer = switch (value) {
                 .integer => |integer| integer,
                 else => break :blk true,
             };
-            break :blk integer >= min;
-        } else if (std.mem.eql(u8, refinement.name, "MaxValue")) blk: {
-            const max = refinementU256Arg(refinement.args, 1) orelse break :blk true;
-            const integer = switch (value) {
-                .integer => |integer| integer,
-                else => break :blk true,
-            };
-            break :blk integer <= max;
-        } else if (std.mem.eql(u8, refinement.name, "InRange")) blk: {
-            const min = refinementU256Arg(refinement.args, 1) orelse break :blk true;
-            const max = refinementU256Arg(refinement.args, 2) orelse break :blk true;
-            const integer = switch (value) {
-                .integer => |integer| integer,
-                else => break :blk true,
-            };
-            break :blk integer >= min and integer <= max;
-        } else if (std.mem.eql(u8, refinement.name, "NonZero")) blk: {
-            const integer = switch (value) {
-                .integer => |integer| integer,
-                else => break :blk true,
-            };
-            break :blk integer != 0;
-        } else if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) blk: {
+            if (parseU256Text(info.min_text)) |min| {
+                if (integer < min) break :blk false;
+            }
+            if (parseU256Text(info.max_text)) |max| {
+                if (integer > max) break :blk false;
+            }
+            break :blk true;
+        } else if (refinements.kindForName(refinement.name) == .non_zero_address) blk: {
             const address = switch (value) {
                 .address => |address| address,
                 else => break :blk true,
@@ -1281,34 +1249,14 @@ const ConstEvaluator = struct {
             .not_comptime,
             self.sourceSpan(range),
             "comptime refinement violation",
-            try self.refinementExpectation(refinement),
+            try refinements.expectationText(self.allocator, refinement),
         ));
         return false;
     }
 
-    fn refinementExpectation(self: *ConstEvaluator, refinement: model.RefinementType) ![]const u8 {
-        if (std.mem.eql(u8, refinement.name, "MinValue")) {
-            const min = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected MinValue");
-            return std.fmt.allocPrint(self.allocator, "expected MinValue value >= {d}", .{min});
-        }
-        if (std.mem.eql(u8, refinement.name, "MaxValue")) {
-            const max = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected MaxValue");
-            return std.fmt.allocPrint(self.allocator, "expected MaxValue value <= {d}", .{max});
-        }
-        if (std.mem.eql(u8, refinement.name, "InRange")) {
-            const min = refinementU256Arg(refinement.args, 1) orelse return self.allocator.dupe(u8, "expected InRange");
-            const max = refinementU256Arg(refinement.args, 2) orelse return self.allocator.dupe(u8, "expected InRange");
-            return std.fmt.allocPrint(self.allocator, "expected InRange value between {d} and {d}", .{ min, max });
-        }
-        return std.fmt.allocPrint(self.allocator, "expected {s}", .{refinement.name});
-    }
-
-    fn refinementU256Arg(args: []const ast.TypeArg, index: usize) ?u256 {
-        if (index >= args.len) return null;
-        return switch (args[index]) {
-            .Integer => |integer| std.fmt.parseInt(u256, integer.text, 10) catch null,
-            else => null,
-        };
+    fn parseU256Text(text: ?[]const u8) ?u256 {
+        const raw = text orelse return null;
+        return std.fmt.parseInt(u256, raw, 10) catch null;
     }
 
     fn structFieldValue(self: *ConstEvaluator, struct_data: CtAggregate.StructData, field_index: usize) ?CtValue {
@@ -1588,15 +1536,7 @@ const ConstEvaluator = struct {
             else
                 null,
             .Generic => |generic| blk: {
-                if (std.mem.eql(u8, generic.name, "MinValue") or
-                    std.mem.eql(u8, generic.name, "MaxValue") or
-                    std.mem.eql(u8, generic.name, "InRange") or
-                    std.mem.eql(u8, generic.name, "Scaled") or
-                    std.mem.eql(u8, generic.name, "Exact") or
-                    std.mem.eql(u8, generic.name, "NonZero") or
-                    std.mem.eql(u8, generic.name, "NonZeroAddress") or
-                    std.mem.eql(u8, generic.name, "BasisPoints"))
-                {
+                if (refinements.isKnownName(generic.name)) {
                     if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprByteSize(generic.args[0].Type);
                 }
                 if (self.pathTypeId(generic.name)) |type_id| break :blk self.typeByteSizeForTypeId(type_id);
@@ -1632,15 +1572,7 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Generic => |generic| blk: {
-                if (std.mem.eql(u8, generic.name, "MinValue") or
-                    std.mem.eql(u8, generic.name, "MaxValue") or
-                    std.mem.eql(u8, generic.name, "InRange") or
-                    std.mem.eql(u8, generic.name, "Scaled") or
-                    std.mem.eql(u8, generic.name, "Exact") or
-                    std.mem.eql(u8, generic.name, "NonZero") or
-                    std.mem.eql(u8, generic.name, "NonZeroAddress") or
-                    std.mem.eql(u8, generic.name, "BasisPoints"))
-                {
+                if (refinements.isKnownName(generic.name)) {
                     if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprAbiName(generic.args[0].Type);
                 }
                 var rendered_args: std.ArrayList([]const u8) = .{};

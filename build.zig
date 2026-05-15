@@ -61,6 +61,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const ora_refinements_mod = b.createModule(.{
+        .root_source_file = b.path("src/refinements/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Standalone pipeline modules with explicit dependency boundaries.
     // These enable fast builds/tests for frontend-only work without MLIR/Z3.
@@ -69,6 +74,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ora_types_mod.addImport("ora_refinements", ora_refinements_mod);
 
     const ora_lexer_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer.zig"),
@@ -108,9 +114,11 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("log", log_mod);
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
     exe_mod.addImport("ora_types", ora_types_mod);
+    exe_mod.addImport("ora_refinements", ora_refinements_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("log", log_mod);
     lib_mod.addImport("ora_types", ora_types_mod);
+    lib_mod.addImport("ora_refinements", ora_refinements_mod);
     lib_mod.addImport("ora_lexer", ora_lexer_mod);
     lib_mod.addImport("ora_imports", ora_imports_mod);
 

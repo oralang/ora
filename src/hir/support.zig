@@ -148,34 +148,35 @@ pub fn isRefinementTypeName(name: []const u8) bool {
 }
 
 pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg) ?mlir.MlirType {
-    if (std.mem.eql(u8, name, "MinValue")) {
-        const value = parseRefinementIntArg(args, 1) orelse return null;
-        const words = splitU256IntoU64Words(value);
-        return mlir.oraMinValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
-    }
-    if (std.mem.eql(u8, name, "MaxValue")) {
-        const value = parseRefinementIntArg(args, 1) orelse return null;
-        const words = splitU256IntoU64Words(value);
-        return mlir.oraMaxValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
-    }
-    if (std.mem.eql(u8, name, "InRange")) {
-        const min_value = parseRefinementIntArg(args, 1) orelse return null;
-        const max_value = parseRefinementIntArg(args, 2) orelse return null;
-        const min_words = splitU256IntoU64Words(min_value);
-        const max_words = splitU256IntoU64Words(max_value);
-        return mlir.oraInRangeTypeGet(ctx, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
-    }
-    if (std.mem.eql(u8, name, "Scaled")) {
-        const decimals = parseRefinementIntArg(args, 1) orelse return null;
-        return mlir.oraScaledTypeGet(ctx, base_type, @intCast(decimals));
-    }
-    if (std.mem.eql(u8, name, "Exact")) {
-        return mlir.oraExactTypeGet(ctx, base_type);
-    }
-    if (std.mem.eql(u8, name, "NonZeroAddress")) {
-        return mlir.oraNonZeroAddressTypeGet(ctx);
-    }
-    return null;
+    const entry = sema.refinements.entryForName(name) orelse return null;
+    if (!entry.has_native_mlir_type) return null;
+
+    return switch (entry.kind) {
+        .min_value => blk: {
+            const value = parseRefinementIntArg(args, 1) orelse return null;
+            const words = splitU256IntoU64Words(value);
+            break :blk mlir.oraMinValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
+        },
+        .max_value => blk: {
+            const value = parseRefinementIntArg(args, 1) orelse return null;
+            const words = splitU256IntoU64Words(value);
+            break :blk mlir.oraMaxValueTypeGet(ctx, base_type, words.high_high, words.high_low, words.low_high, words.low_low);
+        },
+        .in_range => blk: {
+            const min_value = parseRefinementIntArg(args, 1) orelse return null;
+            const max_value = parseRefinementIntArg(args, 2) orelse return null;
+            const min_words = splitU256IntoU64Words(min_value);
+            const max_words = splitU256IntoU64Words(max_value);
+            break :blk mlir.oraInRangeTypeGet(ctx, base_type, min_words.high_high, min_words.high_low, min_words.low_high, min_words.low_low, max_words.high_high, max_words.high_low, max_words.low_high, max_words.low_low);
+        },
+        .scaled => blk: {
+            const decimals = parseRefinementIntArg(args, 1) orelse return null;
+            break :blk mlir.oraScaledTypeGet(ctx, base_type, @intCast(decimals));
+        },
+        .exact => mlir.oraExactTypeGet(ctx, base_type),
+        .non_zero_address => mlir.oraNonZeroAddressTypeGet(ctx),
+        .non_zero, .basis_points => unreachable,
+    };
 }
 
 fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
@@ -190,6 +191,20 @@ fn parseU256Literal(text: []const u8) ?u256 {
     const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
     const digits = if (base == 10) text else text[2..];
     return std.fmt.parseInt(u256, digits, base) catch null;
+}
+
+test "HIR refinement type builder follows registry native type classification" {
+    const ctx = try createContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const base_type = defaultIntegerType(ctx);
+    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
+    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } };
+
+    try std.testing.expect(buildRefinementType(ctx, "NonZero", base_type, &.{type_arg}) == null);
+
+    const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!mlir.oraTypeIsNull(min_type));
 }
 
 fn splitU256IntoU64Words(x: u256) struct {

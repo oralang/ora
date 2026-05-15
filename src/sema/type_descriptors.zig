@@ -10,7 +10,7 @@ pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.Ast
     return switch (file.typeExpr(type_expr_id).*) {
         .Path => |path| if (refinements.isPathFormName(path.name))
             .{ .refinement = .{
-                .name = "NonZeroAddress",
+                .name = refinements.nameForKind(.non_zero_address),
                 .base_type = try storeType(allocator, .{ .address = {} }),
                 .args = &.{},
             } }

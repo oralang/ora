@@ -7,6 +7,7 @@ const crypto = std.crypto;
 const compiler = @import("compiler.zig");
 const compiler_abi = @import("hir/abi.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
+const sema_refinements = @import("sema/refinements.zig");
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
@@ -1330,7 +1331,7 @@ const CompilerAbiGenerator = struct {
                 if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{});
                 if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{});
                 if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
-                if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{});
+                if (sema_refinements.isPathFormName(named.name)) return self.resolveSemaType(ctx, .address, &.{});
                 if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
                 if (parseFixedBytesSpelling(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
                 return error.UnsupportedAbiType;
@@ -1667,48 +1668,54 @@ const CompilerAbiGenerator = struct {
         const base = try self.resolveSemaType(ctx, refinement.base_type.*, &.{});
 
         var predicate_json: []const u8 = try self.buildExactPredicate();
+        errdefer self.allocator.free(predicate_json);
         var ui_hints = UiHints{};
+        errdefer {
+            if (ui_hints.min) |min| self.allocator.free(min);
+            if (ui_hints.max) |max| self.allocator.free(max);
+        }
 
-        if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) {
-            self.allocator.free(predicate_json);
-            predicate_json = try self.buildNonZeroAddressPredicate();
-            ui_hints.widget = "address";
-        } else if (std.mem.eql(u8, refinement.name, "Scaled")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const decimals = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildScaledPredicate(@intCast(decimals));
-                ui_hints.widget = "number";
-                ui_hints.decimals = @intCast(decimals);
+        if (sema_refinements.kindForName(refinement.name)) |kind| {
+            switch (kind) {
+                .non_zero_address => {
+                    const next_predicate = try self.buildNonZeroAddressPredicate();
+                    self.allocator.free(predicate_json);
+                    predicate_json = next_predicate;
+                    ui_hints.widget = "address";
+                },
+                .non_zero => {
+                    const next_predicate = try self.buildNonZeroPredicate();
+                    self.allocator.free(predicate_json);
+                    predicate_json = next_predicate;
+                    ui_hints.widget = "number";
+                },
+                .scaled => {
+                    if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
+                        const decimals = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse return error.UnsupportedAbiType;
+                        const next_predicate = try self.buildScaledPredicate(@intCast(decimals));
+                        self.allocator.free(predicate_json);
+                        predicate_json = next_predicate;
+                        ui_hints.widget = "number";
+                        ui_hints.decimals = @intCast(decimals);
+                    }
+                },
+                .min_value, .max_value, .in_range, .basis_points => {
+                    const bounds = sema_refinements.bounds(refinement) orelse return error.UnsupportedAbiType;
+                    const built = try buildBoundsBackedPredicate(self.allocator, bounds);
+                    self.allocator.free(predicate_json);
+                    predicate_json = built.predicate_json;
+                    ui_hints.widget = "number";
+                    if (built.min_value) |value| {
+                        ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+                    }
+                    if (built.max_value) |value| {
+                        ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+                    }
+                },
+                .exact => {
+                    ui_hints.widget = "number";
+                },
             }
-        } else if (std.mem.eql(u8, refinement.name, "MinValue")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildMinPredicate(min_value);
-                ui_hints.widget = "number";
-                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "MaxValue")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const max_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildMaxPredicate(max_value);
-                ui_hints.widget = "number";
-                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "InRange")) {
-            if (refinement.args.len >= 3 and refinement.args[1] == .Integer and refinement.args[2] == .Integer) {
-                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                const max_value = parseUnsignedIntLiteral(refinement.args[2].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildRangePredicate(min_value, max_value);
-                ui_hints.widget = "number";
-                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
-                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "Exact")) {
-            ui_hints.widget = "number";
         }
 
         var node = AbiTypeNode{
@@ -1767,18 +1774,6 @@ const CompilerAbiGenerator = struct {
         return self.types.items[new_index].type_id.?;
     }
 
-    fn buildMinPredicate(self: *CompilerAbiGenerator, min_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"min\",\"value\":\"{d}\"}}", .{min_value});
-    }
-
-    fn buildMaxPredicate(self: *CompilerAbiGenerator, max_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"max\",\"value\":\"{d}\"}}", .{max_value});
-    }
-
-    fn buildRangePredicate(self: *CompilerAbiGenerator, min_value: u256, max_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"range\",\"min\":\"{d}\",\"max\":\"{d}\"}}", .{ min_value, max_value });
-    }
-
     fn buildScaledPredicate(self: *CompilerAbiGenerator, decimals: u32) anyerror![]const u8 {
         return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"scaled\",\"decimals\":{d}}}", .{decimals});
     }
@@ -1787,10 +1782,70 @@ const CompilerAbiGenerator = struct {
         return self.allocator.dupe(u8, "{\"kind\":\"exact\"}");
     }
 
+    fn buildNonZeroPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
+        return self.allocator.dupe(u8, "{\"kind\":\"nonZero\"}");
+    }
+
     fn buildNonZeroAddressPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
         return self.allocator.dupe(u8, "{\"kind\":\"nonZeroAddress\"}");
     }
 };
+
+const BoundsBackedPredicate = struct {
+    predicate_json: []const u8,
+    min_value: ?u256 = null,
+    max_value: ?u256 = null,
+};
+
+fn buildBoundsBackedPredicate(allocator: std.mem.Allocator, bounds: sema_refinements.Bounds) !BoundsBackedPredicate {
+    const min_value = if (bounds.min_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
+    const max_value = if (bounds.max_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
+
+    const predicate_json = if (min_value != null and max_value != null)
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"range\",\"min\":\"{d}\",\"max\":\"{d}\"}}", .{ min_value.?, max_value.? })
+    else if (min_value) |value|
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"min\",\"value\":\"{d}\"}}", .{value})
+    else if (max_value) |value|
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"max\",\"value\":\"{d}\"}}", .{value})
+    else
+        return error.UnsupportedAbiType;
+
+    return .{
+        .predicate_json = predicate_json,
+        .min_value = min_value,
+        .max_value = max_value,
+    };
+}
+
+test "ABI bounds-backed predicates fail closed for malformed registry bounds" {
+    const base: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .min_text = "not-an-int",
+    }));
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .max_text = "not-an-int",
+    }));
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+    }));
+}
+
+test "ABI bounds-backed predicates preserve range metadata" {
+    const base: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const built = try buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .min_text = "0",
+        .max_text = "10000",
+    });
+    defer std.testing.allocator.free(built.predicate_json);
+
+    try std.testing.expectEqualStrings("{\"kind\":\"range\",\"min\":\"0\",\"max\":\"10000\"}", built.predicate_json);
+    try std.testing.expectEqual(@as(?u256, 0), built.min_value);
+    try std.testing.expectEqual(@as(?u256, 10000), built.max_value);
+}
 
 fn functionHasBareSelf(file: *const compiler.AstFile, function: compiler.ast.FunctionItem) bool {
     if (function.parameters.len == 0) return false;

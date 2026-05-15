@@ -16,6 +16,7 @@ const lib = @import("ora_lib");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const compiler = lib.compiler;
+const refinements = compiler.sema.refinements;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
@@ -1972,14 +1973,16 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
 
         // Print user-friendly explanation.
         if (parsed) |g| {
-            if (std.mem.eql(u8, g.refinement_kind, "NonZeroAddress")) {
-                try stdout.print("     -> `{s}` can be the zero address\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "MinValue")) {
-                try stdout.print("     -> `{s}` can be zero (below minimum)\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "MaxValue")) {
-                try stdout.print("     -> `{s}` can exceed maximum value\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "InRange")) {
-                try stdout.print("     -> `{s}` can be out of range\n", .{g.variable_name});
+            if (refinements.kindForName(g.refinement_kind)) |kind| {
+                switch (kind) {
+                    .non_zero_address => try stdout.print("     -> `{s}` can be the zero address\n", .{g.variable_name}),
+                    .non_zero => try stdout.print("     -> `{s}` can be zero\n", .{g.variable_name}),
+                    .min_value => try stdout.print("     -> `{s}` can be below the minimum value\n", .{g.variable_name}),
+                    .max_value => try stdout.print("     -> `{s}` can exceed the maximum value\n", .{g.variable_name}),
+                    .in_range, .basis_points => try stdout.print("     -> `{s}` can be out of range\n", .{g.variable_name}),
+                    // Compile-time-only refinements never produce runtime guard violations.
+                    .exact, .scaled => {},
+                }
             }
         }
     }
@@ -1990,6 +1993,25 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
     for (diagnostics) |diag| {
         try stdout.print("  {s}\n", .{diag.guard_id});
     }
+}
+
+test "verification diagnostics explain registry-backed NonZero guard violations" {
+    const allocator = std.testing.allocator;
+    var counterexample = z3_errors.Counterexample.init(allocator);
+    defer counterexample.deinit();
+
+    var diagnostics = [_]z3_errors.Diagnostic{.{
+        .guard_id = "guard:test.ora:1:2:3:NonZero:amount",
+        .function_name = "deposit",
+        .counterexample = counterexample,
+        .allocator = allocator,
+    }};
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(allocator);
+
+    try printVerificationDiagnostics(buffer.writer(allocator), diagnostics[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "`amount` can be zero") != null);
 }
 
 fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {

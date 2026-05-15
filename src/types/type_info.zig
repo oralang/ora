@@ -19,6 +19,7 @@
 // ============================================================================
 
 const std = @import("std");
+const refinements = @import("ora_refinements");
 const SourceSpan = @import("source_span.zig").SourceSpan;
 const MemoryRegion = @import("region.zig").MemoryRegion;
 
@@ -686,7 +687,8 @@ pub const OraType = union(enum) {
             .type => try writer.writeAll("type"),
             .type_parameter => |name| try writer.writeAll(name),
             .min_value => |mv| {
-                try writer.writeAll("MinValue<");
+                try writer.writeAll(refinements.nameForKind(.min_value));
+                try writer.writeByte('<');
                 try (@constCast(mv.base).*).render(writer);
                 try writer.writeAll(", ");
                 var buf: [32]u8 = undefined;
@@ -695,7 +697,8 @@ pub const OraType = union(enum) {
                 try writer.writeByte('>');
             },
             .max_value => |mv| {
-                try writer.writeAll("MaxValue<");
+                try writer.writeAll(refinements.nameForKind(.max_value));
+                try writer.writeByte('<');
                 try (@constCast(mv.base).*).render(writer);
                 try writer.writeAll(", ");
                 var buf: [32]u8 = undefined;
@@ -704,7 +707,8 @@ pub const OraType = union(enum) {
                 try writer.writeByte('>');
             },
             .in_range => |ir| {
-                try writer.writeAll("InRange<");
+                try writer.writeAll(refinements.nameForKind(.in_range));
+                try writer.writeByte('<');
                 try (@constCast(ir.base).*).render(writer);
                 try writer.writeAll(", ");
                 var buf_min: [32]u8 = undefined;
@@ -717,7 +721,8 @@ pub const OraType = union(enum) {
                 try writer.writeByte('>');
             },
             .scaled => |s| {
-                try writer.writeAll("Scaled<");
+                try writer.writeAll(refinements.nameForKind(.scaled));
+                try writer.writeByte('<');
                 try (@constCast(s.base).*).render(writer);
                 try writer.writeAll(", ");
                 var buf: [32]u8 = undefined;
@@ -726,12 +731,13 @@ pub const OraType = union(enum) {
                 try writer.writeByte('>');
             },
             .exact => |e| {
-                try writer.writeAll("Exact<");
+                try writer.writeAll(refinements.nameForKind(.exact));
+                try writer.writeByte('<');
                 try (@constCast(e).*).render(writer);
                 try writer.writeByte('>');
             },
             .non_zero_address => {
-                try writer.writeAll("NonZeroAddress");
+                try writer.writeAll(refinements.nameForKind(.non_zero_address));
             },
         }
     }

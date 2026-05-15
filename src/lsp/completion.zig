@@ -1,5 +1,6 @@
 const std = @import("std");
 const frontend = @import("frontend.zig");
+const refinements = @import("ora_refinements");
 const semantic_index = @import("semantic_index.zig");
 
 const Allocator = std.mem.Allocator;
@@ -112,11 +113,6 @@ const keyword_candidates = [_][]const u8{
     "bytes",
     "map",
     "slice",
-    // Refinement types
-    "MinValue",
-    "MaxValue",
-    "InRange",
-    "NonZeroAddress",
     // Builtins
     "self",
     "extern",
@@ -161,6 +157,17 @@ pub fn completionAt(
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, keyword),
             .documentation = if (keywordDocumentation(keyword)) |doc| try allocator.dupe(u8, doc) else null,
+            .kind = .keyword,
+        });
+    }
+
+    for (refinements.entries) |entry| {
+        if (!matchesPrefix(entry.name, prefix)) continue;
+        if (seen.contains(entry.name)) continue;
+
+        try seen.put(entry.name, {});
+        try items.append(allocator, .{
+            .label = try allocator.dupe(u8, entry.name),
             .kind = .keyword,
         });
     }

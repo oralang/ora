@@ -148,6 +148,43 @@ test "compiler abi emits fixed bytes public ABI types" {
     return error.TestUnexpectedResult;
 }
 
+test "compiler abi emits registry-backed refinement predicates" {
+    const source_text =
+        \\contract C {
+        \\    pub fn configure(rate: BasisPoints<u256>, amount: NonZero<u256>, owner: NonZeroAddress) -> BasisPoints<u256> {
+        \\        return rate;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    var contract_abi = try ora_root.abi.generateCompilerAbi(testing.allocator, &compilation);
+    defer contract_abi.deinit();
+
+    for (contract_abi.callables) |callable| {
+        if (callable.kind != .function or !std.mem.eql(u8, callable.name, "configure")) continue;
+        try testing.expectEqual(@as(usize, 3), callable.inputs.len);
+        try testing.expectEqual(@as(usize, 1), callable.outputs.len);
+
+        const rate = contract_abi.findType(callable.inputs[0].type_id) orelse return error.TestUnexpectedResult;
+        const amount = contract_abi.findType(callable.inputs[1].type_id) orelse return error.TestUnexpectedResult;
+        const owner = contract_abi.findType(callable.inputs[2].type_id) orelse return error.TestUnexpectedResult;
+        const output = contract_abi.findType(callable.outputs[0].type_id) orelse return error.TestUnexpectedResult;
+
+        try testing.expectEqualStrings("{\"kind\":\"range\",\"min\":\"0\",\"max\":\"10000\"}", rate.predicate_json.?);
+        try testing.expectEqualStrings("{\"kind\":\"nonZero\"}", amount.predicate_json.?);
+        try testing.expectEqualStrings("{\"kind\":\"nonZeroAddress\"}", owner.predicate_json.?);
+        try testing.expectEqualStrings("{\"kind\":\"range\",\"min\":\"0\",\"max\":\"10000\"}", output.predicate_json.?);
+        try testing.expectEqualStrings("uint256", rate.wire_type.?);
+        try testing.expectEqualStrings("uint256", amount.wire_type.?);
+        try testing.expectEqualStrings("address", owner.wire_type.?);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "compiler abi keeps anonymous structs distinct from tuples" {
     const source_text =
         \\contract Test {
