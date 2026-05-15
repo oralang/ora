@@ -35,7 +35,35 @@ pub fn renderSirTextForModule(context: mlir.MlirContext, module: mlir.MlirModule
 }
 
 pub fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {
-    return compiler.compilePackage(testing.allocator, root_path);
+    const resolved_path = try resolvePackageFixturePath(root_path);
+    defer testing.allocator.free(resolved_path);
+    return compiler.compilePackage(testing.allocator, resolved_path);
+}
+
+fn resolvePackageFixturePath(root_path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(root_path)) {
+        return testing.allocator.dupe(u8, root_path);
+    }
+
+    if (pathExists(root_path)) {
+        return testing.allocator.dupe(u8, root_path);
+    }
+
+    const parent_prefixes = [_][]const u8{ "..", "../..", "../../..", "../../../..", "../../../../.." };
+    for (parent_prefixes) |prefix| {
+        const candidate = try std.fs.path.join(testing.allocator, &.{ prefix, root_path });
+        if (pathExists(candidate)) {
+            return candidate;
+        }
+        testing.allocator.free(candidate);
+    }
+
+    return testing.allocator.dupe(u8, root_path);
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }
 
 pub fn expectOraToSirConverts(path: []const u8) !void {
