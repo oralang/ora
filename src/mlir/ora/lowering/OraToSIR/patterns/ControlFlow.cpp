@@ -536,11 +536,18 @@ static void buildWideErrorUnionReturnFromParts(
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type);
+// Error unions have two SIR encodings. Narrow unions fit in one u256 word
+// as (payload << 1) | tag. Wide unions lower to two values: a u256 tag and a
+// carrier for the success payload. Scalar payloads use u256; aggregate or
+// dynamic payloads use a ptr carrier. Callers must pass the expected carrier
+// explicitly so a struct/tuple/bytes payload is not silently reinterpreted as
+// u256 while threading try/catch or function-call control flow.
 static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
     Value operand,
-    SmallVectorImpl<Value> &outValues);
+    SmallVectorImpl<Value> &outValues,
+    Type payloadCarrierType);
 
 static std::optional<Value> materializeNarrowErrorUnionPackedValue(
     PatternRewriter &rewriter,
@@ -656,7 +663,7 @@ static LogicalResult appendConvertedCompositeValues(
 {
     if (targetGroup.size() == 2 && llvm::isa<ora::ErrorUnionType>(value.getType()))
     {
-        return materializeWideErrorUnion(rewriter, loc, value, out);
+        return materializeWideErrorUnion(rewriter, loc, value, out, targetGroup[1]);
     }
 
     if (targetGroup.size() == 2 && llvm::isa<ora::AdtType>(value.getType()))
@@ -694,6 +701,36 @@ static LogicalResult appendConvertedCompositeValues(
     return success();
 }
 
+static Value materializeValueForTargetType(
+    PatternRewriter &rewriter,
+    Location loc,
+    const TypeConverter *tc,
+    Value value,
+    Type targetType)
+{
+    if (!value || !targetType)
+        return Value();
+    if (value.getType() == targetType)
+        return value;
+    if (llvm::isa<sir::U256Type>(targetType))
+        return ensureU256(rewriter, loc, value);
+    if (tc)
+    {
+        if (Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, value))
+            return converted;
+    }
+    if (llvm::isa<sir::PtrType>(targetType) &&
+        (llvm::isa<sir::U256Type, sir::PtrType>(value.getType()) ||
+         llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                   ora::StringType, ora::BytesType, mlir::MemRefType, mlir::UnrankedMemRefType>(value.getType())))
+    {
+        return rewriter.create<sir::BitcastOp>(loc, targetType, value);
+    }
+    if (llvm::isa<sir::U256Type, sir::PtrType>(value.getType()))
+        return rewriter.create<sir::BitcastOp>(loc, targetType, value);
+    return Value();
+}
+
 static LogicalResult appendConvertedCallArgument(
     PatternRewriter &rewriter,
     Location loc,
@@ -713,18 +750,32 @@ static LogicalResult appendConvertedCallArgument(
                                     !isNarrowErrorUnion(errType);
         if (useWideCarrier)
         {
+            Type payloadCarrierType = getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType());
             SmallVector<Value> wideParts;
-            if (succeeded(materializeWideErrorUnion(rewriter, loc, operand, wideParts)) && wideParts.size() == 2)
+            if (succeeded(materializeWideErrorUnion(rewriter, loc, operand, wideParts, payloadCarrierType)) &&
+                wideParts.size() == 2)
             {
-                out.push_back(ensureU256(rewriter, loc, wideParts[0]));
-                out.push_back(ensureU256(rewriter, loc, wideParts[1]));
+                Value tag = materializeValueForTargetType(
+                    rewriter, loc, typeConverter, wideParts[0], sir::U256Type::get(rewriter.getContext()));
+                Value payload = materializeValueForTargetType(
+                    rewriter, loc, typeConverter, wideParts[1], payloadCarrierType);
+                if (!tag || !payload)
+                    return failure();
+                out.push_back(tag);
+                out.push_back(payload);
                 return success();
             }
 
             if (convertedOperandIndex + 1 < adaptorOperands.size())
             {
-                out.push_back(ensureU256(rewriter, loc, adaptorOperands[convertedOperandIndex]));
-                out.push_back(ensureU256(rewriter, loc, adaptorOperands[convertedOperandIndex + 1]));
+                Value tag = materializeValueForTargetType(
+                    rewriter, loc, typeConverter, adaptorOperands[convertedOperandIndex], sir::U256Type::get(rewriter.getContext()));
+                Value payload = materializeValueForTargetType(
+                    rewriter, loc, typeConverter, adaptorOperands[convertedOperandIndex + 1], payloadCarrierType);
+                if (!tag || !payload)
+                    return failure();
+                out.push_back(tag);
+                out.push_back(payload);
                 convertedOperandIndex += 2;
                 return success();
             }
@@ -838,7 +889,7 @@ static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
 {
     if (!ctx)
         return Type();
-    if (llvm::isa<ora::TupleType, ora::StructType, ora::StringType, ora::BytesType,
+    if (llvm::isa<sir::PtrType, ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                   mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
         return sir::PtrType::get(ctx, /*addrSpace*/ 1);
     return sir::U256Type::get(ctx);
@@ -848,7 +899,8 @@ static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
     Value operand,
-    SmallVectorImpl<Value> &outValues)
+    SmallVectorImpl<Value> &outValues,
+    Type payloadCarrierType)
 {
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
@@ -857,39 +909,75 @@ static LogicalResult materializeWideErrorUnion(
     Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, 0));
 
     auto toU256 = [&](Value v) -> Value { return ensureU256(rewriter, loc, v); };
+    auto appendPayload = [&](Value v) -> LogicalResult {
+        Type carrierType = payloadCarrierType;
+        if (!carrierType)
+        {
+            if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
+                carrierType = getWideErrorUnionCarrierType(ctx, errType.getSuccessType());
+        }
+        if (!carrierType || v.getType() == carrierType)
+        {
+            outValues.push_back(v);
+            return success();
+        }
+        if (llvm::isa<sir::PtrType>(carrierType))
+        {
+            if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, loc, carrierType, v))
+            {
+                outValues.push_back(*materialized);
+                return success();
+            }
+            if (llvm::isa<sir::U256Type>(v.getType()))
+            {
+                outValues.push_back(rewriter.create<sir::BitcastOp>(loc, carrierType, v));
+                return success();
+            }
+            if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                          ora::StringType, ora::BytesType, mlir::MemRefType, mlir::UnrankedMemRefType>(v.getType()))
+            {
+                outValues.push_back(rewriter.create<sir::BitcastOp>(loc, carrierType, v));
+                return success();
+            }
+            outValues.push_back(rewriter.create<sir::BitcastOp>(loc, carrierType, toU256(v)));
+            return success();
+        }
+        if (llvm::isa<sir::U256Type>(carrierType))
+        {
+            outValues.push_back(toU256(v));
+            return success();
+        }
+        outValues.push_back(rewriter.create<sir::BitcastOp>(loc, carrierType, v));
+        return success();
+    };
 
     if (auto okOp = operand.getDefiningOp<ora::ErrorOkOp>())
     {
         outValues.push_back(zero);
-        outValues.push_back(toU256(okOp.getValue()));
-        return success();
+        return appendPayload(okOp.getValue());
     }
     if (auto errOp = operand.getDefiningOp<ora::ErrorErrOp>())
     {
         outValues.push_back(one);
-        outValues.push_back(toU256(errOp.getValue()));
-        return success();
+        return appendPayload(errOp.getValue());
     }
     if (auto cst = operand.getDefiningOp<sir::ConstOp>())
     {
         if (cst->hasAttr("ora.error_id"))
         {
             outValues.push_back(one);
-            outValues.push_back(toU256(operand));
-            return success();
+            return appendPayload(operand);
         }
         // Treat raw constants as ok payloads for wide unions.
         outValues.push_back(zero);
-        outValues.push_back(toU256(operand));
-        return success();
+        return appendPayload(operand);
     }
     if (auto castOp = operand.getDefiningOp<mlir::UnrealizedConversionCastOp>())
     {
         if (castOp.getNumOperands() == 2)
         {
             outValues.push_back(toU256(castOp.getOperand(0)));
-            outValues.push_back(toU256(castOp.getOperand(1)));
-            return success();
+            return appendPayload(castOp.getOperand(1));
         }
         if (castOp.getNumOperands() == 1)
         {
@@ -900,8 +988,7 @@ static LogicalResult materializeWideErrorUnion(
                 Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
                 Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, packed, one);
                 outValues.push_back(tag);
-                outValues.push_back(payload);
-                return success();
+                return appendPayload(payload);
             }
         }
     }
@@ -914,13 +1001,12 @@ static LogicalResult materializeWideErrorUnion(
             Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
             Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, packed, one);
             outValues.push_back(tag);
-            outValues.push_back(payload);
-            return success();
+            return appendPayload(payload);
         }
 
         SmallVector<Type, 2> splitTypes;
         splitTypes.push_back(u256Type);
-        splitTypes.push_back(getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType()));
+        splitTypes.push_back(payloadCarrierType ? payloadCarrierType : getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType()));
         auto split = createWideErrorUnionSplitCast(
             rewriter,
             loc,
@@ -1671,7 +1757,9 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         }
         if (!isErrU256)
         {
-            auto wideRes = materializeWideErrorUnion(rewriter, loc, unwrap->getOperand(0), wideParts);
+            Type payloadCarrierType = getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
+            auto wideRes = materializeWideErrorUnion(
+                rewriter, loc, unwrap->getOperand(0), wideParts, payloadCarrierType);
             if (succeeded(wideRes) && wideParts.size() == 2)
             {
                 Value tag = ensureU256(rewriter, loc, wideParts[0]);
@@ -1701,7 +1789,10 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                         llvm::isa<ora::ErrorUnionType>(cast.getOperand(0).getType()))
                     {
                         SmallVector<Value> castParts;
-                        if (succeeded(materializeWideErrorUnion(rewriter, loc, cast.getOperand(0), castParts)) &&
+                        Type payloadCarrierType =
+                            getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
+                        if (succeeded(materializeWideErrorUnion(
+                                rewriter, loc, cast.getOperand(0), castParts, payloadCarrierType)) &&
                             castParts.size() == 2)
                         {
                             Value tag = ensureU256(rewriter, loc, castParts[0]);
@@ -1797,11 +1888,13 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
     auto *tc = getTypeConverter();
 
     SmallVector<Type> resultTypes;
+    SmallVector<SmallVector<Type>> resultTypeGroups;
     for (Type t : op.getResultTypes())
     {
         SmallVector<Type> convertedTypes;
         if (!tc || failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty())
             return rewriter.notifyMatchFailure(op, "failed to convert try_stmt result type");
+        resultTypeGroups.push_back(convertedTypes);
         resultTypes.append(convertedTypes.begin(), convertedTypes.end());
     }
     SmallVector<ora::ErrorUnwrapOp, 4> unwraps;
@@ -1867,7 +1960,7 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
                 rewriter.eraseOp(y);
                 continue;
             }
-            if (y.getNumOperands() != resultTypes.size())
+            if (y.getNumOperands() != resultTypeGroups.size())
             {
                 // Allow empty yield for value-typed try_stmt by supplying default zeros.
                 if (y.getNumOperands() == 0 && !resultTypes.empty())
@@ -1924,21 +2017,11 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
             }
             rewriter.setInsertionPoint(y);
             SmallVector<Value> convertedOperands;
-            convertedOperands.reserve(y.getNumOperands());
+            convertedOperands.reserve(resultTypes.size());
             for (auto [idx, operand] : llvm::enumerate(y.getOperands()))
             {
-                Type targetType = mergeBlock->getArgument(idx).getType();
-                if (operand.getType() == targetType)
-                {
-                    convertedOperands.push_back(operand);
-                    continue;
-                }
-                if (!tc)
-                    return rewriter.notifyMatchFailure(y, "missing type converter");
-                Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
-                if (!converted)
+                if (failed(appendConvertedCompositeValues(rewriter, loc, tc, operand, resultTypeGroups[idx], convertedOperands)))
                     return rewriter.notifyMatchFailure(y, "failed to materialize try_stmt yield operand");
-                convertedOperands.push_back(converted);
             }
             rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
         }
@@ -1972,13 +2055,25 @@ LogicalResult ConvertTryStmtOp::matchAndRewrite(
         rewriter.eraseOp(op);
     else
     {
-        if (static_cast<unsigned>(mergeBlock->getNumArguments()) != op.getNumResults())
+        if (static_cast<unsigned>(mergeBlock->getNumArguments()) != resultTypes.size())
         {
             return rewriter.notifyMatchFailure(op, "try_stmt result/merge mismatch");
         }
         rewriter.setInsertionPointToStart(mergeBlock);
-        op->replaceAllUsesWith(mergeBlock->getArguments());
-        rewriter.eraseOp(op);
+        SmallVector<SmallVector<Value>> replacementGroups;
+        replacementGroups.reserve(resultTypeGroups.size());
+        auto args = mergeBlock->getArguments();
+        unsigned offset = 0;
+        for (auto &group : resultTypeGroups)
+        {
+            SmallVector<Value> groupValues;
+            groupValues.reserve(group.size());
+            for (unsigned i = 0; i < group.size(); ++i)
+                groupValues.push_back(args[offset + i]);
+            replacementGroups.push_back(std::move(groupValues));
+            offset += group.size();
+        }
+        rewriter.replaceOpWithMultiple(op, replacementGroups);
     }
 
     return success();
@@ -2323,7 +2418,11 @@ static LogicalResult convertErrorIsError(
         else
         {
             SmallVector<Value, 2> wideParts;
-            if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts)) &&
+            auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType());
+            Type payloadCarrierType = errType
+                                          ? getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
+                                          : u256Type;
+            if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts, payloadCarrierType)) &&
                 wideParts.size() >= 1)
             {
                 Value tag = ensureU256(rewriter, loc, wideParts[0]);
@@ -2368,7 +2467,11 @@ static LogicalResult convertErrorIsError(
     {
         // Wide error unions can arrive here with no adapted operands in phase 2.
         SmallVector<Value, 2> wideParts;
-        if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts)) &&
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType());
+        Type payloadCarrierType = errType
+                                      ? getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
+                                      : u256Type;
+        if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts, payloadCarrierType)) &&
             wideParts.size() >= 1)
         {
             Value tag = ensureU256(rewriter, loc, wideParts[0]);
@@ -2943,8 +3046,20 @@ LogicalResult ConvertCallOp::matchAndRewrite(
                             (funcArgForcesWideErrorUnion(callCallee, calleeInputIndex) || !isNarrowErrorUnion(errType));
                         if (useWideCarrier)
                         {
-                            rewrittenOperands.push_back(ensureU256(rewriter, callUser.getLoc(), replaced[0]));
-                            rewrittenOperands.push_back(ensureU256(rewriter, callUser.getLoc(), replaced[1]));
+                            Type tagType = calleeInputIndex < calleeType.getNumInputs()
+                                               ? calleeType.getInput(calleeInputIndex)
+                                               : sir::U256Type::get(callUser.getContext());
+                            Type payloadType = calleeInputIndex + 1 < calleeType.getNumInputs()
+                                                   ? calleeType.getInput(calleeInputIndex + 1)
+                                                   : getWideErrorUnionCarrierType(callUser.getContext(), errType.getSuccessType());
+                            Value tag = materializeValueForTargetType(
+                                rewriter, callUser.getLoc(), typeConverter, replaced[0], tagType);
+                            Value payload = materializeValueForTargetType(
+                                rewriter, callUser.getLoc(), typeConverter, replaced[1], payloadType);
+                            if (!tag || !payload)
+                                return rewriter.notifyMatchFailure(callUser, "unable to rematerialize forwarded wide error-union operand");
+                            rewrittenOperands.push_back(tag);
+                            rewrittenOperands.push_back(payload);
                             calleeInputIndex += 2;
                             continue;
                         }
@@ -3623,7 +3738,10 @@ namespace
         }
 
         SmallVector<Value> parts;
-        if (succeeded(materializeWideErrorUnion(c.rewriter, c.loc, c.op.getOperand(0), parts)) &&
+        Type payloadCarrierType = c.u256Type;
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.op.getOperand(0).getType()))
+            payloadCarrierType = getWideErrorUnionCarrierType(c.op.getContext(), errType.getSuccessType());
+        if (succeeded(materializeWideErrorUnion(c.rewriter, c.loc, c.op.getOperand(0), parts, payloadCarrierType)) &&
             parts.size() == 2)
         {
             buildWideErrorUnionReturnFromParts(
@@ -5637,7 +5755,7 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                 else
                 {
                     convertedTypes.push_back(u256);
-                    convertedTypes.push_back(u256);
+                    convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
                 }
             }
             if (convertedTypes.empty())

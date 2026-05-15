@@ -91,7 +91,7 @@ namespace
     {
         if (!ctx)
             return Type();
-        if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
+        if (llvm::isa<sir::PtrType, ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                       mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
             return sir::PtrType::get(ctx, /*addrSpace*/ 1);
         return sir::U256Type::get(ctx);

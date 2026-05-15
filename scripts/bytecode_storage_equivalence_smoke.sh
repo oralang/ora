@@ -82,6 +82,19 @@ set -euo pipefail
 #   dispatcher decoding and Sensei internal-call argument transfer
 # - two deployed contracts preserve storage isolation across a state-changing
 #   external call: caller storage remains unchanged while callee storage mutates
+#   and caller-side storage can be driven by scalar and structured external-call
+#   return data, including a single external call that both mutates callee state
+#   and returns structured data consumed by the caller
+# - failed external calls are catchable by `try`/`catch`; uncaught failed
+#   external calls bubble as transaction reverts and roll back caller writes
+# - out-of-gas external calls with no typed revert payload are catchable by
+#   `try`/`catch`, and uncaught OOG failures roll back caller writes
+# - a three-contract A -> B -> C call chain preserves each contract's storage
+#   namespace while return data propagates across both external-call boundaries
+# - a two-hop A -> B -> C try/catch path lets B catch C's revert, commit B's
+#   catch-state, return normally, and let A commit based on that return value
+# - an uncaught two-hop A -> B -> C revert rolls back pre-call writes in both
+#   A and B while preserving C's prior state
 
 RPC_URL="${RPC_URL:-http://127.0.0.1:8547}"
 ORA_BIN="${ORA_BIN:-./zig-out/bin/ora}"
@@ -274,6 +287,33 @@ send_contract_tx() {
   [[ "$status" == "0x1" || "$status" == "1" ]] || fail "$label failed with status=$status"
 }
 
+send_contract_tx_expect_revert() {
+  local addr="$1"
+  local label="$2"
+  local signature="$3"
+  shift 3
+  local out rc tx_hash receipt status
+
+  set +e
+  out="$(cast send --no-proxy --rpc-url "$RPC_URL" --async --unlocked --from "$DEPLOYER" "$addr" "$signature" "$@" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    ok "$label reverted"
+    return 0
+  fi
+
+  tx_hash="$(extract_tx_hash "$out")"
+  [[ -n "$tx_hash" ]] || fail "expected $label to revert, but transaction hash was not found"
+
+  receipt="$(wait_receipt_json "$tx_hash")" || fail "timed out waiting for $label revert receipt"
+  status="$(receipt_json_field "$receipt" status)"
+  [[ "$status" == "0x0" || "$status" == "0" ]] || fail "expected $label to revert, but status=$status"
+
+  ok "$label reverted"
+}
+
 send_increment() {
   local out tx_hash receipt status
 
@@ -306,7 +346,8 @@ compile_bytecode() {
   local output="$2"
 
   echo "Compiling $source" >&2
-  "$ORA_BIN" --emit-bytecode -o "$output" "$source" >&2
+  rm -f "$output"
+  "$ORA_BIN" --emit-bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
 
   read_compiled_bytecode "$output"
 }
@@ -316,7 +357,8 @@ compile_bytecode_without_verification() {
   local output="$2"
 
   echo "Compiling $source with --no-verify for deployed-runtime smoke" >&2
-  "$ORA_BIN" --no-verify --emit-bytecode -o "$output" "$source" >&2
+  rm -f "$output"
+  "$ORA_BIN" --no-verify --emit-bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
 
   read_compiled_bytecode "$output"
 }
@@ -2228,6 +2270,13 @@ write_multicontract_callee_fixture() {
   local source="$1"
 
   cat >"$source" <<'ORA'
+struct Snapshot {
+    current: u256,
+    tag: u256,
+}
+
+error ExternalCallFailed;
+
 contract ExternalCallTargetSmoke {
     storage var value: u256;
 
@@ -2239,6 +2288,19 @@ contract ExternalCallTargetSmoke {
     pub fn get_value() -> u256 {
         return value;
     }
+
+    pub fn snapshot() -> Snapshot {
+        return Snapshot { current: value, tag: 1234 };
+    }
+
+    pub fn set_and_snapshot(next: u256) -> Snapshot {
+        value = next;
+        return Snapshot { current: value, tag: 5678 };
+    }
+
+    pub fn always_fail() -> !u256 | ExternalCallFailed {
+        return ExternalCallFailed;
+    }
 }
 ORA
 }
@@ -2249,15 +2311,27 @@ write_multicontract_caller_fixture() {
   cat >"$source" <<'ORA'
 extern trait Target {
     call fn set_value(self, next: u256) -> bool;
+    call fn get_value(self) -> u256;
 }
 
 error ExternalCallFailed;
 
 contract ExternalCallCallerSmoke {
     storage var local: u256;
+    storage var observed: u256;
 
     pub fn call_target(target: address, next: u256) -> !bool | ExternalCallFailed {
         return external<Target>(target, gas: 50000).set_value(next);
+    }
+
+    pub fn pull_target(target: address) -> bool {
+        try {
+            let value: u256 = try external<Target>(target, gas: 50000).get_value();
+            observed = value;
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     pub fn mark_local(next: u256) {
@@ -2266,6 +2340,236 @@ contract ExternalCallCallerSmoke {
 
     pub fn get_local() -> u256 {
         return local;
+    }
+
+    pub fn get_observed() -> u256 {
+        return observed;
+    }
+}
+ORA
+}
+
+write_multicontract_snapshot_caller_fixture() {
+  local source="$1"
+
+  cat >"$source" <<'ORA'
+struct Snapshot {
+    current: u256,
+    tag: u256,
+}
+
+extern trait TargetSnapshot {
+    call fn snapshot(self) -> Snapshot;
+    call fn set_and_snapshot(self, next: u256) -> Snapshot;
+    call fn always_fail(self) -> u256;
+}
+
+error ExternalCallFailed;
+
+contract ExternalCallSnapshotCallerSmoke {
+    storage var observed_current: u256;
+    storage var observed_tag: u256;
+
+    pub fn pull_snapshot(target: address) -> bool {
+        try {
+            let snapshot: Snapshot = try external<TargetSnapshot>(target, gas: 50000).snapshot();
+            observed_current = snapshot.current;
+            observed_tag = snapshot.tag;
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    pub fn push_snapshot(target: address, next: u256) -> bool {
+        try {
+            let snapshot: Snapshot = try external<TargetSnapshot>(target, gas: 100000).set_and_snapshot(next);
+            observed_current = snapshot.current;
+            observed_tag = snapshot.tag;
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    pub fn catch_failure(target: address) -> bool {
+        try {
+            let value: u256 = try external<TargetSnapshot>(target, gas: 50000).always_fail();
+            observed_current = value;
+            observed_tag = 9090;
+            return true;
+        } catch {
+            observed_tag = 4242;
+            return false;
+        }
+    }
+
+    pub fn bubble_failure(target: address) -> !u256 | ExternalCallFailed {
+        observed_current = 1111;
+        return external<TargetSnapshot>(target, gas: 50000).always_fail();
+    }
+
+    pub fn catch_oog(target: address) -> bool {
+        try {
+            let snapshot: Snapshot = try external<TargetSnapshot>(target, gas: 1).snapshot();
+            observed_current = snapshot.current;
+            observed_tag = snapshot.tag;
+            return true;
+        } catch {
+            observed_tag = 5151;
+            return false;
+        }
+    }
+
+    pub fn bubble_oog(target: address) -> !u256 | ExternalCallFailed {
+        observed_current = 2222;
+        return external<TargetSnapshot>(target, gas: 1).always_fail();
+    }
+
+    pub fn get_observed_current() -> u256 {
+        return observed_current;
+    }
+
+    pub fn get_observed_tag() -> u256 {
+        return observed_tag;
+    }
+}
+ORA
+}
+
+write_multicontract_chain_leaf_fixture() {
+  local source="$1"
+
+  cat >"$source" <<'ORA'
+error ExternalCallFailed;
+
+contract ExternalCallChainLeafSmoke {
+    storage var value: u256;
+
+    pub fn set_and_get(next: u256) -> u256 {
+        value = next;
+        return value;
+    }
+
+    pub fn always_fail() -> !u256 | ExternalCallFailed {
+        return ExternalCallFailed;
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+}
+ORA
+}
+
+write_multicontract_chain_middle_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+extern trait ChainLeaf {
+    call fn set_and_get(self, next: u256) -> u256;
+    call fn always_fail(self) -> u256;
+}
+
+error ExternalCallFailed;
+
+contract ExternalCallChainMiddleSmoke {
+    storage var local: u256;
+    storage var observed_leaf: u256;
+
+    pub fn call_leaf(leaf: address, next: u256) -> u256 {
+        local = next + 2;
+        try {
+            let leaf_value: u256 = try external<ChainLeaf>(leaf, gas: 50000).set_and_get(next);
+            observed_leaf = leaf_value;
+            return leaf_value + 10;
+        } catch {
+            observed_leaf = 5555;
+            return 0;
+        }
+    }
+
+    pub fn catch_leaf_failure(leaf: address, next: u256) -> u256 {
+        local = next + 20;
+        try {
+            let leaf_value: u256 = try external<ChainLeaf>(leaf, gas: 50000).always_fail();
+            observed_leaf = leaf_value;
+            return 9090;
+        } catch {
+            observed_leaf = 7777;
+            return 8888;
+        }
+    }
+
+    pub fn bubble_leaf_failure(leaf: address, next: u256) -> !u256 | ExternalCallFailed {
+        local = next + 40;
+        return external<ChainLeaf>(leaf, gas: 50000).always_fail();
+    }
+
+    pub fn get_local() -> u256 {
+        return local;
+    }
+
+    pub fn get_observed_leaf() -> u256 {
+        return observed_leaf;
+    }
+}
+ORA
+}
+
+write_multicontract_chain_root_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+extern trait ChainMiddle {
+    call fn call_leaf(self, leaf: address, next: u256) -> u256;
+    call fn catch_leaf_failure(self, leaf: address, next: u256) -> u256;
+    call fn bubble_leaf_failure(self, leaf: address, next: u256) -> u256;
+}
+
+error ExternalCallFailed;
+
+contract ExternalCallChainRootSmoke {
+    storage var local: u256;
+    storage var observed_middle: u256;
+
+    pub fn call_chain(middle: address, leaf: address, next: u256) -> bool {
+        local = next + 3;
+        try {
+            let middle_value: u256 = try external<ChainMiddle>(middle, gas: 100000).call_leaf(leaf, next);
+            observed_middle = middle_value;
+            return true;
+        } catch {
+            observed_middle = 6666;
+            return false;
+        }
+    }
+
+    pub fn call_chain_catch(middle: address, leaf: address, next: u256) -> bool {
+        local = next + 30;
+        try {
+            let middle_value: u256 = try external<ChainMiddle>(middle, gas: 100000).catch_leaf_failure(leaf, next);
+            observed_middle = middle_value;
+            return true;
+        } catch {
+            observed_middle = 6666;
+            return false;
+        }
+    }
+
+    pub fn bubble_chain_failure(middle: address, leaf: address, next: u256) -> !bool | ExternalCallFailed {
+        local = next + 50;
+        let middle_value: u256 = try external<ChainMiddle>(middle, gas: 100000).bubble_leaf_failure(leaf, next);
+        observed_middle = middle_value;
+        return true;
+    }
+
+    pub fn get_local() -> u256 {
+        return local;
+    }
+
+    pub fn get_observed_middle() -> u256 {
+        return observed_middle;
     }
 }
 ORA
@@ -2309,6 +2613,203 @@ assert_multicontract_caller() {
   [[ "$getter" == "$expected" ]] || fail "external-call caller getter mismatch: expected=$expected got=$getter"
 
   ok "external-call caller getter equals $expected"
+}
+
+assert_multicontract_caller_observed() {
+  local addr="$1"
+  local expected="$2"
+  local getter_raw getter
+
+  assert_contract_raw_slot "$addr" 1 "$expected" "external-call caller observed"
+  getter_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_observed()(uint256)")"
+  getter="$(normalize_uint "$getter_raw")"
+  [[ "$getter" == "$expected" ]] || fail "external-call caller observed getter mismatch: expected=$expected got=$getter"
+
+  ok "external-call caller observed getter equals $expected"
+}
+
+assert_multicontract_caller_snapshot() {
+  local addr="$1"
+  local expected_current="$2"
+  local expected_tag="$3"
+  local current_raw current tag_raw tag
+
+  assert_contract_raw_slot "$addr" 0 "$expected_current" "external-call snapshot caller observed_current"
+  assert_contract_raw_slot "$addr" 1 "$expected_tag" "external-call snapshot caller observed_tag"
+  current_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_observed_current()(uint256)")"
+  current="$(normalize_uint "$current_raw")"
+  [[ "$current" == "$expected_current" ]] || fail "external-call caller observed_current getter mismatch: expected=$expected_current got=$current"
+
+  tag_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_observed_tag()(uint256)")"
+  tag="$(normalize_uint "$tag_raw")"
+  [[ "$tag" == "$expected_tag" ]] || fail "external-call caller observed_tag getter mismatch: expected=$expected_tag got=$tag"
+
+  ok "external-call caller structured observed getters equal [current=$expected_current, tag=$expected_tag]"
+}
+
+assert_multicontract_snapshot_try_success() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local result_raw result
+
+  result_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$caller_addr" "pull_snapshot(address)(bool)" "$target_addr")"
+  result="$(normalize_bool "$result_raw")"
+  [[ "$result" == "true" ]] || fail "external-call snapshot try/catch returned $result"
+
+  ok "external-call snapshot try/catch success path returns true"
+}
+
+assert_multicontract_push_snapshot_try_success() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local value="$3"
+  local result_raw result
+
+  result_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$caller_addr" "push_snapshot(address,uint256)(bool)" "$target_addr" "$value")"
+  result="$(normalize_bool "$result_raw")"
+  [[ "$result" == "true" ]] || fail "external-call mutating snapshot try/catch returned $result"
+
+  ok "external-call mutating snapshot try/catch success path returns true"
+}
+
+assert_multicontract_failure_try_catch_returns_false() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local result_raw result
+
+  # eth_call pins the catch branch's return value; the later transaction pins
+  # the same catch path's committed storage effects.
+  result_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$caller_addr" "catch_failure(address)(bool)" "$target_addr")"
+  result="$(normalize_bool "$result_raw")"
+  [[ "$result" == "false" ]] || fail "external-call failure try/catch returned $result"
+
+  ok "external-call failure try/catch path returns false"
+}
+
+send_multicontract_push_snapshot() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local value="$3"
+
+  send_contract_tx "$caller_addr" "external-call caller push_snapshot" "push_snapshot(address,uint256)" "$target_addr" "$value"
+}
+
+send_multicontract_catch_failure() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx "$caller_addr" "external-call caller catch_failure" "catch_failure(address)" "$target_addr"
+}
+
+assert_multicontract_oog_try_catch_returns_false() {
+  local caller_addr="$1"
+  local target_addr="$2"
+  local result_raw result
+
+  result_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$caller_addr" "catch_oog(address)(bool)" "$target_addr")"
+  result="$(normalize_bool "$result_raw")"
+  [[ "$result" == "false" ]] || fail "external-call OOG try/catch returned $result"
+
+  ok "external-call OOG try/catch path returns false"
+}
+
+send_multicontract_catch_oog() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx "$caller_addr" "external-call caller catch_oog" "catch_oog(address)" "$target_addr"
+}
+
+send_multicontract_bubble_failure_expect_revert() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx_expect_revert "$caller_addr" "external-call caller bubble_failure" "bubble_failure(address)" "$target_addr"
+}
+
+send_multicontract_bubble_oog_expect_revert() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx_expect_revert "$caller_addr" "external-call caller bubble_oog" "bubble_oog(address)" "$target_addr"
+}
+
+assert_multicontract_chain_leaf() {
+  local addr="$1"
+  local expected="$2"
+  local getter_raw getter
+
+  assert_contract_raw_slot "$addr" 0 "$expected" "external-call chain leaf"
+  getter_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_value()(uint256)")"
+  getter="$(normalize_uint "$getter_raw")"
+  [[ "$getter" == "$expected" ]] || fail "external-call chain leaf getter mismatch: expected=$expected got=$getter"
+
+  ok "external-call chain leaf getter equals $expected"
+}
+
+assert_multicontract_chain_middle() {
+  local addr="$1"
+  local expected_local="$2"
+  local expected_observed="$3"
+  local local_raw local_value observed_raw observed
+
+  assert_contract_raw_slot "$addr" 0 "$expected_local" "external-call chain middle local"
+  assert_contract_raw_slot "$addr" 1 "$expected_observed" "external-call chain middle observed_leaf"
+  local_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_local()(uint256)")"
+  local_value="$(normalize_uint "$local_raw")"
+  [[ "$local_value" == "$expected_local" ]] || fail "external-call chain middle local getter mismatch: expected=$expected_local got=$local_value"
+
+  observed_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_observed_leaf()(uint256)")"
+  observed="$(normalize_uint "$observed_raw")"
+  [[ "$observed" == "$expected_observed" ]] || fail "external-call chain middle observed getter mismatch: expected=$expected_observed got=$observed"
+
+  ok "external-call chain middle getters equal [local=$expected_local, observed_leaf=$expected_observed]"
+}
+
+assert_multicontract_chain_root() {
+  local addr="$1"
+  local expected_local="$2"
+  local expected_observed="$3"
+  local local_raw local_value observed_raw observed
+
+  assert_contract_raw_slot "$addr" 0 "$expected_local" "external-call chain root local"
+  assert_contract_raw_slot "$addr" 1 "$expected_observed" "external-call chain root observed_middle"
+  local_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_local()(uint256)")"
+  local_value="$(normalize_uint "$local_raw")"
+  [[ "$local_value" == "$expected_local" ]] || fail "external-call chain root local getter mismatch: expected=$expected_local got=$local_value"
+
+  observed_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_observed_middle()(uint256)")"
+  observed="$(normalize_uint "$observed_raw")"
+  [[ "$observed" == "$expected_observed" ]] || fail "external-call chain root observed getter mismatch: expected=$expected_observed got=$observed"
+
+  ok "external-call chain root getters equal [local=$expected_local, observed_middle=$expected_observed]"
+}
+
+send_multicontract_chain_call() {
+  local root_addr="$1"
+  local middle_addr="$2"
+  local leaf_addr="$3"
+  local value="$4"
+
+  send_contract_tx "$root_addr" "external-call chain call_chain" "call_chain(address,address,uint256)" "$middle_addr" "$leaf_addr" "$value"
+}
+
+send_multicontract_chain_catch_call() {
+  local root_addr="$1"
+  local middle_addr="$2"
+  local leaf_addr="$3"
+  local value="$4"
+
+  send_contract_tx "$root_addr" "external-call chain call_chain_catch" "call_chain_catch(address,address,uint256)" "$middle_addr" "$leaf_addr" "$value"
+}
+
+send_multicontract_chain_bubble_failure_expect_revert() {
+  local root_addr="$1"
+  local middle_addr="$2"
+  local leaf_addr="$3"
+  local value="$4"
+
+  send_contract_tx_expect_revert "$root_addr" "external-call chain bubble_chain_failure" "bubble_chain_failure(address,address,uint256)" "$middle_addr" "$leaf_addr" "$value"
 }
 
 assert_mapping_raw_slot() {
@@ -6166,6 +6667,20 @@ send_multicontract_call_target() {
   send_contract_tx "$caller_addr" "external-call caller call_target" "call_target(address,uint256)" "$target_addr" "$value"
 }
 
+send_multicontract_pull_target() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx "$caller_addr" "external-call caller pull_target" "pull_target(address)" "$target_addr"
+}
+
+send_multicontract_pull_snapshot() {
+  local caller_addr="$1"
+  local target_addr="$2"
+
+  send_contract_tx "$caller_addr" "external-call caller pull_snapshot" "pull_snapshot(address)" "$target_addr"
+}
+
 send_multicontract_mark_local() {
   local caller_addr="$1"
   local value="$2"
@@ -7851,6 +8366,14 @@ write_multicontract_caller_fixture "$MULTICONTRACT_CALLER_SOURCE"
 # bytecode behavior. This is not an SMT verification claim.
 MULTICONTRACT_CALLER_BYTECODE="$(compile_bytecode_without_verification "$MULTICONTRACT_CALLER_SOURCE" "$MULTICONTRACT_CALLER_BYTECODE_FILE")"
 
+MULTICONTRACT_SNAPSHOT_CALLER_SOURCE="$WORK_DIR/multicontract_snapshot_caller_smoke.ora"
+MULTICONTRACT_SNAPSHOT_CALLER_BYTECODE_FILE="$WORK_DIR/multicontract_snapshot_caller_smoke.hex"
+write_multicontract_snapshot_caller_fixture "$MULTICONTRACT_SNAPSHOT_CALLER_SOURCE"
+# This caller also contains an unresolved external call, but its purpose is the
+# structured return-data path: the callee returns a two-word struct and the
+# caller stores both decoded fields locally.
+MULTICONTRACT_SNAPSHOT_CALLER_BYTECODE="$(compile_bytecode_without_verification "$MULTICONTRACT_SNAPSHOT_CALLER_SOURCE" "$MULTICONTRACT_SNAPSHOT_CALLER_BYTECODE_FILE")"
+
 echo "Deploying multi-contract callee bytecode"
 MULTICONTRACT_CALLEE_ADDR="$(deploy_contract "$MULTICONTRACT_CALLEE_BYTECODE")"
 ok "deployed multi-contract callee $MULTICONTRACT_CALLEE_ADDR"
@@ -7859,17 +8382,142 @@ echo "Deploying multi-contract caller bytecode"
 MULTICONTRACT_CALLER_ADDR="$(deploy_contract "$MULTICONTRACT_CALLER_BYTECODE")"
 ok "deployed multi-contract caller $MULTICONTRACT_CALLER_ADDR"
 
+echo "Deploying multi-contract snapshot caller bytecode"
+MULTICONTRACT_SNAPSHOT_CALLER_ADDR="$(deploy_contract "$MULTICONTRACT_SNAPSHOT_CALLER_BYTECODE")"
+ok "deployed multi-contract snapshot caller $MULTICONTRACT_SNAPSHOT_CALLER_ADDR"
+
 assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 0
 assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 0 0
 send_multicontract_call_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 42
 assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
 assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 0 0
+send_multicontract_pull_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 42
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 0 0
+assert_multicontract_snapshot_try_success "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+send_multicontract_pull_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 0
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 42
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 42 1234
 send_multicontract_mark_local "$MULTICONTRACT_CALLER_ADDR" 7
 assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 42
 assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 42
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 42 1234
 send_multicontract_call_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 99
 assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 99
 assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 42
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 42 1234
+send_multicontract_pull_target "$MULTICONTRACT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 99
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 42 1234
+assert_multicontract_snapshot_try_success "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+send_multicontract_pull_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 99
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 99 1234
+assert_multicontract_push_snapshot_try_success "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 99
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 99 1234
+send_multicontract_push_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 5678
+assert_multicontract_failure_try_catch_returns_false "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 5678
+send_multicontract_catch_failure "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 4242
+send_multicontract_bubble_failure_expect_revert "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 4242
+assert_multicontract_oog_try_catch_returns_false "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 4242
+send_multicontract_catch_oog "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 5151
+send_multicontract_bubble_oog_expect_revert "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" "$MULTICONTRACT_CALLEE_ADDR"
+assert_multicontract_callee "$MULTICONTRACT_CALLEE_ADDR" 123
+assert_multicontract_caller "$MULTICONTRACT_CALLER_ADDR" 7
+assert_multicontract_caller_observed "$MULTICONTRACT_CALLER_ADDR" 99
+assert_multicontract_caller_snapshot "$MULTICONTRACT_SNAPSHOT_CALLER_ADDR" 123 5151
+
+MULTICONTRACT_CHAIN_LEAF_SOURCE="$WORK_DIR/multicontract_chain_leaf_smoke.ora"
+MULTICONTRACT_CHAIN_LEAF_BYTECODE_FILE="$WORK_DIR/multicontract_chain_leaf_smoke.hex"
+write_multicontract_chain_leaf_fixture "$MULTICONTRACT_CHAIN_LEAF_SOURCE"
+MULTICONTRACT_CHAIN_LEAF_BYTECODE="$(compile_bytecode "$MULTICONTRACT_CHAIN_LEAF_SOURCE" "$MULTICONTRACT_CHAIN_LEAF_BYTECODE_FILE")"
+
+MULTICONTRACT_CHAIN_MIDDLE_SOURCE="$WORK_DIR/multicontract_chain_middle_smoke.ora"
+MULTICONTRACT_CHAIN_MIDDLE_BYTECODE_FILE="$WORK_DIR/multicontract_chain_middle_smoke.hex"
+write_multicontract_chain_middle_fixture "$MULTICONTRACT_CHAIN_MIDDLE_SOURCE"
+# The middle contract contains an unresolved external call to the leaf; this is
+# deployed-runtime bytecode coverage, not source-level SMT verification.
+MULTICONTRACT_CHAIN_MIDDLE_BYTECODE="$(compile_bytecode_without_verification "$MULTICONTRACT_CHAIN_MIDDLE_SOURCE" "$MULTICONTRACT_CHAIN_MIDDLE_BYTECODE_FILE")"
+
+MULTICONTRACT_CHAIN_ROOT_SOURCE="$WORK_DIR/multicontract_chain_root_smoke.ora"
+MULTICONTRACT_CHAIN_ROOT_BYTECODE_FILE="$WORK_DIR/multicontract_chain_root_smoke.hex"
+write_multicontract_chain_root_fixture "$MULTICONTRACT_CHAIN_ROOT_SOURCE"
+# The root contract contains an unresolved external call to the middle; this is
+# deployed-runtime bytecode coverage, not source-level SMT verification.
+MULTICONTRACT_CHAIN_ROOT_BYTECODE="$(compile_bytecode_without_verification "$MULTICONTRACT_CHAIN_ROOT_SOURCE" "$MULTICONTRACT_CHAIN_ROOT_BYTECODE_FILE")"
+
+echo "Deploying multi-contract chain leaf bytecode"
+MULTICONTRACT_CHAIN_LEAF_ADDR="$(deploy_contract "$MULTICONTRACT_CHAIN_LEAF_BYTECODE")"
+ok "deployed multi-contract chain leaf $MULTICONTRACT_CHAIN_LEAF_ADDR"
+
+echo "Deploying multi-contract chain middle bytecode"
+MULTICONTRACT_CHAIN_MIDDLE_ADDR="$(deploy_contract "$MULTICONTRACT_CHAIN_MIDDLE_BYTECODE")"
+ok "deployed multi-contract chain middle $MULTICONTRACT_CHAIN_MIDDLE_ADDR"
+
+echo "Deploying multi-contract chain root bytecode"
+MULTICONTRACT_CHAIN_ROOT_ADDR="$(deploy_contract "$MULTICONTRACT_CHAIN_ROOT_BYTECODE")"
+ok "deployed multi-contract chain root $MULTICONTRACT_CHAIN_ROOT_ADDR"
+
+assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 0
+assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 0 0
+assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 0 0
+send_multicontract_chain_call "$MULTICONTRACT_CHAIN_ROOT_ADDR" "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" "$MULTICONTRACT_CHAIN_LEAF_ADDR" 211
+assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 211
+assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 213 211
+assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 214 221
+send_multicontract_chain_call "$MULTICONTRACT_CHAIN_ROOT_ADDR" "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" "$MULTICONTRACT_CHAIN_LEAF_ADDR" 17
+assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 17
+assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 19 17
+assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 20 27
+send_multicontract_chain_catch_call "$MULTICONTRACT_CHAIN_ROOT_ADDR" "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" "$MULTICONTRACT_CHAIN_LEAF_ADDR" 31
+assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 17
+assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 51 7777
+assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 61 8888
+send_multicontract_chain_bubble_failure_expect_revert "$MULTICONTRACT_CHAIN_ROOT_ADDR" "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" "$MULTICONTRACT_CHAIN_LEAF_ADDR" 71
+assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 17
+assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 51 7777
+assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 61 8888
 
 MAP_NESTED_STRUCT_SOURCE="$WORK_DIR/map_nested_struct_storage_smoke.ora"
 MAP_NESTED_STRUCT_BYTECODE_FILE="$WORK_DIR/map_nested_struct_storage_smoke.hex"

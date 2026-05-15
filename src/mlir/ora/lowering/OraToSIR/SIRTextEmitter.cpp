@@ -74,8 +74,8 @@ namespace
                         std::string n = nameAttr.getValue().str();
                         if (!n.empty())
                         {
-                            // Allow consts to reuse explicit names across blocks
-                            // only if they share the same value attribute.
+                            // Sensei locals are block-scoped. Explicit const
+                            // names can only be reused within the same block.
                             if (auto cOp = dyn_cast<sir::ConstOp>(def))
                             {
                                 auto existing = constNames.find(n);
@@ -86,10 +86,16 @@ namespace
                                     usedNames.insert(n);
                                     return n;
                                 }
-                                // Same name already registered — reuse only if same value.
+                                // Same name already registered: reuse only for
+                                // an earlier const in this block. Sensei locals
+                                // are block-scoped, so sharing a const name
+                                // across blocks emits a reference to a local
+                                // that is not in scope.
                                 if (auto prevConst = existing->second.getDefiningOp<sir::ConstOp>())
                                 {
-                                    if (prevConst.getValueAttr() == cOp.getValueAttr())
+                                    if (prevConst.getValueAttr() == cOp.getValueAttr() &&
+                                        prevConst->getBlock() == def->getBlock() &&
+                                        prevConst->isBeforeInBlock(def))
                                     {
                                         valueNames[v] = n;
                                         return n;
@@ -662,7 +668,7 @@ namespace
         }
     }
 
-    static Value peelBitcast(Value v)
+    static Value peelBitcast(Value v, Block *scope = nullptr)
     {
         while (auto *def = v.getDefiningOp())
         {
@@ -670,7 +676,14 @@ namespace
             {
                 if (def->getNumOperands() == 1)
                 {
-                    v = bitcast.getOperand();
+                    Value operand = bitcast.getOperand();
+                    if (scope)
+                    {
+                        Operation *operandDef = operand.getDefiningOp();
+                        if (!operandDef || operandDef->getBlock() != scope)
+                            break;
+                    }
+                    v = operand;
                     continue;
                 }
             }
@@ -689,7 +702,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(br.getDestOperands().size());
             for (Value v : br.getDestOperands())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         if (auto br = dyn_cast<sir::CondBrOp>(term))
@@ -697,7 +710,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(br.getTrueOperands().size());
             for (Value v : br.getTrueOperands())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         if (auto iret = dyn_cast<sir::IRetOp>(term))
@@ -705,7 +718,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(iret.getValues().size());
             for (Value v : iret.getValues())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         return {};
@@ -742,6 +755,9 @@ namespace
         SmallVector<Block *, 16> blocks;
         for (Block &block : func.getBlocks())
         {
+            const bool isFirstBlock = first;
+            first = false;
+
             std::string blockName;
             if (!block.empty())
             {
@@ -751,10 +767,9 @@ namespace
 
             if (blockName.empty())
             {
-                if (first)
+                if (isFirstBlock)
                 {
                     blockName = "entry";
-                    first = false;
                 }
                 else
                 {
@@ -1013,6 +1028,9 @@ namespace mlir
                 unsigned bbId = 0;
                 for (Block &block : func.getBlocks())
                 {
+                    const bool isFirstBlock = first;
+                    first = false;
+
                     std::string blockName;
                     if (!block.empty())
                     {
@@ -1021,10 +1039,9 @@ namespace mlir
                     }
                     if (blockName.empty())
                     {
-                        if (first)
+                        if (isFirstBlock)
                         {
                             blockName = "entry";
-                            first = false;
                         }
                         else
                         {
