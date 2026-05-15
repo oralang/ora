@@ -26,7 +26,7 @@ const diagnosticMessagesContain = h.diagnosticMessagesContain;
 const countDiagnosticMessages = h.countDiagnosticMessages;
 const DiagnosticProbePhase = h.DiagnosticProbePhase;
 const expectDiagnosticProbeContains = h.expectDiagnosticProbeContains;
-const containsEffectSlot = h.containsEffectSlot;
+const containsFieldEffectSlot = h.containsFieldEffectSlot;
 const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
@@ -54,14 +54,167 @@ test "compiler lowers ensures on implicit void returns" {
     try testing.expect(ensures_index < return_index);
 }
 
-test "compiler rejects reserved modifies clauses before verification" {
+test "compiler accepts v1 modifies storage paths" {
     const source_text =
         \\contract Vault {
-        \\    storage var total: u256 = 0;
+        \\    struct Config {
+        \\        owner: address,
+        \\    }
         \\
-        \\    pub fn run(value: u256)
+        \\    storage total: u256 = 0;
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\    storage buckets: map<u256, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn run(owner: address, spender: address, value: u256)
         \\        modifies total
+        \\        modifies config.owner
+        \\        modifies balances[owner]
+        \\        modifies balances[msg.sender]
+        \\        modifies balances[tx.origin]
+        \\        modifies buckets[42]
+        \\        modifies allowances[owner][spender]
         \\        ensures total == value
+        \\    {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn comma(owner: address)
+        \\        modifies balances[owner], total
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects unsupported modifies paths fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\    storage users: map<u256, address>;
+        \\
+        \\    pub fn complex(i: u256)
+        \\        modifies balances[users[i]]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn external_name(owner: address)
+        \\        modifies caller_storage[owner]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` v1 only supports current-contract storage paths"));
+}
+
+test "compiler enforces modifies declarations against storage writes" {
+    const source_text =
+        \\contract Vault {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage total: u256 = 0;
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies balances[owner], total, config.owner
+        \\    {
+        \\        balances[owner] = value;
+        \\        total = value;
+        \\        config.owner = owner;
+        \\    }
+        \\
+        \\    pub fn wrong_param(owner: address, other: address, value: u256)
+        \\        modifies balances[owner]
+        \\    {
+        \\        balances[other] = value;
+        \\    }
+        \\
+        \\    pub fn wrong_sender_origin(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        balances[tx.origin] = value;
+        \\    }
+        \\
+        \\    pub fn wrong_field(next_admin: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.admin = next_admin;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    var wrong_param: ?compiler.ast.ItemId = null;
+    var wrong_sender_origin: ?compiler.ast.ItemId = null;
+    var wrong_field: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "wrong_param")) wrong_param = member_id;
+                if (std.mem.eql(u8, function.name, "wrong_sender_origin")) wrong_sender_origin = member_id;
+                if (std.mem.eql(u8, function.name, "wrong_field")) wrong_field = member_id;
+            },
+            else => {},
+        }
+    }
+    const other_key = [_]compiler.sema.KeySegment{.{ .parameter = 1 }};
+    const tx_origin_key = [_]compiler.sema.KeySegment{.{ .tx_origin = {} }};
+    const admin_field = [_][]const u8{"admin"};
+
+    switch (typecheck.itemEffect(wrong_param.?)) {
+        .reads_writes => |effect| try testing.expect(containsKeyedEffectSlot(effect.writes, "balances", .storage, &other_key)),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(wrong_sender_origin.?)) {
+        .reads_writes => |effect| try testing.expect(containsKeyedEffectSlot(effect.writes, "balances", .storage, &tx_origin_key)),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(wrong_field.?)) {
+        .writes => |effect| try testing.expect(containsFieldEffectSlot(effect.slots, "config", .storage, &admin_field)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[other]' is not covered by this function's `modifies` clause"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[tx.origin]' is not covered by this function's `modifies` clause"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler treats modifies empty form as no storage writes" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn ok(user: address) -> u256
+        \\        modifies()
+        \\    {
+        \\        return balances[user];
+        \\    }
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies()
         \\    {
         \\        total = value;
         \\    }
@@ -72,7 +225,7 @@ test "compiler rejects reserved modifies clauses before verification" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` clauses are reserved for user-declared storage effects and are not implemented yet; remove the clause for now. The design is tracked in the SMT implementation plan."));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'total' is not covered by this function's `modifies` clause"));
 }
 
 test "compiler extracts verification facts and lowers HIR handles" {

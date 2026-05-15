@@ -74,6 +74,10 @@ fn collectFactsForItem(allocator: std.mem.Allocator, file: *const ast.AstFile, i
         },
         .Function => |function| {
             for (function.clauses) |clause| {
+                // `modifies` declarations are semantically validated and
+                // checked against compiler-derived writes in sema. They are not
+                // verifier-facing facts until storage framing is implemented.
+                if (clause.kind == .modifies) continue;
                 try facts.append(allocator, .{ .kind = clause.kind, .expr = clause.expr, .range = clause.range });
             }
         },

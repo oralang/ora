@@ -118,21 +118,22 @@ fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
         .parameter => |index| rhs == .parameter and rhs.parameter == index,
         .constant => |value| rhs == .constant and std.mem.eql(u8, rhs.constant, value),
-        .self_ref => rhs == .self_ref,
+        .msg_sender => rhs == .msg_sender,
+        .tx_origin => rhs == .tx_origin,
         .unknown => rhs == .unknown,
     };
 }
 
 fn keySegmentMayAlias(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
-        .unknown, .self_ref => true,
+        .unknown, .msg_sender, .tx_origin => true,
         .parameter => |lhs_index| switch (rhs) {
             .parameter => |rhs_index| lhs_index == rhs_index,
-            .unknown, .self_ref, .constant => true,
+            .unknown, .msg_sender, .tx_origin, .constant => true,
         },
         .constant => |lhs_value| switch (rhs) {
             .constant => |rhs_value| std.mem.eql(u8, lhs_value, rhs_value),
-            .unknown, .self_ref, .parameter => true,
+            .unknown, .msg_sender, .tx_origin, .parameter => true,
         },
     };
 }
@@ -159,9 +160,33 @@ fn keyPathsMayAlias(lhs: ?[]const KeySegment, rhs: ?[]const KeySegment) bool {
     return true;
 }
 
+fn fieldPathsEql(lhs: ?[]const []const u8, rhs: ?[]const []const u8) bool {
+    if (lhs == null and rhs == null) return true;
+    if (lhs == null or rhs == null) return false;
+    const lhs_path = lhs.?;
+    const rhs_path = rhs.?;
+    if (lhs_path.len != rhs_path.len) return false;
+    for (lhs_path, rhs_path) |lhs_field, rhs_field| {
+        if (!std.mem.eql(u8, lhs_field, rhs_field)) return false;
+    }
+    return true;
+}
+
+fn fieldPathsMayAlias(lhs: ?[]const []const u8, rhs: ?[]const []const u8) bool {
+    if (lhs == null or rhs == null) return true;
+    const lhs_path = lhs.?;
+    const rhs_path = rhs.?;
+    const shared_len = @min(lhs_path.len, rhs_path.len);
+    for (lhs_path[0..shared_len], rhs_path[0..shared_len]) |lhs_field, rhs_field| {
+        if (!std.mem.eql(u8, lhs_field, rhs_field)) return false;
+    }
+    return true;
+}
+
 fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
     return lhs.region == rhs.region and
         std.mem.eql(u8, lhs.name, rhs.name) and
+        fieldPathsEql(lhs.field_path, rhs.field_path) and
         keyPathsEql(lhs.key_path, rhs.key_path);
 }
 
@@ -234,11 +259,27 @@ test "effect slot aliasing distinguishes parameters and constants" {
         .region = .storage,
         .key_path = &[_]KeySegment{.{ .unknown = {} }},
     };
+    const owner_field = EffectSlot{
+        .name = "config",
+        .region = .storage,
+        .field_path = &[_][]const u8{"owner"},
+    };
+    const admin_field = EffectSlot{
+        .name = "config",
+        .region = .storage,
+        .field_path = &[_][]const u8{"admin"},
+    };
+    const config_root = EffectSlot{
+        .name = "config",
+        .region = .storage,
+    };
 
     try std.testing.expect(keyPathsMayAlias(same_param.key_path, same_param.key_path));
     try std.testing.expect(!keyPathsMayAlias(same_param.key_path, other_param.key_path));
     try std.testing.expect(!keyPathsMayAlias(const_one.key_path, const_two.key_path));
     try std.testing.expect(keyPathsMayAlias(unknown.key_path, same_param.key_path));
+    try std.testing.expect(!fieldPathsMayAlias(owner_field.field_path, admin_field.field_path));
+    try std.testing.expect(fieldPathsMayAlias(config_root.field_path, owner_field.field_path));
 }
 
 test "buildEffect preserves external marker across slot summaries" {
@@ -788,9 +829,12 @@ const TypeChecker = struct {
                 defer self.current_return_type = previous_return_type;
                 try self.validatePublicFunctionAbi(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
+                var declared_modifies: std.ArrayList(EffectSlot) = .{};
+                var has_modifies_clause = false;
                 for (function.clauses) |clause| {
                     if (clause.kind == .modifies) {
-                        try self.rejectReservedModifiesClause(clause);
+                        has_modifies_clause = true;
+                        try self.collectModifiesClauseSlots(clause, &declared_modifies);
                         continue;
                     }
                     if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
@@ -800,6 +844,9 @@ const TypeChecker = struct {
                 }
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
+                if (has_modifies_clause) {
+                    try self.validateModifiesSubset(function.range, declared_modifies.items, self.effectWrites(self.item_effects[item_id.index()]));
+                }
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
                 try self.validateBodyLocks(function.body, &locked_slots);
                 var external_call_state = try self.initExternalCallValidationState();
@@ -845,7 +892,7 @@ const TypeChecker = struct {
                     }
                     for (method.clauses) |clause| {
                         if (clause.kind == .modifies) {
-                            try self.rejectReservedModifiesClause(clause);
+                            try self.validateModifiesClause(clause);
                             continue;
                         }
                         if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
@@ -2800,10 +2847,137 @@ const TypeChecker = struct {
         };
     }
 
-    fn rejectReservedModifiesClause(self: *TypeChecker, clause: ast.SpecClause) !void {
-        // Fail closed before validating the clause body. The future semantic
-        // implementation should replace this with storage-effect rule checking.
-        try self.emitRangeError(clause.range, "`modifies` clauses are reserved for user-declared storage effects and are not implemented yet; remove the clause for now. The design is tracked in the SMT implementation plan.", .{});
+    fn validateModifiesClause(self: *TypeChecker, clause: ast.SpecClause) !void {
+        var slots: std.ArrayList(EffectSlot) = .{};
+        try self.collectModifiesClauseSlots(clause, &slots);
+    }
+
+    fn collectModifiesClauseSlots(self: *TypeChecker, clause: ast.SpecClause, slots: *std.ArrayList(EffectSlot)) !void {
+        // This helper only validates and collects declared paths. Do not let
+        // verifier framing consume modifies declarations unless the
+        // compiler-derived write-set subset check has succeeded for the same
+        // body; otherwise a user declaration could become an unchecked
+        // storage-frame assumption.
+        try self.visitExpr(clause.expr);
+        try self.collectModifiesExprSlots(clause.expr, slots);
+    }
+
+    fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *std.ArrayList(EffectSlot)) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.collectModifiesExprSlots(group.expr, slots),
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| try self.collectModifiesExprSlots(element, slots);
+            },
+            else => {
+                if (try self.modifiesStorageSlotForExpr(expr_id)) |slot| {
+                    if (slot.region != .storage) {
+                        try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths", .{});
+                    } else {
+                        try self.appendUniqueSlot(slots, slot);
+                    }
+                } else {
+                    try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`", .{});
+                }
+            },
+        }
+    }
+
+    fn modifiesStorageSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.modifiesStorageSlotForExpr(group.expr),
+            .Name => self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()]),
+            .Field => |field| blk: {
+                const base_slot = (try self.modifiesStorageSlotForExpr(field.base)) orelse break :blk null;
+                const result_type = self.expr_types[expr_id.index()];
+                if (result_type.kind() == .unknown) break :blk null;
+                break :blk self.slotWithField(base_slot, field.name);
+            },
+            .Index => |index| blk: {
+                const base_slot = (try self.modifiesStorageSlotForExpr(index.base)) orelse break :blk null;
+                const base_type = self.expr_types[index.base.index()];
+                if (base_type.kind() != .map) {
+                    try self.emitExprError(expr_id, "`modifies` v1 only supports indexing map storage paths", .{});
+                    break :blk null;
+                }
+                try self.validateModifiesKeyExpr(index.index);
+                break :blk self.slotWithIndexKey(base_slot, index.index);
+            },
+            else => null,
+        };
+    }
+
+    fn validateModifiesKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.validateModifiesKeyExpr(group.expr),
+            .IntegerLiteral, .StringLiteral, .AddressLiteral, .BytesLiteral, .BoolLiteral => {},
+            .Name => {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id) != null) return,
+                        .item => {},
+                    }
+                }
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+            },
+            .Field => |field| {
+                const base = self.file.expression(field.base).*;
+                if (base == .Name and
+                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
+                {
+                    return;
+                }
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+            },
+            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{}),
+        }
+    }
+
+    fn validateModifiesSubset(self: *TypeChecker, range: source.TextRange, declared_slots: []const EffectSlot, actual_writes: []const EffectSlot) !void {
+        for (actual_writes) |write_slot| {
+            if (write_slot.region != .storage) continue;
+            if (self.modifiesDeclaresSlot(declared_slots, write_slot)) continue;
+            const display = try self.effectSlotDisplayName(write_slot);
+            try self.emitRangeError(range, "storage write to '{s}' is not covered by this function's `modifies` clause", .{display});
+        }
+    }
+
+    fn modifiesDeclaresSlot(self: *TypeChecker, declared_slots: []const EffectSlot, write_slot: EffectSlot) bool {
+        _ = self;
+        for (declared_slots) |declared_slot| {
+            if (effectSlotEql(declared_slot, write_slot)) return true;
+        }
+        return false;
+    }
+
+    fn effectSlotDisplayName(self: *TypeChecker, slot: EffectSlot) ![]const u8 {
+        var buffer: std.ArrayList(u8) = .{};
+        const writer = buffer.writer(self.arena);
+        try writer.writeAll(slot.name);
+        if (slot.field_path) |field_path| {
+            for (field_path) |field_name| {
+                try writer.writeByte('.');
+                try writer.writeAll(field_name);
+            }
+        }
+        if (slot.key_path) |key_path| {
+            for (key_path) |segment| {
+                try writer.writeByte('[');
+                switch (segment) {
+                    .parameter => |index| if (self.parameterNameForIndex(index)) |name| {
+                        try writer.writeAll(name);
+                    } else {
+                        try writer.print("param#{d}", .{index});
+                    },
+                    .constant => |value| try writer.writeAll(value),
+                    .msg_sender => try writer.writeAll("msg.sender"),
+                    .tx_origin => try writer.writeAll("tx.origin"),
+                    .unknown => try writer.writeAll("?"),
+                }
+                try writer.writeByte(']');
+            }
+        }
+        return buffer.items;
     }
 
     fn switchPatternContainsResult(self: *TypeChecker, pattern: ast.SwitchPattern) bool {
@@ -5294,7 +5468,12 @@ const TypeChecker = struct {
                 }
             },
             .Field => |field| {
-                try self.collectPatternTargetEffects(field.base, .add_assign, state);
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueSlot(&state.writes, slot);
+                } else {
+                    try self.collectPatternTargetEffects(field.base, .add_assign, state);
+                }
             },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
@@ -5317,7 +5496,13 @@ const TypeChecker = struct {
                     try self.appendUniqueSlot(&state.reads, slot);
                 }
             },
-            .Field => |field| try self.collectPatternExprReads(field.base, state),
+            .Field => |field| {
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    try self.appendUniqueSlot(&state.reads, slot);
+                } else {
+                    try self.collectPatternExprReads(field.base, state);
+                }
+            },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
                 if (self.patternFieldSlot(pattern_id)) |slot| {
@@ -5334,7 +5519,10 @@ const TypeChecker = struct {
     fn patternFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
-            .Field => |field| self.patternFieldSlot(field.base),
+            .Field => |field| blk: {
+                const base = self.patternFieldSlot(field.base) orelse break :blk null;
+                break :blk self.slotWithField(base, field.name);
+            },
             .Index => |index| blk: {
                 const base = self.patternFieldSlot(index.base) orelse break :blk null;
                 break :blk self.slotWithIndexKey(base, index.index);
@@ -5397,6 +5585,16 @@ const TypeChecker = struct {
         return slot;
     }
 
+    fn slotWithField(self: *TypeChecker, base: EffectSlot, field_name: []const u8) ?EffectSlot {
+        const base_len: usize = if (base.field_path) |path| path.len else 0;
+        const path = self.arena.alloc([]const u8, base_len + 1) catch return null;
+        if (base.field_path) |existing| @memcpy(path[0..existing.len], existing);
+        path[base_len] = field_name;
+        var slot = base;
+        slot.field_path = path;
+        return slot;
+    }
+
     fn keySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.keySegmentForExpr(group.expr),
@@ -5419,10 +5617,10 @@ const TypeChecker = struct {
             .Field => |field| blk: {
                 const base = self.file.expression(field.base).*;
                 if (base == .Name and std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) {
-                    break :blk .self_ref;
+                    break :blk .msg_sender;
                 }
                 if (base == .Name and std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")) {
-                    break :blk .self_ref;
+                    break :blk .tx_origin;
                 }
                 break :blk .unknown;
             },
@@ -5442,10 +5640,22 @@ const TypeChecker = struct {
         return null;
     }
 
+    fn parameterNameForIndex(self: *const TypeChecker, parameter_index: u32) ?[]const u8 {
+        const function_item = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        const index: usize = @intCast(parameter_index);
+        if (index >= function.parameters.len) return null;
+        return self.patternName(function.parameters[index].pattern);
+    }
+
     fn effectSlotsMayAlias(self: *const TypeChecker, lhs: EffectSlot, rhs: EffectSlot) bool {
         _ = self;
         if (lhs.region != rhs.region) return false;
         if (!std.mem.eql(u8, lhs.name, rhs.name)) return false;
+        if (!fieldPathsMayAlias(lhs.field_path, rhs.field_path)) return false;
         return keyPathsMayAlias(lhs.key_path, rhs.key_path);
     }
 

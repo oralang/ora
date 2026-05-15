@@ -510,13 +510,15 @@ pub const VerificationFact = struct {
 pub const EffectSlot = struct {
     name: []const u8,
     region: Region,
+    field_path: ?[]const []const u8 = null,
     key_path: ?[]const KeySegment = null,
 };
 
 pub const KeySegment = union(enum) {
     parameter: u32,
     constant: []const u8,
-    self_ref,
+    msg_sender,
+    tx_origin,
     unknown,
 };
 

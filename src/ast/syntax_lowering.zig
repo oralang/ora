@@ -2012,10 +2012,24 @@ pub fn mixin(Builder: type) type {
                 _ = try Lowering.malformedExpr(self, node, "missing specification keyword");
                 break :blk .requires;
             };
-            const expr = if (firstDirectExprChild(node)) |expr_node|
-                try Lowering.lowerExpressionNode(self, expr_node)
-            else
-                try Lowering.malformedExpr(self, node, "missing specification expression");
+            var exprs: std.ArrayList(ExprId) = .{};
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |expr_node| if (isExprKind(expr_node.kind())) {
+                        try exprs.append(self.allocator, try Lowering.lowerExpressionNode(self, expr_node));
+                    },
+                }
+            }
+            const expr = switch (exprs.items.len) {
+                0 => try Lowering.malformedExpr(self, node, "missing specification expression"),
+                1 => exprs.items[0],
+                else => try Support.pushExpr(self, .{ .Tuple = .{
+                    .range = node.range(),
+                    .elements = try exprs.toOwnedSlice(self.allocator),
+                } }),
+            };
             return .{
                 .range = node.range(),
                 .kind = kind,

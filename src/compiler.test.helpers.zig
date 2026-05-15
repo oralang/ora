@@ -369,6 +369,24 @@ pub fn containsEffectSlot(items: []const compiler.sema.EffectSlot, needle: []con
     return false;
 }
 
+pub fn containsFieldEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region, field_path: []const []const u8) bool {
+    for (items) |item| {
+        if (item.region != region) continue;
+        if (!std.mem.eql(u8, item.name, needle)) continue;
+        const item_path = item.field_path orelse continue;
+        if (item_path.len != field_path.len) continue;
+        var all_match = true;
+        for (item_path, field_path) |lhs, rhs| {
+            if (!std.mem.eql(u8, lhs, rhs)) {
+                all_match = false;
+                break;
+            }
+        }
+        if (all_match) return true;
+    }
+    return false;
+}
+
 pub fn containsKeyedEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region, key_path: []const compiler.sema.KeySegment) bool {
     for (items) |item| {
         if (item.region != region) continue;

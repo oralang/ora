@@ -570,7 +570,12 @@ const Parser = struct {
         }
 
         if (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.Modifies)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .Modifies }) });
+            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .Modifies }) });
+            while (self.at(.Comma)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (self.at(.Eof) or self.at(.Semicolon) or self.at(.LeftBrace) or self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.Modifies)) break;
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .Modifies }) });
+            }
         }
 
         if (self.at(.Semicolon)) {

@@ -241,7 +241,7 @@ test "compiler syntax parses modifies as reserved spec clause" {
         \\    storage var total: u256 = 0;
         \\
         \\    pub fn run(value: u256)
-        \\        modifies total
+        \\        modifies total, pending
         \\        ensures total >= value
         \\    {
         \\        total = value;
