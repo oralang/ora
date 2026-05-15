@@ -460,6 +460,469 @@ test "verification treats unresolved staticcall return as deterministic" {
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+test "verification uses trusted extern trait scalar ensures summary" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(observed == 42)
+        \\    {
+        \\        let q: u256 = try external<Oracle>(target, gas: 50000).quote();
+        \\        observed = q;
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses trusted extern trait struct ensures summary" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(observed_current == 42)
+        \\        ensures(observed_tag == 7)
+        \\    {
+        \\        let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\        observed_current = snapshot.current;
+        \\        observed_tag = snapshot.tag;
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait scalar summary through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote();
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification proves trusted extern trait requires through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self, amount: u256) -> u256
+        \\        requires(amount == 42)
+        \\        ensures(result == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        requires(amount == 42)
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote(amount);
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects unproven trusted extern trait requires through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self, amount: u256) -> u256
+        \\        requires(amount == 42)
+        \\        ensures(result == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        ensures(!result or observed == amount)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote(amount);
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+}
+
+test "verification carries trusted extern trait struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_current == 42)
+        \\        ensures(!result or observed_tag == 7)
+        \\    {
+        \\        try {
+        \\            let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\            observed_current = snapshot.current;
+        \\            observed_tag = snapshot.tag;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "extern trait requires cannot reference result" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        requires(result == 42);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(diagnosticMessagesContain(type_diags, "`result` is only available in ensures clauses"));
+}
+
+test "verification carries trusted extern trait tuple summary through try catch" {
+    const source_text =
+        \\extern trait Target {
+        \\    staticcall fn quote(self) -> (u256, bool)
+        \\        ensures(result.0 == 42)
+        \\        ensures(result.1);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let quote: (u256, bool) = try external<Target>(target, gas: 50000).quote();
+        \\            observed = quote.0;
+        \\            return quote.1;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait bytes length summary through try catch" {
+    const source_text =
+        \\extern trait Target {
+        \\    staticcall fn payload(self) -> bytes
+        \\        ensures(result.len == 4);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_len: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_len == 4)
+        \\    {
+        \\        try {
+        \\            let payload: bytes = try external<Target>(target, gas: 50000).payload();
+        \\            observed_len = payload.len;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "pull", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait three-field struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\    nonce: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7)
+        \\        ensures(result.nonce == 99);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\    storage var observed_nonce: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_current == 42)
+        \\        ensures(!result or observed_tag == 7)
+        \\        ensures(!result or observed_nonce == 99)
+        \\    {
+        \\        try {
+        \\            let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\            observed_current = snapshot.current;
+        \\            observed_tag = snapshot.tag;
+        \\            observed_nonce = snapshot.nonce;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait nested tuple struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    ok: bool,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn quote(self, amount: u256) -> (Snapshot, u256)
+        \\        ensures(result.0.current == amount)
+        \\        ensures(result.0.ok)
+        \\        ensures(result.1 == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\    storage var mirror: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        ensures(!result or observed == amount)
+        \\        ensures(!result or mirror == amount)
+        \\    {
+        \\        try {
+        \\            let quote: (Snapshot, u256) = try external<Target>(target, gas: 50000).quote(amount);
+        \\            observed = quote.0.current;
+        \\            mirror = quote.1;
+        \\            return quote.0.ok;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames caller storage through trusted extern call summary" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or stable == old(stable))
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<External>(target, gas: 50000).quote();
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames caller storage through trusted extern call summary in helper" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\
+        \\    fn observe(target: address) -> !u256 | ExternalCallFailed {
+        \\        return external<External>(target, gas: 50000).quote();
+        \\    }
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        let ignored: u256 = try observe(target);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
 test "verification frames storage through known helper staticcall" {
     const source_text =
         \\extern trait External {

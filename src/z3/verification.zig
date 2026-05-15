@@ -615,6 +615,8 @@ pub const VerificationPass = struct {
                     try self.walkScfIfRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
                     try self.walkConditionalReturnRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+                    try self.walkTryStmtRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.switch")) {
                     try self.walkOraSwitchRegions(current_op);
                 } else {
@@ -1452,6 +1454,76 @@ pub const VerificationPass = struct {
         }
     }
 
+    fn walkTryStmtRegions(self: *VerificationPass, try_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(try_op);
+        if (num_regions < 2) {
+            for (0..@intCast(num_regions)) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(try_op, @intCast(region_idx));
+                try self.walkMLIRRegion(nested_region);
+            }
+            return;
+        }
+
+        self.encoder.invalidateValueCaches();
+        const catch_predicate = (try self.encoder.tryExtractTryRegionCatchPredicate(try_op, .Current)) orelse {
+            self.encoder.noteSoundnessLossAtOp(
+                .inexact_state_summary,
+                try_op,
+                "ora.try_stmt annotation walk requires an exact catch predicate",
+            );
+            return;
+        };
+
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(try_op);
+        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
+        defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+
+        var base_state = try self.captureEncoderBranchState();
+        defer base_state.deinit(self.allocator);
+
+        var try_state = EncoderBranchState.init(self.allocator);
+        defer try_state.deinit(self.allocator);
+        var catch_state = EncoderBranchState.init(self.allocator);
+        defer catch_state.deinit(self.allocator);
+
+        try self.restoreEncoderBranchState(&base_state);
+        {
+            const saved_len = self.active_path_assumptions.items.len;
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = self.encoder.encodeNot(catch_predicate),
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
+            });
+            const try_region = mlir.oraOperationGetRegion(try_op, 0);
+            try self.walkMLIRRegion(try_region);
+            try_state.deinit(self.allocator);
+            try_state = try self.captureEncoderBranchState();
+        }
+
+        try self.restoreEncoderBranchState(&base_state);
+        {
+            const saved_len = self.active_path_assumptions.items.len;
+            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = catch_predicate,
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
+            });
+            const catch_region = mlir.oraOperationGetRegion(try_op, 1);
+            try self.walkMLIRRegion(catch_region);
+            catch_state.deinit(self.allocator);
+            catch_state = try self.captureEncoderBranchState();
+        }
+
+        try self.mergeEncoderBranchState(catch_predicate, &base_state, &catch_state, &try_state);
+    }
+
     fn walkOraSwitchRegions(self: *VerificationPass, switch_op: mlir.MlirOperation) anyerror!void {
         const num_regions: usize = @intCast(mlir.oraOperationGetNumRegions(switch_op));
         if (num_regions == 0) return;
@@ -1929,13 +2001,13 @@ pub const VerificationPass = struct {
 
         const encoded = blk: {
             if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
-                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                self.encoder.noteSoundnessLossAtOp(.unsupported_operation, failing_op, "unsupported annotation condition");
                 return err;
             }) |specialized| {
                 break :blk specialized;
             }
             break :blk self.encoder.encodeValue(condition_value) catch |err| {
-                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                self.encoder.noteSoundnessLossAtOp(.unsupported_operation, failing_op, "unsupported annotation condition");
                 return err;
             };
         };
@@ -11498,6 +11570,87 @@ test "prepared query result collection taints function on unknown base" {
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
 }
 
+test "prepared query result collection fails closed on unknown for every query kind" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    // Pillar 4.5 self-introspection: every prepared solver-query kind must
+    // surface Z3 UNKNOWN as a user-visible Unknown verification error.
+    inline for (std.meta.fields(QueryKind)) |field| {
+        const kind: QueryKind = @enumFromInt(field.value);
+        const obligation_kind: ?AnnotationKind = switch (kind) {
+            .Obligation => .Ensures,
+            .LoopInvariantStep => .LoopInvariant,
+            .LoopBodySafety => .ContractInvariant,
+            .LoopInvariantPost => .Ensures,
+            else => null,
+        };
+        const guard_id: ?[]const u8 = switch (kind) {
+            .GuardSatisfy, .GuardViolate => "guard:test:unknown",
+            else => null,
+        };
+        var queries = [_]PreparedQuery{.{
+            .kind = kind,
+            .function_name = field.name,
+            .guard_id = guard_id,
+            .obligation_kind = obligation_kind,
+            .file = "/tmp/test.ora",
+            .line = @intCast(field.value + 1),
+            .column = 3,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: {s} [{s}]", .{ field.name, queryKindLabel(kind) }),
+        }};
+        defer queries[0].deinit(testing.allocator);
+
+        const results = [_]PreparedQueryResult{.{ .status = z3.Z3_L_UNDEF }};
+
+        var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+        defer collected.deinit();
+
+        try testing.expect(!collected.success);
+        try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, field.name));
+    }
+
+    const routed_cases = [_]struct {
+        kind: QueryKind,
+        obligation_kind: ?AnnotationKind = null,
+        guard_id: ?[]const u8 = null,
+        expected_message_fragment: []const u8,
+    }{
+        .{ .kind = .Obligation, .obligation_kind = .ContractInvariant, .expected_message_fragment = "contract invariant" },
+        .{ .kind = .Obligation, .obligation_kind = .Guard, .guard_id = "guard:obligation:unknown", .expected_message_fragment = "guard" },
+        .{ .kind = .GuardSatisfy, .guard_id = "guard:satisfy:unknown", .expected_message_fragment = "guard:satisfy:unknown" },
+        .{ .kind = .GuardViolate, .guard_id = "guard:violate:unknown", .expected_message_fragment = "guard:violate:unknown" },
+    };
+
+    for (routed_cases, 0..) |case, idx| {
+        var queries = [_]PreparedQuery{.{
+            .kind = case.kind,
+            .function_name = "routed_unknown",
+            .guard_id = case.guard_id,
+            .obligation_kind = case.obligation_kind,
+            .file = "/tmp/test.ora",
+            .line = @intCast(100 + idx),
+            .column = 5,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: routed-{d} [{s}]", .{ idx, queryKindLabel(case.kind) }),
+        }};
+        defer queries[0].deinit(testing.allocator);
+
+        const results = [_]PreparedQueryResult{.{ .status = z3.Z3_L_UNDEF }};
+
+        var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+        defer collected.deinit();
+
+        try testing.expect(!collected.success);
+        try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, case.expected_message_fragment));
+    }
+}
+
 test "result collection fails closed on inconclusive vacuity check" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -11686,11 +11839,19 @@ test "rendered SMT report json includes degradation metadata" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
 
+    // Pillar 4.5 self-introspection: every typed soundness-loss reason must
+    // surface exactly once through the report JSON metadata path.
+    const soundness_loss_fields = std.meta.fields(Encoder.SoundnessLoss);
+    var soundness_losses: [soundness_loss_fields.len]Encoder.SoundnessLoss = undefined;
+    inline for (soundness_loss_fields, 0..) |field, idx| {
+        soundness_losses[idx] = @enumFromInt(field.value);
+    }
+
     const summary = ReportSummary{
         .encoding_degraded = true,
         .degradation_reason = "test degradation",
         .degradation_reasons = &.{ "test degradation", "follow-on degradation" },
-        .soundness_losses = &.{ .user_disabled_state_verification, .unresolved_callee },
+        .soundness_losses = &soundness_losses,
     };
     const kind_counts = ReportKindCounts{};
 
@@ -11708,7 +11869,17 @@ test "rendered SMT report json includes degradation metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reasons\":[\"test degradation\",\"follow-on degradation\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"soundness_losses\":[\"user_disabled_state_verification\",\"unresolved_callee\"]") != null);
+    const losses_prefix = "\"soundness_losses\":[";
+    const losses_start = std.mem.indexOf(u8, json, losses_prefix) orelse return error.MissingSoundnessLossesArray;
+    const losses_body_start = losses_start + losses_prefix.len;
+    const losses_body_end = losses_body_start + (std.mem.indexOfScalar(u8, json[losses_body_start..], ']') orelse return error.MissingSoundnessLossesArrayEnd);
+    const losses_body = json[losses_body_start..losses_body_end];
+    try testing.expectEqual(soundness_loss_fields.len * 2, std.mem.count(u8, losses_body, "\""));
+    inline for (soundness_loss_fields) |field| {
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        defer testing.allocator.free(needle);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
+    }
 }
 
 test "rendered SMT report json includes query fragment metadata" {

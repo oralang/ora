@@ -17006,10 +17006,12 @@ test "soundness loss kinds are structured and capped" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
+    // Pillar 4.5 self-introspection: labels are a stable machine-facing API.
     inline for (std.meta.fields(Encoder.SoundnessLoss)) |field| {
         const loss: Encoder.SoundnessLoss = @enumFromInt(field.value);
-        try testing.expect(Encoder.soundnessLossLabel(loss).len > 0);
-        encoder.noteSoundnessLoss(loss, Encoder.soundnessLossLabel(loss));
+        const label = Encoder.soundnessLossLabel(loss);
+        try testing.expectEqualStrings(field.name, label);
+        encoder.noteSoundnessLoss(loss, label);
     }
 
     const losses = encoder.soundnessLosses();
@@ -17019,9 +17021,27 @@ test "soundness loss kinds are structured and capped" {
     try testing.expectEqual(Encoder.SoundnessLoss.inexact_call_summary, losses[9]);
 }
 
-test "encoder undef API separates fresh symbols from soundness loss" {
-    const source = try std.fs.cwd().readFileAlloc(testing.allocator, "src/z3/encoder.zig", 2 * 1024 * 1024);
-    defer testing.allocator.free(source);
+const production_z3_sources = [_][]const u8{
+    @embedFile("c.zig"),
+    @embedFile("context.zig"),
+    @embedFile("encoder.zig"),
+    @embedFile("errors.zig"),
+    @embedFile("mlir_helpers.zig"),
+    @embedFile("mod.zig"),
+    @embedFile("solver.zig"),
+    @embedFile("verification.zig"),
+};
+
+test "production z3 code avoids legacy undef and degradation escape hatches" {
+    for (production_z3_sources) |source| {
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, ".noteDegradationAtOp("));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "mkUndefValue"));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "degradeToUndef"));
+    }
+}
+
+test "encoder source keeps fresh-symbol and soundness-loss undef APIs separate" {
+    const source = @embedFile("encoder.zig");
 
     try testing.expect(std.mem.indexOf(u8, source, "mkUndefValue") == null);
     try testing.expect(std.mem.indexOf(u8, source, "degradeToUndef") == null);
@@ -17029,6 +17049,16 @@ test "encoder undef API separates fresh symbols from soundness loss" {
     try testing.expect(std.mem.indexOf(u8, source, "fn soundnessLossUndef") != null);
     try testing.expect(std.mem.indexOf(u8, source, "\"try_state_global\"") != null);
     try testing.expect(std.mem.indexOf(u8, source, ".inexact_state_summary") != null);
+}
+
+test "production verifier uses typed soundness loss instead of annotation degradation escape hatch" {
+    var found_typed_annotation_failure = false;
+    for (production_z3_sources) |source| {
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, ".noteDegradationAtOp("));
+        found_typed_annotation_failure = found_typed_annotation_failure or
+            std.mem.indexOf(u8, source, ".noteSoundnessLossAtOp(.unsupported_operation") != null;
+    }
+    try testing.expect(found_typed_annotation_failure);
 }
 
 test "known pure callee first-iteration scf.for return encodes exactly" {

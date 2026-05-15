@@ -1443,7 +1443,97 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             field: ast.FieldExpr,
             trait_name: []const u8,
             method: sema.TraitMethodSignature,
+            ast_method: ?ast.nodes.TraitMethod = null,
         };
+
+        fn externTraitMethodAst(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?ast.nodes.TraitMethod {
+            const trait_item_id = self.parent.item_index.lookup(trait_name) orelse return null;
+            const trait_item = switch (self.parent.file.item(trait_item_id).*) {
+                .Trait => |trait_item| trait_item,
+                else => return null,
+            };
+            for (trait_item.methods) |method| {
+                if (std.mem.eql(u8, method.name, method_name)) return method;
+            }
+            return null;
+        }
+
+        fn externSummaryLocals(
+            self: *FunctionLowerer,
+            base_locals: *const LocalEnv,
+            ast_method: ast.nodes.TraitMethod,
+            args: []const mlir.MlirValue,
+        ) anyerror!LocalEnv {
+            var clause_locals = try self.cloneLocals(base_locals);
+            const bind_count = @min(ast_method.parameters.len, args.len);
+            for (0..bind_count) |index| {
+                try self.bindPatternValue(ast_method.parameters[index].pattern, args[index], &clause_locals);
+            }
+            return clause_locals;
+        }
+
+        fn emitExternSummaryRequires(
+            self: *FunctionLowerer,
+            ast_method: ?ast.nodes.TraitMethod,
+            base_locals: *const LocalEnv,
+            args: []const mlir.MlirValue,
+        ) anyerror!void {
+            const method = ast_method orelse return;
+            for (method.clauses) |clause| {
+                if (clause.kind != .requires) continue;
+                var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
+                const condition = try self.lowerExpr(clause.expr, &clause_locals);
+                const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(clause.range), condition, strRef("extern trait summary requires"));
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "extern_trait_summary").attribute);
+                appendOp(self.block, op);
+            }
+        }
+
+        fn externSummaryHasEnsures(ast_method: ?ast.nodes.TraitMethod) bool {
+            const method = ast_method orelse return false;
+            for (method.clauses) |clause| {
+                if (clause.kind == .ensures) return true;
+            }
+            return false;
+        }
+
+        fn externSummaryHasClauses(ast_method: ?ast.nodes.TraitMethod) bool {
+            const method = ast_method orelse return false;
+            return method.clauses.len > 0;
+        }
+
+        fn lowerExternSummaryEnsuresCondition(
+            self: *FunctionLowerer,
+            ast_method: ?ast.nodes.TraitMethod,
+            base_locals: *const LocalEnv,
+            args: []const mlir.MlirValue,
+            result: mlir.MlirValue,
+            block: mlir.MlirBlock,
+        ) anyerror!?mlir.MlirValue {
+            const method = ast_method orelse return null;
+            const previous_block = self.block;
+            const previous_result = self.current_return_value;
+            self.block = block;
+            self.current_return_value = result;
+            defer {
+                self.block = previous_block;
+                self.current_return_value = previous_result;
+            }
+
+            var combined: ?mlir.MlirValue = null;
+            for (method.clauses) |clause| {
+                if (clause.kind != .ensures) continue;
+                var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
+                const condition = try self.lowerExpr(clause.expr, &clause_locals);
+                combined = if (combined) |acc| blk: {
+                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(clause.range), acc, condition);
+                    if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
+                    break :blk appendValueOp(block, and_op);
+                } else condition;
+            }
+            return combined;
+        }
 
         fn lowerExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveExternProxyMethodCall(self, call.callee) orelse return null;
@@ -1468,6 +1558,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (call.args) |arg| {
                 try encode_args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
             }
+            try @This().emitExternSummaryRequires(self, resolved.ast_method, locals, encode_args.items);
 
             var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
             defer arg_type_attrs.deinit(self.parent.allocator);
@@ -1530,11 +1621,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 defaultIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(external_call_op)) return error.MlirOperationCreationFailed;
+            if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(resolved.ast_method)) {
+                mlir.oraOperationSetAttributeByName(external_call_op, strRef("ora.trusted_extern_frame"), namedStringAttr(self.parent.context, "ora.trusted_extern_frame", "caller_storage").attribute);
+            }
             appendOp(self.block, external_call_op);
             const success = mlir.oraOperationGetResult(external_call_op, 0);
             const returndata = mlir.oraOperationGetResult(external_call_op, 1);
 
-            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, success, &[_]mlir.MlirType{result_type}, 1, true);
+            const has_extern_summary_ensures = @This().externSummaryHasEnsures(resolved.ast_method);
+            const if_result_types = if (has_extern_summary_ensures)
+                [_]mlir.MlirType{ result_type, boolType(self.parent.context) }
+            else
+                [_]mlir.MlirType{ result_type, undefined };
+            const if_result_count: usize = if (has_extern_summary_ensures) 2 else 1;
+            const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, success, &if_result_types, if_result_count, true);
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, if_op);
 
@@ -1546,16 +1646,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
             appendOp(then_block, decode_op);
             const decoded = mlir.oraOperationGetResult(decode_op, 0);
+            const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
             const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
             if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
             if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
                 mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             appendOp(then_block, ok_op);
-            try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+            if (has_extern_summary_ensures) {
+                const condition = summary_condition orelse appendValueOp(then_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{ mlir.oraOperationGetResult(ok_op, 0), condition });
+            } else {
+                try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+            }
 
             const error_result = try @This().lowerExternErrorResult(self, expr_id, resolved.method, else_block, loc, returndata);
-            try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{error_result});
+            if (has_extern_summary_ensures) {
+                const true_value = appendValueOp(else_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{ error_result, true_value });
+
+                const summary_assume = mlir.oraAssumeOpCreate(self.parent.context, loc, mlir.oraOperationGetResult(if_op, 1));
+                if (mlir.oraOperationIsNull(summary_assume)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(summary_assume, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "extern_trait_summary").attribute);
+                appendOp(self.block, summary_assume);
+            } else {
+                try support.appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{error_result});
+            }
 
             return mlir.oraOperationGetResult(if_op, 0);
         }
@@ -1775,6 +1891,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .field = field,
                     .trait_name = base_type.external_proxy.trait_name,
                     .method = method,
+                    .ast_method = @This().externTraitMethodAst(self, base_type.external_proxy.trait_name, method.name),
                 };
             }
             return null;

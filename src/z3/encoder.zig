@@ -51,6 +51,7 @@ pub const Encoder = struct {
         internal_encoding_failure,
     };
 
+    // SENTINEL: check-verifier-introspection extracts soundness-loss labels from this function.
     pub fn soundnessLossLabel(loss: SoundnessLoss) []const u8 {
         return switch (loss) {
             .user_disabled_state_verification => "user_disabled_state_verification",
@@ -5136,9 +5137,8 @@ pub const Encoder = struct {
 
         if (std.mem.eql(u8, op_name, "ora.length")) {
             if (operands.len < 1) return error.InvalidOperandCount;
-            const length_int = z3.Z3_mk_seq_length(self.context.ctx, operands[0]);
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
-            if (num_results < 1) return length_int;
+            if (num_results < 1) return z3.Z3_mk_seq_length(self.context.ctx, operands[0]);
             const result_value = mlir.oraOperationGetResult(mlir_op, 0);
             const result_type = mlir.oraValueGetType(result_value);
             const result_sort = try self.encodeMLIRType(mlir.oraValueGetType(result_value));
@@ -5146,10 +5146,14 @@ pub const Encoder = struct {
             if (result_kind == z3.Z3_BV_SORT) {
                 const width = z3.Z3_get_bv_sort_size(self.context.ctx, result_sort);
                 if (width == 256) {
-                    return z3.Z3_mk_int2bv(self.context.ctx, width, length_int);
+                    if (try self.tryGetConstantByteSequenceLength(mlir.oraOperationGetOperand(mlir_op, 0))) |constant_len| {
+                        return try self.encodeIntegerConstant(@intCast(constant_len), width);
+                    }
+                    return self.encodeByteSequenceLengthBv(operands[0]);
                 }
                 return self.degradeAstCoercion(result_sort, "sequence length to narrow bitvector requires explicit bound proof");
             }
+            const length_int = z3.Z3_mk_seq_length(self.context.ctx, operands[0]);
             return try self.coerceTypedAstToSortOrUndef(length_int, result_type, result_sort, "sequence_length_result", @intFromPtr(mlir_op.ptr));
         }
 
@@ -6947,6 +6951,12 @@ pub const Encoder = struct {
         return std.mem.eql(u8, call_kind, "staticcall");
     }
 
+    fn isTrustedExternCallerStorageFrame(self: *Encoder, mlir_op: mlir.MlirOperation) bool {
+        if (!self.operationNameEq(mlir_op, "ora.external_call")) return false;
+        const frame = self.getStringAttr(mlir_op, "ora.trusted_extern_frame") orelse return false;
+        return std.mem.eql(u8, frame, "caller_storage");
+    }
+
     fn encodeCallStateTransitionUFSymbol(
         self: *Encoder,
         callee: []const u8,
@@ -7235,7 +7245,7 @@ pub const Encoder = struct {
                 }
             }
         } else if (std.mem.eql(u8, op_name, "ora.external_call")) {
-            if (!self.isNoWriteExternalCall(op)) {
+            if (!self.isNoWriteExternalCall(op) and !self.isTrustedExternCallerStorageFrame(op)) {
                 self.recordSoundnessLoss(.unresolved_callee, "external call in known callee body has no sound state summary");
                 writes_unknown.* = true;
             }
@@ -11349,7 +11359,7 @@ pub const Encoder = struct {
         });
     }
 
-    fn tryExtractTryRegionCatchPredicate(
+    pub fn tryExtractTryRegionCatchPredicate(
         self: *Encoder,
         try_stmt: mlir.MlirOperation,
         mode: EncodeMode,
@@ -12527,6 +12537,11 @@ pub const Encoder = struct {
             } else if (self.isNoWriteExternalCall(mlir_op)) {
                 // EVM STATICCALL cannot write storage. Result values remain opaque
                 // UFs, but current-contract storage is framed instead of degraded.
+                try self.seedDeclaredGlobalSlotsForUnresolvedCall(mlir_op, &read_slots);
+            } else if (self.isTrustedExternCallerStorageFrame(mlir_op)) {
+                // A trusted extern `call fn` summary is an explicit spec boundary:
+                // the callee result is constrained by the lowered summary clauses,
+                // and current-contract storage is framed as caller-local state.
                 try self.seedDeclaredGlobalSlotsForUnresolvedCall(mlir_op, &read_slots);
             } else {
                 self.recordSoundnessLoss(.unresolved_callee, "unresolved external callee has no sound state summary");
@@ -13811,6 +13826,47 @@ pub const Encoder = struct {
         return z3.Z3_mk_seq_sort(self.context.ctx, self.mkBitVectorSort(8));
     }
 
+    fn byteSequenceLengthBvDecl(self: *Encoder) z3.Z3_func_decl {
+        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, "ora_byte_sequence_len_bv");
+        var domain = [_]z3.Z3_sort{self.byteSequenceSort()};
+        return z3.Z3_mk_func_decl(self.context.ctx, symbol, 1, &domain, self.mkBitVectorSort(256));
+    }
+
+    fn encodeByteSequenceLengthBv(self: *Encoder, seq_ast: z3.Z3_ast) z3.Z3_ast {
+        const decl = self.byteSequenceLengthBvDecl();
+        return z3.Z3_mk_app(self.context.ctx, decl, 1, &[_]z3.Z3_ast{seq_ast});
+    }
+
+    fn addByteSequenceLengthFact(self: *Encoder, seq_ast: z3.Z3_ast, len: usize) EncodeError!void {
+        const actual = self.encodeByteSequenceLengthBv(seq_ast);
+        const expected = try self.encodeIntegerConstant(@intCast(len), 256);
+        const fact = z3.Z3_mk_eq(self.context.ctx, actual, expected);
+        self.addGlobalConstraintWithSource(fact, .env_assume, "environment assumption (concrete byte-sequence length)");
+    }
+
+    fn tryGetConstantByteSequenceLength(self: *Encoder, value: mlir.MlirValue) EncodeError!?usize {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (self.operationNameEq(owner, "ora.string.constant")) {
+            const bytes = self.getStringAttr(owner, "value") orelse return null;
+            return bytes.len;
+        }
+        if (self.operationNameEq(owner, "ora.bytes.constant")) {
+            const literal = self.getStringAttr(owner, "value") orelse return null;
+            return try self.decodedBytesHexLiteralLength(literal);
+        }
+        return null;
+    }
+
+    fn decodedBytesHexLiteralLength(_: *Encoder, literal: []const u8) EncodeError!usize {
+        var hex = literal;
+        if (hex.len >= 2 and hex[0] == '0' and (hex[1] == 'x' or hex[1] == 'X')) {
+            hex = hex[2..];
+        }
+        if (hex.len % 2 != 0) return error.UnsupportedOperation;
+        return hex.len / 2;
+    }
+
     fn encodeByteSequence(self: *Encoder, bytes: []const u8) EncodeError!z3.Z3_ast {
         const seq_sort = self.byteSequenceSort();
         var current = z3.Z3_mk_seq_empty(self.context.ctx, seq_sort);
@@ -13824,6 +13880,7 @@ pub const Encoder = struct {
             current = z3.Z3_mk_seq_concat(self.context.ctx, 2, &operands);
         }
 
+        try self.addByteSequenceLengthFact(current, bytes.len);
         return current;
     }
 
