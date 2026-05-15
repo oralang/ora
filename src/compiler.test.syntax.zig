@@ -235,6 +235,37 @@ test "compiler syntax parses guard clauses alongside requires and ensures" {
     try testing.expect(ensures_clause != null);
 }
 
+test "compiler syntax parses modifies as reserved spec clause" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn run(value: u256)
+        \\        modifies total
+        \\        ensures total >= value
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const contract = nthChildNodeOfKind(root, .ContractItem, 0);
+    try testing.expect(contract != null);
+    const function = nthChildNodeOfKind(contract.?, .FunctionItem, 0);
+    try testing.expect(function != null);
+
+    const modifies_clause = nthChildNodeOfKind(function.?, .SpecClause, 0);
+    const ensures_clause = nthChildNodeOfKind(function.?, .SpecClause, 1);
+    try testing.expect(modifies_clause != null);
+    try testing.expect(ensures_clause != null);
+}
+
 test "compiler syntax parses expression precedence and postfix chains" {
     const source_text =
         \\pub fn run() -> u256 {

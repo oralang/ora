@@ -788,7 +788,16 @@ const TypeChecker = struct {
                 defer self.current_return_type = previous_return_type;
                 try self.validatePublicFunctionAbi(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
-                for (function.clauses) |clause| try self.visitExpr(clause.expr);
+                for (function.clauses) |clause| {
+                    if (clause.kind == .modifies) {
+                        try self.rejectReservedModifiesClause(clause);
+                        continue;
+                    }
+                    if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
+                        try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
+                    }
+                    try self.visitExpr(clause.expr);
+                }
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
@@ -805,6 +814,13 @@ const TypeChecker = struct {
                 }
                 for (trait_item.methods) |method| {
                     try self.checkDuplicateTraitBounds(method.trait_bounds);
+                    const previous_return_type = self.current_return_type;
+                    self.current_return_type = if (method.return_type) |type_expr|
+                        try self.resolveTypeExpr(type_expr)
+                    else
+                        .{ .void = {} };
+                    defer self.current_return_type = previous_return_type;
+
                     if (trait_item.is_extern and method.extern_call_kind == .none) {
                         try self.emitRangeError(method.range, "extern trait method '{s}' must use 'call fn' or 'staticcall fn'", .{
                             method.name,
@@ -827,10 +843,16 @@ const TypeChecker = struct {
                     for (method.parameters) |parameter| {
                         self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
                     }
-                    if (method.return_type) |type_expr| {
-                        _ = try self.resolveTypeExpr(type_expr);
+                    for (method.clauses) |clause| {
+                        if (clause.kind == .modifies) {
+                            try self.rejectReservedModifiesClause(clause);
+                            continue;
+                        }
+                        if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
+                            try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
+                        }
+                        try self.visitExpr(clause.expr);
                     }
-                    for (method.clauses) |clause| try self.visitExpr(clause.expr);
                 }
                 try self.recordTraitInterface(item_id, trait_item);
             },
@@ -2704,6 +2726,99 @@ const TypeChecker = struct {
             .StructDestructure => |struct_pattern| for (struct_pattern.fields) |field| try self.validateGenericPatternInstantiation(field.binding, bindings),
             .Name, .Error => {},
         }
+    }
+
+    fn exprContainsResult(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Result => true,
+            .Group => |group| self.exprContainsResult(group.expr),
+            .Old => |old| self.exprContainsResult(old.expr),
+            .Quantified => |quantified| self.exprContainsResult(quantified.body),
+            .Unary => |unary| self.exprContainsResult(unary.operand),
+            .Binary => |binary| self.exprContainsResult(binary.lhs) or self.exprContainsResult(binary.rhs),
+            .Field => |field| self.exprContainsResult(field.base),
+            .Index => |index| self.exprContainsResult(index.base) or self.exprContainsResult(index.index),
+            .Call => |call| blk: {
+                if (self.exprContainsResult(call.callee)) break :blk true;
+                for (call.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Builtin => |builtin| blk: {
+                for (builtin.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Tuple => |tuple| blk: {
+                for (tuple.elements) |element| {
+                    if (self.exprContainsResult(element)) break :blk true;
+                }
+                break :blk false;
+            },
+            .ArrayLiteral => |array| blk: {
+                for (array.elements) |element| {
+                    if (self.exprContainsResult(element)) break :blk true;
+                }
+                break :blk false;
+            },
+            .StructLiteral => |struct_literal| blk: {
+                for (struct_literal.fields) |field| {
+                    if (self.exprContainsResult(field.value)) break :blk true;
+                }
+                break :blk false;
+            },
+            .ErrorReturn => |error_return| blk: {
+                for (error_return.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Switch => |switch_expr| blk: {
+                if (self.exprContainsResult(switch_expr.condition)) break :blk true;
+                for (switch_expr.arms) |arm| {
+                    if (self.switchPatternContainsResult(arm.pattern)) break :blk true;
+                    if (self.exprContainsResult(arm.value)) break :blk true;
+                }
+                if (switch_expr.else_expr) |else_expr| {
+                    if (self.exprContainsResult(else_expr)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Name => |name| std.mem.eql(u8, name.name, "result"),
+            .TypeValue,
+            .Comptime,
+            .ExternalProxy,
+            .IntegerLiteral,
+            .StringLiteral,
+            .BoolLiteral,
+            .AddressLiteral,
+            .BytesLiteral,
+            .Error,
+            => false,
+        };
+    }
+
+    fn rejectReservedModifiesClause(self: *TypeChecker, clause: ast.SpecClause) !void {
+        // Fail closed before validating the clause body. The future semantic
+        // implementation should replace this with storage-effect rule checking.
+        try self.emitRangeError(clause.range, "`modifies` clauses are reserved for user-declared storage effects and are not implemented yet; remove the clause for now. The design is tracked in the SMT implementation plan.", .{});
+    }
+
+    fn switchPatternContainsResult(self: *TypeChecker, pattern: ast.SwitchPattern) bool {
+        return switch (pattern) {
+            .Expr => |expr_id| self.exprContainsResult(expr_id),
+            .Range => |range_pattern| self.exprContainsResult(range_pattern.start) or self.exprContainsResult(range_pattern.end),
+            .NamedError => |named_error| self.exprContainsResult(named_error.callee),
+            .Or => |or_pattern| blk: {
+                for (or_pattern.alternatives) |alternative| {
+                    if (self.switchPatternContainsResult(alternative)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Ok, .Err, .Else => false,
+        };
     }
 
     fn validateGenericSwitchPatternInstantiation(self: *TypeChecker, pattern: ast.SwitchPattern, bindings: []const GenericTypeBinding) anyerror!void {

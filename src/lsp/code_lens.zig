@@ -98,6 +98,7 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
     var guard_count: u32 = 0;
     var ensures_count: u32 = 0;
     var invariant_count: u32 = 0;
+    var modifies_count: u32 = 0;
 
     for (clauses) |clause| {
         switch (clause.kind) {
@@ -105,6 +106,7 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
             .guard => guard_count += 1,
             .ensures => ensures_count += 1,
             .invariant => invariant_count += 1,
+            .modifies => modifies_count += 1,
         }
     }
 
@@ -130,6 +132,11 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
     if (invariant_count > 0) {
         if (!first) try writer.writeAll(", ");
         try writer.print("{d} invariant", .{invariant_count});
+        first = false;
+    }
+    if (modifies_count > 0) {
+        if (!first) try writer.writeAll(", ");
+        try writer.print("{d} modifies", .{modifies_count});
     }
 
     return buffer.toOwnedSlice(allocator);

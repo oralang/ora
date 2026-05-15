@@ -338,6 +338,7 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
             .guard => "    guard(",
             .ensures => "    ensures(",
             .invariant => "    invariant(",
+            .modifies => "    modifies(",
         });
         try writeExprText(writer, file, clause.expr);
         try writer.writeByte(')');
@@ -557,6 +558,7 @@ fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.
             .guard => "    guard(",
             .ensures => "    ensures(",
             .invariant => "    invariant(",
+            .modifies => "    modifies(",
         });
         try writeExprText(writer, file, clause.expr);
         try writer.writeByte(')');

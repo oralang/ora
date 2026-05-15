@@ -2003,6 +2003,7 @@ pub fn mixin(Builder: type) type {
                 .Requires => .requires,
                 .Guard => .guard,
                 .Ensures => .ensures,
+                .Modifies => .modifies,
                 else => blk: {
                     _ = try Lowering.malformedExpr(self, node, "invalid specification keyword");
                     break :blk .requires;

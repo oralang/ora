@@ -54,6 +54,27 @@ test "compiler lowers ensures on implicit void returns" {
     try testing.expect(ensures_index < return_index);
 }
 
+test "compiler rejects reserved modifies clauses before verification" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn run(value: u256)
+        \\        modifies total
+        \\        ensures total == value
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` clauses are reserved for user-declared storage effects and are not implemented yet; remove the clause for now. The design is tracked in the SMT implementation plan."));
+}
+
 test "compiler extracts verification facts and lowers HIR handles" {
     const source_text =
         \\contract Counter {
