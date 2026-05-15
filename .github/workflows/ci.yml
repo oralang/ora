@@ -192,6 +192,18 @@ jobs:
           }
           echo "✅ All files pass linting"
 
+      - name: Check verifier introspection guards
+        run: |
+          echo "🔍 Checking verifier self-introspection guards..."
+          zig build check-verifier-introspection
+          echo "✅ Verifier self-introspection guards passed"
+
+      - name: Check refinement registry sync
+        run: |
+          echo "🔍 Checking refinement registry sync..."
+          zig build check-refinement-registry-sync
+          echo "✅ Refinement registry sync passed"
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}

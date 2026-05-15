@@ -636,6 +636,22 @@ pub fn build(b: *std.Build) void {
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
+
+    // zig build check-verifier-introspection
+    const verifier_introspection_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-verifier-introspection.sh",
+    });
+    const check_verifier_introspection_step = b.step("check-verifier-introspection", "Run verifier self-introspection static checks");
+    check_verifier_introspection_step.dependOn(&verifier_introspection_cmd.step);
+
+    // zig build check-refinement-registry-sync
+    const refinement_registry_sync_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-refinement-registry-sync.sh",
+    });
+    const check_refinement_registry_sync_step = b.step("check-refinement-registry-sync", "Run refinement registry/docs sync checks");
+    check_refinement_registry_sync_step.dependOn(&refinement_registry_sync_cmd.step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
