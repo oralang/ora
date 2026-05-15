@@ -928,7 +928,7 @@ pub const Handler = struct {
             defer index.deinit(self.allocator);
 
             // Find call sites: scan for Call expressions to target_name inside functions
-            var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, doc_source, lexer_mod.LexerConfig.development());
+            var lex = lexer_mod.Lexer.initWithRecovery(self.allocator, doc_source);
             defer lex.deinit();
             const tokens = lex.scanTokens() catch continue;
             defer self.allocator.free(tokens);
@@ -982,7 +982,7 @@ pub const Handler = struct {
         const caller_source = self.docs.docs.get(caller_uri) orelse return null;
         const caller_range = params.item.range;
 
-        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, caller_source, lexer_mod.LexerConfig.development());
+        var lex = lexer_mod.Lexer.initWithRecovery(self.allocator, caller_source);
         defer lex.deinit();
         const tokens = lex.scanTokens() catch return null;
         defer self.allocator.free(tokens);
@@ -1065,7 +1065,7 @@ pub const Handler = struct {
     }
 
     fn identifierAtPosition(self: *Handler, source: []const u8, position: frontend.Position) !?[]const u8 {
-        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, source, lexer_mod.LexerConfig.development());
+        var lex = lexer_mod.Lexer.initWithRecovery(self.allocator, source);
         defer lex.deinit();
         const tokens = lex.scanTokens() catch return null;
         defer self.allocator.free(tokens);
@@ -1121,7 +1121,7 @@ pub const Handler = struct {
             return try self.allocator.alloc(frontend.Range, 0);
         }
 
-        var lex = try lexer_mod.Lexer.initWithConfig(self.allocator, other_source, lexer_mod.LexerConfig.development());
+        var lex = lexer_mod.Lexer.initWithRecovery(self.allocator, other_source);
         defer lex.deinit();
         const tokens = lex.scanTokens() catch {
             self.allocator.free(empty);

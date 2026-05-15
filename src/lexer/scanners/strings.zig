@@ -185,7 +185,7 @@ pub fn scanCharacter(lexer: *Lexer) LexerError!void {
         };
 
         // use error recovery if enabled
-        if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
+        if (lexer.error_recovery != null) {
             try lexer.error_recovery.?.recordDetailedError(LexerError.InvalidCharacterLiteral, range, lexer.source, "Character literal is missing closing single quote");
             return;
         } else {
@@ -215,7 +215,7 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
     var string_processor = StringProcessor.init(lexer.arena.allocator());
     const processed_text = string_processor.processString(text) catch |err| {
         // use error recovery if enabled for better error reporting
-        if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
+        if (lexer.error_recovery != null) {
             const error_message = switch (err) {
                 LexerError.InvalidEscapeSequence => "Invalid escape sequence in string literal",
                 else => "Error processing string literal",
@@ -242,11 +242,6 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
     };
 
     const token_value = TokenValue{ .string = processed_text };
-
-    // track performance metrics if enabled
-    if (lexer.performance) |*perf| {
-        perf.tokens_scanned += 1;
-    }
 
     try lexer.tokens.append(lexer.allocator, Token{
         .type = .StringLiteral,
@@ -303,7 +298,7 @@ pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
     // process the character literal using StringProcessor with enhanced error handling
     const char_value = StringProcessor.processCharacterLiteral(text) catch |err| {
         // use error recovery if enabled for better error reporting
-        if (lexer.config.enable_error_recovery and lexer.error_recovery != null) {
+        if (lexer.error_recovery != null) {
             const error_message = switch (err) {
                 LexerError.EmptyCharacterLiteral => "Character literal cannot be empty",
                 LexerError.InvalidCharacterLiteral => "Character literal must contain exactly one character or valid escape sequence",

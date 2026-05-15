@@ -63,7 +63,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         diagnostics.deinit(allocator);
     }
 
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
+    var lex = lexer.Lexer.initWithRecovery(allocator, source);
     defer lex.deinit();
 
     const tokens = try lex.scanTokens();

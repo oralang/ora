@@ -204,7 +204,7 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
         collected.deinit(allocator);
     }
 
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
+    var lex = lexer.Lexer.initWithRecovery(allocator, source);
     defer lex.deinit();
 
     const tokens = lex.scanTokens() catch {

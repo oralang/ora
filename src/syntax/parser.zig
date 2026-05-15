@@ -22,10 +22,7 @@ pub fn parse(allocator: std.mem.Allocator, file_id: source.FileId, source_text: 
     };
     errdefer result.diagnostics.deinit();
 
-    var lexer_config = lexer.LexerConfig.development();
-    lexer_config.minimum_diagnostic_severity = .Hint;
-
-    var lex = try lexer.Lexer.initWithConfig(allocator, source_text, lexer_config);
+    var lex = lexer.Lexer.initWithRecovery(allocator, source_text);
     defer lex.deinit();
 
     const token_slice = try lex.scanTokens();

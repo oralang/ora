@@ -84,7 +84,7 @@ pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
     errdefer tokens_list.deinit(allocator);
 
     // Phase 1: Lex source and classify tokens.
-    var lex = try lexer_mod.Lexer.initWithConfig(allocator, source, lexer_mod.LexerConfig.development());
+    var lex = lexer_mod.Lexer.initWithRecovery(allocator, source);
     defer lex.deinit();
     const tokens = lex.scanTokens() catch return try tokens_list.toOwnedSlice(allocator);
     defer allocator.free(tokens);

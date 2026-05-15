@@ -354,7 +354,7 @@ pub const LexerConfigError = error{
     DiagnosticFilteringRequiresErrorRecovery,
 };
 
-/// Performance monitoring for lexer operations
+/// Performance monitoring for lexer operations.
 pub const LexerPerformance = struct {
     tokens_scanned: u64 = 0,
     characters_processed: u64 = 0,
@@ -363,75 +363,36 @@ pub const LexerPerformance = struct {
     error_recovery_invocations: u64 = 0,
 
     pub fn reset(self: *LexerPerformance) void {
-        self.* = LexerPerformance{};
-    }
-
-    pub fn getTokensPerCharacter(self: *const LexerPerformance) f64 {
-        if (self.characters_processed == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.tokens_scanned)) / @as(f64, @floatFromInt(self.characters_processed));
-    }
-
-    pub fn getStringInterningHitRate(self: *const LexerPerformance) f64 {
-        const total = self.string_interning_hits + self.string_interning_misses;
-        if (total == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.string_interning_hits)) / @as(f64, @floatFromInt(total));
+        self.* = .{};
     }
 };
 
-/// Lexer configuration options
+/// Lexer configuration options.
 pub const LexerConfig = struct {
-    // error recovery configuration
     enable_error_recovery: bool = true,
     max_errors: u32 = 100,
     enable_suggestions: bool = true,
 
-    // resynchronization after errors
     enable_resync: bool = true,
     resync_max_lookahead: u32 = 256,
 
-    // string processing configuration
     enable_string_interning: bool = true,
     string_pool_initial_capacity: u32 = 256,
 
-    // performance monitoring configuration
     enable_performance_monitoring: bool = false,
 
-    // feature toggles
-    enable_raw_strings: bool = true,
-    enable_character_literals: bool = true,
-    enable_binary_literals: bool = true,
-    enable_hex_validation: bool = true,
-    enable_address_validation: bool = true,
-    enable_number_overflow_checking: bool = true,
-
-    // diagnostic configuration
     enable_diagnostic_grouping: bool = true,
     enable_diagnostic_filtering: bool = true,
     minimum_diagnostic_severity: DiagnosticSeverity = .Error,
 
-    // strict mode for production use
     strict_mode: bool = false,
 
-    /// Create default configuration
     pub fn default() LexerConfig {
-        return LexerConfig{};
+        return .{};
     }
 
-    /// Create configuration optimized for performance
-    pub fn performance() LexerConfig {
-        return LexerConfig{
-            .enable_error_recovery = false,
-            .enable_suggestions = false,
-            .enable_string_interning = true,
-            .enable_performance_monitoring = true,
-            .enable_diagnostic_grouping = false,
-            .enable_diagnostic_filtering = false,
-        };
-    }
-
-    /// Create configuration optimized for development/IDE usage
     pub fn development() LexerConfig {
-        return LexerConfig{
+        return .{
             .enable_error_recovery = true,
             .max_errors = 1000,
             .enable_suggestions = true,
@@ -443,107 +404,26 @@ pub const LexerConfig = struct {
         };
     }
 
-    /// Create configuration for strict parsing (no error recovery)
     pub fn strict() LexerConfig {
-        return LexerConfig{
+        return .{
             .enable_error_recovery = false,
             .enable_suggestions = false,
+            .enable_diagnostic_grouping = false,
+            .enable_diagnostic_filtering = false,
             .strict_mode = true,
             .minimum_diagnostic_severity = .Error,
         };
     }
 
-    /// Validate configuration and return errors if invalid
     pub fn validate(self: LexerConfig) LexerConfigError!void {
-        if (self.max_errors == 0) {
-            return LexerConfigError.InvalidMaxErrors;
-        }
-
-        if (self.max_errors > 10000) {
-            return LexerConfigError.MaxErrorsTooLarge;
-        }
-
-        if (self.string_pool_initial_capacity == 0) {
-            return LexerConfigError.InvalidStringPoolCapacity;
-        }
-
-        if (self.string_pool_initial_capacity > 1000000) {
-            return LexerConfigError.StringPoolCapacityTooLarge;
-        }
-
-        // validate feature combinations
-        if (self.enable_suggestions and !self.enable_error_recovery) {
-            return LexerConfigError.SuggestionsRequireErrorRecovery;
-        }
-
-        if (self.enable_diagnostic_grouping and !self.enable_error_recovery) {
-            return LexerConfigError.DiagnosticGroupingRequiresErrorRecovery;
-        }
-
-        if (self.enable_diagnostic_filtering and !self.enable_error_recovery) {
-            return LexerConfigError.DiagnosticFilteringRequiresErrorRecovery;
-        }
+        if (self.max_errors == 0) return error.InvalidMaxErrors;
+        if (self.max_errors > 10000) return error.MaxErrorsTooLarge;
+        if (self.string_pool_initial_capacity == 0) return error.InvalidStringPoolCapacity;
+        if (self.string_pool_initial_capacity > 1000000) return error.StringPoolCapacityTooLarge;
+        if (self.enable_suggestions and !self.enable_error_recovery) return error.SuggestionsRequireErrorRecovery;
+        if (self.enable_diagnostic_grouping and !self.enable_error_recovery) return error.DiagnosticGroupingRequiresErrorRecovery;
+        if (self.enable_diagnostic_filtering and !self.enable_error_recovery) return error.DiagnosticFilteringRequiresErrorRecovery;
     }
-
-    /// Get a description of the configuration
-    pub fn describe(self: LexerConfig, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(allocator);
-
-        const writer = buffer.writer(allocator);
-
-        try writer.writeAll("Lexer Configuration:\n");
-        try writer.writeAll("==================\n");
-
-        // error recovery settings
-        try writer.print("Error Recovery: {any}\n", .{self.enable_error_recovery});
-        if (self.enable_error_recovery) {
-            try writer.print("  Max Errors: {d}\n", .{self.max_errors});
-            try writer.print("  Suggestions: {any}\n", .{self.enable_suggestions});
-            try writer.print("  Resync: {any} (max lookahead {d})\n", .{ self.enable_resync, self.resync_max_lookahead });
-        }
-
-        // string processing settings
-        try writer.print("String Interning: {any}\n", .{self.enable_string_interning});
-        if (self.enable_string_interning) {
-            try writer.print("  Initial Capacity: {d}\n", .{self.string_pool_initial_capacity});
-        }
-
-        // feature toggles
-        try writer.print("Raw Strings: {any}\n", .{self.enable_raw_strings});
-        try writer.print("Character Literals: {any}\n", .{self.enable_character_literals});
-        try writer.print("Binary Literals: {any}\n", .{self.enable_binary_literals});
-        try writer.print("Hex Validation: {any}\n", .{self.enable_hex_validation});
-        try writer.print("Address Validation: {any}\n", .{self.enable_address_validation});
-        try writer.print("Number Overflow Checking: {any}\n", .{self.enable_number_overflow_checking});
-
-        // diagnostic settings
-        try writer.print("Diagnostic Grouping: {any}\n", .{self.enable_diagnostic_grouping});
-        try writer.print("Diagnostic Filtering: {any}\n", .{self.enable_diagnostic_filtering});
-        try writer.print("Minimum Severity: {any}\n", .{self.minimum_diagnostic_severity});
-
-        // general settings
-        try writer.print("Strict Mode: {any}\n", .{self.strict_mode});
-        try writer.print("Performance Monitoring: {any}\n", .{self.enable_performance_monitoring});
-
-        return buffer.toOwnedSlice(allocator);
-    }
-};
-
-/// Lexer feature enumeration for feature checking
-pub const LexerFeature = enum {
-    ErrorRecovery,
-    Suggestions,
-    StringInterning,
-    PerformanceMonitoring,
-    RawStrings,
-    CharacterLiterals,
-    BinaryLiterals,
-    HexValidation,
-    AddressValidation,
-    NumberOverflowChecking,
-    DiagnosticGrouping,
-    DiagnosticFiltering,
 };
 
 /// Keywords map for efficient lookup
@@ -647,14 +527,14 @@ pub const Lexer = struct {
     // arena allocator for string processing - all processed strings live here
     arena: std.heap.ArenaAllocator,
 
-    // error recovery system
+    // error recovery system (null = fail-fast mode, non-null = recoverable mode)
     error_recovery: ?ErrorRecovery,
     config: LexerConfig,
 
-    // string interning system
+    // string interning system (null in fail-fast mode)
     string_pool: ?StringPool,
 
-    // performance monitoring
+    // performance monitoring (null unless explicitly enabled)
     performance: ?LexerPerformance,
 
     pub fn init(allocator: Allocator, source: []const u8) Lexer {
@@ -671,39 +551,44 @@ pub const Lexer = struct {
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .error_recovery = null,
-            .config = LexerConfig.default(),
+            .config = LexerConfig.strict(),
             .string_pool = null,
             .performance = null,
         };
     }
 
-    /// Initialize lexer with custom configuration
+    /// Initialize lexer with custom configuration.
     pub fn initWithConfig(allocator: Allocator, source: []const u8, config: LexerConfig) LexerConfigError!Lexer {
-        // validate configuration first
         try config.validate();
 
         var lexer = Lexer.init(allocator, source);
         lexer.config = config;
 
-        // initialize optional components based on configuration
         if (config.enable_error_recovery) {
             lexer.error_recovery = ErrorRecovery.init(allocator, config.max_errors);
         }
 
         if (config.enable_string_interning) {
             lexer.string_pool = trivia.StringPool.init(allocator);
-            // pre-allocate capacity if specified
             if (config.string_pool_initial_capacity > 0) {
-                lexer.string_pool.?.strings.ensureTotalCapacity(config.string_pool_initial_capacity) catch {
-                    // if allocation fails, continue with default capacity
-                };
+                lexer.string_pool.?.strings.ensureTotalCapacity(config.string_pool_initial_capacity) catch {};
             }
         }
 
         if (config.enable_performance_monitoring) {
-            lexer.performance = LexerPerformance{};
+            lexer.performance = .{};
         }
 
+        return lexer;
+    }
+
+    /// Initialize lexer with error recovery and string interning enabled.
+    /// Used by LSP / parser; fail-fast `init` is used by driver / formatter / tests.
+    pub fn initWithRecovery(allocator: Allocator, source: []const u8) Lexer {
+        var lexer = Lexer.init(allocator, source);
+        lexer.config = LexerConfig.development();
+        lexer.error_recovery = ErrorRecovery.init(allocator, 1000);
+        lexer.string_pool = trivia.StringPool.init(allocator);
         return lexer;
     }
 
@@ -803,74 +688,6 @@ pub const Lexer = struct {
         return std.ArrayList(LexerDiagnostic){};
     }
 
-    /// Get current lexer configuration
-    pub fn getConfig(self: *const Lexer) LexerConfig {
-        return self.config;
-    }
-
-    /// Update lexer configuration (only affects future operations)
-    pub fn updateConfig(self: *Lexer, new_config: LexerConfig) LexerConfigError!void {
-        // validate new configuration
-        try new_config.validate();
-
-        // update configuration
-        self.config = new_config;
-
-        // reinitialize components if needed
-        if (new_config.enable_error_recovery and self.error_recovery == null) {
-            self.error_recovery = ErrorRecovery.init(self.allocator, new_config.max_errors);
-        } else if (!new_config.enable_error_recovery and self.error_recovery != null) {
-            self.error_recovery.?.deinit();
-            self.error_recovery = null;
-        } else if (new_config.enable_error_recovery and self.error_recovery != null) {
-            // update max errors if changed
-            self.error_recovery.?.max_errors = new_config.max_errors;
-        }
-
-        if (new_config.enable_string_interning and self.string_pool == null) {
-            self.string_pool = trivia.StringPool.init(self.allocator);
-        } else if (!new_config.enable_string_interning and self.string_pool != null) {
-            self.string_pool.?.deinit();
-            self.string_pool = null;
-        }
-
-        if (new_config.enable_performance_monitoring and self.performance == null) {
-            self.performance = LexerPerformance{};
-        } else if (!new_config.enable_performance_monitoring) {
-            self.performance = null;
-        }
-    }
-
-    /// Check if a specific feature is enabled
-    pub fn isFeatureEnabled(self: *const Lexer, feature: LexerFeature) bool {
-        return switch (feature) {
-            .ErrorRecovery => self.config.enable_error_recovery,
-            .Suggestions => self.config.enable_suggestions,
-            .StringInterning => self.config.enable_string_interning,
-            .PerformanceMonitoring => self.config.enable_performance_monitoring,
-            .RawStrings => self.config.enable_raw_strings,
-            .CharacterLiterals => self.config.enable_character_literals,
-            .BinaryLiterals => self.config.enable_binary_literals,
-            .HexValidation => self.config.enable_hex_validation,
-            .AddressValidation => self.config.enable_address_validation,
-            .NumberOverflowChecking => self.config.enable_number_overflow_checking,
-            .DiagnosticGrouping => self.config.enable_diagnostic_grouping,
-            .DiagnosticFiltering => self.config.enable_diagnostic_filtering,
-        };
-    }
-
-    /// Get performance statistics (if monitoring is enabled)
-    pub fn getPerformanceStats(self: *const Lexer) ?LexerPerformance {
-        return self.performance;
-    }
-
-    /// Reset performance statistics
-    pub fn resetPerformanceStats(self: *Lexer) void {
-        if (self.performance) |*perf| {
-            perf.reset();
-        }
-    }
-
     /// Get string pool statistics (if interning is enabled)
     pub fn getStringPoolStats(self: *const Lexer) ?struct { count: u32, capacity: u32 } {
         if (self.string_pool) |*pool| {
@@ -931,6 +748,14 @@ pub const Lexer = struct {
         return self.trivia.items;
     }
 
+    pub fn getConfig(self: *const Lexer) LexerConfig {
+        return self.config;
+    }
+
+    pub fn getPerformanceStats(self: *const Lexer) ?LexerPerformance {
+        return self.performance;
+    }
+
     /// Reset lexer state for reuse
     pub fn reset(self: *Lexer) void {
         self.tokens.clearAndFree(self.allocator);
@@ -947,10 +772,6 @@ pub const Lexer = struct {
 
         if (self.string_pool) |*pool| {
             pool.clear();
-        }
-
-        if (self.performance) |*perf| {
-            perf.reset();
         }
     }
 
@@ -976,8 +797,8 @@ pub const Lexer = struct {
                 return;
             };
             // attempt resynchronization if enabled and appropriate for this error
-            if (self.config.enable_resync and shouldResyncOnError(error_type)) {
-                self.resyncToBoundary(self.config.resync_max_lookahead);
+            if (shouldResyncOnError(error_type)) {
+                self.resyncToBoundary(256);
             }
         }
     }
@@ -997,8 +818,8 @@ pub const Lexer = struct {
                 // if we can't record more errors, we've hit the limit
                 return;
             };
-            if (self.config.enable_resync and shouldResyncOnError(error_type)) {
-                self.resyncToBoundary(self.config.resync_max_lookahead);
+            if (shouldResyncOnError(error_type)) {
+                self.resyncToBoundary(256);
             }
         }
     }
@@ -1031,20 +852,6 @@ pub const Lexer = struct {
     /// Intern a string if string interning is enabled, otherwise return the original
     fn internString(self: *Lexer, string: []const u8) LexerError![]const u8 {
         if (self.string_pool) |*pool| {
-            // track performance metrics if enabled
-            if (self.performance) |*perf| {
-                const hash_value = trivia.StringPool.hash(string);
-                if (pool.strings.get(hash_value)) |interned_string| {
-                    if (std.mem.eql(u8, interned_string, string)) {
-                        perf.string_interning_hits += 1;
-                    } else {
-                        perf.string_interning_misses += 1;
-                    }
-                } else {
-                    perf.string_interning_misses += 1;
-                }
-            }
-
             return pool.intern(string) catch |err| switch (err) {
                 error.OutOfMemory => return LexerError.OutOfMemory,
             };
@@ -1109,11 +916,6 @@ pub const Lexer = struct {
             .end_offset = self.current,
         };
 
-        // track performance metrics for EOF token if enabled
-        if (self.performance) |*perf| {
-            perf.tokens_scanned += 1;
-        }
-
         try self.tokens.append(self.allocator, Token{
             .type = .Eof,
             .lexeme = "",
@@ -1128,11 +930,6 @@ pub const Lexer = struct {
     }
 
     fn scanToken(self: *Lexer) LexerError!void {
-        // track performance metrics if enabled
-        if (self.performance) |*perf| {
-            perf.characters_processed += 1;
-        }
-
         const c = self.advance();
 
         // whitespace/comments are handled by captureLeadingTrivia()
@@ -1483,11 +1280,6 @@ pub const Lexer = struct {
             token_value = TokenValue{ .boolean = false };
         }
 
-        // track performance metrics if enabled
-        if (self.performance) |*perf| {
-            perf.tokens_scanned += 1;
-        }
-
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
             .lexeme = text,
@@ -1521,11 +1313,6 @@ pub const Lexer = struct {
             token_value = TokenValue{ .boolean = false };
         }
 
-        // track performance metrics if enabled
-        if (self.performance) |*perf| {
-            perf.tokens_scanned += 1;
-        }
-
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
             .lexeme = interned_text,
@@ -1550,7 +1337,7 @@ pub fn scan(source: []const u8, allocator: Allocator) LexerError![]Token {
     return lexer.scanTokens();
 }
 
-/// Convenience function with configuration - tokenizes source with custom config
+/// Convenience function with configuration - tokenizes source with custom config.
 pub fn scanWithConfig(source: []const u8, allocator: Allocator, config: LexerConfig) (LexerError || LexerConfigError)![]Token {
     var lexer = try Lexer.initWithConfig(allocator, source, config);
     defer lexer.deinit();
