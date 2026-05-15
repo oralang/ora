@@ -8,6 +8,9 @@
 
 const std = @import("std");
 
+const LLVM_REPO_URL = "https://github.com/llvm/llvm-project.git";
+const LLVM_COMMIT = "ee8c14be14deabace692ab51f5d5d432b0a83d58";
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -690,35 +693,36 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const b = step.owner;
     const allocator = b.allocator;
 
-    const cwd = std.fs.cwd();
+    const root = b.build_root.handle;
+    const build_root = b.build_root.path orelse ".";
 
     // skip if MLIR C API library is already installed
     const mlir_c_lib = if (@import("builtin").os.tag == .macos) "vendor/mlir/lib/libMLIR-C.dylib" else "vendor/mlir/lib/libMLIR-C.so";
-    if (cwd.access(mlir_c_lib, .{}) catch null) |_| {
+    if (root.access(mlir_c_lib, .{}) catch null) |_| {
         std.log.info("MLIR libraries already installed, skipping build (delete vendor/mlir to force rebuild)", .{});
         return;
     }
 
-    // ensure submodule exists
-    _ = cwd.openDir("vendor/llvm-project", .{ .iterate = false }) catch {
-        std.log.err("Missing LLVM source tree: vendor/llvm-project", .{});
-        std.log.err("Run: ./setup.sh --skip-deps --skip-build", .{});
-        std.log.err("Or manually clone + pin llvm-project into vendor/llvm-project", .{});
+    // CMake is configured against llvm-project/llvm, not just the checkout root.
+    _ = root.openDir("vendor/llvm-project/llvm", .{ .iterate = false }) catch {
+        std.log.err("Missing LLVM source tree: vendor/llvm-project/llvm", .{});
+        std.log.err("Build root: {s}", .{build_root});
+        std.log.err("Run: cd {s} && ./setup.sh --skip-deps --skip-build", .{build_root});
+        std.log.err("Or manually fetch the pinned source:", .{});
+        std.log.err("  cd {s}", .{build_root});
+        std.log.err("  git init vendor/llvm-project", .{});
+        std.log.err("  git -C vendor/llvm-project remote add origin {s}", .{LLVM_REPO_URL});
+        std.log.err("  git -C vendor/llvm-project fetch --depth=1 origin {s}", .{LLVM_COMMIT});
+        std.log.err("  git -C vendor/llvm-project checkout --detach FETCH_HEAD", .{});
         return error.SubmoduleMissing;
     };
 
     // create build and install directories
     const build_dir = "vendor/llvm-project/build-mlir";
-    cwd.makeDir(build_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try root.makePath(build_dir);
 
     const install_prefix = "vendor/mlir";
-    cwd.makeDir(install_prefix) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try root.makePath(install_prefix);
 
     // platform-specific flags
     const builtin = @import("builtin");
@@ -834,7 +838,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     }
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = ".";
+    cfg_child.cwd = build_root;
     cfg_child.stdin_behavior = .Inherit;
     cfg_child.stdout_behavior = .Inherit;
     cfg_child.stderr_behavior = .Inherit;
@@ -856,7 +860,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     // build and install MLIR (with sparse checkout and minimal flags above this is lightweight)
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = ".";
+    build_child.cwd = build_root;
     build_child.stdin_behavior = .Inherit;
     build_child.stdout_behavior = .Inherit;
     build_child.stderr_behavior = .Inherit;
@@ -901,13 +905,11 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     const b = step.owner;
     const allocator = b.allocator;
-    const cwd = std.fs.cwd();
+    const root = b.build_root.handle;
+    const build_root = b.build_root.path orelse ".";
 
     const build_dir = "vendor/ora-dialect-build";
-    cwd.makeDir(build_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try root.makePath(build_dir);
 
     const install_prefix = "vendor/mlir";
     const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
@@ -959,7 +961,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     }
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = ".";
+    cfg_child.cwd = build_root;
     cfg_child.stdin_behavior = .Inherit;
     cfg_child.stdout_behavior = .Inherit;
     cfg_child.stderr_behavior = .Inherit;
@@ -981,7 +983,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = ".";
+    build_child.cwd = build_root;
     build_child.stdin_behavior = .Inherit;
     build_child.stdout_behavior = .Inherit;
     build_child.stderr_behavior = .Inherit;
@@ -1025,13 +1027,11 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     const b = step.owner;
     const allocator = b.allocator;
-    const cwd = std.fs.cwd();
+    const root = b.build_root.handle;
+    const build_root = b.build_root.path orelse ".";
 
     const build_dir = "vendor/sir-dialect-build";
-    cwd.makeDir(build_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try root.makePath(build_dir);
 
     const install_prefix = "vendor/mlir";
     const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
@@ -1083,7 +1083,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     }
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = ".";
+    cfg_child.cwd = build_root;
     cfg_child.stdin_behavior = .Inherit;
     cfg_child.stdout_behavior = .Inherit;
     cfg_child.stderr_behavior = .Inherit;
@@ -1105,7 +1105,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
     var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = ".";
+    build_child.cwd = build_root;
     build_child.stdin_behavior = .Inherit;
     build_child.stdout_behavior = .Inherit;
     build_child.stderr_behavior = .Inherit;
