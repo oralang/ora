@@ -761,8 +761,8 @@ static LogicalResult appendConvertedCallArgument(
                     rewriter, loc, typeConverter, wideParts[1], payloadCarrierType);
                 if (!tag || !payload)
                     return failure();
-                out.push_back(tag);
-                out.push_back(payload);
+                out.push_back(ensureU256(rewriter, loc, tag));
+                out.push_back(ensureU256(rewriter, loc, payload));
                 return success();
             }
 
@@ -774,8 +774,8 @@ static LogicalResult appendConvertedCallArgument(
                     rewriter, loc, typeConverter, adaptorOperands[convertedOperandIndex + 1], payloadCarrierType);
                 if (!tag || !payload)
                     return failure();
-                out.push_back(tag);
-                out.push_back(payload);
+                out.push_back(ensureU256(rewriter, loc, tag));
+                out.push_back(ensureU256(rewriter, loc, payload));
                 convertedOperandIndex += 2;
                 return success();
             }
@@ -3058,8 +3058,8 @@ LogicalResult ConvertCallOp::matchAndRewrite(
                                 rewriter, callUser.getLoc(), typeConverter, replaced[1], payloadType);
                             if (!tag || !payload)
                                 return rewriter.notifyMatchFailure(callUser, "unable to rematerialize forwarded wide error-union operand");
-                            rewrittenOperands.push_back(tag);
-                            rewrittenOperands.push_back(payload);
+                            rewrittenOperands.push_back(ensureU256(rewriter, callUser.getLoc(), tag));
+                            rewrittenOperands.push_back(ensureU256(rewriter, callUser.getLoc(), payload));
                             calleeInputIndex += 2;
                             continue;
                         }

@@ -629,13 +629,23 @@ namespace mlir
                         });
                     });
 
-                    // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
+                    // Rewrite all non-entry functions: public ABI functions
+                    // return (ptr,len), but private scalar helpers return the
+                    // scalar word itself. Keeping private helpers ABI-shaped
+                    // makes internal callers observe memory pointers as values.
                     for (func::FuncOp func : module.getOps<func::FuncOp>())
                     {
                         if (func.getName() == "init" || func.getName() == "main")
                             continue;
                         if (userInit && func == userInit)
                             continue;
+
+                        auto vis = func->getAttrOfType<StringAttr>("ora.visibility");
+                        auto ft = func.getFunctionType();
+                        const bool privateScalarReturn =
+                            vis && vis.getValue() == "private" &&
+                            ft.getNumResults() == 1 &&
+                            !isa<sir::PtrType>(ft.getResult(0));
 
                         bool hasReturn = false;
                         for (Block &block : func.getBlocks())
@@ -645,20 +655,34 @@ namespace mlir
                             if (auto ret = dyn_cast<sir::ReturnOp>(block.getTerminator()))
                             {
                                 builder.setInsertionPoint(ret);
-                                Value ptr = ret.getPtr();
-                                Value len = ret.getLen();
-                                Value ptr_u = builder.create<sir::BitcastOp>(loc, u256Type, ptr);
-                                builder.create<sir::IRetOp>(loc, ValueRange{ptr_u, len});
+                                if (privateScalarReturn)
+                                {
+                                    Value scalar = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ret.getPtr());
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{scalar});
+                                }
+                                else
+                                {
+                                    Value ptr = ret.getPtr();
+                                    Value len = ret.getLen();
+                                    Value ptr_u = builder.create<sir::BitcastOp>(ret.getLoc(), u256Type, ptr);
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{ptr_u, len});
+                                }
                                 ret.erase();
                                 hasReturn = true;
                             }
                         }
                         if (hasReturn)
                         {
-                            auto ft = func.getFunctionType();
                             SmallVector<Type, 4> results;
-                            results.push_back(u256Type);
-                            results.push_back(u256Type);
+                            if (privateScalarReturn)
+                            {
+                                results.push_back(u256Type);
+                            }
+                            else
+                            {
+                                results.push_back(u256Type);
+                                results.push_back(u256Type);
+                            }
                             auto newType = builder.getFunctionType(ft.getInputs(), results);
                             func.setType(newType);
                         }

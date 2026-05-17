@@ -2,9 +2,12 @@
 // Guard Showcase: SMT-proven vs Runtime Guards
 // ============================================================================
 //
-// Each refinement has two functions:
+// Runtime refinements have two functions:
 // - Proven: has requires clauses that let SMT remove the guard
 // - Runtime: missing requires so the guard stays
+//
+// Exact and Scaled are compile-time-only refinements. They appear below as
+// typed-input arithmetic examples, not as runtime guard construction examples.
 //
 // ============================================================================
 
@@ -78,15 +81,14 @@ contract GuardShowcase {
         let q: u256 = dividend / 10;
     }
 
-    pub fn runtimeExact(dividend: u256, divisor: u256) -> bool {
+    pub fn checkedExact(dividend: Exact<u256>, divisor: u256) -> bool {
         if (divisor == 0) {
             return false;
         }
         if (dividend % divisor != 0) {
             return false;
         }
-        let exact_dividend: Exact<u256> = dividend;
-        let q: u256 = exact_dividend / divisor;
+        let q: u256 = dividend / divisor;
         return true;
     }
 
@@ -99,10 +101,10 @@ contract GuardShowcase {
         let c: Scaled<u256, 18> = a + b;
     }
 
-    pub fn scaledMul(a: Scaled<u256, 18>)
+    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>)
         requires(a <= std.constants.U256_MAX / 1_000_000)
+        requires(b == 1_000_000)
     {
-        let b: Scaled<u256, 6> = 1_000_000;
         let c: Scaled<u256, 24> = a * b;
     }
 }

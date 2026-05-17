@@ -877,6 +877,73 @@ test "compiler converts narrowed carried locals in nested scf ifs" {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
+test "OraToSIR lowers bytes Result unwrap_or helper call" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\error Failure();
+        \\
+        \\contract ResultHelpers {
+        \\    fn choose_bytes(flag: bool, value: bytes) -> Result<bytes, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn bytes_or_self(flag: bool, value: bytes) -> bytes {
+        \\        let maybe = choose_bytes(flag, value);
+        \\        return std.result.unwrap_or(maybe, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "OraToSIR keeps private scalar helper calls word-shaped" {
+    const source_text =
+        \\contract PrivateScalarHelper {
+        \\    storage var value: u256;
+        \\
+        \\    fn dec(a: u256, b: u256) -> u256 {
+        \\        return a - b;
+        \\    }
+        \\
+        \\    pub fn run() {
+        \\        value = dec(10, 3);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    var found_call = false;
+    var lines = std.mem.splitScalar(u8, rendered, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "icall @dec") == null) continue;
+        found_call = true;
+
+        const eq_idx = std.mem.indexOfScalar(u8, line, '=') orelse return error.TestUnexpectedResult;
+        const lhs = std.mem.trim(u8, line[0..eq_idx], " \t");
+        var tokens = std.mem.tokenizeAny(u8, lhs, " \t");
+        try testing.expect(tokens.next() != null);
+        try testing.expect(tokens.next() == null);
+    }
+    try testing.expect(found_call);
+}
+
 test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     const example_paths = [_][]const u8{
         "ora-example/smoke.ora",
