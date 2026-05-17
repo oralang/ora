@@ -1,0 +1,16 @@
+contract Vault {
+    pub fn external_name(owner: address)
+        modifies caller_storage[owner]
+    {
+    }
+
+    pub fn callee_name(owner: address)
+        modifies callee_storage[owner]
+    {
+    }
+
+    pub fn external_storage_name(owner: address)
+        modifies external_storage[owner]
+    {
+    }
+}

@@ -53,6 +53,8 @@ pub const ConstEvalResult = model.ConstEvalResult;
 pub const VerificationFactsResult = model.VerificationFactsResult;
 pub const ModuleVerificationFactsResult = model.ModuleVerificationFactsResult;
 pub const appendTypeMangleName = model.appendTypeMangleName;
+pub const formatEffectSlotPath = model.formatEffectSlotPath;
+pub const effectSlotPathRoot = model.effectSlotPathRoot;
 
 pub const buildModuleGraph = module_graph.buildModuleGraph;
 pub const buildItemIndex = module_graph.buildItemIndex;

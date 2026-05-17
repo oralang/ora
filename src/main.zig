@@ -1973,16 +1973,10 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
 
         // Print user-friendly explanation.
         if (parsed) |g| {
-            if (refinements.kindForName(g.refinement_kind)) |kind| {
-                switch (kind) {
-                    .non_zero_address => try stdout.print("     -> `{s}` can be the zero address\n", .{g.variable_name}),
-                    .non_zero => try stdout.print("     -> `{s}` can be zero\n", .{g.variable_name}),
-                    .min_value => try stdout.print("     -> `{s}` can be below the minimum value\n", .{g.variable_name}),
-                    .max_value => try stdout.print("     -> `{s}` can exceed the maximum value\n", .{g.variable_name}),
-                    .in_range, .basis_points => try stdout.print("     -> `{s}` can be out of range\n", .{g.variable_name}),
-                    // Compile-time-only refinements never produce runtime guard violations.
-                    .exact, .scaled => {},
-                }
+            if (refinements.hasGuardViolationExplanation(g.refinement_kind)) {
+                try stdout.print("     -> ", .{});
+                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) unreachable;
+                try stdout.print("\n", .{});
             }
         }
     }

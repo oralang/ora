@@ -346,6 +346,192 @@ test "verification accepts requires helper calls that read storage without degra
     try testing.expect(!result.degraded);
 }
 
+test "verification frames storage outside internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var touched: u256 = 0;
+        \\
+        \\    fn bump(next: u256)
+        \\        modifies touched
+        \\    {
+        \\        touched = next;
+        \\    }
+        \\
+        \\    pub fn f(next: u256) -> bool
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        bump(next);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames distinct map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame possibly aliased map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames distinct nested map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    fn set_allowance(owner: address, spender: address, value: u256)
+        \\        modifies allowances[owner][spender]
+        \\    {
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\
+        \\    pub fn f(
+        \\        owner: address,
+        \\        spender: address,
+        \\        other_owner: address,
+        \\        other_spender: address,
+        \\        value: u256,
+        \\    ) -> bool
+        \\        requires(owner != other_owner)
+        \\        ensures(allowances[other_owner][other_spender] == old(allowances[other_owner][other_spender]))
+        \\    {
+        \\        set_allowance(owner, spender, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames distinct struct fields across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.admin == old(config.admin))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not let internal modifies hide unresolved external calls" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\
+        \\    fn helper(target: address) -> !bool | ExternalCallFailed
+        \\        modifies()
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        return helper(target);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.degraded);
+    try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, "unresolved_callee"));
+}
+
 test "verification rejects unresolved external call preserving storage" {
     const source_text =
         \\extern trait External {
@@ -398,6 +584,225 @@ test "verification frames storage across unresolved staticcall" {
     try testing.expect(!result.degraded);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames storage across staticcall inside modifies empty function" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 0;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        modifies()
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames locked storage across unresolved external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var other: u256 = 11;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        @lock(stable);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame unlocked storage across locked external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var other: u256 = 11;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(other == old(other))
+        \\    {
+        \\        @lock(stable);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames locked map key across unresolved external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn f(target: address, user: address) -> !bool | ExternalCallFailed
+        \\        ensures(balances[user] == old(balances[user]))
+        \\    {
+        \\        @lock(balances[user]);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame unlocked map key across locked external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn f(target: address, user: address, other: address) -> !bool | ExternalCallFailed
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        @lock(balances[user]);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification corpus covers smt modifies framing matrix" {
+    const Probe = struct {
+        path: []const u8,
+        expect_success: bool,
+        expect_degraded: bool = false,
+        expected_loss: []const u8 = "",
+    };
+
+    const probes = [_]Probe{
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_root_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_map_key_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_internal_map_key_alias.ora",
+            .expect_success = false,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_nested_map_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_struct_field_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_staticcall_modifies_empty_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_modifies_empty_unresolved_call.ora",
+            .expect_success = false,
+            .expect_degraded = true,
+            .expected_loss = "unresolved_callee",
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_locked_call_root_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_locked_call_unlocked_root.ora",
+            .expect_success = false,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_locked_call_map_key_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_locked_call_unlocked_map_key.ora",
+            .expect_success = false,
+        },
+    };
+
+    for (probes) |probe| {
+        var result = try verifyExampleWithoutDegradation(probe.path, "f", false, 5_000);
+        defer result.deinit(testing.allocator);
+
+        try testing.expectEqual(probe.expect_success, result.success);
+        try testing.expectEqual(probe.expect_degraded, result.degraded);
+        if (probe.expected_loss.len != 0) {
+            try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, probe.expected_loss));
+        } else {
+            try testing.expectEqualStrings("", result.soundness_losses);
+        }
+        if (probe.expect_success) {
+            try testing.expectEqual(@as(usize, 0), result.errors_len);
+        } else {
+            try testing.expect(result.errors_len > 0);
+        }
+    }
 }
 
 test "verification does not assume unresolved staticcall return value" {

@@ -53,8 +53,33 @@ pub fn kindForName(name: []const u8) ?Kind {
     return if (entryForName(name)) |entry| entry.kind else null;
 }
 
+pub fn kindForGuardText(name: []const u8) ?Kind {
+    const trimmed = std.mem.trim(u8, name, " \t\n\r");
+    for (entries) |entry| {
+        if (std.mem.eql(u8, trimmed, entry.name)) return entry.kind;
+        // Guard IDs historically used the enum tag text, such as
+        // "non_zero_address". Keep accepting that form alongside the public
+        // refinement name emitted by current HIR guards.
+        if (std.mem.eql(u8, trimmed, @tagName(entry.kind))) return entry.kind;
+    }
+    return null;
+}
+
 pub fn nameForKind(kind: Kind) []const u8 {
     return (entryForKind(kind) orelse unreachable).name;
+}
+
+pub fn guardFailureSubtype(kind: Kind, violatable: bool) []const u8 {
+    return switch (kind) {
+        .min_value => if (violatable) "GuardViolation.MinValue" else "GuardUnsatisfiable.MinValue",
+        .max_value => if (violatable) "GuardViolation.MaxValue" else "GuardUnsatisfiable.MaxValue",
+        .in_range => if (violatable) "GuardViolation.InRange" else "GuardUnsatisfiable.InRange",
+        .non_zero_address => if (violatable) "GuardViolation.NonZeroAddress" else "GuardUnsatisfiable.NonZeroAddress",
+        .non_zero => if (violatable) "GuardViolation.NonZero" else "GuardUnsatisfiable.NonZero",
+        .basis_points => if (violatable) "GuardViolation.BasisPoints" else "GuardUnsatisfiable.BasisPoints",
+        .exact => if (violatable) "GuardViolation.Exact" else "GuardUnsatisfiable.Exact",
+        .scaled => if (violatable) "GuardViolation.Scaled" else "GuardUnsatisfiable.Scaled",
+    };
 }
 
 pub fn isKnownName(name: []const u8) bool {
@@ -91,6 +116,17 @@ test "every refinement kind has a registry entry" {
     inline for (std.meta.fields(Kind)) |field| {
         const kind: Kind = @enumFromInt(field.value);
         try std.testing.expect(entryForKind(kind) != null);
+    }
+}
+
+test "refinement registry owns verifier guard failure subtype labels" {
+    for (entries) |entry| {
+        try std.testing.expectEqual(entry.kind, kindForGuardText(entry.name).?);
+        try std.testing.expectEqual(entry.kind, kindForGuardText(@tagName(entry.kind)).?);
+        try std.testing.expect(std.mem.startsWith(u8, guardFailureSubtype(entry.kind, true), "GuardViolation."));
+        try std.testing.expect(std.mem.startsWith(u8, guardFailureSubtype(entry.kind, false), "GuardUnsatisfiable."));
+        try std.testing.expect(std.mem.endsWith(u8, guardFailureSubtype(entry.kind, true), entry.name));
+        try std.testing.expect(std.mem.endsWith(u8, guardFailureSubtype(entry.kind, false), entry.name));
     }
 }
 

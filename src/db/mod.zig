@@ -551,6 +551,7 @@ pub const CompilerDb = struct {
         const item_types = try arena_allocator.alloc(sema.Type, ast_file.items.len);
         const item_regions = try arena_allocator.alloc(sema.Region, ast_file.items.len);
         const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
+        const item_modifies = try arena_allocator.alloc(?[]sema.EffectSlot, ast_file.items.len);
         const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
         const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
         const call_resolutions = try arena_allocator.alloc(?sema.ResolvedCall, ast_file.expressions.len);
@@ -560,6 +561,7 @@ pub const CompilerDb = struct {
         for (item_types) |*item_type| item_type.* = .{ .unknown = {} };
         for (item_regions) |*region| region.* = .none;
         for (item_effects) |*effect| effect.* = .pure;
+        @memset(item_modifies, null);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
         @memset(call_resolutions, null);
@@ -572,6 +574,7 @@ pub const CompilerDb = struct {
             .item_types = item_types,
             .item_regions = item_regions,
             .item_effects = item_effects,
+            .item_modifies = item_modifies,
             .pattern_types = pattern_types,
             .expr_types = expr_types,
             .call_resolutions = call_resolutions,

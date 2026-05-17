@@ -1,0 +1,17 @@
+extern trait External {
+    call fn x(self) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract V {
+    storage var balances: map<address, u256>;
+
+    pub fn f(target: address, user: address, other: address) -> !bool | ExternalCallFailed
+        requires(user != other)
+        ensures(balances[other] == old(balances[other]))
+    {
+        @lock(balances[user]);
+        return external<External>(target, gas: 50000).x();
+    }
+}

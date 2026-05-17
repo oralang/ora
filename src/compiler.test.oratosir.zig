@@ -808,6 +808,86 @@ test "compiler storage layout manifest matches SIR slot usage" {
     });
 }
 
+test "OraToSIR lowers lock and guard to matching transient key shapes" {
+    const source_text =
+        \\contract GuardedWrites {
+        \\    storage var total: u256;
+        \\    storage var history: [u256; 8];
+        \\
+        \\    fn write_total(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    fn write_history(index: u256, value: u256) {
+        \\        history[index] = value;
+        \\    }
+        \\
+        \\    pub fn touch_total(value: u256) {
+        \\        @lock(total);
+        \\        write_total(value);
+        \\    }
+        \\
+        \\    pub fn touch_history(index: u256, value: u256) {
+        \\        @lock(history[index]);
+        \\        write_history(index, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const lock_prefix = "large_const 0x8000000000000000000000000000000000000000000000000000000000000000";
+
+    const touch_total = try functionSlice(rendered, "touch_total");
+    try expectOrderedNeedles(touch_total, &.{
+        "slot_total = const 0x0",
+        lock_prefix,
+        "tstore",
+    });
+
+    const write_total = try functionSlice(rendered, "write_total");
+    try expectOrderedNeedles(write_total, &.{
+        "slot_total = const 0x0",
+        lock_prefix,
+        "tload",
+        "revert",
+        "sstore slot_total",
+    });
+
+    const touch_history = try functionSlice(rendered, "touch_history");
+    try expectOrderedNeedles(touch_history, &.{
+        "mstore256",
+        "keccak256",
+        lock_prefix,
+        "add",
+        "tstore",
+    });
+
+    const write_history = try functionSlice(rendered, "write_history");
+    try expectOrderedNeedles(write_history, &.{
+        "slot_history = const 0x1",
+        "mstore256",
+        "keccak256",
+        lock_prefix,
+        "add",
+        "tload",
+        "revert",
+        "sstore",
+    });
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "tstore"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "tload"));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, rendered, lock_prefix));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "keccak256"));
+}
+
 test "OraToSIR lowers deep dynamic struct scalar update to direct field sstore" {
     const source_text =
         \\struct Leaf {

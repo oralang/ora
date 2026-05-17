@@ -641,6 +641,14 @@ pub fn build(b: *std.Build) void {
     });
     const check_refinement_registry_sync_step = b.step("check-refinement-registry-sync", "Run refinement registry/docs sync checks");
     check_refinement_registry_sync_step.dependOn(&refinement_registry_sync_cmd.step);
+
+    // zig build check-lock-guarding
+    const lock_guarding_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-lock-guarding.sh",
+    });
+    const check_lock_guarding_step = b.step("check-lock-guarding", "Run lock guard insertion static checks");
+    check_lock_guarding_step.dependOn(&lock_guarding_cmd.step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose

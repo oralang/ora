@@ -1,0 +1,21 @@
+contract V {
+    struct Config {
+        owner: address,
+        admin: address,
+    }
+
+    storage var config: Config;
+
+    fn set_owner(next_owner: address)
+        modifies config.owner
+    {
+        config.owner = next_owner;
+    }
+
+    pub fn f(next_owner: address) -> bool
+        ensures(config.admin == old(config.admin))
+    {
+        set_owner(next_owner);
+        return true;
+    }
+}

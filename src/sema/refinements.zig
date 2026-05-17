@@ -11,7 +11,9 @@ pub const entries = registry.entries;
 pub const entryForName = registry.entryForName;
 pub const entryForKind = registry.entryForKind;
 pub const kindForName = registry.kindForName;
+pub const kindForGuardText = registry.kindForGuardText;
 pub const nameForKind = registry.nameForKind;
+pub const guardFailureSubtype = registry.guardFailureSubtype;
 pub const isKnownName = registry.isKnownName;
 pub const isPathFormName = registry.isPathFormName;
 pub const hasNativeMlirTypeName = registry.hasNativeMlirTypeName;
@@ -97,6 +99,28 @@ pub fn expectationText(allocator: std.mem.Allocator, refinement: model.Refinemen
     };
 }
 
+pub fn writeGuardViolationExplanation(writer: anytype, refinement_name: []const u8, variable_name: []const u8) !bool {
+    const kind = kindForName(refinement_name) orelse return false;
+    switch (kind) {
+        .non_zero_address => try writer.print("`{s}` can be the zero address", .{variable_name}),
+        .non_zero => try writer.print("`{s}` can be zero", .{variable_name}),
+        .min_value => try writer.print("`{s}` can be below the minimum value", .{variable_name}),
+        .max_value => try writer.print("`{s}` can exceed the maximum value", .{variable_name}),
+        .in_range, .basis_points => try writer.print("`{s}` can be out of range", .{variable_name}),
+        // Compile-time-only refinements never produce runtime guard violations.
+        .exact, .scaled => return false,
+    }
+    return true;
+}
+
+pub fn hasGuardViolationExplanation(refinement_name: []const u8) bool {
+    const kind = kindForName(refinement_name) orelse return false;
+    return switch (kind) {
+        .exact, .scaled => false,
+        else => true,
+    };
+}
+
 pub fn refinementType(
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -140,4 +164,47 @@ test "refinement registry exposes bounds for bounds-backed refinements" {
 
     const non_zero = bounds(.{ .name = nameForKind(.non_zero), .base_type = &base, .args = &.{type_arg} }) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("1", non_zero.min_text.?);
+}
+
+test "refinement registry owns runtime guard explanations" {
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.min_value), "amount"));
+    try std.testing.expectEqualStrings("`amount` can be below the minimum value", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.max_value), "amount"));
+    try std.testing.expectEqualStrings("`amount` can exceed the maximum value", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.in_range), "amount"));
+    try std.testing.expectEqualStrings("`amount` can be out of range", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.non_zero_address), "owner"));
+    try std.testing.expectEqualStrings("`owner` can be the zero address", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.non_zero), "amount"));
+    try std.testing.expectEqualStrings("`amount` can be zero", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.basis_points), "rate"));
+    try std.testing.expectEqualStrings("`rate` can be out of range", buffer.items);
+
+    buffer.clearRetainingCapacity();
+    const exact_has_explanation = try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.exact), "value");
+    try std.testing.expect(!exact_has_explanation);
+    try std.testing.expectEqual(@as(usize, 0), buffer.items.len);
+
+    buffer.clearRetainingCapacity();
+    const scaled_has_explanation = try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.scaled), "value");
+    try std.testing.expect(!scaled_has_explanation);
+    try std.testing.expectEqual(@as(usize, 0), buffer.items.len);
+
+    buffer.clearRetainingCapacity();
+    const unknown_has_explanation = try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), "UnknownRefinement", "value");
+    try std.testing.expect(!unknown_has_explanation);
+    try std.testing.expectEqual(@as(usize, 0), buffer.items.len);
 }

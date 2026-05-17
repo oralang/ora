@@ -1,0 +1,16 @@
+contract V {
+    storage var balances: map<address, u256>;
+
+    fn set_balance(user: address, value: u256)
+        modifies balances[user]
+    {
+        balances[user] = value;
+    }
+
+    pub fn f(user: address, other: address, value: u256) -> bool
+        ensures(balances[other] == old(balances[other]))
+    {
+        set_balance(user, value);
+        return true;
+    }
+}

@@ -1,0 +1,29 @@
+contract Vault {
+    struct Config {
+        owner: address,
+    }
+
+    storage total: u256 = 0;
+    storage config: Config;
+    storage balances: map<address, u256>;
+    storage buckets: map<u256, u256>;
+    storage allowances: map<address, map<address, u256>>;
+
+    pub fn run(owner: address, spender: address, value: u256)
+        modifies total
+        modifies config.owner
+        modifies balances[owner]
+        modifies balances[msg.sender]
+        modifies balances[tx.origin]
+        modifies buckets[42]
+        modifies allowances[owner][spender]
+        ensures total == value
+    {
+        total = value;
+    }
+
+    pub fn comma(owner: address)
+        modifies balances[owner], total
+    {
+    }
+}

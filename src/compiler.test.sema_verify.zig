@@ -94,7 +94,7 @@ test "compiler accepts v1 modifies storage paths" {
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
-test "compiler rejects unsupported modifies paths fail closed" {
+test "compiler rejects unsupported modifies map keys fail closed" {
     const source_text =
         \\contract Vault {
         \\    storage balances: map<address, u256>;
@@ -102,11 +102,6 @@ test "compiler rejects unsupported modifies paths fail closed" {
         \\
         \\    pub fn complex(i: u256)
         \\        modifies balances[users[i]]
-        \\    {
-        \\    }
-        \\
-        \\    pub fn external_name(owner: address)
-        \\        modifies caller_storage[owner]
         \\    {
         \\    }
         \\}
@@ -117,7 +112,33 @@ test "compiler rejects unsupported modifies paths fail closed" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1"));
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` v1 only supports current-contract storage paths"));
+}
+
+test "compiler rejects external storage modifies paths fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn external_name(owner: address)
+        \\        modifies caller_storage[owner]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn callee_name(owner: address)
+        \\        modifies callee_storage[owner]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn external_storage_name(owner: address)
+        \\        modifies external_storage[owner]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 3), countDiagnosticMessages(&typecheck.diagnostics, "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`"));
 }
 
 test "compiler enforces modifies declarations against storage writes" {
@@ -226,6 +247,106 @@ test "compiler treats modifies empty form as no storage writes" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'total' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects modifies empty form combined with non-empty clauses" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies()
+        \\        modifies total
+        \\    {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn also_bad(value: u256)
+        \\        modifies total
+        \\        modifies()
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(&typecheck.diagnostics, "`modifies()` cannot be combined with non-empty `modifies` clauses"));
+}
+
+test "compiler lowers checked modifies declarations into HIR metadata" {
+    const source_text =
+        \\contract Vault {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    fn touch(owner: address, spender: address, value: u256)
+        \\        modifies config.owner, balances[owner], allowances[owner][spender]
+        \\    {
+        \\        config.owner = owner;
+        \\        balances[owner] = value;
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "ora.modifies_slots = [\"config.owner\", \"balances[param#0]\", \"allowances[param#0][param#1]\"]"));
+}
+
+test "compiler corpus covers modifies sema matrix" {
+    const Probe = struct {
+        path: []const u8,
+        expected_diagnostic: []const u8 = "",
+    };
+
+    const probes = [_]Probe{
+        .{ .path = "ora-example/corpus/modifies/pass_supported_paths.ora" },
+        .{ .path = "ora-example/corpus/modifies/pass_empty_no_writes.ora" },
+        .{
+            .path = "ora-example/corpus/modifies/fail_unsupported_map_key.ora",
+            .expected_diagnostic = "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_external_storage_path.ora",
+            .expected_diagnostic = "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_write_outside_declared.ora",
+            .expected_diagnostic = "is not covered by this function's `modifies` clause",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_empty_with_write.ora",
+            .expected_diagnostic = "storage write to 'total' is not covered by this function's `modifies` clause",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_empty_mixed.ora",
+            .expected_diagnostic = "`modifies()` cannot be combined with non-empty `modifies` clauses",
+        },
+    };
+
+    for (probes) |probe| {
+        var compilation = try compilePackage(probe.path);
+        defer compilation.deinit();
+
+        const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+        if (probe.expected_diagnostic.len == 0) {
+            try testing.expect(typecheck.diagnostics.isEmpty());
+        } else {
+            try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, probe.expected_diagnostic));
+        }
+    }
 }
 
 test "compiler extracts verification facts and lowers HIR handles" {
@@ -420,6 +541,10 @@ test "compiler inserts parameter refinement guards in HIR" {
     const source_text =
         \\pub fn guarded(
         \\    bounded: MinValue<u256, 100>,
+        \\    bounded_max: MaxValue<u256, 200>,
+        \\    bounded_range: InRange<u256, 50, 150>,
+        \\    rate: BasisPoints<u256>,
+        \\    amount: NonZero<u256>,
         \\    target: NonZeroAddress,
         \\) -> u256 {
         \\    return bounded;
@@ -432,6 +557,17 @@ test "compiler inserts parameter refinement guards in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "parameter_refinement"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MinValue"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MaxValue"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "InRange"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "BasisPoints"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZero"));
+    // Runtime guard messages are pinned to sema.refinements.expectationText.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MinValue value >= 100"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MaxValue value <= 200"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected InRange value between 50 and 150"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected BasisPoints value between 0 and 10000"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected NonZero value != 0"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected NonZeroAddress value != 0"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
 }
 

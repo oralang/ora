@@ -1,0 +1,23 @@
+contract V {
+    storage var allowances: map<address, map<address, u256>>;
+
+    fn set_allowance(owner: address, spender: address, value: u256)
+        modifies allowances[owner][spender]
+    {
+        allowances[owner][spender] = value;
+    }
+
+    pub fn f(
+        owner: address,
+        spender: address,
+        other_owner: address,
+        other_spender: address,
+        value: u256,
+    ) -> bool
+        requires(owner != other_owner)
+        ensures(allowances[other_owner][other_spender] == old(allowances[other_owner][other_spender]))
+    {
+        set_allowance(owner, spender, value);
+        return true;
+    }
+}

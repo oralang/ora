@@ -313,40 +313,6 @@ test "buildEffect preserves log and havoc markers across slot summaries" {
     try std.testing.expect(effects_only.has_unlock);
 }
 
-test "unknown locked call diagnostics mention each locked slot" {
-    var diags = diagnostics.DiagnosticList.init(std.testing.allocator);
-    defer diags.deinit();
-
-    var checker = TypeChecker{
-        .arena = std.testing.allocator,
-        .file_id = source.FileId.fromIndex(0),
-        .file = undefined,
-        .item_index = undefined,
-        .resolution = undefined,
-        .const_eval = undefined,
-        .item_types = &.{},
-        .item_regions = &.{},
-        .item_effects = &.{},
-        .pattern_types = &.{},
-        .expr_types = &.{},
-        .call_resolutions = &.{},
-        .expr_effects = &.{},
-        .effect_states = &.{},
-        .current_function_item = null,
-        .diagnostics = &diags,
-    };
-
-    const locked = [_]EffectSlot{
-        .{ .name = "total", .region = .storage },
-        .{ .name = "pending", .region = .transient },
-    };
-    try checker.emitUnknownLockedCallDiagnostics(source.TextRange.init(3, 7), &locked);
-
-    try std.testing.expectEqual(@as(usize, 2), diags.items.items.len);
-    try std.testing.expect(std.mem.eql(u8, diags.items.items[0].message, "unresolved call may write locked storage slot 'total'"));
-    try std.testing.expect(std.mem.eql(u8, diags.items.items[1].message, "unresolved call may write locked transient slot 'pending'"));
-}
-
 pub fn typeCheck(
     allocator: std.mem.Allocator,
     module_id: source.ModuleId,
@@ -364,6 +330,7 @@ pub fn typeCheck(
         .item_types = &.{},
         .item_regions = &.{},
         .item_effects = &.{},
+        .item_modifies = &.{},
         .pattern_types = &.{},
         .expr_types = &.{},
         .call_resolutions = &.{},
@@ -382,6 +349,7 @@ pub fn typeCheck(
     var item_types = try arena.alloc(Type, file.items.len);
     var item_regions = try arena.alloc(Region, file.items.len);
     const item_effects = try arena.alloc(Effect, file.items.len);
+    const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     const call_resolutions = try arena.alloc(?ResolvedCall, file.expressions.len);
@@ -393,6 +361,7 @@ pub fn typeCheck(
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
+    @memset(item_modifies, null);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(call_resolutions, null);
@@ -444,6 +413,7 @@ pub fn typeCheck(
         .item_types = item_types,
         .item_regions = item_regions,
         .item_effects = item_effects,
+        .item_modifies = item_modifies,
         .pattern_types = pattern_types,
         .expr_types = expr_types,
         .call_resolutions = call_resolutions,
@@ -537,6 +507,7 @@ pub fn typeCheck(
     result.item_types = item_types;
     result.item_regions = item_regions;
     result.item_effects = item_effects;
+    result.item_modifies = item_modifies;
     result.pattern_types = pattern_types;
     result.expr_types = expr_types;
     result.call_resolutions = call_resolutions;
@@ -562,6 +533,7 @@ const TypeChecker = struct {
     item_types: []Type,
     item_regions: []Region,
     item_effects: []Effect,
+    item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
@@ -676,6 +648,7 @@ const TypeChecker = struct {
         imported_checker.item_types = target_typecheck.item_types;
         imported_checker.item_regions = target_typecheck.item_regions;
         imported_checker.item_effects = target_typecheck.item_effects;
+        imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
@@ -722,6 +695,7 @@ const TypeChecker = struct {
             imported_checker.item_types = target_typecheck.item_types;
             imported_checker.item_regions = target_typecheck.item_regions;
             imported_checker.item_effects = target_typecheck.item_effects;
+            imported_checker.item_modifies = target_typecheck.item_modifies;
             imported_checker.pattern_types = target_typecheck.pattern_types;
             imported_checker.expr_types = target_typecheck.expr_types;
             imported_checker.call_resolutions = target_typecheck.call_resolutions;
@@ -831,9 +805,22 @@ const TypeChecker = struct {
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
                 var declared_modifies: std.ArrayList(EffectSlot) = .{};
                 var has_modifies_clause = false;
+                var has_empty_modifies_clause = false;
+                var has_nonempty_modifies_clause = false;
                 for (function.clauses) |clause| {
                     if (clause.kind == .modifies) {
                         has_modifies_clause = true;
+                        if (self.modifiesClauseIsEmpty(clause.expr)) {
+                            has_empty_modifies_clause = true;
+                            if (has_nonempty_modifies_clause) {
+                                try self.emitRangeError(clause.range, "`modifies()` cannot be combined with non-empty `modifies` clauses", .{});
+                            }
+                        } else {
+                            has_nonempty_modifies_clause = true;
+                            if (has_empty_modifies_clause) {
+                                try self.emitRangeError(clause.range, "`modifies()` cannot be combined with non-empty `modifies` clauses", .{});
+                            }
+                        }
                         try self.collectModifiesClauseSlots(clause, &declared_modifies);
                         continue;
                     }
@@ -846,6 +833,7 @@ const TypeChecker = struct {
                 try self.ensureFunctionEffectSummary(item_id, function);
                 if (has_modifies_clause) {
                     try self.validateModifiesSubset(function.range, declared_modifies.items, self.effectWrites(self.item_effects[item_id.index()]));
+                    self.item_modifies[item_id.index()] = try declared_modifies.toOwnedSlice(self.arena);
                 }
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
                 try self.validateBodyLocks(function.body, &locked_slots);
@@ -2852,12 +2840,19 @@ const TypeChecker = struct {
         try self.collectModifiesClauseSlots(clause, &slots);
     }
 
+    fn modifiesClauseIsEmpty(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.modifiesClauseIsEmpty(group.expr),
+            .Tuple => |tuple| tuple.elements.len == 0,
+            else => false,
+        };
+    }
+
     fn collectModifiesClauseSlots(self: *TypeChecker, clause: ast.SpecClause, slots: *std.ArrayList(EffectSlot)) !void {
-        // This helper only validates and collects declared paths. Do not let
-        // verifier framing consume modifies declarations unless the
-        // compiler-derived write-set subset check has succeeded for the same
-        // body; otherwise a user declaration could become an unchecked
-        // storage-frame assumption.
+        // This helper only validates and collects declared paths. HIR lowering
+        // exports them for verifier framing only after the caller stores them
+        // in item_modifies, which happens after the compiler-derived write-set
+        // subset check succeeds for the same body.
         try self.visitExpr(clause.expr);
         try self.collectModifiesExprSlots(clause.expr, slots);
     }
@@ -3377,6 +3372,7 @@ const TypeChecker = struct {
         imported_checker.item_types = target_typecheck.item_types;
         imported_checker.item_regions = target_typecheck.item_regions;
         imported_checker.item_effects = target_typecheck.item_effects;
+        imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
@@ -5012,11 +5008,11 @@ const TypeChecker = struct {
             },
             .Lock => |lock_stmt| {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
-                if (self.lockSlotForExpr(lock_stmt.path)) |slot| try self.appendUniqueSlot(locked_slots, slot);
+                if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueSlot(locked_slots, slot);
             },
             .Unlock => |unlock_stmt| {
                 try self.validateExprLocks(unlock_stmt.path, locked_slots);
-                if (self.lockSlotForExpr(unlock_stmt.path)) |slot| self.removeLockedSlot(locked_slots, slot);
+                if (try self.runtimeLockSlotForExpr(unlock_stmt.path, "`@unlock`")) |slot| self.removeLockedSlot(locked_slots, slot);
             },
             .Assign => |assign| {
                 try self.validateExprLocks(assign.value, locked_slots);
@@ -5040,8 +5036,6 @@ const TypeChecker = struct {
                         },
                         else => {},
                     }
-                } else if (self.callableType(call.callee).kind() == .function) {
-                    try self.emitUnknownLockedCallDiagnostics(call.range, locked_slots.items);
                 }
             },
             .Unary => |unary| try self.validateExprLocks(unary.operand, locked_slots),
@@ -5110,6 +5104,46 @@ const TypeChecker = struct {
         };
     }
 
+    fn runtimeLockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId, op_name: []const u8) !?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.runtimeLockSlotForExpr(group.expr, op_name),
+            .Name => |name| blk: {
+                const slot = self.lookupNamedFieldSlot(name.name) orelse break :blk null;
+                if (slot.region != .storage) {
+                    try self.emitExprError(expr_id, "{s} v1 only supports current-contract storage paths", .{op_name});
+                    break :blk null;
+                }
+                break :blk slot;
+            },
+            .Index => |index| blk: {
+                const base_expr = switch (self.file.expression(index.base).*) {
+                    .Group => |group| group.expr,
+                    else => index.base,
+                };
+                const base = switch (self.file.expression(base_expr).*) {
+                    .Name => |name| self.lookupNamedFieldSlot(name.name) orelse break :blk null,
+                    else => {
+                        try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths", .{op_name});
+                        break :blk null;
+                    },
+                };
+                if (base.region != .storage) {
+                    try self.emitExprError(expr_id, "{s} v1 only supports current-contract storage paths", .{op_name});
+                    break :blk null;
+                }
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
+            .Field => {
+                try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths; struct-field locks are not runtime-lowered yet", .{op_name});
+                return null;
+            },
+            else => {
+                try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths", .{op_name});
+                return null;
+            },
+        };
+    }
+
     fn emitLockedWriteDiagnostics(self: *TypeChecker, range: source.TextRange, writes: []const EffectSlot, locked_slots: []const EffectSlot) !void {
         for (writes) |write_slot| {
             for (locked_slots) |locked_slot| {
@@ -5120,15 +5154,6 @@ const TypeChecker = struct {
                 });
                 break;
             }
-        }
-    }
-
-    fn emitUnknownLockedCallDiagnostics(self: *TypeChecker, range: source.TextRange, locked_slots: []const EffectSlot) !void {
-        for (locked_slots) |locked_slot| {
-            try self.emitRangeError(range, "unresolved call may write locked {s} slot '{s}'", .{
-                region_rules.regionDisplayName(locked_slot.region),
-                locked_slot.name,
-            });
         }
     }
 

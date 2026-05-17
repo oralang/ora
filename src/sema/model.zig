@@ -522,6 +522,45 @@ pub const KeySegment = union(enum) {
     unknown,
 };
 
+pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u8 {
+    var buffer: std.ArrayList(u8) = .{};
+    errdefer buffer.deinit(allocator);
+
+    const writer = buffer.writer(allocator);
+    try writer.writeAll(slot.name);
+    if (slot.field_path) |field_path| {
+        for (field_path) |field_name| {
+            try writer.writeByte('.');
+            try writer.writeAll(field_name);
+        }
+    }
+    if (slot.key_path) |key_path| {
+        for (key_path) |segment| {
+            try writer.writeByte('[');
+            switch (segment) {
+                .parameter => |index| try writer.print("param#{d}", .{index}),
+                .constant => |value| try writer.writeAll(value),
+                .msg_sender => try writer.writeAll("msg.sender"),
+                .tx_origin => try writer.writeAll("tx.origin"),
+                .unknown => try writer.writeAll("?"),
+            }
+            try writer.writeByte(']');
+        }
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+pub fn effectSlotPathRoot(path: []const u8) []const u8 {
+    // Keep this parser aligned with z3.encoder.effectSlotPathRoot. The encoder
+    // has a local copy because it is compiled as a standalone z3 module in
+    // encoder-only tests.
+    for (path, 0..) |byte, idx| {
+        if (byte == '.' or byte == '[') return path[0..idx];
+    }
+    return path;
+}
+
 pub const Effect = union(enum) {
     pure,
     external,
@@ -631,6 +670,7 @@ pub const TypeCheckResult = struct {
     item_types: []Type,
     item_regions: []Region,
     item_effects: []Effect,
+    item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
@@ -669,6 +709,10 @@ pub const TypeCheckResult = struct {
 
     pub fn itemEffect(self: *const TypeCheckResult, id: ast.ItemId) Effect {
         return self.item_effects[id.index()];
+    }
+
+    pub fn itemModifies(self: *const TypeCheckResult, id: ast.ItemId) ?[]EffectSlot {
+        return self.item_modifies[id.index()];
     }
 
     pub fn instantiatedStructByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedStruct {
@@ -791,6 +835,27 @@ test "Effect stub supports read and write slot sets" {
     try std.testing.expectEqual(.transient, write_effect.writes.slots[1].region);
     try std.testing.expectEqualStrings("balances", both_effect.reads_writes.reads[0].name);
     try std.testing.expectEqualStrings("pending", both_effect.reads_writes.writes[1].name);
+}
+
+test "EffectSlot path formatting includes fields and keys" {
+    const fields = [_][]const u8{"owner"};
+    const keys = [_]KeySegment{
+        .{ .parameter = 0 },
+        .msg_sender,
+        .{ .constant = "42" },
+    };
+    const slot = EffectSlot{
+        .name = "allowances",
+        .region = .storage,
+        .field_path = &fields,
+        .key_path = &keys,
+    };
+
+    const path = try formatEffectSlotPath(std.testing.allocator, slot);
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings("allowances.owner[param#0][msg.sender][42]", path);
+    try std.testing.expectEqualStrings("allowances", effectSlotPathRoot(path));
 }
 
 test "Effect supports external call marker" {

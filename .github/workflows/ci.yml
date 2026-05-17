@@ -204,6 +204,12 @@ jobs:
           zig build check-refinement-registry-sync
           echo "✅ Refinement registry sync passed"
 
+      - name: Check lock guard insertion
+        run: |
+          echo "🔍 Checking lock guard insertion..."
+          zig build check-lock-guarding
+          echo "✅ Lock guard insertion checks passed"
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}

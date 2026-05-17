@@ -1,0 +1,9 @@
+contract Vault {
+    storage total: u256 = 0;
+
+    pub fn bad(value: u256)
+        modifies()
+    {
+        total = value;
+    }
+}

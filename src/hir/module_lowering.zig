@@ -523,6 +523,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 };
             }
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
+            try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
@@ -648,6 +649,37 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 },
             }
+        }
+
+        fn attachModifiesSummaryAttrs(
+            self: *Lowerer,
+            attrs: *std.ArrayList(mlir.MlirNamedAttribute),
+            item_id: ast.ItemId,
+        ) anyerror!void {
+            if (item_id.index() >= self.typecheck.item_modifies.len) return;
+            const slots = self.typecheck.item_modifies[item_id.index()] orelse return;
+
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer slot_attrs.deinit(self.allocator);
+
+            for (slots) |slot| {
+                if (slot.region != .storage) continue;
+                const slot_path = try sema.formatEffectSlotPath(self.allocator, slot);
+                defer self.allocator.free(slot_path);
+                try slot_attrs.append(
+                    self.allocator,
+                    mlir.oraStringAttrCreate(self.context, strRef(slot_path)),
+                );
+            }
+
+            try attrs.append(self.allocator, .{
+                .name = identifier(self.context, "ora.modifies_slots"),
+                .attribute = mlir.oraArrayAttrCreate(
+                    self.context,
+                    @intCast(slot_attrs.items.len),
+                    if (slot_attrs.items.len == 0) null else slot_attrs.items.ptr,
+                ),
+            });
         }
 
         fn appendEffectSlotAttrs(

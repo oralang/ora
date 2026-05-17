@@ -20,6 +20,7 @@ const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
+const refinements = @import("ora_lib").compiler.sema.refinements;
 const ManagedArrayList = std.array_list.Managed;
 
 pub const AnnotationKind = enum {
@@ -1293,8 +1294,14 @@ pub const VerificationPass = struct {
         const condition = self.encoder.coerceBoolean(raw_condition);
         const function_name = self.current_function_name orelse "unknown";
         const loc = try self.getLocationInfo(if_op);
-        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        const branch_constraints = try self.encoder.takeConstraintRecordsForBranchMerge(self.allocator);
+        defer if (branch_constraints.records.len > 0) self.allocator.free(branch_constraints.records);
+        const leaked_constraints = try self.allocator.alloc(z3.Z3_ast, branch_constraints.records.len);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        for (branch_constraints.records, 0..) |record, idx| {
+            leaked_constraints[idx] = record.ast;
+            try registerSemanticConstraintTag(self, function_name, loc.file, loc.line, loc.column, record);
+        }
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
 
@@ -1348,6 +1355,12 @@ pub const VerificationPass = struct {
         }
 
         try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+        // Condition encoding can emit global facts, such as locked-call frame
+        // constraints from an external_call inside the condition expression.
+        // They are drained from normal pending constraints so branch walkers
+        // consume them once as local assumptions, then restored here for
+        // post-merge postconditions.
+        try self.encoder.restoreBranchMergeConstraintScope(branch_constraints);
     }
 
     fn walkConditionalReturnRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
@@ -6106,29 +6119,40 @@ fn classifyGuardId(guard_id: []const u8, violatable: bool) FailureClassification
         .refinement_kind = kind,
     };
 
-    if (violatable) {
-        classification.subtype = if (kind) |k|
-            if (std.mem.eql(u8, k, "non_zero_address"))
-                "GuardViolation.NonZeroAddress"
-            else if (std.mem.eql(u8, k, "min_value"))
-                "GuardViolation.MinValue"
-            else
-                "GuardViolation"
+    classification.subtype = if (kind) |k|
+        if (refinements.kindForGuardText(k)) |registry_kind|
+            refinements.guardFailureSubtype(registry_kind, violatable)
+        else if (violatable)
+            "GuardViolation"
         else
-            "GuardViolation";
-    } else {
-        classification.subtype = if (kind) |k|
-            if (std.mem.eql(u8, k, "non_zero_address"))
-                "GuardUnsatisfiable.NonZeroAddress"
-            else if (std.mem.eql(u8, k, "min_value"))
-                "GuardUnsatisfiable.MinValue"
-            else
-                "GuardUnsatisfiable"
-        else
-            "GuardUnsatisfiable";
-    }
+            "GuardUnsatisfiable"
+    else if (violatable)
+        "GuardViolation"
+    else
+        "GuardUnsatisfiable";
 
     return classification;
+}
+
+test "guard failure classification uses refinement registry labels" {
+    for (refinements.entries) |entry| {
+        const guard_id = try std.fmt.allocPrint(std.testing.allocator, "guard:test.ora:1:2:3:{s}:value", .{entry.name});
+        defer std.testing.allocator.free(guard_id);
+
+        const violation = classifyGuardId(guard_id, true);
+        try std.testing.expectEqualStrings(refinements.guardFailureSubtype(entry.kind, true), violation.subtype.?);
+        try std.testing.expectEqualStrings(entry.name, violation.refinement_kind.?);
+
+        const unsatisfiable = classifyGuardId(guard_id, false);
+        try std.testing.expectEqualStrings(refinements.guardFailureSubtype(entry.kind, false), unsatisfiable.subtype.?);
+        try std.testing.expectEqualStrings(entry.name, unsatisfiable.refinement_kind.?);
+    }
+
+    const legacy = classifyGuardId("guard:test.ora:1:2:3:non_zero_address:value", true);
+    try std.testing.expectEqualStrings(refinements.guardFailureSubtype(.non_zero_address, true), legacy.subtype.?);
+
+    const unknown = classifyGuardId("guard:test.ora:1:2:3:UnknownRefinement:value", true);
+    try std.testing.expectEqualStrings("GuardViolation", unknown.subtype.?);
 }
 
 fn inferNarrowingBitsFromSmtlib(smtlib: []const u8) ?u32 {

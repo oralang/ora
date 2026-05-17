@@ -95,6 +95,10 @@ set -euo pipefail
 #   catch-state, return normally, and let A commit based on that return value
 # - an uncaught two-hop A -> B -> C revert rolls back pre-call writes in both
 #   A and B while preserving C's prior state
+# - transient-storage locks roll back with a reverted child call, so a caller
+#   can catch the failure and call the same target again in the same transaction
+# - transient-storage locks are visible to reentrant calls into the same
+#   contract and still remain usable by the parent frame after the callback
 
 RPC_URL="${RPC_URL:-http://127.0.0.1:8547}"
 ORA_BIN="${ORA_BIN:-./zig-out/bin/ora}"
@@ -2575,6 +2579,180 @@ contract ExternalCallChainRootSmoke {
 ORA
 }
 
+write_lock_rollback_target_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+contract LockRollbackTargetSmoke {
+    storage var value: u256;
+    storage var marker: u256;
+
+    fn write_value(next: u256) {
+        value = next;
+    }
+
+    pub fn set_value(next: u256) -> bool {
+        write_value(next);
+        return true;
+    }
+
+    pub fn lock_then_guarded_write(next: u256) -> bool {
+        @lock(value);
+        write_value(next);
+        return true;
+    }
+
+    pub fn lock_unlock_then_write(next: u256) -> bool {
+        @lock(value);
+        marker = 3001;
+        @unlock(value);
+        write_value(next);
+        return true;
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+
+    pub fn get_marker() -> u256 {
+        return marker;
+    }
+}
+ORA
+}
+
+write_lock_rollback_observer_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+extern trait LockRollbackTarget {
+    call fn lock_then_guarded_write(self, next: u256) -> bool;
+    call fn set_value(self, next: u256) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract LockRollbackObserverSmoke {
+    storage var marker: u256;
+
+    pub fn catch_revert_then_set(target: address, next: u256) -> bool {
+        try {
+            let locked_write_ok: bool = try external<LockRollbackTarget>(target, gas: 100000).lock_then_guarded_write(next);
+            if (locked_write_ok) {
+                return false;
+            } else {
+                return false;
+            }
+        } catch {
+            // The first call reverted while its callee frame held the transient
+            // lock. The second call must still succeed in this same transaction.
+        }
+
+        try {
+            let set_ok: bool = try external<LockRollbackTarget>(target, gas: 100000).set_value(next + 1);
+            marker = 31;
+            return set_ok;
+        } catch {
+            marker = 41;
+            return false;
+        }
+    }
+
+    pub fn get_marker() -> u256 {
+        return marker;
+    }
+}
+ORA
+}
+
+write_reentrant_lock_target_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+extern trait ReentrantLockObserver {
+    call fn attempt_reenter(self, target: address, next: u256) -> u256;
+}
+
+error ExternalCallFailed;
+
+contract ReentrantLockTargetSmoke {
+    storage var value: u256;
+    storage var marker: u256;
+
+    fn write_value(next: u256) {
+        value = next;
+    }
+
+    pub fn reentrant_write(next: u256) -> bool {
+        write_value(next);
+        marker = 7000;
+        return true;
+    }
+
+    pub fn lock_call_observer(observer: address, target: address, next: u256) -> bool {
+        @lock(value);
+        try {
+            let observed: u256 = try external<ReentrantLockObserver>(observer, gas: 200000).attempt_reenter(target, next + 1);
+            marker = observed;
+            @unlock(value);
+            write_value(next + 2);
+            return true;
+        } catch {
+            @unlock(value);
+            marker = 9001;
+            return false;
+        }
+    }
+
+    pub fn get_value() -> u256 {
+        return value;
+    }
+
+    pub fn get_marker() -> u256 {
+        return marker;
+    }
+}
+ORA
+}
+
+write_reentrant_lock_observer_fixture() {
+  local source="$1"
+
+cat >"$source" <<'ORA'
+extern trait ReentrantLockTarget {
+    call fn reentrant_write(self, next: u256) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract ReentrantLockObserverSmoke {
+    storage var marker: u256;
+
+    pub fn attempt_reenter(target: address, next: u256) -> u256 {
+        try {
+            let ok: bool = try external<ReentrantLockTarget>(target, gas: 100000).reentrant_write(next);
+            if (ok) {
+                marker = 99;
+                return 99;
+            } else {
+                marker = 98;
+                return 98;
+            }
+        } catch {
+            // 31 is the sentinel for "the target's runtime lock blocked the
+            // reentrant callback and the observer caught that revert."
+            marker = 31;
+            return 31;
+        }
+    }
+
+    pub fn get_marker() -> u256 {
+        return marker;
+    }
+}
+ORA
+}
+
 assert_contract_raw_slot() {
   local addr="$1"
   local slot="$2"
@@ -2810,6 +2988,108 @@ send_multicontract_chain_bubble_failure_expect_revert() {
   local value="$4"
 
   send_contract_tx_expect_revert "$root_addr" "external-call chain bubble_chain_failure" "bubble_chain_failure(address,address,uint256)" "$middle_addr" "$leaf_addr" "$value"
+}
+
+assert_lock_rollback_target() {
+  local addr="$1"
+  local expected_value="$2"
+  local expected_marker="$3"
+  local value_raw value marker_raw marker
+
+  assert_contract_raw_slot "$addr" 0 "$expected_value" "lock rollback target value"
+  assert_contract_raw_slot "$addr" 1 "$expected_marker" "lock rollback target marker"
+  value_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_value()(uint256)")"
+  value="$(normalize_uint "$value_raw")"
+  [[ "$value" == "$expected_value" ]] || fail "lock rollback target value getter mismatch: expected=$expected_value got=$value"
+
+  marker_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_marker()(uint256)")"
+  marker="$(normalize_uint "$marker_raw")"
+  [[ "$marker" == "$expected_marker" ]] || fail "lock rollback target marker getter mismatch: expected=$expected_marker got=$marker"
+
+  ok "lock rollback target getters equal [value=$expected_value, marker=$expected_marker]"
+}
+
+assert_lock_rollback_observer() {
+  local addr="$1"
+  local expected_marker="$2"
+  local marker_raw marker
+
+  assert_contract_raw_slot "$addr" 0 "$expected_marker" "lock rollback observer marker"
+  marker_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_marker()(uint256)")"
+  marker="$(normalize_uint "$marker_raw")"
+  [[ "$marker" == "$expected_marker" ]] || fail "lock rollback observer marker getter mismatch: expected=$expected_marker got=$marker"
+
+  ok "lock rollback observer marker getter equals $expected_marker"
+}
+
+send_lock_rollback_catch_revert_then_set() {
+  local observer_addr="$1"
+  local target_addr="$2"
+  local value="$3"
+
+  send_contract_tx "$observer_addr" "lock rollback catch_revert_then_set" "catch_revert_then_set(address,uint256)" "$target_addr" "$value"
+}
+
+send_lock_rollback_guarded_write_expect_revert() {
+  local target_addr="$1"
+  local value="$2"
+
+  send_contract_tx_expect_revert "$target_addr" "lock rollback guarded write" "lock_then_guarded_write(uint256)" "$value"
+}
+
+send_lock_rollback_unlock_then_write() {
+  local target_addr="$1"
+  local value="$2"
+
+  send_contract_tx "$target_addr" "lock rollback unlock then write" "lock_unlock_then_write(uint256)" "$value"
+}
+
+assert_reentrant_lock_target() {
+  local addr="$1"
+  local expected_value="$2"
+  local expected_marker="$3"
+  local value_raw value marker_raw marker
+
+  assert_contract_raw_slot "$addr" 0 "$expected_value" "reentrant lock target value"
+  assert_contract_raw_slot "$addr" 1 "$expected_marker" "reentrant lock target marker"
+
+  value_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_value()(uint256)")"
+  value="$(normalize_uint "$value_raw")"
+  [[ "$value" == "$expected_value" ]] || fail "reentrant lock target value getter mismatch: expected=$expected_value got=$value"
+
+  marker_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_marker()(uint256)")"
+  marker="$(normalize_uint "$marker_raw")"
+  [[ "$marker" == "$expected_marker" ]] || fail "reentrant lock target marker getter mismatch: expected=$expected_marker got=$marker"
+
+  ok "reentrant lock target getters equal [value=$expected_value, marker=$expected_marker]"
+}
+
+assert_reentrant_lock_observer() {
+  local addr="$1"
+  local expected_marker="$2"
+  local marker_raw marker
+
+  assert_contract_raw_slot "$addr" 0 "$expected_marker" "reentrant lock observer marker"
+  marker_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "get_marker()(uint256)")"
+  marker="$(normalize_uint "$marker_raw")"
+  [[ "$marker" == "$expected_marker" ]] || fail "reentrant lock observer marker getter mismatch: expected=$expected_marker got=$marker"
+
+  ok "reentrant lock observer marker getter equals $expected_marker"
+}
+
+send_reentrant_lock_call_observer() {
+  local target_addr="$1"
+  local observer_addr="$2"
+  local value="$3"
+
+  send_contract_tx "$target_addr" "reentrant lock call observer" "lock_call_observer(address,address,uint256)" "$observer_addr" "$target_addr" "$value"
+}
+
+send_reentrant_lock_direct_write() {
+  local target_addr="$1"
+  local value="$2"
+
+  send_contract_tx "$target_addr" "reentrant lock direct write" "reentrant_write(uint256)" "$value"
 }
 
 assert_mapping_raw_slot() {
@@ -8518,6 +8798,72 @@ send_multicontract_chain_bubble_failure_expect_revert "$MULTICONTRACT_CHAIN_ROOT
 assert_multicontract_chain_leaf "$MULTICONTRACT_CHAIN_LEAF_ADDR" 17
 assert_multicontract_chain_middle "$MULTICONTRACT_CHAIN_MIDDLE_ADDR" 51 7777
 assert_multicontract_chain_root "$MULTICONTRACT_CHAIN_ROOT_ADDR" 61 8888
+
+LOCK_ROLLBACK_TARGET_SOURCE="$WORK_DIR/lock_rollback_target_smoke.ora"
+LOCK_ROLLBACK_TARGET_BYTECODE_FILE="$WORK_DIR/lock_rollback_target_smoke.hex"
+write_lock_rollback_target_fixture "$LOCK_ROLLBACK_TARGET_SOURCE"
+LOCK_ROLLBACK_TARGET_BYTECODE="$(compile_bytecode "$LOCK_ROLLBACK_TARGET_SOURCE" "$LOCK_ROLLBACK_TARGET_BYTECODE_FILE")"
+
+LOCK_ROLLBACK_OBSERVER_SOURCE="$WORK_DIR/lock_rollback_observer_smoke.ora"
+LOCK_ROLLBACK_OBSERVER_BYTECODE_FILE="$WORK_DIR/lock_rollback_observer_smoke.hex"
+write_lock_rollback_observer_fixture "$LOCK_ROLLBACK_OBSERVER_SOURCE"
+# The observer catches a reverted target call and calls the same target again in
+# one transaction to prove the target frame's transient lock rolled back.
+LOCK_ROLLBACK_OBSERVER_BYTECODE="$(compile_bytecode_without_verification "$LOCK_ROLLBACK_OBSERVER_SOURCE" "$LOCK_ROLLBACK_OBSERVER_BYTECODE_FILE")"
+
+echo "Deploying lock rollback target bytecode"
+LOCK_ROLLBACK_TARGET_ADDR="$(deploy_contract "$LOCK_ROLLBACK_TARGET_BYTECODE")"
+ok "deployed lock rollback target $LOCK_ROLLBACK_TARGET_ADDR"
+
+echo "Deploying lock rollback observer bytecode"
+LOCK_ROLLBACK_OBSERVER_ADDR="$(deploy_contract "$LOCK_ROLLBACK_OBSERVER_BYTECODE")"
+ok "deployed lock rollback observer $LOCK_ROLLBACK_OBSERVER_ADDR"
+
+assert_lock_rollback_target "$LOCK_ROLLBACK_TARGET_ADDR" 0 0
+assert_lock_rollback_observer "$LOCK_ROLLBACK_OBSERVER_ADDR" 0
+send_lock_rollback_catch_revert_then_set "$LOCK_ROLLBACK_OBSERVER_ADDR" "$LOCK_ROLLBACK_TARGET_ADDR" 40
+assert_lock_rollback_target "$LOCK_ROLLBACK_TARGET_ADDR" 41 0
+assert_lock_rollback_observer "$LOCK_ROLLBACK_OBSERVER_ADDR" 31
+send_lock_rollback_guarded_write_expect_revert "$LOCK_ROLLBACK_TARGET_ADDR" 50
+assert_lock_rollback_target "$LOCK_ROLLBACK_TARGET_ADDR" 41 0
+assert_lock_rollback_observer "$LOCK_ROLLBACK_OBSERVER_ADDR" 31
+send_lock_rollback_unlock_then_write "$LOCK_ROLLBACK_TARGET_ADDR" 70
+assert_lock_rollback_target "$LOCK_ROLLBACK_TARGET_ADDR" 70 3001
+assert_lock_rollback_observer "$LOCK_ROLLBACK_OBSERVER_ADDR" 31
+
+REENTRANT_LOCK_TARGET_SOURCE="$WORK_DIR/reentrant_lock_target_smoke.ora"
+REENTRANT_LOCK_TARGET_BYTECODE_FILE="$WORK_DIR/reentrant_lock_target_smoke.hex"
+write_reentrant_lock_target_fixture "$REENTRANT_LOCK_TARGET_SOURCE"
+# The target intentionally holds a runtime lock across an unresolved external
+# call so the observer can attempt a reentrant write into the locked contract.
+REENTRANT_LOCK_TARGET_BYTECODE="$(compile_bytecode_without_verification "$REENTRANT_LOCK_TARGET_SOURCE" "$REENTRANT_LOCK_TARGET_BYTECODE_FILE")"
+
+REENTRANT_LOCK_OBSERVER_SOURCE="$WORK_DIR/reentrant_lock_observer_smoke.ora"
+REENTRANT_LOCK_OBSERVER_BYTECODE_FILE="$WORK_DIR/reentrant_lock_observer_smoke.hex"
+write_reentrant_lock_observer_fixture "$REENTRANT_LOCK_OBSERVER_SOURCE"
+# The observer catches the reentrant revert and records whether the callback was
+# blocked by the target's transient lock.
+REENTRANT_LOCK_OBSERVER_BYTECODE="$(compile_bytecode_without_verification "$REENTRANT_LOCK_OBSERVER_SOURCE" "$REENTRANT_LOCK_OBSERVER_BYTECODE_FILE")"
+
+echo "Deploying reentrant lock target bytecode"
+REENTRANT_LOCK_TARGET_ADDR="$(deploy_contract "$REENTRANT_LOCK_TARGET_BYTECODE")"
+ok "deployed reentrant lock target $REENTRANT_LOCK_TARGET_ADDR"
+
+echo "Deploying reentrant lock observer bytecode"
+REENTRANT_LOCK_OBSERVER_ADDR="$(deploy_contract "$REENTRANT_LOCK_OBSERVER_BYTECODE")"
+ok "deployed reentrant lock observer $REENTRANT_LOCK_OBSERVER_ADDR"
+
+assert_reentrant_lock_target "$REENTRANT_LOCK_TARGET_ADDR" 0 0
+assert_reentrant_lock_observer "$REENTRANT_LOCK_OBSERVER_ADDR" 0
+send_reentrant_lock_call_observer "$REENTRANT_LOCK_TARGET_ADDR" "$REENTRANT_LOCK_OBSERVER_ADDR" 100
+assert_reentrant_lock_target "$REENTRANT_LOCK_TARGET_ADDR" 102 31
+assert_reentrant_lock_observer "$REENTRANT_LOCK_OBSERVER_ADDR" 31
+send_reentrant_lock_direct_write "$REENTRANT_LOCK_TARGET_ADDR" 200
+assert_reentrant_lock_target "$REENTRANT_LOCK_TARGET_ADDR" 200 7000
+assert_reentrant_lock_observer "$REENTRANT_LOCK_OBSERVER_ADDR" 31
+send_reentrant_lock_call_observer "$REENTRANT_LOCK_TARGET_ADDR" "$REENTRANT_LOCK_OBSERVER_ADDR" 300
+assert_reentrant_lock_target "$REENTRANT_LOCK_TARGET_ADDR" 302 31
+assert_reentrant_lock_observer "$REENTRANT_LOCK_OBSERVER_ADDR" 31
 
 MAP_NESTED_STRUCT_SOURCE="$WORK_DIR/map_nested_struct_storage_smoke.ora"
 MAP_NESTED_STRUCT_BYTECODE_FILE="$WORK_DIR/map_nested_struct_storage_smoke.hex"

@@ -412,7 +412,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn buildMinValueCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
-            const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+            const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
+            const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), min_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const predicate = comparePredicateForBase(refinement.base_type.*, true);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
@@ -421,7 +422,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn buildMaxValueCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
-            const max_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
+            const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
+            const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), max_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const predicate = comparePredicateForBase(refinement.base_type.*, false);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
@@ -430,8 +432,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn buildInRangeCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
-            const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
-            const max_value = refinementIntArg(refinement.args, 2) orelse return error.MlirOperationCreationFailed;
+            const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
+            const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
+            const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const ty = mlir.oraValueGetType(value);
             const min_constant = try @This().createTypedIntegerConstant(self, ty, min_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const max_constant = try @This().createTypedIntegerConstant(self, ty, max_value, self.parent.location(.{ .start = 0, .end = 0 }));
@@ -449,9 +452,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn buildBasisPointsCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
-            const zero: u256 = 0;
-            const max: u256 = 10_000;
-            return @This().buildRangeBoundsCheck(self, value, refinement, zero, max);
+            const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
+            const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
+            const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
+            return @This().buildRangeBoundsCheck(self, value, refinement, min_value, max_value);
         }
 
         fn buildNonZeroCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
@@ -506,33 +510,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn refinementMessage(self: *FunctionLowerer, refinement: sema.RefinementType) anyerror![]const u8 {
-            return switch (sema.refinements.kindForName(refinement.name) orelse return error.MlirOperationCreationFailed) {
-                .min_value => blk: {
-                    const value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
-                    break :blk std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected MinValue<u256, {d}>", .{value});
-                },
-                .max_value => blk: {
-                    const value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
-                    break :blk std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected MaxValue<u256, {d}>", .{value});
-                },
-                .in_range => blk: {
-                    const min_value = refinementIntArg(refinement.args, 1) orelse return error.MlirOperationCreationFailed;
-                    const max_value = refinementIntArg(refinement.args, 2) orelse return error.MlirOperationCreationFailed;
-                    break :blk std.fmt.allocPrint(self.parent.allocator, "Refinement violation: expected InRange<u256, {d}, {d}>", .{ min_value, max_value });
-                },
-                .basis_points => self.parent.allocator.dupe(u8, "Refinement violation: expected BasisPoints<u256>"),
-                .non_zero => self.parent.allocator.dupe(u8, "Refinement violation: expected NonZero<u256>"),
-                .non_zero_address => self.parent.allocator.dupe(u8, "Refinement violation: expected NonZeroAddress"),
-                .exact, .scaled => error.MlirOperationCreationFailed,
-            };
-        }
-
-        fn refinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
-            if (index >= args.len) return null;
-            return switch (args[index]) {
-                .Integer => |literal| parseU256Literal(literal.text),
-                else => null,
-            };
+            if (sema.refinements.isCompileTimeOnly(refinement)) return error.MlirOperationCreationFailed;
+            const expectation = try sema.refinements.expectationText(self.parent.allocator, refinement);
+            defer self.parent.allocator.free(expectation);
+            return std.fmt.allocPrint(self.parent.allocator, "Refinement violation: {s}", .{expectation});
         }
 
         fn parseU256Literal(text: []const u8) ?u256 {
