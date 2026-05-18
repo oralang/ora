@@ -32,12 +32,12 @@ contract RefinementMLIRTest {
     }
 
     // Test variable declarations with refinements
-    fn testVariables() {
+    fn testVariables(scaled_input: Scaled<u256, 18>, exact_input: Exact<u256>) {
         let min_val: MinValue<u256, 1000> = 2000;
         let max_val: MaxValue<u256, 10000> = 5000;
         let range_val: InRange<u256, 100, 500> = 250;
-        let scaled_val: Scaled<u256, 18> = 1_000_000_000_000_000_000;
-        let exact_val: Exact<u256> = 1000;
+        let scaled_val: Scaled<u256, 18> = scaled_input;
+        let exact_val: Exact<u256> = exact_input;
     }
 
     // Test return with refinement

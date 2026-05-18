@@ -33,19 +33,17 @@ contract ComprehensiveRefinements {
     // ============================================================================
     // Scaled<T, D> - scaled by 10^D (compile-time annotation)
     // ============================================================================
-    fn testScaled() {
-        let x: Scaled<u256, 18> = 1000000000000000000; // 1.0 with 18 decimals
-        let y: Scaled<u256, 6> = 1000000;              // 1.0 with 6 decimals
-        // No compile-time validation - scaling is semantic annotation
+    fn testScaled(x: Scaled<u256, 18>, y: Scaled<u256, 6>) {
+        let same_scale: Scaled<u256, 18> = x;
+        let other_scale: Scaled<u256, 6> = y;
     }
 
     // ============================================================================
     // Exact<T> - must divide exactly (runtime check at division)
     // ============================================================================
-    fn testExact() {
-        let x: Exact<u256> = 1000;
-        let y: Exact<u256> = 2000;
-        // No compile-time validation - exactness checked at division operations
+    fn testExact(x: Exact<u256>, y: Exact<u256>) {
+        let first: Exact<u256> = x;
+        let second: Exact<u256> = y;
     }
 
     // ============================================================================
@@ -70,7 +68,7 @@ contract ComprehensiveRefinements {
     // ============================================================================
     // Subtyping Tests
     // ============================================================================
-    fn testSubtyping() {
+    fn testSubtyping(e: Scaled<u256, 18>) {
         // MinValue: more restrictive (higher min) is subtype of less restrictive
         let x: MinValue<u256, 2000> = 3000;
         let y: MinValue<u256, 1000> = x; // OK: 2000 >= 1000
@@ -84,7 +82,6 @@ contract ComprehensiveRefinements {
         let d: InRange<u256, 0, 1000> = c; // OK: [100,500] ⊆ [0,1000]
 
         // Scaled: same decimals required
-        let e: Scaled<u256, 18> = 1000000000000000000;
         let f: Scaled<u256, 18> = e; // OK: same decimals
     }
 
@@ -126,4 +123,3 @@ contract ComprehensiveRefinements {
         // Operations preserve refinement constraints where possible
     }
 }
-
