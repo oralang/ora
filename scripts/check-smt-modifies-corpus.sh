@@ -39,6 +39,10 @@ OPAQUE_PASS_CASES=(
   "ora-example/smt/modifies/pass_internal_struct_field_frame.ora"
 )
 
+REAL_CONTRACT_PASS_CASES=(
+  "ora-example/apps/erc20_verified.ora"
+)
+
 FAIL_CASES=(
   "ora-example/smt/modifies/fail_internal_map_key_alias.ora|failed to prove ensures"
   "ora-example/smt/modifies/fail_modifies_empty_unresolved_call.ora|SMT encoding degraded"
@@ -166,6 +170,10 @@ main() {
 
   for source in "${OPAQUE_PASS_CASES[@]}"; do
     run_opaque_pass "$source"
+  done
+
+  for source in "${REAL_CONTRACT_PASS_CASES[@]}"; do
+    run_pass "$source" "apps"
   done
 
   for entry in "${FAIL_CASES[@]}"; do

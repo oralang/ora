@@ -14,6 +14,7 @@ contract VerifiedToken {
     log Approval(owner: address, spender: address, amount: u256);
 
     pub fn initialize(admin: NonZeroAddress)
+        modifies(owner, initialized, totalSupply, spec_total_minted)
         requires(!initialized)
         requires(admin != std.constants.ZERO_ADDRESS)
         ensures(initialized)
@@ -41,6 +42,7 @@ contract VerifiedToken {
 
     // Only mint can increase totalSupply/spec_total_minted.
     pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>)
+        modifies(totalSupply, balances[to], spec_total_minted)
         requires(initialized)
         requires(std.msg.sender() == owner)
         requires(to != std.constants.ZERO_ADDRESS)

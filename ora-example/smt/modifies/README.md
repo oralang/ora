@@ -26,6 +26,10 @@ per-query timing budget. The default budget is intentionally generous
 large solver regressions fail visibly. Override that environment variable when
 triaging slower machines or tightening the corpus budget.
 
+The corpus includes the focused fixtures in this directory and at least one
+larger application fixture with real user-facing contracts annotated where the
+current v1 path syntax can express the write set.
+
 Current coverage:
 
 - Sema-supported path syntax, `modifies()`, unsupported path fail-closed cases,
@@ -36,3 +40,5 @@ Current coverage:
 - Runtime-lock-based framing across unresolved external calls.
 - Negative controls for aliasing, unlocked storage, and unresolved callees.
 - Per-query solver-time budget checks for the corpus pass cases.
+- A larger ERC20 verification fixture with `modifies` annotations on initializer
+  and mint write sets.
