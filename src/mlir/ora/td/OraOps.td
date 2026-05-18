@@ -415,6 +415,42 @@ def Ora_ByteAtOp : Ora_PureOp<"byte_at"> {
   let assemblyFormat = "$value `,` $index attr-dict `:` type($value) `,` type($index) `->` type($result)";
 }
 
+def Ora_ConcatOp : Ora_PureOp<"concat"> {
+  let summary = "Concatenate dynamic string or bytes values";
+  let description = [{
+    Builds a new dynamic `string` or `bytes` value by concatenating two runtime
+    values with the same dynamic byte layout.
+
+    Example:
+    ```mlir
+    %joined = ora.concat %lhs, %rhs : !ora.bytes, !ora.bytes -> !ora.bytes
+    ```
+  }];
+
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
+def Ora_SliceOp : Ora_PureOp<"slice"> {
+  let summary = "Slice a dynamic string or bytes value";
+  let description = [{
+    Builds a new dynamic `string` or `bytes` value by copying `length` bytes
+    from `value` starting at byte offset `start`.
+
+    Example:
+    ```mlir
+    %part = ora.slice %value, %start, %length : !ora.bytes, i256, i256 -> !ora.bytes
+    ```
+  }];
+
+  let arguments = (ins AnyType:$value, AnyType:$start, AnyType:$length);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$value `,` $start `,` $length attr-dict `:` type($value) `,` type($start) `,` type($length) `->` type($result)";
+}
+
 def Ora_Keccak256Op : Ora_PureOp<"keccak256"> {
   let summary = "Runtime keccak256 over dynamic string or bytes";
   let description = [{

@@ -18,6 +18,7 @@ const expectVerificationProbeEquivalent = h.expectVerificationProbeEquivalent;
 const verifyExampleWithoutDegradation = h.verifyExampleWithoutDegradation;
 const verifyTextWithoutDegradation = h.verifyTextWithoutDegradation;
 const verifyTextWithoutDegradationWithTimeout = h.verifyTextWithoutDegradationWithTimeout;
+const verifyTextWithoutDegradationWithSummaryInlineDepth = h.verifyTextWithoutDegradationWithSummaryInlineDepth;
 const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
@@ -255,6 +256,63 @@ test "verification supports native string and bytes index access when length pre
     try testing.expect(!result.degraded);
 }
 
+test "verification requires byte slice bounds before using projected length" {
+    const source_text =
+        \\pub fn cut_unchecked(data: bytes) -> bytes
+        \\{
+        \\    return @slice(data, 0, 1);
+        \\}
+        \\
+        \\pub fn cut_checked(data: bytes) -> bytes
+        \\    requires(data.len >= 4)
+        \\    ensures(result.len == 3)
+        \\{
+        \\    return @slice(data, 1, 3);
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "cut_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "cut_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
+test "verification requires byte concat bounds before using projected length" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn join_unchecked(a: bytes, b: bytes) -> bytes
+        \\{
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn join_checked(a: bytes, b: bytes) -> bytes
+        \\    requires(b.len <= std.constants.U256_MAX - 32)
+        \\    requires(a.len <= std.constants.U256_MAX - 32 - b.len)
+        \\    ensures(result.len == a.len + b.len)
+        \\{
+        \\    return @concat(a, b);
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "join_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "join_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
 test "verification proves checked power for a bounded safe case without degradation" {
     const source_text =
         \\pub fn square_ten(x: u8) -> u8
@@ -432,6 +490,66 @@ test "verification does not frame possibly aliased map keys across internal call
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+test "verification uses opaque modifies metadata when internal summary inlining is disabled" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification opaque modifies metadata does not frame declared written key" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, value: u256) -> bool
+        \\        ensures(balances[user] == old(balances[user]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
 test "verification frames distinct nested map keys across internal callee modifies set" {
     const source_text =
         \\contract V {
@@ -498,6 +616,75 @@ test "verification frames distinct struct fields across internal callee modifies
     try testing.expect(!result.degraded);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses opaque modifies metadata for struct fields when internal summary inlining is disabled" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.admin == old(config.admin))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification opaque modifies metadata does not frame declared written struct field" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.owner == old(config.owner))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
 }
 
 test "verification does not let internal modifies hide unresolved external calls" {
@@ -735,6 +922,7 @@ test "verification corpus covers smt modifies framing matrix" {
         expect_success: bool,
         expect_degraded: bool = false,
         expected_loss: []const u8 = "",
+        expected_error_kinds: []const u8 = "",
     };
 
     const probes = [_]Probe{
@@ -749,6 +937,7 @@ test "verification corpus covers smt modifies framing matrix" {
         .{
             .path = "ora-example/smt/modifies/fail_internal_map_key_alias.ora",
             .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
         },
         .{
             .path = "ora-example/smt/modifies/pass_internal_nested_map_frame.ora",
@@ -767,6 +956,7 @@ test "verification corpus covers smt modifies framing matrix" {
             .expect_success = false,
             .expect_degraded = true,
             .expected_loss = "unresolved_callee",
+            .expected_error_kinds = "EncodingDegraded",
         },
         .{
             .path = "ora-example/smt/modifies/pass_locked_call_root_frame.ora",
@@ -775,6 +965,7 @@ test "verification corpus covers smt modifies framing matrix" {
         .{
             .path = "ora-example/smt/modifies/fail_locked_call_unlocked_root.ora",
             .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
         },
         .{
             .path = "ora-example/smt/modifies/pass_locked_call_map_key_frame.ora",
@@ -783,25 +974,40 @@ test "verification corpus covers smt modifies framing matrix" {
         .{
             .path = "ora-example/smt/modifies/fail_locked_call_unlocked_map_key.ora",
             .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
         },
     };
 
     for (probes) |probe| {
-        var result = try verifyExampleWithoutDegradation(probe.path, "f", false, 5_000);
-        defer result.deinit(testing.allocator);
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, "f", false, 5_000);
+        defer seq_result.deinit(testing.allocator);
 
-        try testing.expectEqual(probe.expect_success, result.success);
-        try testing.expectEqual(probe.expect_degraded, result.degraded);
+        var par_result = try verifyExampleWithoutDegradation(probe.path, "f", true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expectEqual(probe.expect_success, seq_result.success);
+        try testing.expectEqual(probe.expect_success, par_result.success);
+        try testing.expectEqual(probe.expect_degraded, seq_result.degraded);
+        try testing.expectEqual(probe.expect_degraded, par_result.degraded);
         if (probe.expected_loss.len != 0) {
-            try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, probe.expected_loss));
+            try testing.expect(std.mem.containsAtLeast(u8, seq_result.soundness_losses, 1, probe.expected_loss));
+            try testing.expect(std.mem.containsAtLeast(u8, par_result.soundness_losses, 1, probe.expected_loss));
         } else {
-            try testing.expectEqualStrings("", result.soundness_losses);
+            try testing.expectEqualStrings("", seq_result.soundness_losses);
+            try testing.expectEqualStrings("", par_result.soundness_losses);
         }
         if (probe.expect_success) {
-            try testing.expectEqual(@as(usize, 0), result.errors_len);
+            try testing.expectEqual(@as(usize, 0), seq_result.errors_len);
+            try testing.expectEqual(@as(usize, 0), par_result.errors_len);
         } else {
-            try testing.expect(result.errors_len > 0);
+            try testing.expect(seq_result.errors_len > 0);
+            try testing.expect(par_result.errors_len > 0);
+            try testing.expectEqualStrings(probe.expected_error_kinds, seq_result.error_kinds);
+            try testing.expectEqualStrings(probe.expected_error_kinds, par_result.error_kinds);
         }
+        try testing.expectEqualStrings("", seq_result.precision_notes);
+        try testing.expectEqualStrings("", par_result.precision_notes);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
     }
 }
 

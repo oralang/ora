@@ -1,0 +1,30 @@
+comptime const std = @import("std");
+
+contract BytesConcatSlice {
+    pub fn join_bytes(a: bytes, b: bytes) -> bytes
+        requires(b.len <= std.constants.U256_MAX - 32)
+        requires(a.len <= std.constants.U256_MAX - 32 - b.len)
+    {
+        return a + b;
+    }
+
+    pub fn join_bytes_builtin(a: bytes, b: bytes) -> bytes
+        requires(b.len <= std.constants.U256_MAX - 32)
+        requires(a.len <= std.constants.U256_MAX - 32 - b.len)
+    {
+        return @concat(a, b);
+    }
+
+    pub fn cut_bytes(data: bytes, start: u256, length: u256) -> bytes
+        requires(start <= data.len)
+        requires(length <= data.len - start)
+    {
+        return @slice(data, start, length);
+    }
+
+    pub fn cut_bytes_std(data: bytes) -> bytes
+        requires(data.len >= 4)
+    {
+        return std.bytes.slice(data, 1, 3);
+    }
+}

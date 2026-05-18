@@ -786,6 +786,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return self.lowerCheckedPower(lhs, rhs, result_type, binary.range);
             }
 
+            if (binary.op == .add) {
+                const result_kind = self.parent.typecheck.exprType(expr_id).kind();
+                if (result_kind == .string or result_kind == .bytes) {
+                    try @This().emitConcatBoundsAssert(self, lhs, rhs, binary.range);
+                    const op = mlir.oraConcatOpCreate(self.parent.context, loc, lhs, rhs, result_type);
+                    if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, binary.range);
+                    return appendValueOp(self.block, op);
+                }
+            }
+
             switch (binary.op) {
                 .wrapping_add, .wrapping_sub, .wrapping_mul, .wrapping_shl, .wrapping_shr, .wrapping_pow => {
                     lhs = try self.convertValueForFlow(lhs, result_type, binary.range);
@@ -2424,7 +2434,97 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
                 return appendValueOp(self.block, op);
             }
+            if (builtin.args.len == 2 and std.mem.eql(u8, builtin.name, "concat")) {
+                const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
+                const rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
+                const result_type = self.parent.lowerExprType(expr_id);
+                try @This().emitConcatBoundsAssert(self, lhs, rhs, builtin.range);
+                const op = mlir.oraConcatOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    lhs,
+                    rhs,
+                    result_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
+                return appendValueOp(self.block, op);
+            }
+            if (builtin.args.len == 3 and std.mem.eql(u8, builtin.name, "slice")) {
+                const value = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
+                var start = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
+                var length = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[2], locals), exprRange(self.parent.file, builtin.args[2]));
+                const result_type = self.parent.lowerExprType(expr_id);
+                const loc = self.parent.location(builtin.range);
+                const u256_type = mlir.oraIntegerTypeCreate(self.parent.context, 256);
+                start = try self.convertValueForFlow(start, u256_type, builtin.range);
+                length = try self.convertValueForFlow(length, u256_type, builtin.range);
+                try @This().emitSliceBoundsAssert(self, value, start, length, builtin.range);
+                const op = mlir.oraSliceOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    start,
+                    length,
+                    result_type,
+                );
+                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
+                return appendValueOp(self.block, op);
+            }
             return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
+        }
+
+        fn emitConcatBoundsAssert(
+            self: *FunctionLowerer,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const loc = self.parent.location(range);
+            const u256_type = mlir.oraIntegerTypeCreate(self.parent.context, 256);
+            const lhs_len_op = mlir.oraLengthOpCreate(self.parent.context, loc, lhs, u256_type);
+            if (mlir.oraOperationIsNull(lhs_len_op)) return error.MlirOperationCreationFailed;
+            const lhs_len = appendValueOp(self.block, lhs_len_op);
+            const rhs_len_op = mlir.oraLengthOpCreate(self.parent.context, loc, rhs, u256_type);
+            if (mlir.oraOperationIsNull(rhs_len_op)) return error.MlirOperationCreationFailed;
+            const rhs_len = appendValueOp(self.block, rhs_len_op);
+
+            const result_len_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs_len, rhs_len);
+            if (mlir.oraOperationIsNull(result_len_op)) return error.MlirOperationCreationFailed;
+            const result_len = appendValueOp(self.block, result_len_op);
+            const length_overflow = appendValueOp(self.block, self.createCompareOp(loc, "ult", result_len, lhs_len));
+            try FunctionLowerer.emitOverflowAssert(self, length_overflow, "@concat length overflow", range);
+
+            const header_size = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, u256_type, 32));
+            const total_size_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, result_len, header_size);
+            if (mlir.oraOperationIsNull(total_size_op)) return error.MlirOperationCreationFailed;
+            const total_size = appendValueOp(self.block, total_size_op);
+            const allocation_overflow = appendValueOp(self.block, self.createCompareOp(loc, "ult", total_size, result_len));
+            try FunctionLowerer.emitOverflowAssert(self, allocation_overflow, "@concat allocation size overflow", range);
+        }
+
+        fn emitSliceBoundsAssert(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            start: mlir.MlirValue,
+            length: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const loc = self.parent.location(range);
+            const u256_type = mlir.oraIntegerTypeCreate(self.parent.context, 256);
+            const end_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, start, length);
+            if (mlir.oraOperationIsNull(end_op)) return error.MlirOperationCreationFailed;
+            const end_offset = appendValueOp(self.block, end_op);
+
+            const overflow = appendValueOp(self.block, self.createCompareOp(loc, "ult", end_offset, start));
+            try FunctionLowerer.emitOverflowAssert(self, overflow, "@slice start + length overflow", range);
+
+            const source_len_op = mlir.oraLengthOpCreate(self.parent.context, loc, value, u256_type);
+            if (mlir.oraOperationIsNull(source_len_op)) return error.MlirOperationCreationFailed;
+            const source_len = appendValueOp(self.block, source_len_op);
+            const in_bounds = appendValueOp(self.block, self.createCompareOp(loc, "ule", end_offset, source_len));
+            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, in_bounds, strRef("@slice requires start + length <= value.len"));
+            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, assert_op);
         }
 
         fn lowerDivisionBuiltin(

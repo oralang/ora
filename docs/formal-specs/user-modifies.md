@@ -3,17 +3,22 @@
 This document defines the v1 design direction for user-declared `modifies`
 clauses.
 
-Status: **design phase with sema validation and explicit-path subset checking
-landed**. Parser and AST already accept `modifies` as a function spec clause.
-Sema accepts the supported v1 current-contract storage path shapes, rejects
-unsupported forms fail-closed, and checks compiler-derived current-contract
-storage writes against declared paths, including `modifies()` as the empty
-declared set. Verifier framing is not implemented yet.
+Status: **v1 landed with documented deferrals**. Parser and AST accept
+`modifies` as a function spec clause. Sema accepts the supported v1
+current-contract storage path shapes, rejects unsupported forms fail-closed,
+and checks compiler-derived current-contract storage writes against declared
+paths, including `modifies()` as the empty declared set. Verifier framing is
+landed for known internal callees: exact internal summaries preserve distinct
+map keys and struct fields, while opaque metadata fallback preserves indexed
+map paths and struct-field paths precisely and falls back to root-slot
+precision for root-slot declarations.
+External-call framing is landed for `staticcall`, for the existing trusted
+extern caller-storage frame, and for runtime-locked root/single-key storage
+paths across ordinary `call`.
 
-The implementation goal is to replace that fail-closed placeholder with a
-small, sound v1 feature. v1 intentionally models only the current contract's
-own storage. It does not attempt to describe or verify storage owned by
-external contracts.
+The implemented v1 feature intentionally models only the current contract's own
+storage. It does not attempt to describe or verify storage owned by external
+contracts.
 
 ## 1. Objective
 
@@ -199,6 +204,12 @@ be added later if performance or separate-compilation needs justify it. v1
 must not require every internal helper to be annotated before a caller can use
 `modifies`.
 
+The verifier may consume a helper's sema-checked `modifies` declaration as an
+internal-call frame summary. This is distinct from trusted extern summaries:
+internal helper `modifies` is checked against the helper body before it is
+lowered for framing, while extern summary facts are trusted at an explicit
+boundary.
+
 Source-level writes count for the modifies obligation even if a later runtime
 revert would roll them back. `modifies` constrains what the source path may
 attempt to write, not only what survives at the end of EVM execution.
@@ -292,8 +303,9 @@ Therefore the verifier must distinguish:
 
 For v1:
 
-- `staticcall`: current-contract storage is fully framed.
-- `call` with relevant slots locked: locked slots are framed.
+- `staticcall`: current-contract storage is fully framed. **Implemented.**
+- `call` with relevant slots locked: locked root/single-key storage paths are
+  framed. **Implemented for supported runtime lock paths.**
 - `call` without proven reentrancy protection: unlocked current-contract
   storage cannot be assumed preserved unless another sound summary applies.
 
@@ -302,38 +314,28 @@ verified. `modifies` only constrains the current contract's own writes.
 
 ## 7. `@lock` and `@unlock`
 
-`@lock` and `@unlock` are runtime write gates, not only SMT hints.
+`@lock` and `@unlock` are runtime write gates, not only SMT hints. The sibling
+soundness model is tracked in `docs/formal-specs/user-locks.md`.
 
-The intended model:
+The implemented runtime lowering stores lock state in transient storage and
+inserts transient-storage guards before writes to guarded roots. Current
+runtime lock paths are intentionally narrow: root current-contract storage
+paths and single-key indexed current-contract storage roots. Struct-field
+locks, nested indexed locks, and user transient-variable locks fail closed
+until the lowering can represent them soundly.
 
-> If a storage path is locked, no source path may write it until it is unlocked,
-> including writes reached through reentrant execution.
-
-This gives the verifier a concrete framing rule:
+The implemented verifier rule is:
 
 ```text
 locked slot across external CALL => preserved slot
 ```
 
-This rule is load-bearing. The modifies design may rely on it only after the
-`@lock` soundness model is specified and audited with comparable rigor.
-
-Until that sibling soundness spec exists, implementation must treat
-lock-based framing as unavailable or guarded by an explicit soundness-loss
-record. If the compiler cannot prove that the relevant slot is locked across
-the call, it must not use the lock framing rule.
-
-The required `@lock` soundness spec must answer at least:
-
-- Which storage-path forms can be locked.
-- Whether locks apply to root slots, derived mapping slots, struct fields, or
-  all of the above.
-- How lock state is represented at runtime.
-- How sema proves every write path checks the lock before writing.
-- How reentrant entrypoints observe the same lock state.
-- What happens on early return, revert, and `try`/`catch`.
-- Whether `unlock` is guaranteed to run on all non-reverting paths.
-- What diagnostics fire when a write target cannot be matched to a lock path.
+This rule is load-bearing. The encoder only applies it for lock operations
+accepted by sema and backed by the runtime evidence in
+`docs/formal-specs/user-locks.md`: root current-contract storage and
+single-key indexed current-contract storage roots. If the compiler cannot
+prove that the relevant slot is locked across the call, it must not use the
+lock framing rule.
 
 ## 8. Supported v1 Syntax
 
@@ -367,6 +369,7 @@ Unsupported in v1:
 modifies *
 modifies balances[*]
 modifies balances[users[i]]
+modifies users[user].balance
 modifies external_storage[...]
 modifies callee_storage[...]
 modifies caller_storage[...]
@@ -489,12 +492,28 @@ unsupported-path diagnostic.
 
 5. Implement `modifies()` as the empty declared set. **Landed for sema-side
    write-set checking.**
-6. Add verifier framing only after the subset check is in place.
+6. Add verifier framing only after the subset check is in place. **Landed for
+   known internal callees.** Exact internal summaries preserve distinct map
+   keys and struct fields. Opaque metadata fallback preserves indexed map paths
+   precisely, including nested maps, and preserves struct fields precisely.
+   Root-slot declarations remain root-slot precise.
 7. Add external-call framing:
-   - `staticcall` preserves current-contract storage.
-   - locked slots are preserved across `call`.
-   - unsafe unlocked storage is not assumed preserved.
-8. Add regression tests for every fail-closed rule in section 11.
+   - `staticcall` preserves current-contract storage. **Implemented.**
+   - trusted extern caller-storage frame preserves current-contract storage.
+     **Implemented for the existing round-55 implicit frame.**
+   - locked slots are preserved across `call`. **Implemented for supported
+     runtime lock paths.**
+   - unsafe unlocked storage is not assumed preserved. **Implemented
+     conservatively through soundness-loss reporting.**
+8. Add regression tests for every fail-closed rule in section 11. **Landed for
+   the v1 semantic matrix:** writes outside the declared set, `modifies()`
+   with writes, `modifies()` mixed with non-empty clauses, unsupported map-key
+   syntax, unsupported external-storage names, and unresolved-call framing
+   soundness loss. Regression coverage also pins internal-callee preservation
+   for distinct map keys and struct fields, plus locked-call preservation for
+   root storage and single-key map slots with negative controls for unlocked
+   storage. Parser-level unsupported forms such as `modifies *` remain
+   rejected before sema.
 
 ## 13. Non-Goals for v1
 
@@ -510,7 +529,69 @@ The following are explicitly deferred:
   later, this document must be revisited because delegatecall executes in the
   caller's storage context.
 
-## 14. Summary
+## 14. Precision Notes
+
+Known internal callees are summarized by their body, so the verifier can
+preserve paths that are not actually written. A helper declared as
+`modifies balances[a]` and implemented by writing only `balances[a]` can support
+a caller proof that `balances[b]` is preserved when the caller proves `a != b`.
+Map-key paths require that kind of disjointness fact because symbolic keys can
+alias. Struct fields are syntactically distinct, so preserving `config.admin`
+across a helper that writes only `config.owner` needs no key-disjointness
+precondition.
+
+Opaque metadata framing consumes the same serialized `ora.modifies_slots` path
+strings used by sema and HIR. For indexed map paths such as
+`balances[param#0]` and nested map paths such as
+`allowances[param#0][param#1]`, the fallback encoder models the call as an
+opaque leaf-value update at the declared key path. That lets array theory prove
+disjoint keys are preserved without quantifying over the whole map.
+
+For struct-field paths such as `config.owner`, the fallback encoder models the
+call as an opaque field-value update and reconstructs the product value from
+the untouched pre-state fields. Root-slot declarations remain root-slot precise
+in opaque fallback.
+
+There are three reportable outcomes when opaque metadata is used:
+
+1. Path-precise framing succeeds. The encoding is sound and precise for the
+   declared indexed or struct-field path, and no precision note is emitted.
+2. Path-precise framing cannot be applied, but metadata still covers the root.
+   The encoding remains sound, falls back to a coarser root-slot opaque summary,
+   and emits a precision note in the SMT report.
+3. Metadata does not cover the written root. The verifier records a soundness
+   loss and fails closed.
+
+Precision notes fire for non-root path metadata when path-precise fallback
+cannot be applied, including indexed paths, struct-field paths, and unsupported
+mixed indexed-field shapes such as `users[param#0].balance` if such metadata is
+encountered at a summary boundary. Source-level v1 `modifies` declarations for
+mixed indexed-field paths fail closed in sema.
+
+Precision notes are intentionally weaker than soundness losses: they explain
+why a proof may lose precision without making the report trustedness fail by
+themselves. Precision notes are typed report entries; if too many notes are
+recorded, the final visible entry is `precision_note_cap_exceeded` so truncation
+is explicit rather than silent. After overflow, the report contains up to nine
+specific precision notes plus the cap marker.
+
+Soundness losses use the same public truncation convention:
+`soundness_loss_cap_exceeded` means the report omitted additional specific
+soundness-loss entries after reaching the bounded report size. Cap markers are
+truncation notices, not independent proof failures beyond the omitted entries
+they summarize.
+
+The opaque metadata path mainly serves future separate-compilation boundaries
+and verifier runs that deliberately cap internal summary inlining. Current
+regression coverage exercises both the opaque indexed-map encoder directly and
+a known-callee `func.call` integration path with exact body summarization
+disabled through `VerificationPass.setMaxSummaryInlineDepth(0)`. Production
+runs can use `ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH=0` to force the same
+summary-only behavior. A full separate-compilation integration test should be
+added when separate-compilation makes the fallback naturally reachable without a
+global summary-depth cap.
+
+## 15. Summary
 
 The v1 design is intentionally narrow:
 
@@ -518,8 +599,8 @@ The v1 design is intentionally narrow:
 > storage. If absent, it means no storage-frame promise. If present, actual
 > compiler-derived writes must be a subset of the declared paths. External
 > contracts cannot directly write our storage, but they can reenter; `@lock`
-> is the runtime mechanism that lets the verifier preserve locked slots across
-> external calls.
+> is the runtime mechanism that lets the verifier preserve supported locked
+> slots across external calls.
 
 This scope is enough to make `modifies` useful for real verification without
 pretending Ora can know arbitrary external contract behavior.

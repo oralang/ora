@@ -6116,6 +6116,54 @@ MlirOperation oraByteAtOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraConcatOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value lhsValue = unwrap(lhs);
+        Value rhsValue = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.concat");
+        state.addOperands(lhsValue);
+        state.addOperands(rhsValue);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraSliceOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue start, MlirValue length, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Value startValue = unwrap(start);
+        Value lengthValue = unwrap(length);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.slice");
+        state.addOperands(val);
+        state.addOperands(startValue);
+        state.addOperands(lengthValue);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraKeccak256OpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
 {
     try

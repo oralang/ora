@@ -2853,8 +2853,62 @@ const TypeChecker = struct {
         // exports them for verifier framing only after the caller stores them
         // in item_modifies, which happens after the compiler-derived write-set
         // subset check succeeds for the same body.
-        try self.visitExpr(clause.expr);
+        try self.visitModifiesExpr(clause.expr);
         try self.collectModifiesExprSlots(clause.expr, slots);
+    }
+
+    fn visitModifiesExpr(self: *TypeChecker, expr_id: ast.ExprId) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.visitModifiesExpr(group.expr),
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| try self.visitModifiesExpr(element);
+            },
+            .Field => |field| {
+                if (self.isModifiesEnvironmentKey(expr_id)) {
+                    self.expr_types[expr_id.index()] = .{ .address = {} };
+                    return;
+                }
+                try self.visitModifiesExpr(field.base);
+                const base_type = self.expr_types[field.base.index()];
+                const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                self.expr_types[expr_id.index()] = result_type;
+                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                    if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
+                        try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
+                            diagnosticTypeDisplayName(self, base_type),
+                            field.name,
+                        });
+                    }
+                }
+            },
+            .Index => |index| {
+                try self.visitModifiesExpr(index.base);
+                if (self.isModifiesEnvironmentKey(index.index)) {
+                    self.expr_types[index.index.index()] = .{ .address = {} };
+                } else {
+                    try self.visitExpr(index.index);
+                }
+                const base_type = self.expr_types[index.base.index()];
+                const result_type = self.indexAccessType(base_type, index.index);
+                self.expr_types[expr_id.index()] = result_type;
+                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                    try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
+                }
+            },
+            else => try self.visitExpr(expr_id),
+        }
+    }
+
+    fn isModifiesEnvironmentKey(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        const field = switch (self.file.expression(expr_id).*) {
+            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
+            .Field => |field| field,
+            else => return false,
+        };
+        const base = self.file.expression(field.base).*;
+        return base == .Name and
+            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
     }
 
     fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *std.ArrayList(EffectSlot)) !void {
@@ -2867,6 +2921,8 @@ const TypeChecker = struct {
                 if (try self.modifiesStorageSlotForExpr(expr_id)) |slot| {
                     if (slot.region != .storage) {
                         try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths", .{});
+                    } else if (slot.field_path != null and slot.key_path != null) {
+                        try self.emitExprError(expr_id, "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`", .{});
                     } else {
                         try self.appendUniqueSlot(slots, slot);
                     }
@@ -3241,6 +3297,12 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "keccak256")) {
             try self.checkKeccak256BuiltinArguments(builtin);
         }
+        if (std.mem.eql(u8, builtin.name, "concat")) {
+            try self.checkConcatBuiltinArguments(builtin);
+        }
+        if (std.mem.eql(u8, builtin.name, "slice")) {
+            try self.checkSliceBuiltinArguments(builtin);
+        }
     }
 
     fn checkKeccak256BuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
@@ -3255,6 +3317,46 @@ const TypeChecker = struct {
             else => try self.emitRangeError(builtin.range, "@keccak256 expects a string or bytes argument, found '{s}'", .{
                 diagnosticTypeDisplayName(self, arg_type),
             }),
+        }
+    }
+
+    fn checkConcatBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 2) {
+            try self.emitRangeError(builtin.range, "@concat expects 2 arguments", .{});
+            return;
+        }
+
+        const lhs_type = self.expr_types[builtin.args[0].index()];
+        const rhs_type = self.expr_types[builtin.args[1].index()];
+        if (lhs_type.kind() == .string and rhs_type.kind() == .string) return;
+        if (lhs_type.kind() == .bytes and rhs_type.kind() == .bytes) return;
+
+        try self.emitRangeError(builtin.range, "@concat expects two string arguments or two bytes arguments, found '{s}' and '{s}'", .{
+            diagnosticTypeDisplayName(self, lhs_type),
+            diagnosticTypeDisplayName(self, rhs_type),
+        });
+    }
+
+    fn checkSliceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 3) {
+            try self.emitRangeError(builtin.range, "@slice expects 3 arguments", .{});
+            return;
+        }
+
+        const value_type = self.expr_types[builtin.args[0].index()];
+        switch (value_type.kind()) {
+            .string, .bytes => {},
+            else => try self.emitRangeError(builtin.range, "@slice expects a string or bytes value, found '{s}'", .{
+                diagnosticTypeDisplayName(self, value_type),
+            }),
+        }
+
+        const start_type = self.expr_types[builtin.args[1].index()];
+        const length_type = self.expr_types[builtin.args[2].index()];
+        const start_base = if (start_type.refinementBaseType()) |base| base.* else start_type;
+        const length_base = if (length_type.refinementBaseType()) |base| base.* else length_type;
+        if (start_base.kind() != .integer or length_base.kind() != .integer) {
+            try self.emitRangeError(builtin.range, "@slice expects integer start and length operands", .{});
         }
     }
 
@@ -4616,6 +4718,16 @@ const TypeChecker = struct {
             return descriptorFromPathName(self.file, self.item_index, "u256");
         }
 
+        if (std.mem.eql(u8, builtin.name, "concat") or std.mem.eql(u8, builtin.name, "slice")) {
+            if (builtin.args.len == 0) return .{ .unknown = {} };
+            const value_type = self.expr_types[builtin.args[0].index()];
+            return switch (value_type.kind()) {
+                .string => .{ .string = {} },
+                .bytes => .{ .bytes = {} },
+                else => .{ .unknown = {} },
+            };
+        }
+
         if (std.mem.eql(u8, builtin.name, "typeName")) {
             return .{ .string = {} };
         }
@@ -5919,6 +6031,8 @@ const TypeChecker = struct {
         return switch (op) {
             .add => if (lhs_type.kind() == .string and rhs_type.kind() == .string)
                 .{ .string = {} }
+            else if (lhs_type.kind() == .bytes and rhs_type.kind() == .bytes)
+                .{ .bytes = {} }
             else
                 arithmeticResultType(lhs_type, rhs_type),
             .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .pow, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),

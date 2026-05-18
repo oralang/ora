@@ -1888,6 +1888,37 @@ test "compiler lowers native string and bytes len field access" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.length"));
 }
 
+test "compiler lowers dynamic byte concat and slice operations" {
+    const source_text =
+        \\pub fn join_text(a: string, b: string) -> string {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn join_bytes(a: bytes, b: bytes) -> bytes {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn direct_concat(a: bytes, b: bytes) -> bytes {
+        \\    return @concat(a, b);
+        \\}
+        \\
+        \\pub fn cut(data: bytes, start: u256, length: u256) -> bytes {
+        \\    return @slice(data, start, length);
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "ora.concat"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.slice"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 7, "ora.length"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "@concat length overflow"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "@concat allocation size overflow"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "@slice start + length overflow"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "@slice requires start + length <= value.len"));
+}
+
 test "compiler lowers checked cast of native bytes length through asserted truncation" {
     const source_text =
         \\pub fn bytes_len_checked(data: bytes) -> u8 {

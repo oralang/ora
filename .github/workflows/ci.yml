@@ -377,6 +377,13 @@ jobs:
           zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
+      - name: Run SMT modifies corpus
+        shell: bash
+        run: |
+          echo "🧪 Running SMT modifies corpus checks..."
+          zig build check-smt-modifies-corpus -Dskip-mlir=true
+          echo "✅ SMT modifies corpus checks completed"
+
       - name: Run release artifact smoke
         shell: bash
         run: |

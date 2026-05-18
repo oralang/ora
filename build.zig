@@ -649,6 +649,15 @@ pub fn build(b: *std.Build) void {
     });
     const check_lock_guarding_step = b.step("check-lock-guarding", "Run lock guard insertion static checks");
     check_lock_guarding_step.dependOn(&lock_guarding_cmd.step);
+
+    // zig build check-smt-modifies-corpus
+    const smt_modifies_corpus_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-smt-modifies-corpus.sh",
+    });
+    const check_smt_modifies_corpus_step = b.step("check-smt-modifies-corpus", "Run SMT modifies corpus checks");
+    smt_modifies_corpus_cmd.step.dependOn(b.getInstallStep());
+    check_smt_modifies_corpus_step.dependOn(&smt_modifies_corpus_cmd.step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose

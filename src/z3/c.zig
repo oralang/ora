@@ -189,6 +189,7 @@ pub const Z3_mk_seq_nth = c.Z3_mk_seq_nth;
 pub const Z3_mk_char_to_bv = c.Z3_mk_char_to_bv;
 pub const Z3_mk_char_from_bv = c.Z3_mk_char_from_bv;
 pub const Z3_mk_seq_concat = c.Z3_mk_seq_concat;
+pub const Z3_mk_seq_extract = c.Z3_mk_seq_extract;
 pub const Z3_mk_seq_length = c.Z3_mk_seq_length;
 pub const Z3_mk_int2bv = c.Z3_mk_int2bv;
 pub const Z3_mk_bv2int = c.Z3_mk_bv2int;

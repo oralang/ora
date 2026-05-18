@@ -99,6 +99,8 @@ set -euo pipefail
 #   can catch the failure and call the same target again in the same transaction
 # - transient-storage locks are visible to reentrant calls into the same
 #   contract and still remain usable by the parent frame after the callback
+# - dynamic byte slicing emits runtime bounds assertions: in-bounds slices return
+#   their requested length, and out-of-bounds slices revert in deployed bytecode
 
 RPC_URL="${RPC_URL:-http://127.0.0.1:8547}"
 ORA_BIN="${ORA_BIN:-./zig-out/bin/ora}"
@@ -2265,6 +2267,18 @@ contract HighArityAbiSmoke {
         a5 = five;
         a6 = six;
         a7 = seven;
+    }
+}
+ORA
+}
+
+write_byte_sequence_bounds_fixture() {
+  local source="$1"
+
+  cat >"$source" <<'ORA'
+contract ByteSequenceBoundsSmoke {
+    pub fn slice_len(data: bytes, start: u256, length: u256) -> u256 {
+        return @slice(data, start, length).len;
     }
 }
 ORA
@@ -6939,6 +6953,29 @@ send_high_arity_set8() {
   [[ "$status" == "0x1" || "$status" == "1" ]] || fail "high-arity set8 failed with status=$status"
 }
 
+assert_byte_slice_len() {
+  local addr="$1"
+  local data="$2"
+  local start="$3"
+  local length="$4"
+  local expected="$5"
+  local got_raw got
+
+  got_raw="$(cast call --no-proxy --rpc-url "$RPC_URL" "$addr" "slice_len(bytes,uint256,uint256)(uint256)" "$data" "$start" "$length")"
+  got="$(normalize_uint "$got_raw")"
+  [[ "$got" == "$expected" ]] || fail "byte slice_len($data, $start, $length) mismatch: expected=$expected got=$got"
+  ok "byte slice_len($data, $start, $length) returns $expected"
+}
+
+send_byte_slice_bounds_expect_revert() {
+  local addr="$1"
+  local data="$2"
+  local start="$3"
+  local length="$4"
+
+  send_contract_tx_expect_revert "$addr" "byte slice bounds" "slice_len(bytes,uint256,uint256)" "$data" "$start" "$length"
+}
+
 send_multicontract_call_target() {
   local caller_addr="$1"
   local target_addr="$2"
@@ -8616,6 +8653,21 @@ assert_nested_dual_dynamic_struct_left_slot 0 5
 assert_nested_dual_dynamic_struct_right_slot 0 8
 assert_nested_dual_dynamic_struct_right_slot 1 9
 assert_nested_dual_dynamic_struct_getters 11 77 99
+
+BYTE_SEQUENCE_BOUNDS_SOURCE="$WORK_DIR/byte_sequence_bounds_smoke.ora"
+BYTE_SEQUENCE_BOUNDS_BYTECODE_FILE="$WORK_DIR/byte_sequence_bounds_smoke.hex"
+write_byte_sequence_bounds_fixture "$BYTE_SEQUENCE_BOUNDS_SOURCE"
+# This fixture intentionally contains an out-of-bounds-call path. Source
+# verification rejects that path; the deployed smoke uses --no-verify only to
+# prove the lowered runtime assertion reverts.
+BYTE_SEQUENCE_BOUNDS_BYTECODE="$(compile_bytecode_without_verification "$BYTE_SEQUENCE_BOUNDS_SOURCE" "$BYTE_SEQUENCE_BOUNDS_BYTECODE_FILE")"
+
+echo "Deploying byte sequence bounds bytecode"
+BYTE_SEQUENCE_BOUNDS_ADDR="$(deploy_contract "$BYTE_SEQUENCE_BOUNDS_BYTECODE")"
+ok "deployed byte sequence bounds $BYTE_SEQUENCE_BOUNDS_ADDR"
+
+assert_byte_slice_len "$BYTE_SEQUENCE_BOUNDS_ADDR" "0x1234" 1 1 1
+send_byte_slice_bounds_expect_revert "$BYTE_SEQUENCE_BOUNDS_ADDR" "0x12" 2 1
 
 HIGH_ARITY_SOURCE="$WORK_DIR/high_arity_abi_smoke.ora"
 HIGH_ARITY_BYTECODE_FILE="$WORK_DIR/high_arity_abi_smoke.hex"

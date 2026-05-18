@@ -109,6 +109,8 @@ pub fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
         "ora.assert",
         "ora.length",
         "ora.byte_at",
+        "ora.concat",
+        "ora.slice",
         "ora.log",
         "ora.lock",
         "ora.unlock",
@@ -134,10 +136,12 @@ pub const VerificationProbeSummary = struct {
     degraded: bool,
     error_kinds: []u8,
     soundness_losses: []u8,
+    precision_notes: []u8,
 
     pub fn deinit(self: *VerificationProbeSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.error_kinds);
         allocator.free(self.soundness_losses);
+        allocator.free(self.precision_notes);
     }
 };
 
@@ -147,6 +151,7 @@ pub fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, r
     try testing.expectEqual(lhs.diagnostics_len, rhs.diagnostics_len);
     try testing.expectEqualStrings(lhs.error_kinds, rhs.error_kinds);
     try testing.expectEqualStrings(lhs.soundness_losses, rhs.soundness_losses);
+    try testing.expectEqualStrings(lhs.precision_notes, rhs.precision_notes);
     try testing.expectEqual(lhs.degraded, rhs.degraded);
 }
 
@@ -194,6 +199,19 @@ fn collectSoundnessLossCsv(verifier: *const z3_verification.VerificationPass) ![
     return try builder.toOwnedSlice(testing.allocator);
 }
 
+fn collectPrecisionNoteCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
+    var labels = std.ArrayList([]const u8){};
+    defer labels.deinit(testing.allocator);
+    for (verifier.encoder.precisionNotes()) |note| {
+        try labels.append(testing.allocator, @tagName(note));
+    }
+
+    var builder = std.ArrayList(u8){};
+    errdefer builder.deinit(testing.allocator);
+    try appendSortedLabelsCsv(&builder, labels.items);
+    return try builder.toOwnedSlice(testing.allocator);
+}
+
 pub fn verifyExampleWithoutDegradation(
     path: []const u8,
     function_name: ?[]const u8,
@@ -217,6 +235,8 @@ pub fn verifyExampleWithoutDegradation(
     errdefer testing.allocator.free(error_kinds);
     const soundness_losses = try collectSoundnessLossCsv(&verifier);
     errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
 
     defer result.deinit();
     verifier.deinit();
@@ -227,6 +247,7 @@ pub fn verifyExampleWithoutDegradation(
         .degraded = degraded,
         .error_kinds = error_kinds,
         .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
     };
 }
 
@@ -255,6 +276,8 @@ pub fn verifyTextWithoutDegradationWithTimeout(
     errdefer testing.allocator.free(error_kinds);
     const soundness_losses = try collectSoundnessLossCsv(&verifier);
     errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
 
     defer result.deinit();
     verifier.deinit();
@@ -265,6 +288,44 @@ pub fn verifyTextWithoutDegradationWithTimeout(
         .degraded = degraded,
         .error_kinds = error_kinds,
         .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
+    };
+}
+
+pub fn verifyTextWithoutDegradationWithSummaryInlineDepth(
+    source_text: []const u8,
+    function_name: ?[]const u8,
+    max_summary_inline_depth: u32,
+) !VerificationProbeSummary {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.filter_function_name = function_name;
+    verifier.setMaxSummaryInlineDepth(max_summary_inline_depth);
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
+
+    defer result.deinit();
+    verifier.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
     };
 }
 

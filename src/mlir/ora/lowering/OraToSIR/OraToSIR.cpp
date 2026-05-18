@@ -1035,6 +1035,8 @@ public:
             patterns.add<ConvertConstOp>(typeConverter, ctx);
             patterns.add<ConvertLengthOp>(typeConverter, ctx);
             patterns.add<ConvertByteAtOp>(typeConverter, ctx);
+            patterns.add<ConvertConcatOp>(typeConverter, ctx);
+            patterns.add<ConvertSliceOp>(typeConverter, ctx);
             patterns.add<ConvertKeccak256Op>(typeConverter, ctx);
             patterns.add<ConvertStringConstantOp>(typeConverter, ctx);
             patterns.add<ConvertBytesConstantOp>(typeConverter, ctx);
@@ -1677,6 +1679,8 @@ public:
             phase4Patterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertLengthOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertByteAtOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertConcatOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertSliceOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertKeccak256Op>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithAddIOp>(typeConverter, ctx);

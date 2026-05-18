@@ -467,6 +467,93 @@ LogicalResult ConvertByteAtOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
+// Convert ora.concat → allocate [len][lhs bytes][rhs bytes]
+// Layout: [len: u256][bytes...]
+// -----------------------------------------------------------------------------
+LogicalResult ConvertConcatOp::matchAndRewrite(
+    Operation *op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op->getName().getStringRef() != "ora.concat")
+        return failure();
+    if (op->getNumResults() != 1 || operands.size() != 2)
+        return rewriter.notifyMatchFailure(op, "ora.concat expects two operands and one result");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    Value lhs = operands[0];
+    Value rhs = operands[1];
+    if (!llvm::isa<sir::PtrType>(lhs.getType()))
+        lhs = rewriter.create<sir::BitcastOp>(loc, ptrType, lhs);
+    if (!llvm::isa<sir::PtrType>(rhs.getType()))
+        rhs = rewriter.create<sir::BitcastOp>(loc, ptrType, rhs);
+
+    Value lhsLen = rewriter.create<sir::LoadOp>(loc, u256Type, lhs);
+    Value rhsLen = rewriter.create<sir::LoadOp>(loc, u256Type, rhs);
+    Value resultLen = rewriter.create<sir::AddOp>(loc, u256Type, lhsLen, rhsLen);
+    Value headerSize = constU256(rewriter, loc, evm::kWordBytes);
+    Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, resultLen, headerSize);
+
+    Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+    rewriter.create<sir::StoreOp>(loc, base, resultLen);
+
+    Value lhsPayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, lhs, headerSize);
+    Value rhsPayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, rhs, headerSize);
+    Value resultPayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, headerSize);
+    rewriter.create<sir::MCopyOp>(loc, resultPayload, lhsPayload, lhsLen);
+
+    Value rhsDest = rewriter.create<sir::AddPtrOp>(loc, ptrType, resultPayload, lhsLen);
+    rewriter.create<sir::MCopyOp>(loc, rhsDest, rhsPayload, rhsLen);
+
+    rewriter.replaceOp(op, base);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
+// Convert ora.slice → allocate [len][copied bytes]
+// Layout: [len: u256][bytes...]
+// -----------------------------------------------------------------------------
+LogicalResult ConvertSliceOp::matchAndRewrite(
+    Operation *op,
+    ArrayRef<Value> operands,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op->getName().getStringRef() != "ora.slice")
+        return failure();
+    if (op->getNumResults() != 1 || operands.size() != 3)
+        return rewriter.notifyMatchFailure(op, "ora.slice expects three operands and one result");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    Value source = operands[0];
+    if (!llvm::isa<sir::PtrType>(source.getType()))
+        source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
+
+    Value start = ensureU256(rewriter, loc, operands[1]);
+    Value length = ensureU256(rewriter, loc, operands[2]);
+    Value headerSize = constU256(rewriter, loc, evm::kWordBytes);
+    Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, length, headerSize);
+
+    Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+    rewriter.create<sir::StoreOp>(loc, base, length);
+
+    Value sourcePayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, headerSize);
+    Value sourceStart = rewriter.create<sir::AddPtrOp>(loc, ptrType, sourcePayload, start);
+    Value resultPayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, headerSize);
+    rewriter.create<sir::MCopyOp>(loc, resultPayload, sourceStart, length);
+
+    rewriter.replaceOp(op, base);
+    return success();
+}
+
+// -----------------------------------------------------------------------------
 // Convert ora.keccak256 → sir.keccak256 over dynamic string/bytes payload
 // Layout: [len: u256][bytes...]
 // -----------------------------------------------------------------------------

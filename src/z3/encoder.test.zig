@@ -49,6 +49,14 @@ fn expectSingleSelectTrigger(ctx: *Context, quantifier: z3.Z3_ast) !void {
     try testing.expectEqual(@as(c_uint, z3.Z3_OP_SELECT), @as(c_uint, @intCast(z3.Z3_get_decl_kind(ctx.ctx, decl))));
 }
 
+fn expectNoQuantifiedConstraints(ctx: *Context, constraints: []const z3.Z3_ast) !void {
+    for (constraints) |constraint| {
+        const text = std.mem.span(z3.Z3_ast_to_string(ctx.ctx, constraint));
+        try testing.expect(std.mem.indexOf(u8, text, "forall") == null);
+        try testing.expect(std.mem.indexOf(u8, text, "exists") == null);
+    }
+}
+
 test "encodeMLIRType maps bool and i32" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -3347,11 +3355,16 @@ test "func.call summary with single-iteration scf.for state effects encodes exac
     _ = try encoder.encodeOperation(call);
 
     try testing.expect(!encoder.isDegraded());
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
     const counter = encoder.global_map.get("counter").?;
     const expected = z3.Z3_mk_numeral(z3_ctx.ctx, "7", z3.Z3_mk_bv_sort(z3_ctx.ctx, 256));
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, counter, expected)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -15222,12 +15235,17 @@ test "func.call summary preserves branch-guarded storage writes" {
     );
     _ = try encoder.encodeOperation(call_op);
 
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
     const sload_after = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("counter"), i256_ty);
     const loaded = try encoder.encodeOperation(sload_after);
     const expected = try encoder.encodeValue(seed);
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -15309,12 +15327,17 @@ test "func.call summary preserves switch-guarded storage writes" {
     );
     _ = try encoder.encodeOperation(call_op);
 
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
     const sload_after = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("counter"), i256_ty);
     const loaded = try encoder.encodeOperation(sload_after);
     const expected = try encoder.encodeValue(seed);
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, loaded, expected)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -16655,6 +16678,141 @@ test "ora.length to u256 result is exact under bounded byte-sequence model" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "byte-sequence concat length composes without quantified frame axioms" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const seq_sort = z3.Z3_mk_seq_sort(z3_ctx.ctx, z3.Z3_mk_bv_sort(z3_ctx.ctx, 8));
+    const lhs = try encoder.mkVariable("lhs_bytes", seq_sort);
+    const rhs = try encoder.mkVariable("rhs_bytes", seq_sort);
+    const concat = try encoder.encodeByteSequenceConcatForTesting(lhs, rhs);
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |constraint| solver.assert(constraint);
+
+    const lhs_len = encoder.encodeByteSequenceLengthBvForTesting(lhs);
+    const rhs_len = encoder.encodeByteSequenceLengthBvForTesting(rhs);
+    const concat_len = encoder.encodeByteSequenceLengthBvForTesting(concat);
+    const expected = z3.Z3_mk_bv_add(z3_ctx.ctx, lhs_len, rhs_len);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, concat_len, expected)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "byte-sequence slice length composes without quantified frame axioms" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const seq_sort = z3.Z3_mk_seq_sort(z3_ctx.ctx, z3.Z3_mk_bv_sort(z3_ctx.ctx, 8));
+    const bytes = try encoder.mkVariable("slice_source", seq_sort);
+    const offset = try encoder.encodeIntegerConstant(2, 256);
+    const len = try encoder.encodeIntegerConstant(4, 256);
+    const slice = try encoder.encodeByteSequenceSliceForTesting(bytes, offset, len);
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |constraint| solver.assert(constraint);
+
+    const slice_len = encoder.encodeByteSequenceLengthBvForTesting(slice);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, slice_len, len)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.concat operation length composes under bounded byte-sequence model" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const lhs_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xdead"), bytes_ty);
+    const rhs_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xbeefca"), bytes_ty);
+    const concat_op = mlir.oraConcatOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(lhs_op, 0), mlir.oraOperationGetResult(rhs_op, 0), bytes_ty);
+
+    const ast = try encoder.encodeOperation(concat_op);
+    try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |constraint| solver.assert(constraint);
+
+    const expected_len = try encoder.encodeIntegerConstant(5, 256);
+    const actual_len = encoder.encodeByteSequenceLengthBvForTesting(ast);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, actual_len, expected_len)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "ora.slice operation length composes under bounded byte-sequence model" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const bytes_ty = mlir.oraBytesTypeGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const source_op = mlir.oraBytesConstantOpCreate(mlir_ctx, loc, stringRef("0xdeadbeefcafe"), bytes_ty);
+    const start_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1);
+    const length_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const start_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, start_attr);
+    const length_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, length_attr);
+    const slice_op = mlir.oraSliceOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(source_op, 0),
+        mlir.oraOperationGetResult(start_op, 0),
+        mlir.oraOperationGetResult(length_op, 0),
+        bytes_ty,
+    );
+
+    const ast = try encoder.encodeOperation(slice_op);
+    try testing.expect(!encoder.isDegraded());
+
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |constraint| solver.assert(constraint);
+
+    const expected_len = try encoder.encodeIntegerConstant(3, 256);
+    const actual_len = encoder.encodeByteSequenceLengthBvForTesting(ast);
+    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, actual_len, expected_len)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "ora.length to narrow bitvector result degrades instead of applying unchecked int2bv" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -17000,6 +17158,8 @@ test "degradation reasons are capped and preserve encounter order" {
 }
 
 test "soundness loss kinds are structured and capped" {
+    comptime std.debug.assert(std.meta.fields(Encoder.SoundnessLoss).len > 10);
+
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -17018,7 +17178,71 @@ test "soundness loss kinds are structured and capped" {
     try testing.expect(encoder.isDegraded());
     try testing.expectEqual(@as(usize, 10), losses.len);
     try testing.expectEqual(Encoder.SoundnessLoss.user_disabled_state_verification, losses[0]);
-    try testing.expectEqual(Encoder.SoundnessLoss.inexact_call_summary, losses[9]);
+    try testing.expectEqual(Encoder.SoundnessLoss.soundness_loss_cap_exceeded, losses[9]);
+}
+
+test "soundness loss cap reports truncation explicitly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    encoder.noteSoundnessLoss(.unsupported_operation, "loss-0");
+    encoder.noteSoundnessLoss(.unsupported_sort_coercion, "loss-1");
+    encoder.noteSoundnessLoss(.unsupported_error_encoding, "loss-2");
+    encoder.noteSoundnessLoss(.missing_type_metadata, "loss-3");
+    encoder.noteSoundnessLoss(.missing_product_metadata, "loss-4");
+    encoder.noteSoundnessLoss(.missing_control_flow_summary, "loss-5");
+    encoder.noteSoundnessLoss(.unresolved_callee, "loss-6");
+    encoder.noteSoundnessLoss(.inexact_call_summary, "loss-7");
+    encoder.noteSoundnessLoss(.inexact_state_summary, "loss-8");
+    encoder.noteSoundnessLoss(.internal_encoding_failure, "loss-9");
+    encoder.noteSoundnessLoss(.user_disabled_state_verification, "loss-10");
+
+    const losses = encoder.soundnessLosses();
+    try testing.expectEqual(@as(usize, 10), losses.len);
+    try testing.expectEqual(Encoder.SoundnessLoss.unsupported_operation, losses[0]);
+    try testing.expectEqual(Encoder.SoundnessLoss.inexact_state_summary, losses[8]);
+    try testing.expectEqual(Encoder.SoundnessLoss.soundness_loss_cap_exceeded, losses[9]);
+}
+
+test "precision note kinds are structured and labeled" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    inline for (std.meta.fields(Encoder.PrecisionNoteKind)) |field| {
+        const note: Encoder.PrecisionNoteKind = @enumFromInt(field.value);
+        const label = Encoder.precisionNoteLabel(note);
+        try testing.expect(label.len > 0);
+        try testing.expectEqualStrings(field.name, label);
+        encoder.notePrecision(note);
+    }
+
+    const notes = encoder.precisionNotes();
+    try testing.expectEqual(std.meta.fields(Encoder.PrecisionNoteKind).len, notes.len);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.precision_note_cap_exceeded, notes[1]);
+}
+
+test "precision note cap reports truncation explicitly" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    for (0..12) |_| {
+        encoder.notePrecision(.path_precise_modifies_fallback_unavailable);
+    }
+
+    const notes = encoder.precisionNotes();
+    try testing.expectEqual(@as(usize, 10), notes.len);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.precision_note_cap_exceeded, notes[9]);
 }
 
 const production_z3_sources = [_][]const u8{
@@ -18104,6 +18328,596 @@ test "known callee exact write metadata does not degrade" {
 
     try testing.expect(!encoder.isDegraded());
     try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+    try testing.expectEqual(@as(usize, 0), encoder.precisionNotes().len);
+}
+
+test "known callee opaque modifies metadata fallback preserves only disjoint map key" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("balances[param#0]")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetBalance"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const user_arg = mlir.oraBlockGetArgument(helper_body, 0);
+    const value_arg = mlir.oraBlockGetArgument(helper_body, 1);
+    const balances_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const balances_after = mlir.oraMapStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(balances_before, 0),
+        user_arg,
+        value_arg,
+    );
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, balances_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, balances_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const user_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11));
+    const other_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22));
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99));
+    const user = mlir.oraOperationGetResult(user_op, 0);
+    const other = mlir.oraOperationGetResult(other_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const pre_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const pre_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), other, i256_ty);
+    const pre_other = try encoder.encodeOperation(pre_get);
+    const pre_user_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), user, i256_ty);
+    const pre_user = try encoder.encodeOperation(pre_user_get);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetBalance"),
+        &[_]mlir.MlirValue{ user, value },
+        2,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+    try testing.expectEqual(@as(usize, 0), encoder.precisionNotes().len);
+
+    const post_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const post_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), other, i256_ty);
+    const post_other = try encoder.encodeOperation(post_get);
+    const post_user_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), user, i256_ty);
+    const post_user = try encoder.encodeOperation(post_user_get);
+
+    var preserved_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer preserved_solver.deinit();
+    preserved_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_other, post_other)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), preserved_solver.check());
+
+    var changed_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer changed_solver.deinit();
+    changed_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_user, post_user)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), changed_solver.check());
+}
+
+test "known callee opaque modifies metadata fallback handles indexed and root paths" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("balances[param#0]")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("total_supply")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetBalanceAndTotal"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const user_arg = mlir.oraBlockGetArgument(helper_body, 0);
+    const balance_arg = mlir.oraBlockGetArgument(helper_body, 1);
+    const total_arg = mlir.oraBlockGetArgument(helper_body, 2);
+    const balances_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const balances_after = mlir.oraMapStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(balances_before, 0),
+        user_arg,
+        balance_arg,
+    );
+    const total_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, total_arg, stringRef("total_supply"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, balances_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, balances_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, total_store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const user_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11));
+    const other_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22));
+    const balance_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99));
+    const total_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 1000));
+    const seed_total_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 500));
+    const user = mlir.oraOperationGetResult(user_op, 0);
+    const other = mlir.oraOperationGetResult(other_op, 0);
+    const balance = mlir.oraOperationGetResult(balance_op, 0);
+    const total = mlir.oraOperationGetResult(total_op, 0);
+
+    const pre_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const pre_other_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), other, i256_ty);
+    const pre_other = try encoder.encodeOperation(pre_other_get);
+    const pre_user_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), user, i256_ty);
+    const pre_user = try encoder.encodeOperation(pre_user_get);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_total_op, 0), stringRef("total_supply")));
+    const pre_total_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("total_supply"), i256_ty);
+    const pre_total = try encoder.encodeOperation(pre_total_load);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetBalanceAndTotal"),
+        &[_]mlir.MlirValue{ user, balance, total },
+        3,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+    try testing.expectEqual(@as(usize, 0), encoder.precisionNotes().len);
+
+    const post_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("balances"), map_ty);
+    const post_other_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), other, i256_ty);
+    const post_other = try encoder.encodeOperation(post_other_get);
+    const post_user_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), user, i256_ty);
+    const post_user = try encoder.encodeOperation(post_user_get);
+    const post_total_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("total_supply"), i256_ty);
+    const post_total = try encoder.encodeOperation(post_total_load);
+
+    var preserved_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer preserved_solver.deinit();
+    preserved_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_other, post_other)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), preserved_solver.check());
+
+    var changed_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer changed_solver.deinit();
+    changed_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_user, post_user)));
+    changed_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_total, post_total)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), changed_solver.check());
+}
+
+test "known callee opaque modifies metadata fallback preserves disjoint nested map key" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, inner_map_ty);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("allowances[param#0][param#1]")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetAllowance"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const owner_arg = mlir.oraBlockGetArgument(helper_body, 0);
+    const spender_arg = mlir.oraBlockGetArgument(helper_body, 1);
+    const value_arg = mlir.oraBlockGetArgument(helper_body, 2);
+    const outer_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const inner_before = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(outer_before, 0), owner_arg, inner_map_ty);
+    const inner_after = mlir.oraMapStoreOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(inner_before, 0),
+        spender_arg,
+        value_arg,
+    );
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, outer_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, inner_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, inner_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const owner_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11));
+    const spender_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22));
+    const other_spender_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 33));
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99));
+    const owner = mlir.oraOperationGetResult(owner_op, 0);
+    const spender = mlir.oraOperationGetResult(spender_op, 0);
+    const other_spender = mlir.oraOperationGetResult(other_spender_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const pre_outer_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const pre_owner_inner = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_outer_load, 0), owner, inner_map_ty);
+    const pre_other_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_owner_inner, 0), other_spender, i256_ty);
+    const pre_other = try encoder.encodeOperation(pre_other_get);
+    const pre_spender_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_owner_inner, 0), spender, i256_ty);
+    const pre_spender = try encoder.encodeOperation(pre_spender_get);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetAllowance"),
+        &[_]mlir.MlirValue{ owner, spender, value },
+        3,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+    try testing.expectEqual(@as(usize, 0), encoder.precisionNotes().len);
+
+    const post_outer_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("allowances"), outer_map_ty);
+    const post_owner_inner = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_outer_load, 0), owner, inner_map_ty);
+    const post_other_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_owner_inner, 0), other_spender, i256_ty);
+    const post_other = try encoder.encodeOperation(post_other_get);
+    const post_spender_get = mlir.oraMapGetOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_owner_inner, 0), spender, i256_ty);
+    const post_spender = try encoder.encodeOperation(post_spender_get);
+
+    var preserved_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer preserved_solver.deinit();
+    preserved_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_other, post_other)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), preserved_solver.check());
+
+    var changed_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer changed_solver.deinit();
+    changed_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_spender, post_spender)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), changed_solver.check());
+}
+
+test "known callee opaque modifies metadata fallback preserves disjoint struct field" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const struct_ty = mlir.oraStructTypeGet(mlir_ctx, stringRef("Config__u256"));
+
+    const struct_decl = mlir.oraStructDeclOpCreate(mlir_ctx, loc, stringRef("Config__u256"));
+    const field_name_attrs = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("owner")),
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("admin")),
+    };
+    const field_type_attrs = [_]mlir.MlirAttribute{
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+        mlir.oraTypeAttrCreateFromType(i256_ty),
+    };
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_names"), mlir.oraArrayAttrCreate(mlir_ctx, field_name_attrs.len, &field_name_attrs));
+    mlir.oraOperationSetAttributeByName(struct_decl, stringRef("ora.field_types"), mlir.oraArrayAttrCreate(mlir_ctx, field_type_attrs.len, &field_type_attrs));
+    try encoder.registerStructDeclOperation(struct_decl);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("config.owner")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetOwner"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{i256_ty};
+    const helper_param_locs = [_]mlir.MlirLocation{loc};
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const owner_arg = mlir.oraBlockGetArgument(helper_body, 0);
+    const config_before = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("config"), struct_ty);
+    const config_after = mlir.oraStructFieldUpdateOpCreate(
+        mlir_ctx,
+        loc,
+        mlir.oraOperationGetResult(config_before, 0),
+        stringRef("owner"),
+        owner_arg,
+    );
+    const config_store = mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(config_after, 0), stringRef("config"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, config_before);
+    mlir.oraBlockAppendOwnedOperation(helper_body, config_after);
+    mlir.oraBlockAppendOwnedOperation(helper_body, config_store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const owner_seed = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11),
+    ), 0);
+    const admin_seed = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22),
+    ), 0);
+    const next_owner = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99),
+    ), 0);
+
+    const initial_fields = [_]mlir.MlirValue{ owner_seed, admin_seed };
+    const initial_config = mlir.oraStructInstantiateOpCreate(mlir_ctx, loc, stringRef("Config__u256"), &initial_fields, initial_fields.len, struct_ty);
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(initial_config, 0), stringRef("config")));
+
+    const pre_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("config"), struct_ty);
+    const pre_owner_extract = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), stringRef("owner"), i256_ty);
+    const pre_admin_extract = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(pre_load, 0), stringRef("admin"), i256_ty);
+    const pre_owner = try encoder.encodeOperation(pre_owner_extract);
+    const pre_admin = try encoder.encodeOperation(pre_admin_extract);
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetOwner"),
+        &[_]mlir.MlirValue{next_owner},
+        1,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+    try testing.expectEqual(@as(usize, 0), encoder.precisionNotes().len);
+
+    const post_load = mlir.oraSLoadOpCreate(mlir_ctx, loc, stringRef("config"), struct_ty);
+    const post_owner_extract = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), stringRef("owner"), i256_ty);
+    const post_admin_extract = mlir.oraStructFieldExtractOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(post_load, 0), stringRef("admin"), i256_ty);
+    const post_owner = try encoder.encodeOperation(post_owner_extract);
+    const post_admin = try encoder.encodeOperation(post_admin_extract);
+
+    var preserved_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer preserved_solver.deinit();
+    preserved_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_admin, post_admin)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), preserved_solver.check());
+
+    var changed_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer changed_solver.deinit();
+    changed_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, pre_owner, post_owner)));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), changed_solver.check());
+}
+
+test "known callee covered root opaque fallback records precision note when indexed path cannot apply" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("counter[param#0]")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetCounterWithBadPathShape"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_arg = mlir.oraBlockGetArgument(helper_body, 1);
+    const store = mlir.oraSStoreOpCreate(mlir_ctx, loc, value_arg, stringRef("counter"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const user_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11));
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99));
+    const user = mlir.oraOperationGetResult(user_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0));
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("counter")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetCounterWithBadPathShape"),
+        &[_]mlir.MlirValue{ user, value },
+        2,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+
+    const notes = encoder.precisionNotes();
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
+}
+
+test "known callee covered root opaque fallback records precision note for mixed indexed field metadata" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+    encoder.setVerifyState(true);
+    encoder.max_summary_inline_depth = 0;
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const modifies_slots = [_]mlir.MlirAttribute{
+        mlir.oraStringAttrCreate(mlir_ctx, stringRef("users[param#0].balance")),
+    };
+    const helper_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("opaqueSetUsersWithMixedPathShape"))),
+        namedAttr(mlir_ctx, "ora.effect", mlir.oraStringAttrCreate(mlir_ctx, stringRef("writes"))),
+        namedAttr(mlir_ctx, "ora.modifies_slots", mlir.oraArrayAttrCreate(mlir_ctx, modifies_slots.len, &modifies_slots)),
+    };
+    const helper_param_types = [_]mlir.MlirType{ i256_ty, i256_ty };
+    const helper_param_locs = [_]mlir.MlirLocation{ loc, loc };
+    const helper = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &helper_attrs,
+        helper_attrs.len,
+        &helper_param_types,
+        &helper_param_locs,
+        helper_param_types.len,
+    );
+    const helper_body = mlir.oraFuncOpGetBodyBlock(helper);
+    const value_arg = mlir.oraBlockGetArgument(helper_body, 1);
+    const store = mlir.oraSStoreOpCreate(mlir_ctx, loc, value_arg, stringRef("users"));
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{}, 0);
+    mlir.oraBlockAppendOwnedOperation(helper_body, store);
+    mlir.oraBlockAppendOwnedOperation(helper_body, ret);
+    try encoder.registerFunctionOperation(helper);
+
+    const user_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11));
+    const value_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99));
+    const user = mlir.oraOperationGetResult(user_op, 0);
+    const value = mlir.oraOperationGetResult(value_op, 0);
+
+    const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0));
+    _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("users")));
+
+    const call = mlir.oraFuncCallOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("opaqueSetUsersWithMixedPathShape"),
+        &[_]mlir.MlirValue{ user, value },
+        2,
+        &[_]mlir.MlirType{},
+        0,
+    );
+    _ = try encoder.encodeOperation(call);
+
+    try testing.expect(!encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 0), encoder.soundnessLosses().len);
+
+    const notes = encoder.precisionNotes();
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
 }
 
 test "known callee conservative write metadata superset does not degrade" {
@@ -18669,6 +19483,9 @@ test "known callee loop-carried nested map write set stays exact" {
     _ = try encoder.encodeOperation(call);
 
     try testing.expect(!encoder.isDegraded());
+    const constraints = try encoder.takeConstraints(testing.allocator);
+    defer if (constraints.len > 0) testing.allocator.free(constraints);
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
 
     const allowances = encoder.global_map.get("allowances").?;
     const owner_ast = try encoder.encodeValue(owner_val);
@@ -18679,6 +19496,7 @@ test "known callee loop-carried nested map write set stays exact" {
 
     var solver = try Solver.init(&z3_ctx, testing.allocator);
     defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
     solver.assert(z3.Z3_mk_not(z3_ctx.ctx, z3.Z3_mk_eq(z3_ctx.ctx, observed, value_ast)));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
@@ -18984,7 +19802,7 @@ test "map key widening uses typed exact coercion when signedness is known" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
-test "map_store emits quantified frame constraint" {
+test "map_store relies on concrete array-store semantics instead of redundant frame quantifier" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -19016,21 +19834,10 @@ test "map_store emits quantified frame constraint" {
 
     const constraints = try encoder.takeConstraints(testing.allocator);
     defer if (constraints.len > 0) testing.allocator.free(constraints);
-    try testing.expect(constraints.len > 0);
-
-    var saw_forall = false;
-    for (constraints) |cst| {
-        const text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, cst));
-        if (std.mem.indexOf(u8, text, "forall") != null) {
-            saw_forall = true;
-            try expectSingleSelectTrigger(&z3_ctx, cst);
-            break;
-        }
-    }
-    try testing.expect(saw_forall);
+    try testing.expectEqual(@as(usize, 0), constraints.len);
 }
 
-test "func.call adds quantified frame constraint for untouched map slot" {
+test "func.call preserves untouched map slot without redundant quantified frame" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -19083,16 +19890,24 @@ test "func.call adds quantified frame constraint for untouched map slot" {
     defer if (constraints.len > 0) testing.allocator.free(constraints);
     try testing.expect(constraints.len > 0);
 
-    var saw_frame_forall = false;
-    for (constraints) |cst| {
-        const text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, cst));
-        if (std.mem.indexOf(u8, text, "forall") != null and std.mem.indexOf(u8, text, "frame_eq_k_") != null) {
-            saw_frame_forall = true;
-            try expectSingleSelectTrigger(&z3_ctx, cst);
-            break;
-        }
-    }
-    try testing.expect(saw_frame_forall);
+    const pre_balances = encoder.global_old_map.get("balances") orelse encoder.global_entry_map.get("balances") orelse unreachable;
+    const post_balances = encoder.global_map.get("balances") orelse unreachable;
+    const key = try encoder.encodeIntegerConstant(11, 256);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    for (constraints) |cst| solver.assert(cst);
+    solver.assert(z3.Z3_mk_not(
+        z3_ctx.ctx,
+        z3.Z3_mk_eq(
+            z3_ctx.ctx,
+            encoder.encodeSelect(post_balances, key),
+            encoder.encodeSelect(pre_balances, key),
+        ),
+    ));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+
+    try expectNoQuantifiedConstraints(&z3_ctx, constraints);
 }
 
 test "state threading can be disabled" {

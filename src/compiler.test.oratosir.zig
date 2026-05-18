@@ -102,6 +102,31 @@ test "compiler lowers runtime keccak256 through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
 }
 
+test "compiler lowers dynamic byte concat and slice through OraToSIR" {
+    const source_text =
+        \\pub fn join(a: bytes, b: bytes) -> bytes {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn cut(data: bytes, start: u256, length: u256) -> bytes {
+        \\    return @slice(data, start, length);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "mcopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.concat"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.slice"));
+}
+
 test "compiler lowers Err discard patterns through OraToSIR" {
     const source_text =
         \\error Failure(code: u256);

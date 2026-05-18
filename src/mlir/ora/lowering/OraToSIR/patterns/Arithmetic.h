@@ -96,6 +96,30 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertConcatOp : public ConversionPattern
+        {
+        public:
+            ConvertConcatOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertSliceOp : public ConversionPattern
+        {
+        public:
+            ConvertSliceOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertKeccak256Op : public ConversionPattern
         {
         public:

@@ -107,6 +107,7 @@ pub const SmtReportArtifacts = struct {
 pub const VerificationPass = struct {
     pub const InitOptions = struct {
         proofs_enabled: ?bool = null,
+        max_summary_inline_depth: ?u32 = null,
     };
 
     const SwitchCaseMetadata = struct {
@@ -295,8 +296,17 @@ pub const VerificationPass = struct {
             break :blk try parseBoolEnv(val);
         } else false;
 
+        const summary_depth_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH") catch null;
+        const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
+            depth
+        else if (summary_depth_env) |val| blk: {
+            defer allocator.free(val);
+            break :blk try std.fmt.parseInt(u32, val, 10);
+        } else encoder.max_summary_inline_depth;
+
         encoder.setVerifyCalls(verify_calls);
         encoder.setVerifyState(verify_state);
+        encoder.max_summary_inline_depth = max_summary_inline_depth;
         try solver.setRandomSeed(random_seed);
         try qf_solver.setRandomSeed(random_seed);
 
@@ -347,6 +357,10 @@ pub const VerificationPass = struct {
     pub fn setVerifyState(self: *VerificationPass, enabled: bool) void {
         self.verify_state = enabled;
         self.encoder.setVerifyState(enabled);
+    }
+
+    pub fn setMaxSummaryInlineDepth(self: *VerificationPass, depth: u32) void {
+        self.encoder.max_summary_inline_depth = depth;
     }
 
     pub fn setVerifyStats(self: *VerificationPass, enabled: bool) void {
@@ -1883,15 +1897,13 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "ora.map_store");
         if (!should_observe) return;
 
-        _ = try self.encoder.encodeOperation(op);
-
         const function_name = self.current_function_name orelse "unknown";
         const loc = try self.getLocationInfo(op);
+        _ = try self.encoder.encodeOperation(op);
         const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
-
         // Preserve obligations discovered while observing stateful ops (notably
         // call summaries) so public entrypoints with no explicit requires/asserts
         // still prove checked arithmetic safety in reachable callees.
@@ -3482,6 +3494,7 @@ pub const VerificationPass = struct {
         summary.degradation_reason = self.encoder.degradationReason();
         summary.degradation_reasons = self.encoder.degradationReasons();
         summary.soundness_losses = self.encoder.soundnessLosses();
+        summary.precision_notes = self.encoder.precisionNotes();
         var kind_counts = ReportKindCounts{};
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
@@ -3634,6 +3647,7 @@ pub const VerificationPass = struct {
             .encoding_degraded = false,
             .degradation_reason = self.encoder.degradationReason(),
             .soundness_losses = self.encoder.soundnessLosses(),
+            .precision_notes = self.encoder.precisionNotes(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3678,6 +3692,7 @@ pub const VerificationPass = struct {
             .degradation_reason = self.encoder.degradationReason(),
             .degradation_reasons = self.encoder.degradationReasons(),
             .soundness_losses = self.encoder.soundnessLosses(),
+            .precision_notes = self.encoder.precisionNotes(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3769,6 +3784,12 @@ pub const VerificationPass = struct {
             try writer.writeAll("- Soundness losses:\n");
             for (summary.soundness_losses) |loss| {
                 try writer.print("  - `{s}`\n", .{Encoder.soundnessLossLabel(loss)});
+            }
+        }
+        if (summary.precision_notes.len > 0) {
+            try writer.writeAll("- Precision notes:\n");
+            for (summary.precision_notes) |note| {
+                try writer.print("  - `{s}`\n", .{Encoder.precisionNoteLabel(note)});
             }
         }
         try writer.writeAll("\n");
@@ -3942,6 +3963,12 @@ pub const VerificationPass = struct {
         for (summary.soundness_losses, 0..) |loss, idx| {
             if (idx != 0) try writer.writeByte(',');
             try writeJsonStringEscaped(writer, Encoder.soundnessLossLabel(loss));
+        }
+        try writer.writeByte(']');
+        try writer.writeAll(",\"precision_notes\":[");
+        for (summary.precision_notes, 0..) |note, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
         }
         try writer.writeByte(']');
         try writer.writeByte('}');
@@ -6010,6 +6037,7 @@ const ReportSummary = struct {
     degradation_reason: ?[]const u8 = null,
     degradation_reasons: []const []const u8 = &.{},
     soundness_losses: []const Encoder.SoundnessLoss = &.{},
+    precision_notes: []const Encoder.PrecisionNoteKind = &.{},
     fragment_counts: ReportFragmentCounts = .{},
 };
 
@@ -10661,7 +10689,7 @@ test "prepared queries do not assume evm caller is non-zero" {
     try testing.expect(!saw_caller_nonzero);
 }
 
-test "prepared queries track frame conditions from map-store summaries" {
+test "direct map-store safety obligations avoid redundant quantified frame constraints" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setExplainCores(true);
@@ -10681,16 +10709,17 @@ test "prepared queries track frame conditions from map-store summaries" {
         queries.deinit();
     }
 
-    var saw_frame = false;
+    var saw_contract_obligation = false;
     for (queries.items) |q| {
         if (!std.mem.eql(u8, q.function_name, "conditional_return_map_store_div_test")) continue;
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        saw_contract_obligation = true;
         for (q.tracked_assumptions) |tracked| {
             if (tracked.tag.kind != .frame) continue;
-            saw_frame = true;
-            try testing.expectEqualStrings("frame condition", tracked.tag.label);
+            return error.TestUnexpectedResult;
         }
     }
-    try testing.expect(saw_frame);
+    try testing.expect(saw_contract_obligation);
 }
 
 test "semantic constraint tags preserve binding provenance" {
@@ -11034,9 +11063,6 @@ test "prepared queries route quantifier-free and quantified formulas to differen
 
     const qf_module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
     defer mlir.oraModuleDestroy(qf_module);
-    const quantified_module = buildConditionalReturnMapStoreDivModule(mlir_ctx);
-    defer mlir.oraModuleDestroy(quantified_module);
-
     var qf_pass = try VerificationPass.init(testing.allocator);
     defer qf_pass.deinit();
     try qf_pass.extractAnnotationsFromMLIR(qf_module);
@@ -11053,7 +11079,30 @@ test "prepared queries route quantifier-free and quantified formulas to differen
 
     var quantified_pass = try VerificationPass.init(testing.allocator);
     defer quantified_pass.deinit();
-    try quantified_pass.extractAnnotationsFromMLIR(quantified_module);
+    const bv8_sort = z3.Z3_mk_bv_sort(quantified_pass.context.ctx, 8);
+    const x = z3.Z3_mk_const(quantified_pass.context.ctx, z3.Z3_mk_string_symbol(quantified_pass.context.ctx, "prepared_quant_x"), bv8_sort);
+    const seven = z3.Z3_mk_numeral(quantified_pass.context.ctx, "7", bv8_sort);
+    const body = z3.Z3_mk_eq(quantified_pass.context.ctx, x, seven);
+    const bound = [_]z3.Z3_ast{x};
+    const quantified_assumption = z3.Z3_mk_forall_const(quantified_pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, body);
+    try quantified_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_test",
+        .kind = .Requires,
+        .condition = quantified_assumption,
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 1,
+        .column = 1,
+    });
+    try quantified_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_test",
+        .kind = .Ensures,
+        .condition = z3.Z3_mk_true(quantified_pass.context.ctx),
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 2,
+        .column = 1,
+    });
     var quantified_queries = try quantified_pass.buildPreparedQueries();
     defer {
         for (quantified_queries.items) |*q| q.deinit(testing.allocator);
@@ -11870,12 +11919,18 @@ test "rendered SMT report json includes degradation metadata" {
     inline for (soundness_loss_fields, 0..) |field, idx| {
         soundness_losses[idx] = @enumFromInt(field.value);
     }
+    const precision_note_fields = std.meta.fields(Encoder.PrecisionNoteKind);
+    var precision_notes: [precision_note_fields.len]Encoder.PrecisionNoteKind = undefined;
+    inline for (precision_note_fields, 0..) |field, idx| {
+        precision_notes[idx] = @enumFromInt(field.value);
+    }
 
     const summary = ReportSummary{
         .encoding_degraded = true,
         .degradation_reason = "test degradation",
         .degradation_reasons = &.{ "test degradation", "follow-on degradation" },
         .soundness_losses = &soundness_losses,
+        .precision_notes = &precision_notes,
     };
     const kind_counts = ReportKindCounts{};
 
@@ -11893,6 +11948,17 @@ test "rendered SMT report json includes degradation metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reasons\":[\"test degradation\",\"follow-on degradation\"]") != null);
+    const notes_prefix = "\"precision_notes\":[";
+    const notes_start = std.mem.indexOf(u8, json, notes_prefix) orelse return error.MissingPrecisionNotesArray;
+    const notes_body_start = notes_start + notes_prefix.len;
+    const notes_body_end = notes_body_start + (std.mem.indexOfScalar(u8, json[notes_body_start..], ']') orelse return error.MissingPrecisionNotesArrayEnd);
+    const notes_body = json[notes_body_start..notes_body_end];
+    try testing.expectEqual(precision_note_fields.len * 2, std.mem.count(u8, notes_body, "\""));
+    inline for (precision_note_fields) |field| {
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        defer testing.allocator.free(needle);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
+    }
     const losses_prefix = "\"soundness_losses\":[";
     const losses_start = std.mem.indexOf(u8, json, losses_prefix) orelse return error.MissingSoundnessLossesArray;
     const losses_body_start = losses_start + losses_prefix.len;

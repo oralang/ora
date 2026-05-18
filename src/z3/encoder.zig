@@ -36,6 +36,8 @@ pub const Encoder = struct {
         frame,
     };
 
+    /// Typed soundness-loss report entries. Keep the cap marker last; insert new
+    /// specific losses before it so truncation remains visually distinct.
     pub const SoundnessLoss = enum {
         user_disabled_state_verification,
         user_disabled_call_verification,
@@ -49,6 +51,12 @@ pub const Encoder = struct {
         inexact_call_summary,
         inexact_state_summary,
         internal_encoding_failure,
+        soundness_loss_cap_exceeded,
+    };
+
+    pub const PrecisionNoteKind = enum(u8) {
+        path_precise_modifies_fallback_unavailable,
+        precision_note_cap_exceeded,
     };
 
     // SENTINEL: check-verifier-introspection extracts soundness-loss labels from this function.
@@ -66,6 +74,14 @@ pub const Encoder = struct {
             .inexact_call_summary => "inexact_call_summary",
             .inexact_state_summary => "inexact_state_summary",
             .internal_encoding_failure => "internal_encoding_failure",
+            .soundness_loss_cap_exceeded => "soundness_loss_cap_exceeded",
+        };
+    }
+
+    pub fn precisionNoteLabel(note: PrecisionNoteKind) []const u8 {
+        return switch (note) {
+            .path_precise_modifies_fallback_unavailable => "path_precise_modifies_fallback_unavailable",
+            .precision_note_cap_exceeded => "precision_note_cap_exceeded",
         };
     }
 
@@ -281,6 +297,8 @@ pub const Encoder = struct {
     encoding_degraded_reasons: std.ArrayList([]const u8),
     /// Bounded list of structured soundness-loss kinds in encounter order.
     encoding_soundness_losses: std.ArrayList(SoundnessLoss),
+    /// Bounded list of precision notes that do not taint soundness.
+    encoding_precision_notes: std.ArrayList(PrecisionNoteKind),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.StringHashMap(ErrorUnionSort),
     /// Cache of product tuple sorts for tuples and structs.
@@ -327,6 +345,7 @@ pub const Encoder = struct {
             .encoding_degraded_reason = null,
             .encoding_degraded_reasons = std.ArrayList([]const u8){},
             .encoding_soundness_losses = std.ArrayList(SoundnessLoss){},
+            .encoding_precision_notes = std.ArrayList(PrecisionNoteKind){},
             .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
@@ -349,6 +368,7 @@ pub const Encoder = struct {
         self.encoding_degraded_reason = null;
         self.encoding_degraded_reasons.clearRetainingCapacity();
         self.encoding_soundness_losses.clearRetainingCapacity();
+        self.encoding_precision_notes.clearRetainingCapacity();
     }
 
     pub fn isDegraded(self: *const Encoder) bool {
@@ -365,6 +385,10 @@ pub const Encoder = struct {
 
     pub fn soundnessLosses(self: *const Encoder) []const SoundnessLoss {
         return self.encoding_soundness_losses.items;
+    }
+
+    pub fn precisionNotes(self: *const Encoder) []const PrecisionNoteKind {
+        return self.encoding_precision_notes.items;
     }
 
     /// Public wrapper used by verifier-side test hooks and other callers that need
@@ -385,6 +409,10 @@ pub const Encoder = struct {
         self.recordSoundnessLoss(loss, self.formatDegradationAtOp(op, detail));
     }
 
+    pub fn notePrecision(self: *Encoder, note: PrecisionNoteKind) void {
+        self.recordPrecisionNote(note);
+    }
+
     pub fn getOrCreateCurrentGlobal(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         return try self.getOrCreateGlobal(name, sort);
     }
@@ -403,10 +431,27 @@ pub const Encoder = struct {
 
     fn recordSoundnessLoss(self: *Encoder, loss: SoundnessLoss, detail: []const u8) void {
         const degradation_reason_cap = 10;
-        if (self.encoding_soundness_losses.items.len < degradation_reason_cap) {
+        if (self.encoding_soundness_losses.items.len >= degradation_reason_cap) {
+            // Preserve bounded report size while making truncation visible. Once
+            // overflow happens, the bucket holds up to 9 specific losses plus this marker.
+            self.encoding_soundness_losses.items[degradation_reason_cap - 1] = .soundness_loss_cap_exceeded;
+        } else {
             self.encoding_soundness_losses.append(self.allocator, loss) catch {};
         }
+        // The detail bucket has its own cap and keeps the first diagnostic
+        // strings even after the typed soundness-loss bucket has overflowed.
         self.recordDegradation(detail);
+    }
+
+    fn recordPrecisionNote(self: *Encoder, note: PrecisionNoteKind) void {
+        const precision_note_cap = 10;
+        if (self.encoding_precision_notes.items.len >= precision_note_cap) {
+            // Preserve bounded report size while making truncation visible. Once
+            // overflow happens, the bucket holds up to 9 specific notes plus this marker.
+            self.encoding_precision_notes.items[precision_note_cap - 1] = .precision_note_cap_exceeded;
+            return;
+        }
+        self.encoding_precision_notes.append(self.allocator, note) catch {};
     }
 
     fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
@@ -2159,6 +2204,7 @@ pub const Encoder = struct {
         self.pending_obligations.deinit(self.allocator);
         self.encoding_degraded_reasons.deinit(self.allocator);
         self.encoding_soundness_losses.deinit(self.allocator);
+        self.encoding_precision_notes.deinit(self.allocator);
         var error_union_it = self.error_union_sorts.iterator();
         while (error_union_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -3771,14 +3817,32 @@ pub const Encoder = struct {
     }
 
     pub fn coerceAstToSortForTesting(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort) z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
         return self.coerceAstToSort(ast, target_sort);
     }
 
     pub fn coerceAstToSeqIndexIntForTesting(self: *Encoder, ast: z3.Z3_ast, signed: bool) z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
         return self.coerceAstToSeqIndexInt(ast, signed);
     }
 
+    pub fn encodeByteSequenceConcatForTesting(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
+        return self.encodeByteSequenceConcat(lhs, rhs);
+    }
+
+    pub fn encodeByteSequenceSliceForTesting(self: *Encoder, seq_ast: z3.Z3_ast, offset_bv: z3.Z3_ast, len_bv: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
+        return self.encodeByteSequenceSlice(seq_ast, offset_bv, len_bv);
+    }
+
+    pub fn encodeByteSequenceLengthBvForTesting(self: *Encoder, seq_ast: z3.Z3_ast) z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
+        return self.encodeByteSequenceLengthBv(seq_ast);
+    }
+
     pub fn encodeOperationWithModeForTesting(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
         return self.encodeOperationWithMode(mlir_op, mode);
     }
 
@@ -3788,6 +3852,7 @@ pub const Encoder = struct {
         result_index: u32,
         mode: EncodeMode,
     ) EncodeError!z3.Z3_ast {
+        if (!@import("builtin").is_test) unreachable;
         return self.encodeOperationResultWithMode(mlir_op, result_index, mode);
     }
 
@@ -4095,29 +4160,6 @@ pub const Encoder = struct {
 
     fn isArraySort(self: *Encoder, sort: z3.Z3_sort) bool {
         return z3.Z3_get_sort_kind(self.context.ctx, sort) == z3.Z3_ARRAY_SORT;
-    }
-
-    /// Emit quantified frame equality for array-typed state:
-    /// forall k. select(post, k) == select(pre, k)
-    fn addArrayEqualityFrameConstraint(self: *Encoder, pre: z3.Z3_ast, post: z3.Z3_ast, frame_id: u64) EncodeError!void {
-        const pre_sort = z3.Z3_get_sort(self.context.ctx, pre);
-        if (!self.isArraySort(pre_sort)) return;
-        const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, pre_sort);
-        const key_name = try std.fmt.allocPrint(self.allocator, "frame_eq_k_{d}", .{frame_id});
-        defer self.allocator.free(key_name);
-        const key = try self.mkVariable(key_name, key_sort);
-
-        const pre_val = z3.Z3_mk_select(self.context.ctx, pre, key);
-        const post_val = z3.Z3_mk_select(self.context.ctx, post, key);
-        const eq_val = z3.Z3_mk_eq(self.context.ctx, post_val, pre_val);
-
-        var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, key)};
-        const pattern_terms = [_]z3.Z3_ast{pre_val};
-        const frame = if (try self.maybeMkPattern(&pattern_terms)) |pattern| blk: {
-            const patterns = [_]z3.Z3_pattern{pattern};
-            break :blk try self.mkQuantifier(.forall, &bounds, .{ .with_patterns = &patterns }, eq_val);
-        } else try self.mkQuantifier(.forall, &bounds, .{ .no_patterns = .{ .reason = "array-equality frame trigger contains conditional state" } }, eq_val);
-        self.addConstraintWithSource(frame, .frame, "frame condition");
     }
 
     // SENTINEL: end_of_mkQuantifier_helpers
@@ -5426,6 +5468,16 @@ pub const Encoder = struct {
             return try self.coerceTypedAstToSortOrUndef(byte_bv, result_type, result_sort, "byte_at_result", @intFromPtr(mlir_op.ptr));
         }
 
+        if (std.mem.eql(u8, op_name, "ora.concat")) {
+            if (operands.len < 2) return error.InvalidOperandCount;
+            return try self.encodeByteSequenceConcat(operands[0], operands[1]);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.slice")) {
+            if (operands.len < 3) return error.InvalidOperandCount;
+            return try self.encodeByteSequenceSlice(operands[0], operands[1], operands[2]);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.keccak256")) {
             return try self.encodeKeccak256Op(operands, mlir_op);
         }
@@ -5662,17 +5714,17 @@ pub const Encoder = struct {
                     @intFromPtr(mlir_op.ptr),
                 );
                 const stored = self.encodeStore(operands[0], key, value);
-                const op_id = @intFromPtr(mlir_op.ptr);
-                self.addArrayStoreFrameConstraint(operands[0], key, stored, op_id) catch {
-                    self.recordSoundnessLoss(.inexact_state_summary, "failed to encode map store frame constraint");
-                };
+                // A concrete array store already carries its own frame semantics
+                // through Z3's array theory. Emitting an additional quantified
+                // frame axiom here is redundant and can make unrelated safety
+                // obligation vacuity checks inconclusive.
                 if (mode == .Current) {
                     const map_operand = mlir.oraOperationGetOperand(mlir_op, 0);
                     const map_operand_id = @intFromPtr(map_operand.ptr);
                     try self.value_bindings.put(map_operand_id, stored);
                     try self.value_map.put(map_operand_id, stored);
                     if (self.mapOperandUsesNestedGet(map_operand)) {
-                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode, op_id);
+                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode);
                     } else if (self.resolveGlobalNameFromMapOperand(map_operand)) |global_name| {
                         _ = try self.getOrCreateGlobal(global_name, map_sort);
                         if (self.global_map.getPtr(global_name)) |existing| {
@@ -5687,7 +5739,7 @@ pub const Encoder = struct {
                         // Nested map write (e.g., root[a][b] = v) may target a map_get
                         // result. Rebuild and thread the root global map update so later
                         // reads observe the inner write.
-                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode, op_id);
+                        try self.tryUpdateNestedGlobalMapStore(map_operand, stored, mode);
                     }
                 }
                 const num_results = mlir.oraOperationGetNumResults(mlir_op);
@@ -6190,7 +6242,7 @@ pub const Encoder = struct {
                 });
                 if (mode == .Current) {
                     if (self.mapOperandUsesNestedGet(memref_value)) {
-                        try self.tryUpdateNestedGlobalMapStore(memref_value, updated, mode, @intFromPtr(mlir_op.ptr));
+                        try self.tryUpdateNestedGlobalMapStore(memref_value, updated, mode);
                     } else if (self.resolveGlobalNameFromMapOperand(memref_value)) |global_name| {
                         const global_sort = z3.Z3_get_sort(self.context.ctx, updated);
                         _ = try self.getOrCreateGlobal(global_name, global_sort);
@@ -7307,6 +7359,7 @@ pub const Encoder = struct {
         self: *Encoder,
         callee: []const u8,
         slot: CallSlotState,
+        path_kind: []const u8,
         keys: []const []const u8,
         leaf_sort: z3.Z3_sort,
         operands: []const z3.Z3_ast,
@@ -7319,6 +7372,7 @@ pub const Encoder = struct {
         var hasher = std.hash.Wyhash.init(0);
         hasher.update(callee);
         hasher.update(slot.name);
+        hasher.update(path_kind);
         for (keys) |key| hasher.update(key);
         const leaf_sort_ptr = @intFromPtr(leaf_sort);
         hasher.update(std.mem.asBytes(&leaf_sort_ptr));
@@ -7416,6 +7470,7 @@ pub const Encoder = struct {
         var updated = try self.encodeCallPathLeafUFSymbol(
             callee,
             slot,
+            "indexed",
             keys,
             z3.Z3_get_sort(self.context.ctx, cursor),
             operands,
@@ -7437,6 +7492,54 @@ pub const Encoder = struct {
         return updated;
     }
 
+    fn encodeOpaqueStructFieldPathStore(
+        self: *Encoder,
+        callee: []const u8,
+        slot: CallSlotState,
+        fields: []const []const u8,
+        base: z3.Z3_ast,
+        operands: []const z3.Z3_ast,
+        slots: []const CallSlotState,
+    ) EncodeError!?z3.Z3_ast {
+        if (fields.len == 0) return null;
+
+        const product = self.findProductSortByZ3Sort(z3.Z3_get_sort(self.context.ctx, base)) orelse return null;
+        const target_field = product.findField(fields[0]) orelse return null;
+
+        const replacement = if (fields.len == 1)
+            try self.encodeCallPathLeafUFSymbol(
+                callee,
+                slot,
+                "field",
+                fields,
+                target_field.sort,
+                operands,
+                slots,
+            )
+        else blk: {
+            const current_child = z3.Z3_mk_app(self.context.ctx, target_field.projection, 1, &[_]z3.Z3_ast{base});
+            break :blk (try self.encodeOpaqueStructFieldPathStore(
+                callee,
+                slot,
+                fields[1..],
+                current_child,
+                operands,
+                slots,
+            )) orelse return null;
+        };
+
+        var args = try self.allocator.alloc(z3.Z3_ast, product.fields.len);
+        defer self.allocator.free(args);
+        for (product.fields, 0..) |field, index| {
+            args[index] = if (std.mem.eql(u8, field.name, fields[0]))
+                replacement
+            else
+                z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{base});
+        }
+
+        return z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(args.len), args.ptr);
+    }
+
     fn encodeOpaqueModifiesPathPost(
         self: *Encoder,
         callee: []const u8,
@@ -7451,23 +7554,40 @@ pub const Encoder = struct {
 
         for (declared_paths, 0..) |path, path_index| {
             if (!std.mem.eql(u8, effectSlotPathRoot(path), slot.name)) continue;
-            const parsed = (try self.parseIndexedEffectSlotPath(path)) orelse return null;
-            defer parsed.deinit(self.allocator);
-            if (parsed.keys.len == 0) return null;
-            post = (try self.encodeOpaqueIndexedPathStore(
-                callee,
-                slot,
-                parsed.keys,
-                post,
-                operands,
-                slots,
-                // This seed names quantified frame variables only; opaque leaf
-                // UF identity comes from the callee/path/state arguments.
-                // Reserve the low 16 bits for nested-key frame constraints.
-                // A single call summary with more than 65k declared paths would
-                // wrap here; that is outside any practical contract surface.
-                frame_constraint_seed +% (@as(u64, @intCast(path_index + 1)) << 16),
-            )) orelse return null;
+            if (std.mem.eql(u8, path, slot.name)) return null;
+            if (std.mem.indexOfScalar(u8, path, '[') != null) {
+                const parsed = (try self.parseIndexedEffectSlotPath(path)) orelse return null;
+                defer parsed.deinit(self.allocator);
+                if (parsed.keys.len == 0) return null;
+                post = (try self.encodeOpaqueIndexedPathStore(
+                    callee,
+                    slot,
+                    parsed.keys,
+                    post,
+                    operands,
+                    slots,
+                    // This seed names quantified frame variables only; opaque leaf
+                    // UF identity comes from the callee/path/state arguments.
+                    // Reserve the low 16 bits for nested-key frame constraints.
+                    // A single call summary with more than 65k declared paths would
+                    // wrap here; that is outside any practical contract surface.
+                    frame_constraint_seed +% (@as(u64, @intCast(path_index + 1)) << 16),
+                )) orelse return null;
+            } else if (std.mem.indexOfScalar(u8, path, '.') != null) {
+                const parsed = (try self.parseFieldEffectSlotPath(path)) orelse return null;
+                defer parsed.deinit(self.allocator);
+                if (parsed.keys.len == 0) return null;
+                post = (try self.encodeOpaqueStructFieldPathStore(
+                    callee,
+                    slot,
+                    parsed.keys,
+                    post,
+                    operands,
+                    slots,
+                )) orelse return null;
+            } else {
+                return null;
+            }
             used_path = true;
         }
 
@@ -7547,6 +7667,57 @@ pub const Encoder = struct {
         return path;
     }
 
+    fn declaredModifiesCoversRoot(paths: []const []u8, root: []const u8) bool {
+        for (paths) |path| {
+            if (std.mem.eql(u8, effectSlotPathRoot(path), root)) return true;
+        }
+        return false;
+    }
+
+    fn declaredModifiesHasPathPreciseShapeForRoot(paths: []const []u8, root: []const u8) bool {
+        for (paths) |path| {
+            if (!std.mem.eql(u8, effectSlotPathRoot(path), root)) continue;
+            if (std.mem.indexOfScalar(u8, path, '[') != null or
+                std.mem.indexOfScalar(u8, path, '.') != null)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn parseFieldEffectSlotPath(self: *Encoder, path: []const u8) EncodeError!?EffectPathSegments {
+        if (std.mem.indexOfScalar(u8, path, '[') != null) return null;
+        const root = effectSlotPathRoot(path);
+        if (root.len == path.len) {
+            return .{
+                .root = root,
+                .keys = try self.allocator.alloc([]const u8, 0),
+            };
+        }
+        if (root.len >= path.len or path[root.len] != '.') return null;
+
+        var fields = std.ArrayList([]const u8){};
+        var fields_owned = false;
+        defer if (!fields_owned) fields.deinit(self.allocator);
+
+        var it = std.mem.splitScalar(u8, path[root.len + 1 ..], '.');
+        while (it.next()) |field| {
+            if (field.len == 0) return null;
+            try fields.append(self.allocator, field);
+        }
+        if (fields.items.len == 0) return null;
+
+        return .{
+            .root = root,
+            .keys = blk: {
+                const owned = try fields.toOwnedSlice(self.allocator);
+                fields_owned = true;
+                break :blk owned;
+            },
+        };
+    }
+
     fn parseIndexedEffectSlotPath(self: *Encoder, path: []const u8) EncodeError!?EffectPathSegments {
         const root = effectSlotPathRoot(path);
         if (root.len == path.len) {
@@ -7558,7 +7729,8 @@ pub const Encoder = struct {
         if (root.len >= path.len or path[root.len] != '[') return null;
 
         var keys = std.ArrayList([]const u8){};
-        errdefer keys.deinit(self.allocator);
+        var keys_owned = false;
+        defer if (!keys_owned) keys.deinit(self.allocator);
 
         var cursor = root.len;
         while (cursor < path.len) {
@@ -7573,7 +7745,11 @@ pub const Encoder = struct {
 
         return .{
             .root = root,
-            .keys = try keys.toOwnedSlice(self.allocator),
+            .keys = blk: {
+                const owned = try keys.toOwnedSlice(self.allocator);
+                keys_owned = true;
+                break :blk owned;
+            },
         };
     }
 
@@ -13207,9 +13383,6 @@ pub const Encoder = struct {
                 if (num_results > 0) {
                     self.recordCalleeResultDegradation(mlir_op, callee, "failed to encode known callee results exactly");
                 }
-                if (slots.items.len > 0) {
-                    self.recordSoundnessLoss(.inexact_call_summary, "failed to encode known callee state exactly");
-                }
             }
         }
 
@@ -13244,8 +13417,11 @@ pub const Encoder = struct {
                     if (opaque_path_post) |path_post| {
                         post = path_post;
                     } else {
-                        if (func_op != null) {
+                        const covered_by_declared_modifies = Encoder.declaredModifiesCoversRoot(declared_modifies_paths.items, slot.name);
+                        if (func_op != null and !covered_by_declared_modifies) {
                             self.recordSoundnessLoss(.inexact_call_summary, "known callee state fell back to opaque UF summary");
+                        } else if (func_op != null and Encoder.declaredModifiesHasPathPreciseShapeForRoot(declared_modifies_paths.items, slot.name)) {
+                            self.recordPrecisionNote(.path_precise_modifies_fallback_unavailable);
                         }
                         post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
                     }
@@ -13255,14 +13431,6 @@ pub const Encoder = struct {
                         .frame,
                         "frame condition",
                     );
-                    const slot_sort = z3.Z3_get_sort(self.context.ctx, post);
-                    if (self.isArraySort(slot_sort)) {
-                        const call_id_u64: u64 = @intCast(@intFromPtr(mlir_op.ptr));
-                        const frame_id = @as(u64, @intCast(slot_idx)) ^ (call_id_u64 << 8);
-                        self.addArrayEqualityFrameConstraint(slot.pre, post, frame_id) catch {
-                            self.recordSoundnessLoss(.inexact_call_summary, "failed to encode call-state frame constraint");
-                        };
-                    }
                 }
 
                 if (self.hasActiveLockedCallFrame(mlir_op)) {
@@ -13426,7 +13594,6 @@ pub const Encoder = struct {
         map_operand: mlir.MlirValue,
         stored_value: z3.Z3_ast,
         mode: EncodeMode,
-        op_id: u64,
     ) EncodeError!void {
         // Collect map_get chain from leaf map operand to root map value.
         var chain = std.ArrayList(MapGetAncestor){};
@@ -13476,7 +13643,7 @@ pub const Encoder = struct {
         // updated_leaf, then store into each parent map_get site.
         var updated = stored_value;
         var updated_type = mlir.oraValueGetType(map_operand);
-        for (chain.items, 0..) |ancestor, depth| {
+        for (chain.items) |ancestor| {
             const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
             if (!self.isArraySort(parent_sort)) return;
@@ -13505,14 +13672,6 @@ pub const Encoder = struct {
 
             updated = self.encodeStore(parent_map_ast, parent_key, parent_value);
             updated_type = mlir.oraValueGetType(ancestor.parent_map);
-            self.addArrayStoreFrameConstraint(
-                parent_map_ast,
-                parent_key,
-                updated,
-                op_id +% @as(u64, @intCast(depth + 1)),
-            ) catch {
-                self.recordSoundnessLoss(.inexact_state_summary, "failed to encode nested map-store frame constraint");
-            };
         }
 
         if (self.global_map.getPtr(global_name)) |existing| {
@@ -14473,6 +14632,41 @@ pub const Encoder = struct {
         self.addGlobalConstraintWithSource(fact, .env_assume, "environment assumption (concrete byte-sequence length)");
     }
 
+    fn addByteSequenceConcatLengthFact(self: *Encoder, result: z3.Z3_ast, lhs: z3.Z3_ast, rhs: z3.Z3_ast) EncodeError!void {
+        const actual = self.encodeByteSequenceLengthBv(result);
+        const lhs_len = self.encodeByteSequenceLengthBv(lhs);
+        const rhs_len = self.encodeByteSequenceLengthBv(rhs);
+        const expected = z3.Z3_mk_bv_add(self.context.ctx, lhs_len, rhs_len);
+        const fact = z3.Z3_mk_eq(self.context.ctx, actual, expected);
+        self.addGlobalConstraintWithSource(fact, .env_assume, "environment assumption (byte-sequence concat length)");
+    }
+
+    fn addByteSequenceSliceLengthFact(self: *Encoder, result: z3.Z3_ast, len_bv: z3.Z3_ast) EncodeError!void {
+        const actual = self.encodeByteSequenceLengthBv(result);
+        const expected = self.coerceAstToSort(len_bv, self.mkBitVectorSort(256));
+        const fact = z3.Z3_mk_eq(self.context.ctx, actual, expected);
+        self.addGlobalConstraintWithSource(fact, .env_assume, "environment assumption (byte-sequence slice length)");
+    }
+
+    fn encodeByteSequenceConcat(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        var operands = [_]z3.Z3_ast{ lhs, rhs };
+        const result = z3.Z3_mk_seq_concat(self.context.ctx, operands.len, &operands);
+        try self.addByteSequenceLengthBound(result);
+        try self.addByteSequenceConcatLengthFact(result, lhs, rhs);
+        return result;
+    }
+
+    fn encodeByteSequenceSlice(self: *Encoder, seq_ast: z3.Z3_ast, offset_bv: z3.Z3_ast, len_bv: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        const offset = self.coerceAstToSeqIndexInt(offset_bv, false);
+        const len = self.coerceAstToSeqIndexInt(len_bv, false);
+        const result = z3.Z3_mk_seq_extract(self.context.ctx, seq_ast, offset, len);
+        try self.addByteSequenceLengthBound(result);
+        // This helper is for verified slice-style ops: callers must establish
+        // offset/length bounds before relying on the projected u256 length.
+        try self.addByteSequenceSliceLengthFact(result, len_bv);
+        return result;
+    }
+
     fn tryGetConstantByteSequenceLength(self: *Encoder, value: mlir.MlirValue) EncodeError!?usize {
         if (!mlir.oraValueIsAOpResult(value)) return null;
         const owner = mlir.oraOpResultGetOwner(value);
@@ -14931,6 +15125,27 @@ test "encoder parses indexed modifies paths" {
     try std.testing.expect((try encoder.parseIndexedEffectSlotPath("config.owner")) == null);
 }
 
+test "encoder parses field modifies paths" {
+    var z3_ctx = try Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, std.testing.allocator);
+    defer encoder.deinit();
+
+    const parsed = (try encoder.parseFieldEffectSlotPath("config.owner.admin")).?;
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("config", parsed.root);
+    try std.testing.expectEqual(@as(usize, 2), parsed.keys.len);
+    try std.testing.expectEqualStrings("owner", parsed.keys[0]);
+    try std.testing.expectEqualStrings("admin", parsed.keys[1]);
+
+    try std.testing.expect((try encoder.parseFieldEffectSlotPath("balances[param#0]")) == null);
+    try std.testing.expect((try encoder.parseIndexedEffectSlotPath("users[param#0].balance")) == null);
+    const mixed_path = try std.testing.allocator.dupe(u8, "users[param#0].balance");
+    defer std.testing.allocator.free(mixed_path);
+    try std.testing.expect(Encoder.declaredModifiesHasPathPreciseShapeForRoot(&[_][]u8{mixed_path}, "users"));
+}
+
 test "encoder parses sema formatted indexed modifies path forms" {
     var z3_ctx = try Context.init(std.testing.allocator);
     defer z3_ctx.deinit();
@@ -15006,6 +15221,53 @@ test "opaque indexed modifies path preserves disjoint map keys" {
     );
     changed_solver.assert(user_changed);
     try std.testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), changed_solver.check());
+}
+
+test "opaque indexed modifies path emits explicit frame constraint" {
+    var z3_ctx = try Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, std.testing.allocator);
+    defer encoder.deinit();
+
+    const key_sort = encoder.mkBitVectorSort(160);
+    const value_sort = encoder.mkBitVectorSort(256);
+    const map_sort = z3.Z3_mk_array_sort(z3_ctx.ctx, key_sort, value_sort);
+
+    const pre = try encoder.mkVariable("pre_opaque_frame_balances", map_sort);
+    const user = try encoder.mkVariable("opaque_frame_user", key_sort);
+    const slot = Encoder.CallSlotState{
+        .name = "balances",
+        .pre = pre,
+        .sort = map_sort,
+        .is_write = true,
+    };
+    const path = try std.testing.allocator.dupe(u8, "balances[param#0]");
+    defer std.testing.allocator.free(path);
+
+    _ = (try encoder.encodeOpaqueModifiesPathPost(
+        "set_balance",
+        slot,
+        &[_]z3.Z3_ast{user},
+        &[_]Encoder.CallSlotState{slot},
+        &[_][]u8{path},
+        1234,
+    )).?;
+
+    const constraints = try encoder.takeConstraints(std.testing.allocator);
+    defer if (constraints.len > 0) std.testing.allocator.free(constraints);
+
+    var saw_frame = false;
+    for (constraints) |constraint| {
+        const text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, constraint));
+        if (std.mem.indexOf(u8, text, "forall") != null and
+            std.mem.indexOf(u8, text, "frame_k_") != null)
+        {
+            saw_frame = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_frame);
 }
 
 test "opaque indexed modifies path composes multiple paths on one root" {

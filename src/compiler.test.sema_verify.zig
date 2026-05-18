@@ -114,6 +114,29 @@ test "compiler rejects unsupported modifies map keys fail closed" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1"));
 }
 
+test "compiler rejects mixed indexed-field modifies paths fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    struct User {
+        \\        balance: u256,
+        \\    }
+        \\
+        \\    storage users: map<address, User>;
+        \\
+        \\    pub fn unsupported(owner: address)
+        \\        modifies users[owner].balance
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`"));
+}
+
 test "compiler rejects external storage modifies paths fail closed" {
     const source_text =
         \\contract Vault {
@@ -317,6 +340,10 @@ test "compiler corpus covers modifies sema matrix" {
         .{
             .path = "ora-example/corpus/modifies/fail_unsupported_map_key.ora",
             .expected_diagnostic = "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_mixed_indexed_field_path.ora",
+            .expected_diagnostic = "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`",
         },
         .{
             .path = "ora-example/corpus/modifies/fail_external_storage_path.ora",

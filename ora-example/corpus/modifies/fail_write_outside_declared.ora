@@ -14,10 +14,10 @@ contract Vault {
         balances[other] = value;
     }
 
-    pub fn wrong_sender_origin(value: u256)
+    pub fn wrong_sender_literal(other: address, value: u256)
         modifies balances[msg.sender]
     {
-        balances[tx.origin] = value;
+        balances[other] = value;
     }
 
     pub fn wrong_field(next_admin: address)

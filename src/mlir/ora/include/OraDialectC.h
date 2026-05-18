@@ -1551,6 +1551,23 @@ extern "C"
         MlirValue index,
         MlirType resultType);
 
+    /// Create an ora.concat operation
+    MLIR_CAPI_EXPORTED MlirOperation oraConcatOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue lhs,
+        MlirValue rhs,
+        MlirType resultType);
+
+    /// Create an ora.slice operation
+    MLIR_CAPI_EXPORTED MlirOperation oraSliceOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue value,
+        MlirValue start,
+        MlirValue length,
+        MlirType resultType);
+
     /// Create an ora.keccak256 operation
     MLIR_CAPI_EXPORTED MlirOperation oraKeccak256OpCreate(
         MlirContext ctx,

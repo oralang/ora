@@ -3,7 +3,9 @@ set -eu
 
 encoder="src/z3/encoder.zig"
 grep_output="${TMPDIR:-/tmp}/ora_verifier_introspection_grep.$$"
-trap 'rm -f "$grep_output"' EXIT INT HUP TERM
+variants_output="${TMPDIR:-/tmp}/ora_verifier_introspection_variants.$$"
+labels_output="${TMPDIR:-/tmp}/ora_verifier_introspection_labels.$$"
+trap 'rm -f "$grep_output" "$variants_output" "$labels_output"' EXIT INT HUP TERM
 
 set -- \
   src/z3/c.zig \
@@ -36,6 +38,66 @@ line_of() {
     index($0, needle) { print NR; exit }
   ' "$file"
 }
+
+check_enum_label_parity() {
+  enum_name="$1"
+  label_fn="$2"
+
+  awk -v enum_name="$enum_name" '
+    $0 ~ "pub const " enum_name " = enum" {
+      in_enum = 1
+      next
+    }
+    in_enum && $0 ~ /^[[:space:]]*};/ {
+      exit
+    }
+    in_enum {
+      line = $0
+      sub(/\/\/.*/, "", line)
+      gsub(/[[:space:],]/, "", line)
+      if (line != "") print line
+    }
+  ' "$encoder" >"$variants_output"
+
+  [ -s "$variants_output" ] || fail "failed to extract $enum_name variants from $encoder"
+
+  awk -v label_fn="$label_fn" '
+    $0 ~ "pub fn " label_fn "\\(" {
+      in_fn = 1
+      next
+    }
+    in_fn && $0 ~ /^[[:space:]]*};/ {
+      exit
+    }
+    in_fn {
+      line = $0
+      sub(/\/\/.*/, "", line)
+      if (match(line, /\.[A-Za-z0-9_]+[[:space:]]*=>[[:space:]]*"[A-Za-z0-9_]+"/)) {
+        text = substr(line, RSTART, RLENGTH)
+        sub(/^\./, "", text)
+        split(text, parts, /[[:space:]]*=>[[:space:]]*/)
+        label = parts[2]
+        gsub(/"/, "", label)
+        print parts[1] " " label
+      }
+    }
+  ' "$encoder" >"$labels_output"
+
+  [ -s "$labels_output" ] || fail "failed to extract labels from $label_fn in $encoder"
+
+  while IFS= read -r variant; do
+    grep -x "$variant $variant" "$labels_output" >/dev/null ||
+      fail "$label_fn must map $enum_name.$variant to \"$variant\""
+  done <"$variants_output"
+
+  variant_count="$(wc -l <"$variants_output" | tr -d ' ')"
+  label_count="$(wc -l <"$labels_output" | tr -d ' ')"
+  [ "$variant_count" = "$label_count" ] ||
+    fail "$label_fn label count ($label_count) does not match $enum_name variant count ($variant_count)"
+}
+
+check_enum_label_parity "SoundnessLoss" "soundnessLossLabel"
+check_enum_label_parity "PrecisionNoteKind" "precisionNoteLabel"
 
 forall_count="$(count_occurrences "$encoder" "Z3_mk_forall_const")"
 exists_count="$(count_occurrences "$encoder" "Z3_mk_exists_const")"
