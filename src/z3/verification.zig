@@ -3822,6 +3822,12 @@ pub const VerificationPass = struct {
                     try writer.print("- Type: `{s}`\n", .{@tagName(err.error_type)});
                     try writer.print("- Message: {s}\n", .{err.message});
                     try writer.print("- Location: `{s}:{d}:{d}`\n", .{ err.file, err.line, err.column });
+                    if (summary.precision_notes.len > 0) {
+                        try writer.writeAll("- Precision context:\n");
+                        for (summary.precision_notes) |note| {
+                            try writer.print("  - `{s}`\n", .{Encoder.precisionNoteLabel(note)});
+                        }
+                    }
                     if (err.counterexample) |ce| {
                         try writer.writeAll("- Counterexample:\n");
                         try writeCounterexampleMarkdown(writer, self.allocator, ce);
@@ -4030,6 +4036,12 @@ pub const VerificationPass = struct {
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.writeAll(",\"precision_context\":[");
+                for (summary.precision_notes, 0..) |note, idx| {
+                    if (idx != 0) try writer.writeByte(',');
+                    try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
+                }
+                try writer.writeByte(']');
                 try writer.writeAll(",\"subtype\":");
                 if (classification.subtype) |subtype| {
                     try writeJsonStringEscaped(writer, subtype);
@@ -11970,6 +11982,60 @@ test "rendered SMT report json includes degradation metadata" {
         defer testing.allocator.free(needle);
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
     }
+}
+
+test "rendered SMT report connects precision notes to proof errors" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const precision_notes = [_]Encoder.PrecisionNoteKind{
+        .path_precise_modifies_fallback_unavailable,
+    };
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+        .precision_notes = &precision_notes,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .PostconditionViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove ensures"),
+        .file = try testing.allocator.dupe(u8, "/tmp/test.ora"),
+        .line = 12,
+        .column = 3,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\"]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`path_precise_modifies_fallback_unavailable`") != null);
 }
 
 test "rendered SMT report json includes query fragment metadata" {
