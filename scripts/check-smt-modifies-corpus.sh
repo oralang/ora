@@ -7,6 +7,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ORA_BIN="${ORA_BIN:-$PROJECT_ROOT/zig-out/bin/ora}"
 OUT_ROOT="${OUT_ROOT:-${TMPDIR:-/tmp}/ora-smt-modifies-corpus}"
+MAX_QUERY_MS="${ORA_SMT_MODIFIES_MAX_QUERY_MS:-5000}"
 
 SEMA_PASS_CASES=(
   "ora-example/corpus/modifies/pass_supported_paths.ora"
@@ -51,6 +52,42 @@ if [[ ! -x "$ORA_BIN" ]]; then
   exit 1
 fi
 
+if [[ ! "$MAX_QUERY_MS" =~ ^[0-9]+$ ]]; then
+  echo "error: ORA_SMT_MODIFIES_MAX_QUERY_MS must be an integer millisecond budget, got '$MAX_QUERY_MS'" >&2
+  exit 1
+fi
+
+assert_query_budget() {
+  local out_dir="$1"
+  local source="$2"
+  local report_file
+  local max_elapsed
+
+  report_file="$(find "$out_dir/verify" -name '*.smt.report.json' -print -quit 2>/dev/null || true)"
+  if [[ -z "$report_file" ]]; then
+    echo "error: SMT report JSON not found for $source under $out_dir/verify" >&2
+    return 1
+  fi
+
+  max_elapsed="$(
+    awk '
+      match($0, /"elapsed_ms"[[:space:]]*:[[:space:]]*[0-9]+/) {
+        value = substr($0, RSTART, RLENGTH)
+        sub(/.*:[[:space:]]*/, "", value)
+        if (value + 0 > max) max = value + 0
+      }
+      END { print max + 0 }
+    ' "$report_file"
+  )"
+  max_elapsed="${max_elapsed:-0}"
+
+  if (( max_elapsed > MAX_QUERY_MS )); then
+    echo "error: SMT query budget exceeded for $source: max elapsed ${max_elapsed}ms > ${MAX_QUERY_MS}ms" >&2
+    echo "report: $report_file" >&2
+    return 1
+  fi
+}
+
 run_pass() {
   local source="$1"
   local label="$2"
@@ -58,6 +95,7 @@ run_pass() {
 
   echo "[pass] $label $source"
   "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >/dev/null 2>&1
+  assert_query_budget "$out_dir" "$source"
 }
 
 run_opaque_pass() {
@@ -68,6 +106,7 @@ run_opaque_pass() {
 
   echo "[pass] opaque-summary $source"
   ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH=0 "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
+  assert_query_budget "$out_dir" "$source"
   if grep -q "precision_note" "$log_file"; then
     echo "error: opaque-summary run for $source emitted precision notes" >&2
     sed -n '1,120p' "$log_file" >&2
