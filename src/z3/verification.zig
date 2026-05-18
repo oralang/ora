@@ -11990,6 +11990,7 @@ test "rendered SMT report connects precision notes to proof errors" {
 
     const precision_notes = [_]Encoder.PrecisionNoteKind{
         .path_precise_modifies_fallback_unavailable,
+        .precision_note_cap_exceeded,
     };
     const summary = ReportSummary{
         .verification_success = false,
@@ -12021,7 +12022,7 @@ test "rendered SMT report connects precision notes to proof errors" {
     );
     defer testing.allocator.free(json);
 
-    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\",\"precision_note_cap_exceeded\"]") != null);
 
     const markdown = try pass.renderSmtReportMarkdown(
         "/tmp/test.ora",
@@ -12036,6 +12037,56 @@ test "rendered SMT report connects precision notes to proof errors" {
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "`path_precise_modifies_fallback_unavailable`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`precision_note_cap_exceeded`") != null);
+}
+
+test "rendered SMT report omits markdown precision context when there are no precision notes" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .InvariantViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove invariant"),
+        .file = try testing.allocator.dupe(u8, "/tmp/test.ora"),
+        .line = 14,
+        .column = 5,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
 }
 
 test "rendered SMT report json includes query fragment metadata" {

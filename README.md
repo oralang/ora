@@ -239,6 +239,11 @@ Environment variables for tuning:
 `--no-verify` are soundness-reducing escape hatches. Their reports must not be
 treated as fully verified.
 
+SMT reports expose structured `soundness_losses` and `precision_notes`.
+`soundness_loss_cap_exceeded` and `precision_note_cap_exceeded` are truncation
+markers, not additional independent findings: they mean the bounded report list
+filled and later entries were omitted.
+
 ## Advanced MLIR controls
 
 ```bash
